@@ -60,7 +60,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      # Default features only: the optional `rug` puzzle backend (GMP, LGPL) is
+      # benchmark-only and never shipped.
       - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          arguments: --workspace
 
   smoke:
     name: integration smoke (TS3 + TS6)

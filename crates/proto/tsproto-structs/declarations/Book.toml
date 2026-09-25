@@ -170,6 +170,7 @@ properties = [
 	{ name="TalkPowerGranted", type="bool", doc="If the client is granted talk power" },
 	{ name="Metadata", type="str", doc="Set by client" },
 	{ name="IsRecording", type="bool", doc="Whether the client is recording" },
+	{ name="IsStreaming", type="bool", opt=true, doc="Whether the client is streaming (TeamSpeak 6), `None` on servers that do not report it" },
 	{ name="DatabaseId", type="ClientDbId" },
 	{ name="ChannelGroup", type="ChannelGroupId" },
 	{ name="ServerGroups", type="ServerGroupId", mod="set" },

@@ -11,8 +11,8 @@ use tsclientlib::events::{Event, PropertyId, PropertyValue};
 use tsclientlib::messages::c2s::{OutTokenUseMessage, OutTokenUsePart};
 use tsclientlib::prelude::*;
 use tsclientlib::{
-	ChannelId, ClientId, Connection, DisconnectOptions, MessageHandle, MessageTarget, StreamItem,
-	data,
+	ChannelId, ClientId, Connection, DisconnectOptions, InMessage, MessageHandle, MessageTarget,
+	StreamItem, data,
 };
 use tsproto_packets::packets::{Direction, Flags, OutCommand, PacketType};
 
@@ -238,8 +238,56 @@ fn describe(state: &data::Connection, event: &Event) -> Option<String> {
 				channel_name(state, client.channel)
 			))
 		}
+		Event::PropertyChanged { id: PropertyId::ClientIsStreaming(clid), .. } => {
+			let client = state.clients.get(clid)?;
+			let what = if client.is_streaming == Some(true) { "started" } else { "stopped" };
+			Some(format!("* {} (clid {}) {what} streaming", client.name, clid.0))
+		}
 		_ => None,
 	}
+}
+
+/// One line for TeamSpeak 6 stream notifications, `None` for other messages.
+fn describe_message(msg: &InMessage) -> Option<String> {
+	let lines: Vec<String> = match msg {
+		InMessage::StreamStarted(m) => m
+			.iter()
+			.map(|p| {
+				format!(
+					"* stream {} started by clid {} (name {:?}, type {:?}, bitrate {:?}, audio {:?})",
+					p.stream_id,
+					p.client_id.0,
+					p.stream_name.as_deref().unwrap_or(""),
+					p.stream_type,
+					p.bitrate,
+					p.audio
+				)
+			})
+			.collect(),
+		InMessage::StreamStopped(m) => {
+			m.iter().map(|p| format!("* stream {} stopped", p.stream_id)).collect()
+		}
+		InMessage::JoinStreamRequest(m) => m
+			.iter()
+			.map(|p| format!("* clid {} asks to join stream {}", p.client_id.0, p.stream_id))
+			.collect(),
+		InMessage::StreamSignaling(m) => m
+			.iter()
+			.map(|p| {
+				format!("* signaling from clid {} on {}: {}", p.client_id.0, p.stream_id, p.json)
+			})
+			.collect(),
+		InMessage::StreamClientJoined(m) => m
+			.iter()
+			.map(|p| format!("* clid {} joined stream {}", p.client_id.0, p.stream_id))
+			.collect(),
+		InMessage::StreamClientLeft(m) => m
+			.iter()
+			.map(|p| format!("* clid {} left stream {}", p.client_id.0, p.stream_id))
+			.collect(),
+		_ => return None,
+	};
+	Some(lines.join("\n"))
 }
 
 /// Print book events; returns `true` if a text message contained `expect`.
@@ -271,10 +319,18 @@ async fn listen(
 ) -> Result<()> {
 	let deadline = timeout.map(|t| Instant::now() + t);
 	let end = pump(con, deadline, |con, item| {
-		if let StreamItem::BookEvents(events) = item
-			&& print_events(con.get_state()?, &events, json, expect)?
-		{
-			return Ok(Flow::Stop);
+		match item {
+			StreamItem::BookEvents(events) => {
+				if print_events(con.get_state()?, &events, json, expect)? {
+					return Ok(Flow::Stop);
+				}
+			}
+			StreamItem::MessageEvent(msg) if !json => {
+				if let Some(line) = describe_message(&msg) {
+					println!("{line}");
+				}
+			}
+			_ => {}
 		}
 		Ok(Flow::Continue)
 	})
@@ -323,6 +379,11 @@ async fn repl(con: &mut Connection) -> Result<()> {
 			ReplInput::Item(Some(item)) => match item? {
 				StreamItem::BookEvents(events) => {
 					print_events(con.get_state()?, &events, false, None)?;
+				}
+				StreamItem::MessageEvent(msg) => {
+					if let Some(line) = describe_message(&msg) {
+						println!("{line}");
+					}
 				}
 				StreamItem::MessageResult(handle, Err(error)) => {
 					println!("error (command {}): {error}", handle.0);

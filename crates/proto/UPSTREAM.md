@@ -43,3 +43,11 @@ against or offered back to upstream.
    `spawn_blocking` thread that stops when the connect future is dropped. The level
    cap is `max_puzzle_level()` (default 100 million, was a fixed 10 million),
    adjustable with `set_max_puzzle_level`, because TeamSpeak 6 adapts the level.
+4. **TeamSpeak 6 declarations** (`tsproto-structs/declarations/Messages.toml`, `Book.toml`).
+   New fields `client_is_streaming` (book: `Client::is_streaming: Option<bool>`),
+   `virtualserver_address`, `virtualserver_version_sign`; stream notifications
+   (`notifystreamstarted`, `notifystreamstopped`, `notifystreaminfo`,
+   `notifyjoinstreamrequest`, `notifyrespondjoinstreamrequest`,
+   `notifystreamsignaling`, `notifystreamclientjoined`, `notifystreamclientleft`) and
+   commands (`setupstream`, `stopstream`, `streamsignaling`, `respondjoinstreamrequest`,
+   `removeclientfromstream`). See `docs/protocol-notes/ts6-streaming.md`.

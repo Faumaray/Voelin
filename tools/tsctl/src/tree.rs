@@ -25,6 +25,7 @@ pub struct ClientNode {
 	pub input_muted: bool,
 	pub output_muted: bool,
 	pub away: bool,
+	pub streaming: bool,
 }
 
 /// Sort siblings by following the `order` links (each channel names the
@@ -82,6 +83,9 @@ fn render_level(
 			if client.away {
 				flags.push("away");
 			}
+			if client.streaming {
+				flags.push("streaming");
+			}
 			let flags =
 				if flags.is_empty() { String::new() } else { format!(" [{}]", flags.join(", ")) };
 			let _ = writeln!(out, "{indent}  - {}{flags}", client.name);
@@ -107,6 +111,7 @@ pub fn from_state(state: &data::Connection) -> String {
 			input_muted: c.input_muted,
 			output_muted: c.output_muted,
 			away: c.away_message.is_some(),
+			streaming: c.is_streaming == Some(true),
 		})
 		.collect();
 	render(&state.server.name, &channels, &clients)
@@ -134,6 +139,7 @@ mod tests {
 			input_muted: false,
 			output_muted: false,
 			away: false,
+			streaming: false,
 		}
 	}
 
@@ -161,6 +167,7 @@ mod tests {
 		query.is_query = true;
 		let mut muted = cl(3, "Bob", 0);
 		muted.input_muted = true;
+		muted.streaming = true;
 		let clients = [cl(1, "Alice", 10), cl(1, "Zed", 50), query, muted];
 		let text = render("Test Server", &channels, &clients);
 		assert_eq!(
@@ -171,7 +178,7 @@ mod tests {
 			 - Alice\n\
 			 # Games (cid 2)\n  \
 			 # Squad (cid 3)\n    \
-			 - Bob [mic off]\n"
+			 - Bob [mic off, streaming]\n"
 		);
 	}
 }

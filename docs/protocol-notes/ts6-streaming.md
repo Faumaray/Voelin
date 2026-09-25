@@ -75,6 +75,11 @@ notifyclientupdated clid=20 client_is_streaming=1
 notifystreamstarted clid=20 id=e7da957e-7ce0-46cf-bf6d-754d3446b4d4 name=probe type=3 access=1 mode=1 bitrate=4608 viewer_limit=0 audio=1 return_code=0
 ```
 
+Other clients in the channel receive the same `notifystreamstarted` (without
+`return_code`) and `notifyclientupdated clid=<streamer> client_is_streaming=1`;
+`client_is_streaming` is also part of `notifycliententerview` and `initserver`.
+When the streamer disconnects, everyone gets `notifystreamstopped id=<uuid>`.
+
 Stream ids are UUIDs. The notification carries the command's `return_code`, and
 the field is named `access` there (not `accessibility`).
 
