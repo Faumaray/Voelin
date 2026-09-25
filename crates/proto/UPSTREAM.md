@@ -31,3 +31,9 @@ files in this directory is listed here, newest last, so it can be diffed
 against or offered back to upstream.
 
 <!-- patches -->
+1. **Workspace integration.** Path dependencies point at the flat `crates/proto/<crate>`
+   layout; every crate gets `publish = false`.
+2. **Replace `audiopus` with `opus2` 0.4** (`tsclientlib/src/audio.rs`,
+   `tsclientlib/examples/audio_utils/audio_to_ts.rs`, `tsclientlib/Cargo.toml`).
+   `audiopus` is unmaintained (RUSTSEC-2026-0150) and breaks with CMake 4. The
+   `audiopus-unstable` feature (decoder complexity/DRED via a fork) is dropped.

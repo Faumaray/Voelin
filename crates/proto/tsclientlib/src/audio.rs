@@ -11,17 +11,14 @@ use std::convert::TryInto;
 use std::fmt::Debug;
 use std::hash::Hash;
 
-use audiopus::coder::Decoder;
-#[cfg(feature = "audiopus-unstable")]
-use audiopus::coder::GenericCtl;
-use audiopus::{Channels, SampleRate, packet};
+use opus2::{Channels, Decoder, packet};
 use thiserror::Error;
 use tracing::{Span, debug, info_span, trace, warn};
 use tsproto_packets::packets::{AudioData, CodecType, InAudioBuf};
 
 use crate::ClientId;
 
-const SAMPLE_RATE: SampleRate = SampleRate::Hz48000;
+const SAMPLE_RATE: u32 = 48_000;
 const CHANNELS: Channels = Channels::Stereo;
 const CHANNEL_NUM: usize = 2;
 /// If this amount of packets is lost consecutively, we assume the stream stopped.
@@ -48,17 +45,17 @@ type Result<T> = std::result::Result<T, Error>;
 #[non_exhaustive]
 pub enum Error {
 	#[error("Failed to create opus decoder: {0}")]
-	CreateDecoder(#[source] audiopus::Error),
+	CreateDecoder(#[source] opus2::Error),
 	#[error("Opus decode failed: {error} (packet: {packet:?})")]
 	Decode {
 		#[source]
-		error: audiopus::Error,
+		error: opus2::Error,
 		packet: Option<Vec<u8>>,
 	},
 	#[error("Get duplicate packet id {0}")]
 	Duplicate(u16),
 	#[error("Failed to get packet samples: {0}")]
-	GetPacketSample(#[source] audiopus::Error),
+	GetPacketSample(#[source] opus2::Error),
 	#[error("Audio queue is full, dropping")]
 	QueueFull,
 	#[error("Audio packet is too late, dropping (wanted {wanted}, got {got})")]
@@ -163,9 +160,8 @@ impl<T: Copy + Default + Ord> SlidingWindowMinimum<T> {
 impl AudioQueue {
 	fn new(packet: InAudioBuf) -> Result<Self> {
 		let data = packet.data().data();
-		let opus_packet = data.data().try_into().map_err(Error::GetPacketSample)?;
 		let last_packet_samples =
-			packet::nb_samples(opus_packet, SAMPLE_RATE).map_err(Error::GetPacketSample)?;
+			packet::get_nb_samples(data.data(), SAMPLE_RATE).map_err(Error::GetPacketSample)?;
 		if last_packet_samples > MAX_BUFFER_SIZE {
 			return Err(Error::TooManySamples);
 		}
@@ -173,16 +169,6 @@ impl AudioQueue {
 		let last_packet_samples = last_packet_samples * CHANNEL_NUM;
 		let whispering = matches!(data, AudioData::S2CWhisper { .. });
 		let decoder = Decoder::new(SAMPLE_RATE, CHANNELS).map_err(Error::CreateDecoder)?;
-
-		// Enable DRED and NoLACE, ignore errors e.g. if unsupported
-		#[cfg(feature = "audiopus-unstable")]
-		let decoder = {
-			let mut decoder = decoder;
-			if let Err(error) = decoder.set_complexity(7) {
-				debug!(%error, "Failed setting opus decoder complexity, ignoring");
-			}
-			decoder
-		};
 
 		let mut res = Self {
 			span: Span::current(),
@@ -236,10 +222,8 @@ impl AudioQueue {
 			// End of stream
 			samples = 0;
 		} else {
-			let opus_packet =
-				packet.data().data().data().try_into().map_err(Error::GetPacketSample)?;
-			samples =
-				packet::nb_samples(opus_packet, SAMPLE_RATE).map_err(Error::GetPacketSample)?;
+			samples = packet::get_nb_samples(packet.data().data().data(), SAMPLE_RATE)
+				.map_err(Error::GetPacketSample)?;
 			if samples > MAX_BUFFER_SIZE {
 				return Err(Error::TooManySamples);
 			}
@@ -289,12 +273,12 @@ impl AudioQueue {
 		let packet_data;
 		let len;
 		if let Some(p) = packet {
-			packet_data =
-				Some(p.packet.data().data().data().try_into().map_err(Error::GetPacketSample)?);
+			packet_data = p.packet.data().data().data();
 			len = p.samples;
 			self.whispering = matches!(p.packet.data().data(), AudioData::S2CWhisper { .. });
 		} else {
-			packet_data = None;
+			// An empty slice signals packet loss to the decoder
+			packet_data = &[];
 			len = self.last_packet_samples;
 		}
 		self.packet_loss_num += 1;
@@ -303,13 +287,7 @@ impl AudioQueue {
 		self.decoded_buffer.resize(orig_buffer_len + len * CHANNEL_NUM, 0.0);
 		let len = self
 			.decoder
-			.decode_float(
-				packet_data,
-				(&mut self.decoded_buffer[orig_buffer_len..])
-					.try_into()
-					.map_err(Error::GetPacketSample)?,
-				fec,
-			)
+			.decode_float(packet_data, &mut self.decoded_buffer[orig_buffer_len..], fec)
 			.map_err(|e| Error::Decode {
 				error: e,
 				packet: packet.map(|p| p.packet.raw_data().to_vec()),
@@ -558,7 +536,7 @@ impl<Id: Clone + Debug + Eq + Hash + PartialEq> AudioHandler<Id> {
 #[cfg(test)]
 mod test {
 	use anyhow::{Result, bail};
-	use audiopus::coder::Encoder;
+	use opus2::Encoder;
 	use tsproto_packets::packets::{Direction, OutAudio};
 
 	use super::*;
@@ -616,9 +594,9 @@ mod test {
 			match a {
 				SimulateAction::CreateEncoder => {
 					encoder = Some(Encoder::new(
-						audiopus::SampleRate::Hz48000,
-						audiopus::Channels::Mono,
-						audiopus::Application::Voip,
+						48_000,
+						opus2::Channels::Mono,
+						opus2::Application::Voip,
 					)?);
 				}
 				SimulateAction::ReceivePacket(i, success) => {

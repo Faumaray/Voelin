@@ -7,6 +7,7 @@ repository = "https://github.com/ReSpeak/tsclientlib/tree/master/utils/tsproto-p
 readme = "README.md"
 keywords = ["teamspeak3", "ts3"]
 license = "MIT OR Apache-2.0"
+publish = false
 edition = "2018"
 include = [
 	"/Cargo.toml",

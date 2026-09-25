@@ -1,0 +1,5 @@
+# Stable subset of the vendored crates' style (crates/proto/.rustfmt.toml needs nightly).
+edition = "2024"
+hard_tabs = true
+use_small_heuristics = "Max"
+newline_style = "Unix"

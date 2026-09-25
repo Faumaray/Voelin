@@ -8,6 +8,7 @@ readme = "README.md"
 keywords = ["teamspeak3", "ts3", "voip"]
 categories = ["multimedia"]
 license = "MIT OR Apache-2.0"
+publish = false
 edition = "2018"
 autobenches = false
 include = [
@@ -38,8 +39,8 @@ thiserror = "2"
 time = { version = "0.3", features = ["formatting"] }
 tokio = { version = "1", features = ["macros", "net", "sync", "time"] }
 tracing = "0.1"
-tsproto-packets = { path = "../utils/tsproto-packets", version = "0.1" }
-tsproto-types = { path = "../utils/tsproto-types", version = "0.1" }
+tsproto-packets = { path = "../tsproto-packets", version = "0.1" }
+tsproto-types = { path = "../tsproto-types", version = "0.1" }
 quicklz = "0.3"
 
 [dev-dependencies]

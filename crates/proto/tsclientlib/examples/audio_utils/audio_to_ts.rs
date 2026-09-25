@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, format_err};
-use audiopus::coder::Encoder;
+use opus2::Encoder;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Device, Stream, StreamConfig};
 use futures::prelude::*;
@@ -63,9 +63,9 @@ impl AudioToTs {
 		};
 
 		let encoder = Encoder::new(
-			audiopus::SampleRate::Hz48000,
-			audiopus::Channels::Mono,
-			audiopus::Application::Voip,
+			48_000,
+			opus2::Channels::Mono,
+			opus2::Application::Voip,
 		)
 		.expect("Could not create encoder");
 		let mut callback = Callback {
