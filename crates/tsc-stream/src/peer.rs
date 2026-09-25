@@ -33,6 +33,8 @@ pub enum VideoCodec {
 }
 
 impl VideoCodec {
+	pub const ALL: [Self; 4] = [Self::Vp8, Self::Vp9, Self::H264, Self::Av1];
+
 	pub fn from_codec(c: Codec) -> Option<Self> {
 		match c {
 			Codec::Vp8 => Some(Self::Vp8),
@@ -40,6 +42,20 @@ impl VideoCodec {
 			Codec::H264 => Some(Self::H264),
 			Codec::Av1 => Some(Self::Av1),
 			_ => None,
+		}
+	}
+
+	/// From an SDP encoding name (`a=rtpmap:<pt> VP8/90000`).
+	pub fn from_sdp_name(name: &str) -> Option<Self> {
+		Self::ALL.into_iter().find(|c| c.sdp_name().eq_ignore_ascii_case(name))
+	}
+
+	pub fn sdp_name(self) -> &'static str {
+		match self {
+			Self::Vp8 => "VP8",
+			Self::Vp9 => "VP9",
+			Self::H264 => "H264",
+			Self::Av1 => "AV1",
 		}
 	}
 }
@@ -50,8 +66,12 @@ pub struct PeerConfig {
 	pub hosts: Vec<IpAddr>,
 	/// STUN servers (`host:port`) for a server-reflexive candidate.
 	pub stun_servers: Vec<String>,
-	/// Video codecs, used for the streamer's offer; a viewer accepts all it knows.
+	/// Video codecs a streamer offers, in order of preference. Frames are sent
+	/// with the codec the viewer picks, so offer only what the encoder produces.
 	pub video_codecs: Vec<VideoCodec>,
+	/// Video codecs a viewer accepts (what it can decode). The answer keeps
+	/// the order of the streamer's offer, so the streamer's preference wins.
+	pub accept_video_codecs: Vec<VideoCodec>,
 	pub video: bool,
 	pub audio: bool,
 }
@@ -61,7 +81,8 @@ impl Default for PeerConfig {
 		Self {
 			hosts: Vec::new(),
 			stun_servers: stun::TEAMSPEAK_STUN.iter().map(|s| (*s).to_owned()).collect(),
-			video_codecs: vec![VideoCodec::Vp8, VideoCodec::H264],
+			video_codecs: vec![VideoCodec::Vp8],
+			accept_video_codecs: VideoCodec::ALL.to_vec(),
 			video: true,
 			audio: true,
 		}
@@ -142,7 +163,7 @@ impl Peer {
 	/// Streamer side: create a connection that sends our media; returns the SDP
 	/// offer for `respondjoinstreamrequest`.
 	pub async fn offer(config: &PeerConfig, stream_id: &str) -> Result<(Self, String), PeerError> {
-		let mut rtc = build_rtc(config, true);
+		let mut rtc = build_rtc(config, &config.video_codecs);
 		let net = Net::bind(config, &mut rtc).await?;
 		let mut api = rtc.sdp_api();
 		let msid = Some(stream_id.to_owned());
@@ -163,8 +184,18 @@ impl Peer {
 
 	/// Viewer side: accept the streamer's offer; returns our SDP answer.
 	pub async fn answer(config: &PeerConfig, offer: &str) -> Result<(Self, String), PeerError> {
+		// Our codecs in the order of the offer, then the rest.
+		let mut codecs: Vec<_> = offered_video_codecs(offer)
+			.into_iter()
+			.filter(|c| config.accept_video_codecs.contains(c))
+			.collect();
+		for c in &config.accept_video_codecs {
+			if !codecs.contains(c) {
+				codecs.push(*c);
+			}
+		}
 		let offer = SdpOffer::from_sdp_string(offer).map_err(|e| PeerError::Sdp(e.to_string()))?;
-		let mut rtc = build_rtc(config, false);
+		let mut rtc = build_rtc(config, &codecs);
 		let net = Net::bind(config, &mut rtc).await?;
 		let answer = rtc.sdp_api().accept_offer(offer)?;
 		Ok((Self::spawn(rtc, net, config, None, Vec::new()), answer.to_sdp_string()))
@@ -240,22 +271,64 @@ impl Drop for Peer {
 	}
 }
 
-fn build_rtc(config: &PeerConfig, offering: bool) -> Rtc {
-	let mut rtc_config =
-		RtcConfig::new().set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()));
-	if offering {
-		// Offer only the codecs we can encode, in our order of preference.
-		rtc_config = rtc_config.clear_codecs().enable_opus(config.audio);
-		for codec in &config.video_codecs {
-			rtc_config = match codec {
-				VideoCodec::Vp8 => rtc_config.enable_vp8(true),
-				VideoCodec::Vp9 => rtc_config.enable_vp9(true),
-				VideoCodec::H264 => rtc_config.enable_h264(true),
-				VideoCodec::Av1 => rtc_config.enable_av1(true),
-			};
-		}
+/// H.264 Constrained High, level 3.1: reportedly the only H.264 profile the
+/// TeamSpeak client decodes; str0m's defaults lack it.
+const H264_CONSTRAINED_HIGH: u32 = 0x640c1f;
+
+/// An RTC with Opus and `video` codecs, in this order of preference.
+fn build_rtc(config: &PeerConfig, video: &[VideoCodec]) -> Rtc {
+	let mut rtc_config = RtcConfig::new()
+		.set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
+		.clear_codecs()
+		.enable_opus(config.audio);
+	for codec in video {
+		rtc_config = match codec {
+			VideoCodec::Vp8 => rtc_config.enable_vp8(true),
+			VideoCodec::Vp9 => rtc_config.enable_vp9(true),
+			VideoCodec::H264 => {
+				let mut c = rtc_config.enable_h264(true);
+				c.codec_config().add_h264(
+					112.into(),
+					Some(113.into()),
+					true,
+					H264_CONSTRAINED_HIGH,
+				);
+				c
+			}
+			VideoCodec::Av1 => rtc_config.enable_av1(true),
+		};
 	}
 	rtc_config.build(Instant::now())
+}
+
+/// The video codecs of the first video media line of `sdp`, in offered order.
+fn offered_video_codecs(sdp: &str) -> Vec<VideoCodec> {
+	let mut pts: Vec<&str> = Vec::new();
+	let mut names: Vec<(&str, VideoCodec)> = Vec::new();
+	let mut in_video = false;
+	for line in sdp.lines().map(str::trim) {
+		if let Some(media) = line.strip_prefix("m=") {
+			in_video = pts.is_empty() && media.starts_with("video ");
+			if in_video {
+				pts = media.split_whitespace().skip(3).collect();
+			}
+		} else if in_video
+			&& let Some((pt, encoding)) =
+				line.strip_prefix("a=rtpmap:").and_then(|r| r.split_once(' '))
+			&& let Some(codec) = encoding.split('/').next().and_then(VideoCodec::from_sdp_name)
+		{
+			names.push((pt, codec));
+		}
+	}
+	let mut codecs = Vec::new();
+	for pt in pts {
+		if let Some((_, codec)) = names.iter().find(|(p, _)| *p == pt)
+			&& !codecs.contains(codec)
+		{
+			codecs.push(*codec);
+		}
+	}
+	codecs
 }
 
 /// The primary local IPv4 address (the one used for the default route).
@@ -589,5 +662,47 @@ impl Task {
 		// The first remote payload type in the answer is the peer's preference.
 		let pt = writer.payload_params().find(|p| p.spec().codec.kind() == kind)?.pt();
 		Some((mid, pt))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn offered_codec_order() {
+		let sdp = "v=0\r\n\
+			m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+			a=rtpmap:111 opus/48000/2\r\n\
+			m=video 9 UDP/TLS/RTP/SAVPF 98 99 96 97 45 102\r\n\
+			a=rtpmap:96 VP8/90000\r\n\
+			a=rtpmap:97 rtx/90000\r\n\
+			a=rtpmap:98 VP9/90000\r\n\
+			a=rtpmap:99 rtx/90000\r\n\
+			a=rtpmap:45 AV1/90000\r\n\
+			a=rtpmap:102 H264/90000\r\n\
+			m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+			a=rtpmap:96 H264/90000\r\n";
+		assert_eq!(
+			offered_video_codecs(sdp),
+			[VideoCodec::Vp9, VideoCodec::Vp8, VideoCodec::Av1, VideoCodec::H264]
+		);
+		assert!(offered_video_codecs("v=0\r\n").is_empty());
+	}
+
+	#[tokio::test]
+	async fn answer_follows_offer_order() {
+		let streamer = PeerConfig {
+			video_codecs: vec![VideoCodec::H264, VideoCodec::Vp8],
+			..PeerConfig::loopback()
+		};
+		let (_peer, offer) = Peer::offer(&streamer, "s").await.unwrap();
+		assert!(offer.contains("profile-level-id=640c1f"), "{offer}");
+		let (_peer, answer) = Peer::answer(&PeerConfig::loopback(), &offer).await.unwrap();
+		assert_eq!(offered_video_codecs(&answer)[0], VideoCodec::H264, "{answer}");
+		let vp8_only =
+			PeerConfig { accept_video_codecs: vec![VideoCodec::Vp8], ..PeerConfig::loopback() };
+		let (_peer, answer) = Peer::answer(&vp8_only, &offer).await.unwrap();
+		assert_eq!(offered_video_codecs(&answer), [VideoCodec::Vp8], "{answer}");
 	}
 }
