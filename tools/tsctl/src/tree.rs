@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use tsclientlib::data;
 use tsc_model::ServerFlavor;
+use tsclientlib::data;
 use tsclientlib::{ChannelId, ClientType};
 
 /// Minimal channel view, so the ordering logic can be tested without a connection.
