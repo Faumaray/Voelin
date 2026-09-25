@@ -16,8 +16,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export RUST_BACKTRACE=0 RUST_LOG="${RUST_LOG:-error}"
 COMPOSE_FILE="${COMPOSE_FILE:-dev/docker-compose.yml}"
-STATE_DIR="target/it-smoke"
+# Survives `cargo clean`: holds the admin identity that redeemed the one-time key.
+STATE_DIR="${SMOKE_STATE_DIR:-dev/.state}"
 mkdir -p "$STATE_DIR"
+# Never leave background clients behind.
+trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
 
 if [[ -z "${TSCTL:-}" ]]; then
 	cargo build --quiet -p tsctl
@@ -51,8 +54,11 @@ admin_args() {
 	local svc=$1 addr=$2 id="$STATE_DIR/$svc-admin.json"
 	if [[ ! -f "$id" ]]; then
 		"$TSCTL" identity new --out "$id.tmp" --force >/dev/null
-		"$TSCTL" connect "$addr" --identity "$id.tmp" --nick admin \
-			--privilege-key "$(privilege_key "$svc")" tree >/dev/null
+		if ! "$TSCTL" connect "$addr" --identity "$id.tmp" --nick admin \
+			--privilege-key "$(privilege_key "$svc")" tree >/dev/null; then
+			fail "could not redeem the $svc privilege key (already used?). Reset the servers:
+  docker compose -f $COMPOSE_FILE down -v && docker compose -f $COMPOSE_FILE up -d && rm -rf $STATE_DIR"
+		fi
 		mv "$id.tmp" "$id"
 		# The rapid test connections would trip the per-IP anti-flood ban.
 		"$TSCTL" connect "$addr" --identity "$id" --nick admin raw \
