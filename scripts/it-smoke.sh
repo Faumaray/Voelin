@@ -7,6 +7,8 @@
 #   2. server chat between two clients
 #   3. channel chat between two clients
 #   4. voice: a 1 kHz tone sent by one client is recorded by another
+#   5. invisible presence: a ServerQuery observer sees a voice client join
+#   6. relay chat: a query relay reads channel chat and posts into the channel
 #
 # Usage: scripts/it-smoke.sh [ts3|ts6]...   (default: both)
 # Env:   TSCTL=path/to/tsctl (default: builds target/debug/tsctl)
@@ -28,6 +30,9 @@ if [[ -z "${TSCTL:-}" ]]; then
 fi
 
 declare -A PORTS=([ts3]=9987 [ts6]=9988)
+# ServerQuery transport and address per server (dev/docker-compose.yml).
+declare -A QUERY=([ts3]="raw 127.0.0.1:10011" [ts6]="ssh 127.0.0.1:10022")
+QUERY_SECRET=tsc-dev-admin
 SERVERS=("$@")
 [[ ${#SERVERS[@]} -eq 0 ]] && SERVERS=(ts3 ts6)
 
@@ -99,6 +104,50 @@ voice_roundtrip() {
 	grep "tone ratio" "$out"
 }
 
+# An observer over ServerQuery must see a voice client join.
+presence_check() {
+	local addr=$1 query=$2 out="$STATE_DIR/observe.log"
+	# shellcheck disable=SC2086
+	"$TSCTL" observe $query --secret "$QUERY_SECRET" --allowlisted --poll 2 \
+		--seconds 20 --expect-client presence-probe >"$out" 2>&1 &
+	local observer=$!
+	sleep 2
+	"$TSCTL" connect "$addr" --nick presence-probe listen --timeout 4 >/dev/null 2>&1 || true
+	if ! wait "$observer"; then
+		cat "$out"
+		fail "observer did not see the voice client"
+	fi
+	grep "presence-probe" "$out"
+}
+
+# A relay reads a voice client's channel message and posts one back.
+relay_check() {
+	local addr=$1 query=$2 out="$STATE_DIR/relay.log" heard="$STATE_DIR/relay-heard.log"
+	local token="relay-$RANDOM$RANDOM"
+	# shellcheck disable=SC2086
+	"$TSCTL" relay $query --secret "$QUERY_SECRET" --allowlisted --channel 1 \
+		--expect "to-relay-$token" --seconds 20 >"$out" 2>&1 &
+	local relay=$!
+	"$TSCTL" connect "$addr" --nick relay-listener listen --expect "from-relay-$token" \
+		--timeout 20 >"$heard" 2>&1 &
+	local listener=$!
+	sleep 4
+	"$TSCTL" connect "$addr" --nick relay-talker chat channel "to-relay-$token"
+	# shellcheck disable=SC2086
+	"$TSCTL" relay $query --secret "$QUERY_SECRET" --allowlisted --channel 1 --nick Alice \
+		--send "from-relay-$token" --seconds 1 >/dev/null
+	if ! wait "$relay"; then
+		cat "$out"
+		fail "relay did not receive the channel message"
+	fi
+	if ! wait "$listener"; then
+		cat "$heard"
+		fail "voice client did not receive the relayed post"
+	fi
+	grep "to-relay-$token" "$out"
+	grep "from-relay-$token" "$heard"
+}
+
 for svc in "${SERVERS[@]}"; do
 	port=${PORTS[$svc]:?unknown server $svc}
 	addr="127.0.0.1:$port"
@@ -114,6 +163,8 @@ for svc in "${SERVERS[@]}"; do
 	chat_roundtrip "$addr" server "$admin"
 	chat_roundtrip "$addr" channel ""
 	voice_roundtrip "$addr"
+	presence_check "$addr" "${QUERY[$svc]}"
+	relay_check "$addr" "${QUERY[$svc]}"
 done
 
 log "all smoke tests passed"

@@ -6,6 +6,10 @@
 # Each server prints a one-time ServerAdmin privilege key to its log on first
 # start; the smoke test reads it from there. `down -v` resets the servers.
 #
+# ServerQuery: every interface is enabled with the fixed development password
+# `tsc-dev-admin` for the `serveradmin` login (TS3: raw 10011, SSH 10023,
+# HTTP 10081; TS6: SSH 10022, HTTP 10080). Never use these settings in production.
+#
 # query_ip_allowlist.txt allowlists private ranges: clients reach the servers
 # through the Docker bridge, and allowlisted IPs skip the anti-flood bans that
 # rapid test connections would otherwise trigger. Development use only.
@@ -21,9 +25,13 @@ services:
     environment:
       TS3SERVER_LICENSE: accept
       TS3SERVER_IP_ALLOWLIST: /etc/ts3server/query_ip_allowlist.txt
+      TS3SERVER_SERVERADMIN_PASSWORD: tsc-dev-admin
+      TS3SERVER_QUERY_PROTOCOLS: raw,ssh,http
     ports:
       - "9987:9987/udp"   # voice
       - "10011:10011"     # raw ServerQuery
+      - "10023:10022"     # SSH ServerQuery
+      - "10081:10080"     # HTTP WebQuery
       - "30033:30033"     # file transfer
     volumes:
       - ts3-data:/var/ts3server
@@ -34,6 +42,10 @@ services:
     image: ${REGISTRY:-docker.io}/teamspeaksystems/teamspeak6-server@sha256:d845f803aecf842c2df034c959c23ff2462357bacafb3807500885c5ec170fa1
     environment:
       TSSERVER_LICENSE_ACCEPTED: accept
+      TSSERVER_QUERY_ADMIN_PASSWORD: tsc-dev-admin
+      TSSERVER_QUERY_SSH_ENABLED: 1
+      TSSERVER_QUERY_HTTP_ENABLED: 1
+      TSSERVER_QUERY_ALLOW_LIST: /etc/tsserver/query_ip_allowlist.txt
     ports:
       - "9988:9987/udp"   # voice (mapped to 9988 so both servers can run)
       - "10022:10022"     # SSH ServerQuery
@@ -41,7 +53,7 @@ services:
       - "30034:30033"     # file transfer
     volumes:
       - ts6-data:/var/tsserver
-      - ./query_ip_allowlist.txt:/var/tsserver/query_ip_allowlist.txt:ro
+      - ./query_ip_allowlist.txt:/etc/tsserver/query_ip_allowlist.txt:ro
 
 volumes:
   ts3-data:

@@ -20,6 +20,22 @@ facts constrain it, how the code is organised, and the milestone order.
 - TeamSpeak 6 servers still accept the TeamSpeak 3 client protocol; verified with
   `tsctl` against 6.0.0-beta13.1.
 
+### What "invisible" means for query clients (verified on 3.13.8 and 6.0.0-beta13.1)
+
+The server does not hide ServerQuery clients: every client subscribed to a
+channel receives `notifycliententerview` for query clients in it too
+(`client_type=1`). Official clients hide a query client when its
+`client_needed_serverquery_view_power` (100 for `serveradmin` by default) is
+higher than the viewer's `i_client_serverquery_view_power` (only Server Admins
+have it by default). So observers and relays are invisible to normal users of
+official clients, visible to admins, and visible to third-party clients that
+ignore the rule. This client applies the same rule.
+
+TeamSpeak 6 ships with SSH and HTTP query disabled
+(`TSSERVER_QUERY_SSH_ENABLED`, `TSSERVER_QUERY_HTTP_ENABLED`). HTTP guest
+access (`query-http-allow-guest`, on by default) lacks list permissions unless
+the admin grants them to the guest query group.
+
 ## How each feature is delivered
 
 | Feature | Mechanism |

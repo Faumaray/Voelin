@@ -23,7 +23,7 @@ See [docs/architecture.md](docs/architecture.md) for the design and milestones.
 
 ## Status
 
-Done so far (milestones M0–M2 of [the plan](docs/architecture.md#milestones)):
+Done so far (milestones M0–M3 of [the plan](docs/architecture.md#milestones)):
 
 - `crates/proto/`: vendored tsclientlib, modernised (TS6 fields and stream
   messages, faster off-thread Init1 puzzle, `curve25519-dalek` 4, fuzzing fixes;
@@ -31,9 +31,13 @@ Done so far (milestones M0–M2 of [the plan](docs/architecture.md#milestones)):
 - `crates/tsc-model`: server flavor detection (TS3 / TS6) and capabilities
 - `crates/tsc-audio`: Opus voice encoding, framing, resampling, WAV, jitter buffer/mixer, cpal devices
 - `crates/tsc-store`: SQLite store for identities, bookmarks, settings and chat history; keyring secrets
-- `tools/tsctl`: headless CLI: channel tree, chat, voice send/record, raw commands, stream events
+- `crates/tsc-query`: ServerQuery client over raw TCP, SSH and HTTP WebQuery (events, rate limiting, keepalive)
+- `crates/tsc-observer`: invisible presence (events or polling) and channel-chat relays over ServerQuery
+- `tools/tsctl`: headless CLI: channel tree, chat, voice send/record, raw commands, stream events,
+  `query`, `observe` (invisible presence) and `relay` (channel chat without joining)
 - `dev/`: TeamSpeak 3.13 and TeamSpeak 6 (6.0.0-beta13.1) servers; `scripts/it-smoke.sh`
-  checks tree, server chat, channel chat and a voice tone round-trip on both
+  checks tree, server chat, channel chat, a voice tone round-trip, invisible presence
+  and relay chat on both
 - `fuzz/`: cargo-fuzz targets for packets, commands and the license chain
 
 No GUI and no screen sharing yet.
@@ -50,7 +54,11 @@ cargo run -p tsctl -- connect 127.0.0.1:9988 --nick me repl  # interactive chat
 cargo run -p tsctl -- connect 127.0.0.1:9988 --nick me voice send --tone 440
 cargo run -p tsctl -- connect 127.0.0.1:9988 --nick ear voice record out.wav
 
-scripts/it-smoke.sh   # tree, chat and voice round-trips on both servers
+# ServerQuery (dev password tsc-dev-admin): invisible presence and relay chat
+cargo run -p tsctl -- observe ssh 127.0.0.1:10022 --secret tsc-dev-admin --allowlisted
+cargo run -p tsctl -- relay ssh 127.0.0.1:10022 --secret tsc-dev-admin --allowlisted --channel 1
+
+scripts/it-smoke.sh   # all of the above, on both servers
 ```
 
 Other commands: `tsctl identity new`, `tsctl versions`, `tsctl connect <addr> listen|chat|raw`.

@@ -1,6 +1,8 @@
 //! `tsctl`: headless TeamSpeak 3/6 client for development and integration tests.
 
 mod identity;
+mod observe;
+mod query;
 mod session;
 mod tree;
 mod versions;
@@ -34,6 +36,12 @@ enum Command {
 	},
 	/// Connect to a server and run an action.
 	Connect(ConnectArgs),
+	/// Run ServerQuery commands (raw TCP, SSH or HTTP WebQuery).
+	Query(query::QueryArgs),
+	/// Watch who is in which channel through ServerQuery, without appearing on the server.
+	Observe(observe::ObserveArgs),
+	/// Read and write a channel's chat through an invisible query relay.
+	Relay(observe::RelayArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -190,6 +198,9 @@ fn main() -> Result<()> {
 			let rt = tokio::runtime::Runtime::new()?;
 			rt.block_on(session::run(args))
 		}
+		Command::Query(args) => tokio::runtime::Runtime::new()?.block_on(query::run(args)),
+		Command::Observe(args) => tokio::runtime::Runtime::new()?.block_on(observe::observe(args)),
+		Command::Relay(args) => tokio::runtime::Runtime::new()?.block_on(observe::relay(args)),
 	}
 }
 

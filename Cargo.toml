@@ -10,6 +10,8 @@ members = [
 	"crates/proto/tsclientlib",
 	"crates/tsc-audio",
 	"crates/tsc-model",
+	"crates/tsc-observer",
+	"crates/tsc-query",
 	"crates/tsc-store",
 	"tools/tsctl",
 ]
@@ -22,6 +24,8 @@ default-members = [
 	"crates/proto/tsclientlib",
 	"crates/tsc-audio",
 	"crates/tsc-model",
+	"crates/tsc-observer",
+	"crates/tsc-query",
 	"crates/tsc-store",
 	"tools/tsctl",
 ]
