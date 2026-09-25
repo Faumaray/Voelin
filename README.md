@@ -23,7 +23,7 @@ See [docs/architecture.md](docs/architecture.md) for the design and milestones.
 
 ## Status
 
-Done so far (milestones M0–M4 of [the plan](docs/architecture.md#milestones)):
+Done so far (milestones M0–M4 and the first part of M5 of [the plan](docs/architecture.md#milestones)):
 
 - `crates/proto/`: vendored tsclientlib, modernised (TS6 fields and stream
   messages, faster off-thread Init1 puzzle, `curve25519-dalek` 4, fuzzing fixes;
@@ -36,6 +36,9 @@ Done so far (milestones M0–M4 of [the plan](docs/architecture.md#milestones)):
 - `crates/tsc-gateway` (`tsgw`) + `tsc-gateway-proto`: companion gateway for server admins. Users log in
   with their TeamSpeak identity and get presence, channel chat and history without joining voice,
   limited by their server permissions ([admin guide](docs/gateway-admin.md))
+- `crates/tsc-core`: client engine; sessions merge voice, gateway and query sources, route chat, run audio
+- `crates/tsc-ui` (`tsc-desktop`): Slint desktop app: servers, channel tree with talking indicators,
+  chat tabs (own channel via voice, other channels via relay), connect / observe invisibly, mute, push-to-talk
 - `tools/tsctl`: headless CLI: channel tree, chat, voice send/record, raw commands, stream events,
   `query`, `observe` (invisible presence), `relay` (channel chat without joining) and `gateway`
 - `dev/`: TeamSpeak 3.13 and TeamSpeak 6 (6.0.0-beta13.1) servers; `scripts/it-smoke.sh`
@@ -43,11 +46,18 @@ Done so far (milestones M0–M4 of [the plan](docs/architecture.md#milestones)):
   relay chat and the gateway on both
 - `fuzz/`: cargo-fuzz targets for packets, commands and the license chain
 
-No GUI and no screen sharing yet.
+No screen sharing yet, and no Android build yet.
+
+| Connected with voice | Observing invisibly through the gateway |
+|---|---|
+| ![voice](docs/screenshots/desktop-voice.png) | ![observe](docs/screenshots/desktop-observe.png) |
 
 ## Try it
 
 ```sh
+# Desktop app
+cargo run -p tsc-ui --bin tsc-desktop
+
 # Local servers (use REGISTRY=mirror.gcr.io if Docker Hub rate-limits you)
 docker compose -f dev/docker-compose.yml up -d
 
@@ -71,8 +81,9 @@ scripts/it-smoke.sh   # all of the above, on both servers
 Other commands: `tsctl identity new`, `tsctl versions`, `tsctl connect <addr> listen|chat|raw`.
 `tsctl --help` lists all options.
 
-Building on Linux needs the ALSA headers (`libasound2-dev`) for the audio examples,
-plus CMake and a C compiler for the bundled libopus.
+Building on Linux needs the ALSA headers (`libasound2-dev`), fontconfig and xkbcommon
+headers for the UI (`libfontconfig1-dev libxkbcommon-dev`), plus CMake and a C compiler for
+the bundled libopus.
 
 ## License
 

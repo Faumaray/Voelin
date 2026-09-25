@@ -16,6 +16,7 @@ members = [
 	"crates/tsc-observer",
 	"crates/tsc-query",
 	"crates/tsc-store",
+	"crates/tsc-ui",
 	"tools/tsctl",
 ]
 default-members = [
@@ -33,6 +34,7 @@ default-members = [
 	"crates/tsc-observer",
 	"crates/tsc-query",
 	"crates/tsc-store",
+	"crates/tsc-ui",
 	"tools/tsctl",
 ]
 
@@ -44,7 +46,8 @@ repository = "https://github.com/Faumaray/teamspeak_client_rs"
 publish = false
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# deny, not forbid: generated code (Slint) needs a local allow.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

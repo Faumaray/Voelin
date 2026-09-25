@@ -6,9 +6,11 @@
 mod chat;
 mod presence;
 mod server;
+mod tree;
 
 pub use chat::{ChatMessage, ChatTarget, relay_text, split_message};
 pub use presence::{
 	ChannelId, ChannelInfo, ClientId, ClientInfo, Presence, PresenceDelta, PresenceSnapshot,
 };
 pub use server::{Capabilities, ServerFlavor, ServerVersion};
+pub use tree::{TreeRow, order_siblings, tree_rows};
