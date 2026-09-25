@@ -88,16 +88,59 @@ When the streamer disconnects, everyone gets `notifystreamstopped id=<uuid>`.
 Stream ids are UUIDs. The notification carries the command's `return_code`, and
 the field is named `access` there (not `accessibility`).
 
+### Join handshake (confirmed, 6.0.0-beta13.1)
+
+```
+viewer   -> server: joinstreamrequest id=<uuid> clid=<streamer clid> msg=<text> is_remove=0
+streamer <- server: notifyjoinstreamrequest clid=<viewer clid> id=<uuid> msg=<text> is_remove=0
+```
+
+All four parameters are required. `is_remove=1` withdraws the request; the
+server also sends `notifyjoinstreamrequest ... is_remove=1` to the streamer when
+the viewer disconnects. Found by testing candidate parameter names from the
+server binary against a live stream (`is_remove` matches the
+`JoinStreamRequestEvent.is_remove` protobuf field).
+
+### Schema embedded in the server (confirmed)
+
+The server binary embeds the protobuf descriptors of the new binary protocol
+(`client/streaming.proto`, `events/stream_events.proto`). The text commands
+are separate handlers with their own parameter names, but the events and the
+enums line up:
+
+| Enum | Values |
+|---|---|
+| `StreamType` (`type`) | 1 none, 2 camera, **3 screen**, 4 window, 5 existing session, 6 voice |
+| `StreamAccessibility` (`accessibility`/`access`) | 1 none, 2 public, 3 contacts only, 4 private |
+| `StreamMode` (`mode`) | 1 none, 2 P2P, 3 SFU |
+| `StreamLeaveReason` (`reason`) | 1 none, 2 left, 3 denied, 4 failed, 5 kicked, 6 banned |
+
+Events (text notification names in brackets):
+
+| Event | Fields |
+|---|---|
+| StreamStarted (`notifystreamstarted`) | client_id, session_id, name, type, access, mode, bitrate, viewer_limit, audio |
+| StreamStopped (`notifystreamstopped`) | client_id, session_id, reason |
+| StreamUpdated | client_id, session_id, name, type, access, mode, bitrate, viewer_limit, audio |
+| StreamInfo (`notifystreaminfo`) | return_code, client_id, session_id, name, type, accessibility, mode, viewer, bitrate, viewer_limit, audio |
+| JoinStreamRequest (`notifyjoinstreamrequest`) | client_id, session_id, message, is_remove |
+| RespondJoinStreamRequest (`notifyrespondjoinstreamrequest`) | client_id, session_id, message, decision, offer |
+| StreamSignaling (`notifystreamsignaling`) | client_id, session_id, json |
+| StreamClientJoined / StreamClientLeft | client_id, session_id (, reason) |
+
+In text form `client_id` is `clid`, `session_id` is `id` and `message` is `msg`.
+The binary protocol's requests (`SetupStreamRequest` with `max_width`,
+`max_height`, `max_framerate`, `codec`, `properties`, and uint64 stream ids)
+differ from the text commands. There is also a `virtualserver_sfu_endpoint`
+property for the planned SFU mode.
+
 Errors: `setupstream` refused with error 2568 ("insufficient client
 permissions") has been seen; no stream permission names are documented.
 
 ## Open questions
 
-- [ ] Viewer side: the command is `joinstreamrequest`, but `id`, `clid` and `msg`
-      are not enough. Find the missing parameter(s) with
-      `tsctl connect ... --log-commands raw '<candidate>'` (or the REPL's `/raw`)
-      while another client streams.
-- [ ] Meaning of `setupstream` `type`, `accessibility` and `mode` values.
+- [x] Viewer side: `joinstreamrequest id clid msg is_remove` (see above).
+- [x] Meaning of `setupstream` `type`, `accessibility` and `mode` values (enums above).
 - [ ] Parameters of `stopstream` (more than `id`) and `removeclientfromstream`.
 - [ ] Which permission gates `setupstream` (error 2568).
 - [ ] Contents of `notifystreaminfo` and `notifystreamstarted`.
