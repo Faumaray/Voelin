@@ -6,7 +6,13 @@ all-features = false
 [advisories]
 # Unmaintained crates are reported but only fail for direct dependencies.
 unmaintained = "workspace"
-ignore = []
+ignore = [
+	# Marvin attack: timing side channel in RSA *private-key* operations of the
+	# `rsa` crate, pulled in by russh. TeamSpeak SSH query servers use RSA host
+	# keys, so russh needs RSA to verify the server's signature (a public-key
+	# operation). We never hold an RSA private key: query logins use passwords.
+	{ id = "RUSTSEC-2023-0071", reason = "only RSA signature verification is used (SSH host keys)" },
+]
 
 [licenses]
 # Permissive licenses only. AGPL/GPL code (e.g. astrum-ts6) must never be
