@@ -291,6 +291,7 @@ commands:
   /server <text>        send to the server chat
   /channel <text>       send to the current channel
   /msg <clid> <text>    send a private message
+  /raw <command>        send a raw, already escaped command
   /tree                 print the channel tree
   /whoami               print own client and channel
   /quit                 disconnect";
@@ -327,6 +328,7 @@ async fn repl(con: &mut Connection) -> Result<()> {
 					println!("error (command {}): {error}", handle.0);
 				}
 				StreamItem::MessageResult(handle, Ok(())) if Some(handle) == pending => {
+					println!("ok (command {})", handle.0);
 					pending = None;
 				}
 				_ => {}
@@ -356,6 +358,16 @@ async fn repl(con: &mut Connection) -> Result<()> {
 							own.id.0,
 							channel_name(state, own.channel)
 						);
+						continue;
+					}
+					"/raw" => {
+						let cmd = OutCommand::new(
+							Direction::C2S,
+							Flags::empty(),
+							PacketType::Command,
+							rest,
+						);
+						pending = Some(cmd.send_with_result(con)?);
 						continue;
 					}
 					"/server" => ChatTarget::Server { message: rest.into() },
