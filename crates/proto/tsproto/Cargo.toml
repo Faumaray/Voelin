@@ -37,11 +37,12 @@ sha-1 = "0.10"
 sha2 = "0.10"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting"] }
-tokio = { version = "1", features = ["macros", "net", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
 tracing = "0.1"
 tsproto-packets = { path = "../tsproto-packets", version = "0.1" }
 tsproto-types = { path = "../tsproto-types", version = "0.1" }
 quicklz = "0.3"
+crypto-bigint = "0.6"
 
 [dev-dependencies]
 anyhow = "1"

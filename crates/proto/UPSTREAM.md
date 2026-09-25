@@ -37,3 +37,9 @@ against or offered back to upstream.
    `tsclientlib/examples/audio_utils/audio_to_ts.rs`, `tsclientlib/Cargo.toml`).
    `audiopus` is unmaintained (RUSTSEC-2026-0150) and breaks with CMake 4. The
    `audiopus-unstable` feature (decoder complexity/DRED via a fork) is dropped.
+3. **Init1 RSA puzzle off-thread** (`tsproto/src/algorithms.rs`, `tsproto/src/client.rs`,
+   `tsproto/benches/modpow.rs`). `solve_rsa_puzzle` does Montgomery squarings with
+   `crypto-bigint` (about 25% faster than `num-bigint` `modpow`) on a
+   `spawn_blocking` thread that stops when the connect future is dropped. The level
+   cap is `max_puzzle_level()` (default 100 million, was a fixed 10 million),
+   adjustable with `set_max_puzzle_level`, because TeamSpeak 6 adapts the level.

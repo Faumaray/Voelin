@@ -276,8 +276,100 @@ pub fn biguint_to_array(i: &BigUint) -> [u8; 64] {
 
 pub fn array_to_biguint(i: &[u8; 64]) -> BigUint { BigUint::from_bytes_be(i) }
 
+/// Default maximum level of the Init1 RSA puzzle we are willing to solve.
+///
+/// TeamSpeak 6 adapts the level to the server's protection level, so this is
+/// higher than the 10 million upstream used. At about 0.14 µs per squaring
+/// (x86-64, 2026) a level of 100 million takes roughly 15 seconds.
+pub const DEFAULT_MAX_PUZZLE_LEVEL: u32 = 100_000_000;
+
+static MAX_PUZZLE_LEVEL: std::sync::atomic::AtomicU32 =
+	std::sync::atomic::AtomicU32::new(DEFAULT_MAX_PUZZLE_LEVEL);
+
+/// Maximum Init1 puzzle level accepted by new connections.
+pub fn max_puzzle_level() -> u32 { MAX_PUZZLE_LEVEL.load(std::sync::atomic::Ordering::Relaxed) }
+
+/// Change the maximum Init1 puzzle level accepted by new connections.
+pub fn set_max_puzzle_level(level: u32) {
+	MAX_PUZZLE_LEVEL.store(level, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Solve the Init1 RSA puzzle: `y = x ^ (2 ^ level) mod n`.
+///
+/// This is `level` modular squarings in Montgomery form. `cancel` is checked
+/// every few thousand squarings; when it is set, `None` is returned. `None` is
+/// also returned for an even (invalid) modulus.
+pub fn solve_rsa_puzzle(
+	x: &[u8; 64], n: &[u8; 64], level: u32, cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Option<[u8; 64]> {
+	use crypto_bigint::modular::{MontyForm, MontyParams};
+	use crypto_bigint::{Odd, U512};
+
+	const CHECK_EVERY: u32 = 4096;
+
+	let n = Option::<Odd<U512>>::from(Odd::new(U512::from_be_slice(n)))?;
+	let params = MontyParams::new_vartime(n);
+	let mut y = MontyForm::new(&U512::from_be_slice(x), params);
+	let mut done = 0;
+	while done < level {
+		if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+			return None;
+		}
+		let steps = CHECK_EVERY.min(level - done);
+		for _ in 0..steps {
+			y = y.square();
+		}
+		done += steps;
+	}
+	Some(y.retrieve().to_be_bytes())
+}
+
 #[cfg(test)]
 mod tests {
+	#[test]
+	fn rsa_puzzle_matches_modpow() {
+		use num_bigint::BigUint;
+		use num_traits::One;
+
+		// Deterministic pseudo-random 512 bit inputs; n odd, x < n.
+		let mut state = 0x2545_f491_4f6c_dd1du64;
+		let mut next = || {
+			let mut out = [0u8; 64];
+			for b in &mut out {
+				state ^= state << 13;
+				state ^= state >> 7;
+				state ^= state << 17;
+				*b = state as u8;
+			}
+			out
+		};
+		for level in [0, 1, 2, 1000, 4097, 20_000] {
+			let mut n = next();
+			n[0] |= 0x80;
+			n[63] |= 1;
+			let mut x = next();
+			x[0] &= 0x7f;
+			let expected = super::biguint_to_array(&BigUint::from_bytes_be(&x).modpow(
+				&(BigUint::one() << level as usize),
+				&BigUint::from_bytes_be(&n),
+			));
+			assert_eq!(super::solve_rsa_puzzle(&x, &n, level, None), Some(expected), "level {level}");
+		}
+	}
+
+	#[test]
+	fn rsa_puzzle_rejects_even_modulus_and_cancels() {
+		use std::sync::atomic::AtomicBool;
+
+		let x = [3; 64];
+		let mut n = [0xff; 64];
+		n[63] = 0xfe;
+		assert_eq!(super::solve_rsa_puzzle(&x, &n, 10, None), None);
+		n[63] = 0xff;
+		let cancel = AtomicBool::new(true);
+		assert_eq!(super::solve_rsa_puzzle(&x, &n, 10, Some(&cancel)), None);
+	}
+
 	use base64::prelude::*;
 
 	use super::*;

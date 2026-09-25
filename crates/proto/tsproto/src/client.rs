@@ -6,10 +6,6 @@ use std::task::{Context, Poll};
 
 use base64::prelude::*;
 use futures::prelude::*;
-#[cfg(not(feature = "rug"))]
-use num_bigint::BigUint;
-#[cfg(not(feature = "rug"))]
-use num_traits::One;
 use rand::RngExt;
 #[cfg(feature = "rug")]
 use rug::Integer;
@@ -28,6 +24,14 @@ use crate::license::Licenses;
 use crate::resend::{PacketId, ResenderState};
 
 type Result<T> = std::result::Result<T, Error>;
+
+/// Sets the shared flag when dropped, to stop a background computation.
+#[derive(Default)]
+struct CancelOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for CancelOnDrop {
+	fn drop(&mut self) { self.0.store(true, std::sync::atomic::Ordering::Relaxed); }
+}
 
 #[derive(Error, Debug)]
 #[non_exhaustive]
@@ -284,8 +288,7 @@ impl Client {
 					S2CInitData::Init3 { x, n, level, random2 } => {
 						let level = *level;
 						// Solve RSA puzzle: y = x ^ (2 ^ level) % n
-						// Use Montgomery Reduction
-						if level > 10_000_000 {
+						if level > algs::max_puzzle_level() {
 							// Reject too high exponents
 							return Err(Error::RsaPuzzleTooHighLevel(level));
 						}
@@ -315,15 +318,20 @@ impl Client {
 							yi
 						};
 
+						// Montgomery squarings on a blocking thread, so high
+						// (TeamSpeak 6 adaptive) levels do not stall the runtime.
+						// Dropping the connect future cancels the computation.
 						#[cfg(not(feature = "rug"))]
 						let y = {
-							let xi = BigUint::from_bytes_be(&x);
-							let ni = BigUint::from_bytes_be(&n);
-							let e = BigUint::one() << level as usize;
-							let yi = xi.modpow(&e, &ni);
-							info!(parent: &self.con.span, level, x = %xi, n = %ni, y = %yi,
-								"Solve RSA puzzle");
-							algs::biguint_to_array(&yi)
+							info!(parent: &self.con.span, level, "Solving RSA puzzle");
+							let cancel = CancelOnDrop::default();
+							let flag = cancel.0.clone();
+							tokio::task::spawn_blocking(move || {
+								algs::solve_rsa_puzzle(&x, &n, level, Some(&flag))
+							})
+							.await
+							.map_err(|_| Error::RsaPuzzle)?
+							.ok_or(Error::RsaPuzzle)?
 						};
 
 						// Create the command string
