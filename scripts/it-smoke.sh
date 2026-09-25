@@ -6,6 +6,7 @@
 #   1. connect + channel tree (channelsubscribeall)
 #   2. server chat between two clients
 #   3. channel chat between two clients
+#   4. voice: a 1 kHz tone sent by one client is recorded by another
 #
 # Usage: scripts/it-smoke.sh [ts3|ts6]...   (default: both)
 # Env:   TSCTL=path/to/tsctl (default: builds target/debug/tsctl)
@@ -77,6 +78,21 @@ chat_roundtrip() {
 	grep -F "[$kind] sender" "$out"
 }
 
+# One client records while another sends a tone; Goertzel checks the result.
+voice_roundtrip() {
+	local addr=$1 out="$STATE_DIR/voice.log"
+	"$TSCTL" connect "$addr" --nick recorder voice record "$STATE_DIR/voice.wav" \
+		--seconds 6 --expect-tone 1000 >"$out" 2>&1 &
+	local recorder=$!
+	sleep 2
+	"$TSCTL" connect "$addr" --nick talker voice send --tone 1000 --seconds 2 >/dev/null
+	if ! wait "$recorder"; then
+		cat "$out"
+		fail "voice tone not received"
+	fi
+	grep "tone ratio" "$out"
+}
+
 for svc in "${SERVERS[@]}"; do
 	port=${PORTS[$svc]:?unknown server $svc}
 	addr="127.0.0.1:$port"
@@ -91,6 +107,7 @@ for svc in "${SERVERS[@]}"; do
 	# Guests may not use the server chat by default, so the sender is the admin.
 	chat_roundtrip "$addr" server "$admin"
 	chat_roundtrip "$addr" channel ""
+	voice_roundtrip "$addr"
 done
 
 log "all smoke tests passed"

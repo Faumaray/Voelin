@@ -1,0 +1,25 @@
+[package]
+name = "tsc-store"
+version = "0.1.0"
+description = "Local persistence: identities, bookmarks, settings, chat cache and secrets."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Store secrets in the OS keyring (Secret Service, Windows Credential Manager, Keychain).
+keyring = ["dep:keyring"]
+
+[dependencies]
+keyring = { version = "4.2.0", optional = true }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.21"
+tsclientlib = { path = "../proto/tsclientlib" }
+
+[lints]
+workspace = true

@@ -4,6 +4,7 @@ mod identity;
 mod session;
 mod tree;
 mod versions;
+mod voice;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -116,8 +117,41 @@ pub enum Action {
 	/// Send a raw, already escaped command (e.g. `serveredit virtualserver_name=Test\\sServer`)
 	/// and wait for the result. Combine with `--log-commands` to see the answer.
 	Raw { command: String },
+	/// Send or record voice in the current channel.
+	Voice {
+		#[command(subcommand)]
+		command: VoiceCommand,
+	},
 	/// Interactive session. Type `/help` for commands.
 	Repl,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum VoiceCommand {
+	/// Talk: send a WAV file or a test tone, in real time.
+	Send {
+		/// WAV file to send (any sample rate; resampled to 48 kHz).
+		file: Option<PathBuf>,
+		/// Send a sine tone of this frequency instead of a file.
+		#[arg(long, conflicts_with = "file")]
+		tone: Option<f32>,
+		/// Tone length in seconds.
+		#[arg(long, default_value_t = 3.0)]
+		seconds: f32,
+		/// Use the stereo Opus Music codec instead of mono Opus Voice.
+		#[arg(long)]
+		music: bool,
+	},
+	/// Listen: mix everything said in the channel into a stereo 48 kHz WAV file.
+	Record {
+		out: PathBuf,
+		/// Recording length in seconds.
+		#[arg(long, default_value_t = 5.0)]
+		seconds: f32,
+		/// Fail unless the recording contains this tone frequency (for tests).
+		#[arg(long)]
+		expect_tone: Option<f32>,
+	},
 }
 
 #[derive(Subcommand, Debug, Clone)]

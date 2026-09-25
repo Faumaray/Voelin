@@ -1,0 +1,28 @@
+[package]
+name = "tsc-audio"
+version = "0.1.0"
+description = "Voice pipeline: Opus encoding, framing, resampling, jitter buffer/mixer and audio devices."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = ["device"]
+# Audio device I/O through cpal (needs ALSA headers on Linux).
+device = ["dep:cpal", "dep:rtrb"]
+
+[dependencies]
+cpal = { version = "0.18", optional = true }
+hound = "3.5.1"
+opus2 = "0.4"
+rtrb = { version = "0.4.0", optional = true }
+rubato = "5.0.0"
+thiserror = "2.0.21"
+tracing = "0.1.44"
+tsclientlib = { path = "../proto/tsclientlib" }
+tsproto-packets = { path = "../proto/tsproto-packets" }
+
+[lints]
+workspace = true

@@ -57,6 +57,7 @@ pub async fn run(args: ConnectArgs) -> Result<()> {
 			let cmd = OutCommand::new(Direction::C2S, Flags::empty(), PacketType::Command, command);
 			send_and_wait(&mut con, cmd, "command").await.map(|()| println!("ok"))
 		}
+		Action::Voice { command } => crate::voice::run(&mut con, command).await,
 		Action::Repl => repl(&mut con).await,
 	};
 
@@ -65,14 +66,14 @@ pub async fn run(args: ConnectArgs) -> Result<()> {
 }
 
 /// What to do after handling one stream item.
-enum Flow {
+pub(crate) enum Flow {
 	Continue,
 	Stop,
 }
 
 /// How [`pump`] ended.
 #[derive(Debug, PartialEq, Eq)]
-enum PumpEnd {
+pub(crate) enum PumpEnd {
 	Stopped,
 	Deadline,
 	Interrupted,
@@ -80,7 +81,7 @@ enum PumpEnd {
 
 /// Drive the connection, handing every item to `handler` until it returns
 /// [`Flow::Stop`], the deadline passes, or Ctrl-C is pressed.
-async fn pump(
+pub(crate) async fn pump(
 	con: &mut Connection,
 	deadline: Option<Instant>,
 	mut handler: impl FnMut(&mut Connection, StreamItem) -> Result<Flow>,

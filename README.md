@@ -23,14 +23,20 @@ See [docs/architecture.md](docs/architecture.md) for the design and milestones.
 
 ## Status
 
-Milestone **M0 (foundation)**:
+Done so far (milestones M0–M2 of [the plan](docs/architecture.md#milestones)):
 
-- `crates/proto/`: vendored tsclientlib (see [UPSTREAM.md](crates/proto/UPSTREAM.md) for the patch log)
-- `tools/tsctl`: headless CLI that connects, prints the channel tree, sends and receives chat
-- `dev/`: TeamSpeak 3.13 and TeamSpeak 6 (6.0.0-beta13.1) servers for local testing
-- CI: build and test on Linux and Windows, `cargo-deny`, smoke test against both servers
+- `crates/proto/`: vendored tsclientlib, modernised (TS6 fields and stream
+  messages, faster off-thread Init1 puzzle, `curve25519-dalek` 4, fuzzing fixes;
+  see [UPSTREAM.md](crates/proto/UPSTREAM.md))
+- `crates/tsc-model`: server flavor detection (TS3 / TS6) and capabilities
+- `crates/tsc-audio`: Opus voice encoding, framing, resampling, WAV, jitter buffer/mixer, cpal devices
+- `crates/tsc-store`: SQLite store for identities, bookmarks, settings and chat history; keyring secrets
+- `tools/tsctl`: headless CLI: channel tree, chat, voice send/record, raw commands, stream events
+- `dev/`: TeamSpeak 3.13 and TeamSpeak 6 (6.0.0-beta13.1) servers; `scripts/it-smoke.sh`
+  checks tree, server chat, channel chat and a voice tone round-trip on both
+- `fuzz/`: cargo-fuzz targets for packets, commands and the license chain
 
-No GUI, voice or screen sharing yet.
+No GUI and no screen sharing yet.
 
 ## Try it
 
@@ -41,8 +47,10 @@ docker compose -f dev/docker-compose.yml up -d
 cargo run -p tsctl -- connect 127.0.0.1:9987 tree            # TeamSpeak 3
 cargo run -p tsctl -- connect 127.0.0.1:9988 tree            # TeamSpeak 6
 cargo run -p tsctl -- connect 127.0.0.1:9988 --nick me repl  # interactive chat
+cargo run -p tsctl -- connect 127.0.0.1:9988 --nick me voice send --tone 440
+cargo run -p tsctl -- connect 127.0.0.1:9988 --nick ear voice record out.wav
 
-scripts/it-smoke.sh   # tree + server/channel chat round-trips on both servers
+scripts/it-smoke.sh   # tree, chat and voice round-trips on both servers
 ```
 
 Other commands: `tsctl identity new`, `tsctl versions`, `tsctl connect <addr> listen|chat|raw`.

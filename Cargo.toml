@@ -8,7 +8,9 @@ members = [
 	"crates/proto/tsproto",
 	"crates/proto/ts-bookkeeping",
 	"crates/proto/tsclientlib",
+	"crates/tsc-audio",
 	"crates/tsc-model",
+	"crates/tsc-store",
 	"tools/tsctl",
 ]
 default-members = [
@@ -18,7 +20,9 @@ default-members = [
 	"crates/proto/tsproto",
 	"crates/proto/ts-bookkeeping",
 	"crates/proto/tsclientlib",
+	"crates/tsc-audio",
 	"crates/tsc-model",
+	"crates/tsc-store",
 	"tools/tsctl",
 ]
 
@@ -39,3 +43,12 @@ all = { level = "warn", priority = -1 }
 # The Init1 puzzle does a large modular exponentiation on connect; unoptimized
 # it takes seconds.
 opt-level = 3
+
+[profile.dev]
+# Line tables (for backtraces) for workspace crates, no debug info for
+# dependencies: keeps target/ several times smaller. Override locally for
+# debugging with CARGO_PROFILE_DEV_DEBUG=true.
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
