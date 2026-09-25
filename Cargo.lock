@@ -5155,6 +5155,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsc-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
+ "tsc-audio",
+ "tsc-gateway-proto",
+ "tsc-model",
+ "tsc-observer",
+ "tsc-query",
+ "tsclientlib",
+ "tsproto-packets",
+]
+
+[[package]]
 name = "tsc-gateway"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,36 @@
+[package]
+name = "tsc-core"
+version = "0.1.0"
+description = "Client engine: server sessions merging voice, gateway and query sources; the API the UI drives."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = ["audio-device"]
+# Capture and play audio through the system's devices.
+audio-device = ["tsc-audio/device"]
+
+[dependencies]
+anyhow = "1"
+futures = "0.3"
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = "0.30"
+tracing = "0.1"
+tsc-audio = { path = "../tsc-audio", default-features = false }
+tsc-gateway-proto = { path = "../tsc-gateway-proto" }
+tsc-model = { path = "../tsc-model" }
+tsc-observer = { path = "../tsc-observer" }
+tsc-query = { path = "../tsc-query" }
+tsclientlib = { path = "../proto/tsclientlib" }
+tsproto-packets = { path = "../proto/tsproto-packets" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+
+[lints]
+workspace = true

@@ -24,8 +24,64 @@ pub fn resample_all(samples: &[f32], channels: usize, from: u32, to: u32) -> Res
 	Ok(output.take_data())
 }
 
+/// Streaming mono resampler with linear interpolation, for device audio whose
+/// rate differs from 48 kHz. Cheap and latency-free; good enough for voice.
+#[derive(Clone, Debug)]
+pub struct Linear {
+	/// Input samples per output sample.
+	step: f64,
+	/// Position of the next output sample, relative to `prev`.
+	pos: f64,
+	prev: f32,
+}
+
+impl Linear {
+	pub fn new(from: u32, to: u32) -> Self {
+		Self { step: from as f64 / to as f64, pos: 0.0, prev: 0.0 }
+	}
+
+	pub fn is_passthrough(&self) -> bool {
+		self.step == 1.0
+	}
+
+	/// Resample a chunk, appending to `out`. State carries over between calls.
+	pub fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
+		if self.is_passthrough() {
+			out.extend_from_slice(input);
+			return;
+		}
+		for &next in input {
+			while self.pos < 1.0 {
+				out.push(self.prev + (next - self.prev) * self.pos as f32);
+				self.pos += self.step;
+			}
+			self.pos -= 1.0;
+			self.prev = next;
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
+	#[test]
+	fn linear_streaming_rate_and_tone() {
+		let tone: Vec<f32> = (0..44_100)
+			.map(|i| 0.5 * (std::f32::consts::TAU * 1000.0 * i as f32 / 44_100.0).sin())
+			.collect();
+		let mut r = Linear::new(44_100, 48_000);
+		let mut out = Vec::new();
+		// Arbitrary chunk sizes must give the same stream.
+		for chunk in tone.chunks(333) {
+			r.process(chunk, &mut out);
+		}
+		assert!((out.len() as i64 - 48_000).abs() <= 2, "len {}", out.len());
+		assert!(crate::pcm::tone_ratio(&out[100..], 1000.0, 48_000) > 0.95);
+		let mut same = Linear::new(48_000, 48_000);
+		let mut o = Vec::new();
+		same.process(&[1.0, 2.0], &mut o);
+		assert_eq!(o, vec![1.0, 2.0]);
+	}
+
 	use super::*;
 	use crate::pcm;
 

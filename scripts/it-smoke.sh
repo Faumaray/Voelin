@@ -215,4 +215,7 @@ for svc in "${SERVERS[@]}"; do
 	gateway_check "$svc" "$addr"
 done
 
+log "engine (tsc-core) against both servers"
+TSC_LIVE=1 cargo test --quiet -p tsc-core --test live 2>&1 | grep -E "test result|panicked|timed out" || fail "engine tests failed"
+
 log "all smoke tests passed"
