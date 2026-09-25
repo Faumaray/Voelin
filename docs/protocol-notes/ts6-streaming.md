@@ -49,8 +49,9 @@ which uses a TS3-signed client version over the legacy UDP transport):
 | C→S | `setupstream` | `name type bitrate accessibility mode viewer_limit audio` (bot defaults: `type=3 bitrate=4608 accessibility=1 mode=1 viewer_limit=0 audio=1`) |
 | C→S | `respondjoinstreamrequest` | `id clid msg offer=<SDP> decision=1\|0` |
 | C→S | `streamsignaling` | `id clid json={"cmd":…,"args":{…}}` (answer, ICE candidates `candidate`/`sdpMid`/`sdpMlineIndex`, reconnect) |
-| C→S | `stopstream` | `id`? |
-| C→S | `removeclientfromstream` | `id clid`? |
+| C→S | `joinstreamrequest` | `id clid msg is_remove` (viewer; confirmed, see below) |
+| C→S | `stopstream` | `id reason` (confirmed) |
+| C→S | `removeclientfromstream` | `id clid reason` (confirmed) |
 | S→C | `notifystreamstarted`, `notifystreamstopped`, `notifystreaminfo` | |
 | S→C | `notifyjoinstreamrequest`, `notifyrespondjoinstreamrequest` | |
 | S→C | `notifystreamsignaling` | |
@@ -101,6 +102,35 @@ the viewer disconnects. Found by testing candidate parameter names from the
 server binary against a live stream (`is_remove` matches the
 `JoinStreamRequestEvent.is_remove` protobuf field).
 
+### End-to-end stream (confirmed, 6.0.0-beta13.1, 2026-09-25)
+
+`crates/tsc-stream/tests/live_ts6.rs` runs a whole stream between two of our
+clients through the server, with str0m on both ends:
+
+```
+streamer -> setupstream name=live\stest type=3 bitrate=4608 accessibility=1 mode=1 viewer_limit=0 audio=1
+streamer <- notifystreamstarted clid=<s> id=<uuid> ... return_code=...   (viewer gets it without return_code)
+viewer   -> joinstreamrequest id=<uuid> clid=<s> msg=... is_remove=0
+streamer <- notifyjoinstreamrequest clid=<v> id=<uuid> msg=... is_remove=0
+streamer -> respondjoinstreamrequest id=<uuid> clid=<v> msg offer=<SDP offer> decision=1
+viewer   <- notifyrespondjoinstreamrequest id=<uuid> ... offer=<SDP, unchanged> decision=1
+viewer   -> streamsignaling id=<uuid> clid=<s> json={"cmd":"answer","args":{"answer":<SDP>}}
+streamer <- notifystreamsignaling id=<uuid> clid=<v> json=<unchanged>
+           ICE + DTLS directly between the peers; VP8 video and Opus audio flow
+streamer -> removeclientfromstream id=<uuid> clid=<v> reason=5
+viewer   <- notifystreamclientleft id=<uuid> clid=<v> reason=5   (streamer: + return_code)
+streamer -> stopstream id=<uuid> reason=1
+viewer   <- notifystreamstopped id=<uuid>
+```
+
+- `stopstream id=<uuid>` alone and `stopstream id clid` fail with
+  `ParameterMissing`; `stopstream id reason` works. `removeclientfromstream id clid`
+  fails the same way; it needs `reason` too. Reasons are `StreamLeaveReason` values.
+- The server passes SDP and JSON through unchanged (escaped as usual).
+- Host candidates embedded in the SDP are enough on one machine; trickled
+  candidates use `{"cmd":"iceCandidate","args":{"candidate","sdpMid","sdpMLineIndex"}}`
+  (the parser also accepts `sdp`/`mid`/`mLine`).
+
 ### Schema embedded in the server (confirmed)
 
 The server binary embeds the protobuf descriptors of the new binary protocol
@@ -141,9 +171,12 @@ permissions") has been seen; no stream permission names are documented.
 
 - [x] Viewer side: `joinstreamrequest id clid msg is_remove` (see above).
 - [x] Meaning of `setupstream` `type`, `accessibility` and `mode` values (enums above).
-- [ ] Parameters of `stopstream` (more than `id`) and `removeclientfromstream`.
+- [x] Parameters of `stopstream` and `removeclientfromstream` (`reason` is required).
 - [ ] Which permission gates `setupstream` (error 2568).
-- [ ] Contents of `notifystreaminfo` and `notifystreamstarted`.
+- [x] Contents of `notifystreamstarted` (see probe results).
+- [ ] Contents of `notifystreaminfo` (`requeststreaminfo`).
+- [ ] Interop with the official TS6 client (its offer/answer details, codecs it
+      actually picks, whether it trickles candidates).
 - [ ] Whether stream audio can be sent without video.
 - [ ] The WebRTC/protobuf transport some TS6 clients use on UDP 9987
       (`client_protocol_format=proto`, reported in community reverse engineering).

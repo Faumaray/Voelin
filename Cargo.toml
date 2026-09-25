@@ -16,6 +16,7 @@ members = [
 	"crates/tsc-observer",
 	"crates/tsc-query",
 	"crates/tsc-store",
+	"crates/tsc-stream",
 	"crates/tsc-ui",
 	"tools/tsctl",
 ]
@@ -34,6 +35,7 @@ default-members = [
 	"crates/tsc-observer",
 	"crates/tsc-query",
 	"crates/tsc-store",
+	"crates/tsc-stream",
 	"crates/tsc-ui",
 	"tools/tsctl",
 ]

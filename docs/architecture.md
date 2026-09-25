@@ -48,32 +48,30 @@ the admin grants them to the guest query group.
 
 ## Workspace layout
 
-Present today:
-
 ```
-crates/proto/     vendored tsclientlib (tsproto, tsproto-packets, tsproto-types,
-                  tsproto-structs + declarations, ts-bookkeeping, tsclientlib)
-tools/tsctl       headless CLI
-dev/              docker-compose TS3 + TS6 servers
-scripts/          it-smoke.sh
+crates/proto/        vendored tsclientlib (tsproto, tsproto-packets, tsproto-types,
+                     tsproto-structs + declarations, ts-bookkeeping, tsclientlib)
+crates/<tsc-*>       our crates (table below)
+tools/tsctl          headless CLI
+dev/                 docker-compose TS3 + TS6 servers, gateway configs
+scripts/             it-smoke.sh, own-crates.sh
+fuzz/                cargo-fuzz targets
 ```
 
-Planned crates:
-
-| Crate | Responsibility |
-|---|---|
-| `tsc-model` | UI-facing domain model (servers, channels, clients, chat, capabilities), no IO |
-| `tsc-query` | ServerQuery codec and transports: raw TCP, SSH (russh), HTTP WebQuery |
-| `tsc-observer` | Presence tracker + chat relay pool over `tsc-query` |
-| `tsc-gateway-proto`, `tsc-gateway` (`tsgw`) | Companion service for server admins: identity-challenge auth, permission-mirroring authorization, presence stream, chat relay, SQLite history, WebSocket + JSON (`tsgw.v1+json`) |
-| `tsc-store` | Identities, bookmarks, settings, chat cache, secrets (keyring / Android Keystore) |
-| `tsc-audio` | Capture/playback, Opus, echo cancellation, resampling, jitter buffer, mixer, VAD/push-to-talk |
-| `tsc-media` | Screen and system-audio capture backends (PipeWire portal, X11, Windows Graphics Capture, Android MediaProjection), video codecs |
-| `tsc-stream` | TS6 stream signalling state machine, str0m peer connections |
-| `tsc-core` | Engine: runtime, per-server sessions, merge of voice/gateway/query sources, event bus, command API |
-| `tsc-platform` | Global hotkeys, notifications, paths, Android JNI glue |
-| `tsc-ui` | Slint UI and the desktop binary |
-| `tsc-android` + `android/` | Android library + Gradle/Kotlin app (foreground services for voice and screen capture) |
+| Crate | Responsibility | State |
+|---|---|---|
+| `tsc-model` | UI-facing domain model (servers, channels, clients, chat, capabilities), no IO | done |
+| `tsc-query` | ServerQuery codec and transports: raw TCP, SSH (russh), HTTP WebQuery | done |
+| `tsc-observer` | Presence tracker + chat relay pool over `tsc-query` | done |
+| `tsc-gateway-proto`, `tsc-gateway` (`tsgw`) | Companion service for server admins: identity-challenge auth, permission-mirroring authorization, presence stream, chat relay, SQLite history, WebSocket + JSON (`tsgw.v1+json`) | done |
+| `tsc-store` | Identities, bookmarks, settings, chat cache, secrets (keyring / Android Keystore) | done |
+| `tsc-audio` | Capture/playback, Opus, echo cancellation, resampling, jitter buffer, mixer, VAD/push-to-talk | v0 (no AEC yet) |
+| `tsc-stream` | TS6 stream commands, JSON signalling, str0m peer connections, host/STUN candidates | signalling + transport |
+| `tsc-core` | Engine: runtime, per-server sessions, merge of voice/gateway/query sources, event bus, command API | done (no streams yet) |
+| `tsc-ui` | Slint UI and the desktop binary | done (no streams yet) |
+| `tsc-media` | Screen and system-audio capture backends (PipeWire portal, X11, Windows Graphics Capture, Android MediaProjection), video codecs | planned |
+| `tsc-platform` | Global hotkeys, notifications, paths | planned |
+| `tsc-android` + `android/` | Android library + Gradle/Kotlin app (foreground services for voice and screen capture) | planned |
 
 ## Merging sources
 

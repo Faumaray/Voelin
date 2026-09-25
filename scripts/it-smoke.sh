@@ -218,4 +218,7 @@ done
 log "engine (tsc-core) against both servers"
 TSC_LIVE=1 cargo test --quiet -p tsc-core --test live 2>&1 | grep -E "test result|panicked|timed out" || fail "engine tests failed"
 
+log "stream (tsc-stream) through the TeamSpeak 6 server"
+TSC_LIVE=1 cargo test --quiet -p tsc-stream --test live_ts6 2>&1 | grep -E "test result|panicked|timed out" || fail "stream test failed"
+
 log "all smoke tests passed"

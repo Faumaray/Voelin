@@ -39,6 +39,9 @@ Done so far (milestones M0–M4 and the first part of M5 of [the plan](docs/arch
 - `crates/tsc-core`: client engine; sessions merge voice, gateway and query sources, route chat, run audio
 - `crates/tsc-ui` (`tsc-desktop`): Slint desktop app: servers, channel tree with talking indicators,
   chat tabs (own channel via voice, other channels via relay), connect / observe invisibly, mute, push-to-talk
+- `crates/tsc-stream`: TeamSpeak 6 streams: stream commands and notifications, JSON signalling,
+  WebRTC peers (str0m) with host and STUN candidates. A live test streams VP8 + Opus between two
+  clients through a TS6 server
 - `tools/tsctl`: headless CLI: channel tree, chat, voice send/record, raw commands, stream events,
   `query`, `observe` (invisible presence), `relay` (channel chat without joining) and `gateway`
 - `dev/`: TeamSpeak 3.13 and TeamSpeak 6 (6.0.0-beta13.1) servers; `scripts/it-smoke.sh`
@@ -46,7 +49,8 @@ Done so far (milestones M0–M4 and the first part of M5 of [the plan](docs/arch
   relay chat and the gateway on both
 - `fuzz/`: cargo-fuzz targets for packets, commands and the license chain
 
-No screen sharing yet, and no Android build yet.
+Screen sharing has its protocol and transport layer (`tsc-stream`); capture, codecs and the UI
+for it are in progress. No Android build yet.
 
 | Connected with voice | Observing invisibly through the gateway |
 |---|---|
@@ -91,5 +95,5 @@ The vendored crates in `crates/proto/` are `MIT OR Apache-2.0` (upstream
 `LICENSE-MIT` / `LICENSE-APACHE` are kept there). New crates are declared under
 the same terms in `Cargo.toml`.
 
-Third-party notices: the planned UI toolkit, Slint, is used under its
-royalty-free license, which requires an attribution in the app's About page.
+Third-party notices: the UI toolkit, Slint, is used under its royalty-free license, which
+requires an attribution in the app's About page.

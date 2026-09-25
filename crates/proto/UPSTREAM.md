@@ -60,3 +60,10 @@ against or offered back to upstream.
      are bounds-checked now.
    - `tsproto-packets/src/packets.rs`: the invalid-codec error for short C2S audio
      packets read `content[4]` instead of the codec byte `content[2]`.
+7. **TeamSpeak 6 stream commands, verified against 6.0.0-beta13.1**
+   (`tsproto-structs/declarations/Messages.toml`). New fields `is_remove` and
+   `reason` (stream leave reason). New command `joinstreamrequest id clid msg is_remove`
+   (`JoinStreamRequestRequest`); `stopstream` and `removeclientfromstream` take the
+   required `reason`; `notifyjoinstreamrequest` carries `is_remove`,
+   `notifystreamstopped` and `notifystreamclientleft` carry `reason`, the latter also
+   `return_code`.
