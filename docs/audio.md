@@ -18,9 +18,9 @@ The audio thread lives in `tsc-core/src/audio.rs`; the building blocks are in
 the WebRTC audio processing module: AEC3, the WebRTC noise suppressor, AGC2
 (adaptive digital gain + limiter) and a high-pass filter. Chosen over:
 
-- `webrtc-audio-processing`: binds the C++ library (a system package or a bundled
-  C++ build via meson), a licence field that cargo-deny does not recognise, and
-  extra toolchain work on Windows and Android;
+- `webrtc-audio-processing`: binds the C++ library, either a system package found
+  through pkg-config or a bundled C++ build (autotools, bindgen/libclang); its
+  licence is not an SPDX expression, and Windows/Android need extra toolchain work;
 - `nnnoiseless` (RNNoise port): noise suppression only, no echo cancellation.
 
 sonora needs no C/C++ toolchain, so it builds the same everywhere. It runs on 10 ms
