@@ -59,6 +59,23 @@ all = { level = "warn", priority = -1 }
 # it takes seconds.
 opt-level = 3
 
+# Audio processing (echo cancellation, noise suppression) runs in real time on
+# every 10 ms of microphone audio; unoptimized it needs about a third of a core.
+[profile.dev.package.sonora]
+opt-level = 3
+[profile.dev.package.sonora-aec3]
+opt-level = 3
+[profile.dev.package.sonora-agc2]
+opt-level = 3
+[profile.dev.package.sonora-common-audio]
+opt-level = 3
+[profile.dev.package.sonora-fft]
+opt-level = 3
+[profile.dev.package.sonora-ns]
+opt-level = 3
+[profile.dev.package.sonora-simd]
+opt-level = 3
+
 [profile.dev]
 # Line tables (for backtraces) for workspace crates, no debug info for
 # dependencies: keeps target/ several times smaller. Override locally for
