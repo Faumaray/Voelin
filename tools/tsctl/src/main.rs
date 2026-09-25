@@ -113,6 +113,9 @@ pub enum Action {
 		#[arg(long)]
 		timeout: Option<u64>,
 	},
+	/// Send a raw, already escaped command (e.g. `serveredit virtualserver_name=Test\\sServer`)
+	/// and wait for the result. Combine with `--log-commands` to see the answer.
+	Raw { command: String },
 	/// Interactive session. Type `/help` for commands.
 	Repl,
 }

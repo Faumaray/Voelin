@@ -14,7 +14,7 @@ use tsclientlib::{
 	ChannelId, ClientId, Connection, DisconnectOptions, MessageHandle, MessageTarget, StreamItem,
 	data,
 };
-use tsproto_packets::packets::OutCommand;
+use tsproto_packets::packets::{Direction, Flags, OutCommand, PacketType};
 
 use crate::{Action, ChatTarget, ConnectArgs, identity, tree, versions};
 
@@ -52,6 +52,10 @@ pub async fn run(args: ConnectArgs) -> Result<()> {
 		Action::Chat { target } => send_chat(&mut con, target).await,
 		Action::Listen { json, expect, timeout } => {
 			listen(&mut con, *json, expect.as_deref(), timeout.map(Duration::from_secs)).await
+		}
+		Action::Raw { command } => {
+			let cmd = OutCommand::new(Direction::C2S, Flags::empty(), PacketType::Command, command);
+			send_and_wait(&mut con, cmd, "command").await.map(|()| println!("ok"))
 		}
 		Action::Repl => repl(&mut con).await,
 	};
