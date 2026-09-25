@@ -1,5 +1,6 @@
 //! `tsctl`: headless TeamSpeak 3/6 client for development and integration tests.
 
+mod gateway;
 mod identity;
 mod observe;
 mod query;
@@ -42,6 +43,8 @@ enum Command {
 	Observe(observe::ObserveArgs),
 	/// Read and write a channel's chat through an invisible query relay.
 	Relay(observe::RelayArgs),
+	/// Use a tsgw gateway as a user: presence, chat, history.
+	Gateway(gateway::GatewayArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -201,6 +204,7 @@ fn main() -> Result<()> {
 		Command::Query(args) => tokio::runtime::Runtime::new()?.block_on(query::run(args)),
 		Command::Observe(args) => tokio::runtime::Runtime::new()?.block_on(observe::observe(args)),
 		Command::Relay(args) => tokio::runtime::Runtime::new()?.block_on(observe::relay(args)),
+		Command::Gateway(args) => tokio::runtime::Runtime::new()?.block_on(gateway::run(args)),
 	}
 }
 
@@ -223,6 +227,7 @@ fn run_identity(command: IdentityCommand) -> Result<()> {
 			let id = identity::load(&path)?;
 			println!("uid:   {}", identity::uid(&id));
 			println!("level: {}", id.level());
+			println!("omega: {}", id.key().to_pub().to_ts());
 			Ok(())
 		}
 	}

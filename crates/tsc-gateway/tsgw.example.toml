@@ -1,0 +1,43 @@
+# tsgw: companion gateway for invisible presence and channel chat.
+# Copy to tsgw.toml and adjust. See docs/gateway-admin.md.
+
+# Signed into every login challenge. Defaults to listen.public_url.
+# gateway_id = "wss://gw.example.org/v1"
+
+[server]
+# Voice port of the virtual server this gateway serves.
+voice_port = 9987
+
+[query]
+# "ssh" (TeamSpeak 3 and 6) or "raw" (TeamSpeak 3 only).
+transport = "ssh"
+addr = "127.0.0.1:10022"
+user = "serveradmin"
+# Prefer password_file or the TSGW_QUERY_PASSWORD environment variable.
+# password_file = "/run/secrets/tsgw_query_password"
+# Set to true once the gateway's IP is in the server's query_ip_allowlist.
+allowlisted = false
+
+[listen]
+bind = "0.0.0.0:7788"
+# public_url = "wss://gw.example.org/v1"
+
+[auth]
+# Only these server groups may use the gateway (empty: everyone known to the server).
+require_server_groups = []
+deny_uids = []
+min_security_level = 0
+token_ttl_hours = 720
+
+[relay]
+nickname = "Chat Relay"
+format = "[{nick}] {text}"
+idle_teardown_secs = 120
+max_channel_relays = 6
+# Channels relayed all the time, so their history is complete.
+pinned_channels = []
+
+[history]
+enabled = true
+path = "tsgw.db"
+retention_days = 30

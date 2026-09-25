@@ -15,6 +15,11 @@ capture teaches something new.
   "Unknown argument"):
   - `initserver`: `virtualserver_address`, `virtualserver_version_sign`
   - `initserver` / `notifycliententerview`: `client_is_streaming`
+- **Confirmed**: unique ids differ. TeamSpeak 3 uses `base64(SHA1(omega))`
+  (28 characters), TeamSpeak 6 uses `base64(SHA256(omega))` (44 characters),
+  where omega is the base64 public key string. The same identity therefore has
+  a different `client_unique_identifier` on each server generation
+  (`tsc-gateway-proto::UniqueIds`).
 - **Confirmed**: TS6 has no raw ServerQuery port; SSH query on 10022 and HTTP
   WebQuery on 10080 (HTTPS 10443).
 - **Reported**: beta13 made the Init1 puzzle difficulty adaptive to the server's

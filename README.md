@@ -23,7 +23,7 @@ See [docs/architecture.md](docs/architecture.md) for the design and milestones.
 
 ## Status
 
-Done so far (milestones M0–M3 of [the plan](docs/architecture.md#milestones)):
+Done so far (milestones M0–M4 of [the plan](docs/architecture.md#milestones)):
 
 - `crates/proto/`: vendored tsclientlib, modernised (TS6 fields and stream
   messages, faster off-thread Init1 puzzle, `curve25519-dalek` 4, fuzzing fixes;
@@ -33,11 +33,14 @@ Done so far (milestones M0–M3 of [the plan](docs/architecture.md#milestones)):
 - `crates/tsc-store`: SQLite store for identities, bookmarks, settings and chat history; keyring secrets
 - `crates/tsc-query`: ServerQuery client over raw TCP, SSH and HTTP WebQuery (events, rate limiting, keepalive)
 - `crates/tsc-observer`: invisible presence (events or polling) and channel-chat relays over ServerQuery
+- `crates/tsc-gateway` (`tsgw`) + `tsc-gateway-proto`: companion gateway for server admins. Users log in
+  with their TeamSpeak identity and get presence, channel chat and history without joining voice,
+  limited by their server permissions ([admin guide](docs/gateway-admin.md))
 - `tools/tsctl`: headless CLI: channel tree, chat, voice send/record, raw commands, stream events,
-  `query`, `observe` (invisible presence) and `relay` (channel chat without joining)
+  `query`, `observe` (invisible presence), `relay` (channel chat without joining) and `gateway`
 - `dev/`: TeamSpeak 3.13 and TeamSpeak 6 (6.0.0-beta13.1) servers; `scripts/it-smoke.sh`
-  checks tree, server chat, channel chat, a voice tone round-trip, invisible presence
-  and relay chat on both
+  checks tree, server chat, channel chat, a voice tone round-trip, invisible presence,
+  relay chat and the gateway on both
 - `fuzz/`: cargo-fuzz targets for packets, commands and the license chain
 
 No GUI and no screen sharing yet.
@@ -57,6 +60,10 @@ cargo run -p tsctl -- connect 127.0.0.1:9988 --nick ear voice record out.wav
 # ServerQuery (dev password tsc-dev-admin): invisible presence and relay chat
 cargo run -p tsctl -- observe ssh 127.0.0.1:10022 --secret tsc-dev-admin --allowlisted
 cargo run -p tsctl -- relay ssh 127.0.0.1:10022 --secret tsc-dev-admin --allowlisted --channel 1
+
+# Gateway: users without voice, logging in with their identity
+cargo run -p tsc-gateway -- --config dev/tsgw-ts6.toml &
+cargo run -p tsctl -- gateway ws://127.0.0.1:7788/v1 --identity <file> --presence --open channel:1
 
 scripts/it-smoke.sh   # all of the above, on both servers
 ```

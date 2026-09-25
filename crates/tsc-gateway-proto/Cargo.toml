@@ -1,0 +1,25 @@
+[package]
+name = "tsc-gateway-proto"
+version = "0.1.0"
+description = "Wire protocol and identity-challenge authentication of the tsgw gateway."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = { package = "sha-1", version = "0.10" }
+sha2 = "0.10"
+thiserror = "2"
+tsc-model = { path = "../tsc-model" }
+tsproto-types = { path = "../proto/tsproto-types" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tsproto = { path = "../proto/tsproto" }

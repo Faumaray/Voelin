@@ -9,6 +9,8 @@
 #   4. voice: a 1 kHz tone sent by one client is recorded by another
 #   5. invisible presence: a ServerQuery observer sees a voice client join
 #   6. relay chat: a query relay reads channel chat and posts into the channel
+#   7. gateway (tsgw): login with a TeamSpeak identity, presence, channel chat
+#      both ways, refusal of an identity the server does not know
 #
 # Usage: scripts/it-smoke.sh [ts3|ts6]...   (default: both)
 # Env:   TSCTL=path/to/tsctl (default: builds target/debug/tsctl)
@@ -25,13 +27,15 @@ mkdir -p "$STATE_DIR"
 trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
 
 if [[ -z "${TSCTL:-}" ]]; then
-	cargo build --quiet -p tsctl
+	cargo build --quiet -p tsctl -p tsc-gateway
 	TSCTL=target/debug/tsctl
 fi
+TSGW="${TSGW:-target/debug/tsgw}"
 
 declare -A PORTS=([ts3]=9987 [ts6]=9988)
 # ServerQuery transport and address per server (dev/docker-compose.yml).
 declare -A QUERY=([ts3]="raw 127.0.0.1:10011" [ts6]="ssh 127.0.0.1:10022")
+declare -A GATEWAY=([ts3]=7787 [ts6]=7788)
 QUERY_SECRET=tsc-dev-admin
 SERVERS=("$@")
 [[ ${#SERVERS[@]} -eq 0 ]] && SERVERS=(ts3 ts6)
@@ -148,6 +152,49 @@ relay_check() {
 	grep "from-relay-$token" "$heard"
 }
 
+# Users of the gateway: presence, chat both ways, refusal of unknown identities.
+gateway_check() {
+	local svc=$1 addr=$2 port=${GATEWAY[$svc]} out="$STATE_DIR/gateway.log"
+	local url="ws://127.0.0.1:$port/v1" token="gw-$RANDOM$RANDOM"
+	"$TSGW" --config "dev/tsgw-$svc.toml" >"$STATE_DIR/tsgw-$svc.log" 2>&1 &
+	local gateway=$!
+	for _ in $(seq 1 40); do
+		grep -q "listening" "$STATE_DIR/tsgw-$svc.log" 2>/dev/null && break
+		sleep 0.25
+	done
+
+	# The gateway only knows identities that connected with voice once.
+	local user="$STATE_DIR/$svc-gateway-user.json" stranger="$STATE_DIR/stranger.json"
+	[[ -f "$user" ]] || "$TSCTL" identity new --out "$user" >/dev/null
+	"$TSCTL" connect "$addr" --identity "$user" --nick gateway-user tree >/dev/null
+	"$TSCTL" identity new --out "$stranger" --force >/dev/null
+	if "$TSCTL" gateway "$url" --identity "$stranger" --seconds 3 >/dev/null 2>&1; then
+		fail "gateway accepted an identity the server does not know"
+	fi
+
+	"$TSCTL" gateway "$url" --identity "$user" --presence --open channel:1 \
+		--expect "to-gateway-$token" --seconds 20 >"$out" 2>&1 &
+	local reader=$!
+	"$TSCTL" connect "$addr" --nick gateway-listener listen --expect "from-gateway-$token" \
+		--timeout 20 >"$STATE_DIR/gateway-heard.log" 2>&1 &
+	local listener=$!
+	sleep 4
+	"$TSCTL" connect "$addr" --nick gateway-talker chat channel "to-gateway-$token"
+	"$TSCTL" gateway "$url" --identity "$user" --send "channel:1=from-gateway-$token" --seconds 3 >/dev/null
+	if ! wait "$reader"; then
+		cat "$out" "$STATE_DIR/tsgw-$svc.log"
+		fail "gateway user did not receive the channel message"
+	fi
+	if ! wait "$listener"; then
+		cat "$STATE_DIR/gateway-heard.log"
+		fail "voice client did not receive the gateway user's post"
+	fi
+	grep -E "presence:|to-gateway-$token" "$out"
+	grep "from-gateway-$token" "$STATE_DIR/gateway-heard.log"
+	kill "$gateway"
+	wait "$gateway" 2>/dev/null || true
+}
+
 for svc in "${SERVERS[@]}"; do
 	port=${PORTS[$svc]:?unknown server $svc}
 	addr="127.0.0.1:$port"
@@ -165,6 +212,7 @@ for svc in "${SERVERS[@]}"; do
 	voice_roundtrip "$addr"
 	presence_check "$addr" "${QUERY[$svc]}"
 	relay_check "$addr" "${QUERY[$svc]}"
+	gateway_check "$svc" "$addr"
 done
 
 log "all smoke tests passed"
