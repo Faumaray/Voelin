@@ -659,7 +659,7 @@ impl<'a> AudioData<'a> {
 				Ok(AudioData::C2S {
 					id,
 					codec: CodecType::from_u8(content[2])
-						.ok_or_else(|| Error::InvalidCodec(content[4]))?,
+						.ok_or_else(|| Error::InvalidCodec(content[2]))?,
 					data: &content[3..],
 				})
 			}
@@ -679,7 +679,7 @@ impl<'a> AudioData<'a> {
 				return Err(Error::PacketContentTooShort(content.len()));
 			}
 			let codec =
-				CodecType::from_u8(content[2]).ok_or_else(|| Error::InvalidCodec(content[4]))?;
+				CodecType::from_u8(content[2]).ok_or_else(|| Error::InvalidCodec(content[2]))?;
 			if newprotocol {
 				if content.len() < 14 {
 					return Err(Error::PacketContentTooShort(content.len()));
@@ -1187,6 +1187,14 @@ impl OutAudio {
 
 #[cfg(test)]
 mod tests {
+	#[test]
+	fn short_c2s_audio_with_invalid_codec_is_an_error() {
+		// Packet id + invalid codec byte, shorter than the old error path indexed.
+		for p_type in [PacketType::Voice, PacketType::VoiceWhisper] {
+			assert!(AudioData::parse(p_type, false, Direction::C2S, &[0, 1, 0xff]).is_err());
+		}
+	}
+
 	use super::*;
 
 	fn test_audio_roundtrip(dir: Direction, data: &AudioData) {

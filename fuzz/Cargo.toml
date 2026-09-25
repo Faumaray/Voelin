@@ -1,0 +1,38 @@
+[package]
+name = "tsc-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ts-bookkeeping = { path = "../crates/proto/ts-bookkeeping" }
+tsproto = { path = "../crates/proto/tsproto" }
+tsproto-packets = { path = "../crates/proto/tsproto-packets" }
+
+# Not part of the main workspace: cargo-fuzz needs a nightly toolchain.
+[workspace]
+
+[[bin]]
+name = "packet"
+path = "fuzz_targets/packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "command"
+path = "fuzz_targets/command.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "license"
+path = "fuzz_targets/license.rs"
+test = false
+doc = false
+bench = false

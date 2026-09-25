@@ -20,7 +20,7 @@ include = [
 [dependencies]
 base64 = "0.22"
 bitflags = { version = "2", features = ["serde"] }
-curve25519-dalek-ng = "4"
+curve25519-dalek = { version = "4", features = ["rand_core"] }
 elliptic-curve = { version = "0.13", features = ["ecdh"] }
 generic-array = "0.14"
 num-bigint = "0.4"

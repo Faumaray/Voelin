@@ -1,5 +1,6 @@
 [workspace]
 resolver = "3"
+exclude = ["fuzz"]
 members = [
 	"crates/proto/tsproto-types",
 	"crates/proto/tsproto-structs",
@@ -7,6 +8,7 @@ members = [
 	"crates/proto/tsproto",
 	"crates/proto/ts-bookkeeping",
 	"crates/proto/tsclientlib",
+	"crates/tsc-model",
 	"tools/tsctl",
 ]
 default-members = [
@@ -16,6 +18,7 @@ default-members = [
 	"crates/proto/tsproto",
 	"crates/proto/ts-bookkeeping",
 	"crates/proto/tsclientlib",
+	"crates/tsc-model",
 	"tools/tsctl",
 ]
 

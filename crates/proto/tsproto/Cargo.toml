@@ -21,7 +21,7 @@ include = [
 aes = "0.8"
 base64 = "0.22"
 omnom = "3"
-curve25519-dalek-ng = "4"
+curve25519-dalek = { version = "4", features = ["rand_core"] }
 eax = "0.5"
 futures = "0.3"
 generic-array = "0.14"

@@ -1,5 +1,5 @@
 //! Handle packet splitting and cryptography
-use curve25519_dalek_ng::edwards::EdwardsPoint;
+use curve25519_dalek::edwards::EdwardsPoint;
 use eax::aead::consts::{U16, U8};
 use eax::{AeadInPlace, Eax, KeyInit};
 use generic_array::GenericArray;

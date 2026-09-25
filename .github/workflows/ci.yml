@@ -29,9 +29,9 @@ jobs:
       # and have known clippy findings (cleanup is milestone M1), so the strict
       # checks cover our own crates only.
       - name: rustfmt (own crates)
-        run: cargo fmt -p tsctl --check
+        run: cargo fmt $(scripts/own-crates.sh) --check
       - name: clippy (own crates, deny warnings)
-        run: cargo clippy -p tsctl --all-targets --no-deps -- -D warnings
+        run: cargo clippy $(scripts/own-crates.sh) --all-targets --no-deps -- -D warnings
       - name: clippy (workspace, report only)
         run: cargo clippy --workspace --all-targets
 

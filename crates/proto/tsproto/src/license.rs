@@ -3,8 +3,8 @@ use std::fmt;
 use std::io::Cursor;
 use std::str;
 
-use curve25519_dalek_ng::edwards::EdwardsPoint;
-use curve25519_dalek_ng::scalar::Scalar;
+use curve25519_dalek::edwards::EdwardsPoint;
+use curve25519_dalek::scalar::Scalar;
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive as _, ToPrimitive as _};
 use omnom::{ReadExt, WriteExt};
@@ -165,7 +165,9 @@ impl Licenses {
 	pub fn parse(data: Vec<u8>) -> Result<Self> { Self::parse_internal(data, true) }
 
 	pub fn parse_internal(data: Vec<u8>, check_expired: bool) -> Result<Self> {
-		let version = data[0];
+		let Some(&version) = data.first() else {
+			return Err(Error::TooShort(0, "empty license"));
+		};
 		if version != 0 && version != 1 {
 			return Err(Error::UnsupportedVersion(version));
 		}
@@ -510,17 +512,20 @@ impl License {
 	) -> Result<impl Iterator<Item = Result<LicenseProperty<'a>>> + 'b> {
 		if let InnerLicense::Ts5Server { properties } = &self.inner {
 			Ok(properties.iter().map(move |p| {
+				// Every access is bounds-checked: the data comes from the server.
+				let get = |start: usize, end: usize| {
+					data.get(start..end).ok_or(Error::TooShort(data.len(), "license property"))
+				};
 				let o = BLOCK_MIN_LEN + 2 + p;
-				let len = data[o];
+				let header = get(o, o + 3)?;
+				let (len, id, typ) = (header[0], header[1], header[2]);
 				let len_usize = len as usize;
-				let id = data[o + 1];
-				let typ = data[o + 2];
 
 				// Check length
 				if let Some(expected) = match typ {
 					// String, check that it is null-terminated
 					0 => {
-						if data[o + len_usize] != 0 {
+						if get(o + len_usize, o + len_usize + 1)?[0] != 0 {
 							return Err(Error::NonterminatedString);
 						}
 						None
@@ -540,14 +545,14 @@ impl License {
 							return Err(Error::WrongPropertyType { id, expected: 1, actual: typ });
 						}
 						Ok(LicenseProperty::Unknown1(
-							(&data[o + 3..o + 3 + 4]).read_be().map_err(Error::Deserialize)?,
+							get(o + 3, o + 3 + 4)?.read_be().map_err(Error::Deserialize)?,
 						))
 					}
 					2 => {
 						if typ != 0 {
 							return Err(Error::WrongPropertyType { id, expected: 0, actual: typ });
 						}
-						let s = str::from_utf8(&data[o + 3..o + len_usize])
+						let s = str::from_utf8(get(o + 3, o + len_usize)?)
 							.map_err(Error::DeserializeString)?;
 						Ok(LicenseProperty::Issuer(s))
 					}
@@ -556,12 +561,10 @@ impl License {
 							return Err(Error::WrongPropertyType { id, expected: 1, actual: typ });
 						}
 						Ok(LicenseProperty::MaxClients(
-							(&data[o + 3..o + 3 + 4]).read_be().map_err(Error::Deserialize)?,
+							get(o + 3, o + 3 + 4)?.read_be().map_err(Error::Deserialize)?,
 						))
 					}
-					_ => {
-						Ok(LicenseProperty::Unknown { id, typ, data: &data[o + 3..o + len_usize] })
-					}
+					_ => Ok(LicenseProperty::Unknown { id, typ, data: get(o + 3, o + len_usize)? }),
 				}
 			}))
 		} else {
@@ -844,6 +847,11 @@ impl LicenseBlockBuilder<'_, '_> {
 
 #[cfg(test)]
 mod tests {
+	#[test]
+	fn empty_license_is_an_error() {
+		assert!(super::Licenses::parse(Vec::new()).is_err());
+	}
+
 	use super::*;
 	use base64::prelude::*;
 

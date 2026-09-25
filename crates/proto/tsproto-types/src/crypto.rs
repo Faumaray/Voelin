@@ -3,9 +3,9 @@ use std::convert::TryInto;
 use std::{cmp, fmt, str};
 
 use base64::prelude::*;
-use curve25519_dalek_ng::constants;
-use curve25519_dalek_ng::edwards::{CompressedEdwardsY, EdwardsPoint};
-use curve25519_dalek_ng::scalar::Scalar;
+use curve25519_dalek::constants;
+use curve25519_dalek::edwards::{CompressedEdwardsY, EdwardsPoint};
+use curve25519_dalek::scalar::Scalar;
 use elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use generic_array::GenericArray;
 use generic_array::typenum::Unsigned;
@@ -522,7 +522,7 @@ impl EccKeyPrivEd25519 {
 
 impl<'a> From<&'a EccKeyPrivEd25519> for EccKeyPubEd25519 {
 	fn from(priv_key: &'a EccKeyPrivEd25519) -> Self {
-		Self((&constants::ED25519_BASEPOINT_TABLE * &priv_key.0).compress())
+		Self((constants::ED25519_BASEPOINT_TABLE * &priv_key.0).compress())
 	}
 }
 

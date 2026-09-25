@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 use tsclientlib::data;
+use tsc_model::ServerFlavor;
 use tsclientlib::{ChannelId, ClientType};
 
 /// Minimal channel view, so the ordering logic can be tested without a connection.
@@ -114,7 +115,12 @@ pub fn from_state(state: &data::Connection) -> String {
 			streaming: c.is_streaming == Some(true),
 		})
 		.collect();
-	render(&state.server.name, &channels, &clients)
+	let flavor = match ServerFlavor::from_version_string(&state.server.version) {
+		ServerFlavor::Ts3(v) => format!("TeamSpeak 3 {v}"),
+		ServerFlavor::Ts6(v) => format!("TeamSpeak 6 {v}"),
+		ServerFlavor::Unknown(v) => format!("unknown version {v:?}"),
+	};
+	render(&format!("{} ({flavor})", state.server.name), &channels, &clients)
 }
 
 #[cfg(test)]

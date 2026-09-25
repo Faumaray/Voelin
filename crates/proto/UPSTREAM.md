@@ -51,3 +51,12 @@ against or offered back to upstream.
    `notifystreamsignaling`, `notifystreamclientjoined`, `notifystreamclientleft`) and
    commands (`setupstream`, `stopstream`, `streamsignaling`, `respondjoinstreamrequest`,
    `removeclientfromstream`). See `docs/protocol-notes/ts6-streaming.md`.
+5. **`curve25519-dalek-ng` → `curve25519-dalek` 4** (`tsproto-types`, `tsproto`). The `-ng`
+   fork is unmaintained; the API is the same apart from the basepoint table being a
+   reference. Verified by the license-chain unit tests and a live TeamSpeak 6 handshake.
+6. **Panics on malformed input found by fuzzing** (`fuzz/`):
+   - `tsproto/src/license.rs`: an empty license (`initivexpand2 l=`) indexed `data[0]`;
+     license properties indexed past the end or with start > end. All property reads
+     are bounds-checked now.
+   - `tsproto-packets/src/packets.rs`: the invalid-codec error for short C2S audio
+     packets read `content[4]` instead of the codec byte `content[2]`.

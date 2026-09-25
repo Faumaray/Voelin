@@ -1,7 +1,7 @@
 use base64::prelude::*;
 use clap::Parser;
-use curve25519_dalek_ng::edwards::CompressedEdwardsY;
-use curve25519_dalek_ng::scalar::Scalar;
+use curve25519_dalek::edwards::CompressedEdwardsY;
+use curve25519_dalek::scalar::Scalar;
 
 #[derive(Parser, Debug)]
 #[command(author, about)]
