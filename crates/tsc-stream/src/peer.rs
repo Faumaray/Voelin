@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::hash::{BuildHasher, RandomState};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
@@ -100,8 +101,9 @@ pub enum PeerEvent {
 	/// ICE and DTLS are up; media can flow.
 	Connected,
 	/// A candidate found after the SDP was sent (server reflexive), as an SDP
-	/// `candidate:` line for [`crate::Signal::IceCandidate`].
-	LocalCandidate(String),
+	/// `candidate:` line for [`crate::Signal::IceCandidate`], with the mid of
+	/// the first (bundled) media line.
+	LocalCandidate { candidate: String, mid: Option<String> },
 	/// A received frame (depacketized).
 	Media(MediaFrame),
 	/// The viewer asks for a keyframe.
@@ -224,6 +226,11 @@ impl Peer {
 
 	pub fn try_next_event(&mut self) -> Option<PeerEvent> {
 		self.events.try_recv().ok()
+	}
+
+	/// Poll for the next event, for driving many peers from one task.
+	pub fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<PeerEvent>> {
+		self.events.poll_recv(cx)
 	}
 }
 
@@ -420,9 +427,10 @@ impl Task {
 		}
 		match Candidate::server_reflexive(mapped, pending.base, "udp") {
 			Ok(c) => {
-				let line = c.to_sdp_string();
+				let candidate = c.to_sdp_string();
+				let mid = self.mids.first().map(|(mid, _)| mid.to_string());
 				if self.rtc.add_local_candidate(c).is_some() {
-					let _ = self.events.send(PeerEvent::LocalCandidate(line));
+					let _ = self.events.send(PeerEvent::LocalCandidate { candidate, mid });
 				}
 			}
 			Err(e) => debug!("bad reflexive candidate {mapped}: {e}"),
