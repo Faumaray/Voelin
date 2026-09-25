@@ -385,8 +385,11 @@ export component MainWindow inherits Window {
     property <bool> editing: false;
     property <bool> show-about: false;
     property <BookmarkForm> form;
-    // Phones and narrow windows show one pane at a time.
-    property <bool> narrow: self.width < 800px;
+    // Phones and narrow windows show one pane at a time. Set from a change
+    // handler: a binding on `width` would loop through the layout.
+    property <bool> narrow: false;
+    changed width => { narrow = self.width < 800px; }
+    init => { narrow = self.width < 800px; }
     property <int> pane: 1;
 
     VerticalLayout {
@@ -463,7 +466,10 @@ export component MainWindow inherits Window {
         }
         HorizontalLayout {
             if !narrow || pane == 2: ServerList {
-                width: narrow ? parent.width : 230px;
+                // Fixed width beside the other panes, all the space alone.
+                min-width: narrow ? 0px : 230px;
+                max-width: narrow ? 100000px : 230px;
+                horizontal-stretch: narrow ? 1 : 0;
                 add => {
                     form = Bridge.edit-bookmark(-1);
                     editing = true;
@@ -474,7 +480,9 @@ export component MainWindow inherits Window {
                 }
             }
             if !narrow || pane == 0: ChannelTree {
-                width: narrow ? parent.width : 360px;
+                min-width: narrow ? 0px : 360px;
+                max-width: narrow ? 100000px : 360px;
+                horizontal-stretch: narrow ? 1 : 0;
             }
             if !narrow || pane == 1: ChatPanel { }
         }
