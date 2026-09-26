@@ -1,0 +1,56 @@
+name: Docker builds
+
+# The local builds in docker/ (docs/building.md), run here so they keep
+# working: weekly, by hand, and when they or the packaging change. Each build
+# uploads what it made, the same kinds of packages as CI's package jobs
+# (the Windows one cross-compiled with mingw-w64).
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - docker/**
+      - scripts/package.sh
+      - scripts/docker-build.sh
+      - .dockerignore
+      - packaging/**
+      - .github/workflows/docker.yml
+  pull_request:
+    paths:
+      - docker/**
+      - scripts/package.sh
+      - scripts/docker-build.sh
+      - .dockerignore
+      - packaging/**
+      - .github/workflows/docker.yml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: docker (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux, windows, android]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      # The Android build needs more room than the runner leaves free.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          df -h /
+      - name: Build
+        run: scripts/docker-build.sh ${{ matrix.platform }} --progress=plain
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docker-${{ matrix.platform }}
+          path: dist/${{ matrix.platform }}/
+          if-no-files-found: error

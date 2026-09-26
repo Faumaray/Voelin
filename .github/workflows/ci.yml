@@ -3,6 +3,8 @@ name: CI
 on:
   push:
     branches: [main, master]
+    # A version tag also publishes the packages as a draft release (release job).
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -58,17 +60,11 @@ jobs:
         if: runner.os != 'Linux'
         run: cargo test --workspace --locked
 
-  release-build:
-    name: release build (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            artifact: tsc-desktop-linux-x86_64
-          - os: windows-2025
-            artifact: tsc-desktop-windows-x86_64
-    runs-on: ${{ matrix.os }}
+  # Packages for every platform (docs/building.md), made by scripts/package.sh
+  # like the Docker builds in docker/; each job uploads them as an artifact.
+  package-linux:
+    name: package (Linux)
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/system-deps
@@ -77,45 +73,114 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release
-      - name: Build tsc-desktop
-        run: cargo build --release --locked -p tsc-ui
-      - name: Stage (Linux)
-        if: runner.os == 'Linux'
+      - name: Build
+        run: cargo build --release --locked -p tsc-ui -p tsctl -p tsc-gateway
+      # dpkg-shlibdeps works out the .deb's dependencies.
+      - name: Package (.tar.gz, .deb)
         run: |
-          mkdir -p dist
-          cp target/release/tsc-desktop dist/
-          cp packaging/linux/* THIRD_PARTY_NOTICES.md dist/
-      # The installer is built when NSIS is on the runner; unsigned.
-      - name: Stage (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target\release\tsc-desktop.exe, THIRD_PARTY_NOTICES.md dist\
-          $makensis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
-          if (-not $makensis) {
-            $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
-          }
-          if (Test-Path $makensis) {
-            $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
-              Where-Object name -eq 'tsc-ui' | Select-Object -ExpandProperty version
-            & $makensis "/DVERSION=$version" "/DOUTDIR=$PWD\dist" packaging\windows\installer.nsi
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          } else {
-            Write-Host "::notice::NSIS not found, uploading the executable only"
-          }
+          sudo apt-get install -y --no-install-recommends dpkg-dev
+          scripts/package.sh linux dist
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
+          name: tsc-linux-x86_64
           path: dist/
           if-no-files-found: error
 
-  # The Android app (docs/android.md): clippy on the Android-only code and a
-  # debug APK for arm64. Nothing runs on a device here.
-  android:
-    name: android (arm64 APK)
+  package-windows:
+    name: package (Windows)
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/system-deps
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+      - name: Build
+        run: cargo build --release --locked -p tsc-ui -p tsctl -p tsc-gateway
+      # The installer is required here: install NSIS when the image lacks it.
+      - name: NSIS
+        shell: pwsh
+        run: |
+          $makensis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
+          if (-not $makensis) { $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe" }
+          if (-not (Test-Path $makensis)) {
+            choco install nsis -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          "MAKENSIS=$($makensis.Replace('\', '/'))" >> $env:GITHUB_ENV
+      - name: Package (.zip, installer)
+        shell: bash
+        run: scripts/package.sh windows dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tsc-windows-x86_64
+          path: dist/
+          if-no-files-found: error
+
+  # Flatpak bundle from packaging/flatpak (install with
+  # `flatpak install --user tsc-desktop.flatpak`). flatpak-builder builds
+  # offline, from the crates that flatpak-cargo-generator lists.
+  package-flatpak:
+    name: package (Flatpak)
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    env:
+      # flatpak-builder-tools, pinned.
+      FBT_COMMIT: 41c20aa10819cdb2a4f3ca171758a96d1955c018
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cargo sources
+        run: |
+          curl -sSfL -o /tmp/flatpak-cargo-generator.py \
+            "https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/$FBT_COMMIT/cargo/flatpak-cargo-generator.py"
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install --quiet "aiohttp>=3.9.5,<4" "tomlkit>=0.13.3,<1" "PyYAML>=6.0.2,<7"
+          /tmp/venv/bin/python /tmp/flatpak-cargo-generator.py Cargo.lock -o packaging/flatpak/cargo-sources.json
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: tsc-desktop.flatpak
+          manifest-path: packaging/flatpak/io.github.faumaray.TsClient.yml
+          cache-key: flatpak-builder-${{ hashFiles('Cargo.lock') }}
+          upload-artifact: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tsc-flatpak-x86_64
+          path: tsc-desktop.flatpak
+          if-no-files-found: error
+
+  # The gateway's container image (crates/tsc-gateway/Dockerfile), saved as a
+  # file: `docker load -i tsgw-image.tar.gz`.
+  package-gateway-image:
+    name: package (gateway image)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and save
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/tsc-gateway/Cargo.toml | head -n 1)
+          docker build -f crates/tsc-gateway/Dockerfile -t "tsgw:$version" -t tsgw:latest .
+          mkdir -p dist
+          docker save "tsgw:$version" tsgw:latest | gzip > dist/tsgw-image.tar.gz
+          (cd dist && sha256sum tsgw-image.tar.gz > SHA256SUMS-gateway)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tsgw-image
+          path: dist/
+          if-no-files-found: error
+
+  # The Android app (docs/android.md): clippy on the Android-only code, a
+  # debug APK for arm64-v8a and x86_64 (emulators), and a signed release APK
+  # when the signing secrets are set (docs/release.md). Nothing runs on a
+  # device here.
+  android:
+    name: android (APKs)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     env:
       NDK_VERSION: 27.3.13750724
     steps:
@@ -123,7 +188,7 @@ jobs:
       - name: Install toolchain (rust-toolchain.toml)
         run: |
           rustup toolchain install
-          rustup target add aarch64-linux-android
+          rustup target add aarch64-linux-android x86_64-linux-android
       - uses: Swatinem/rust-cache@v2
         with:
           key: android
@@ -148,12 +213,56 @@ jobs:
           cargo ndk -t arm64-v8a --platform 29 clippy --locked -p tsc-media --no-default-features --no-deps -- -D warnings
       - name: Debug APK
         working-directory: android
-        run: ./gradlew --no-daemon assembleDebug -Ptsc.abis=arm64-v8a
+        run: ./gradlew --no-daemon assembleDebug -Ptsc.abis=arm64-v8a,x86_64
+      # Only with the signing secrets; an unsigned release APK is not installable.
+      - name: Release APK (signed)
+        working-directory: android
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          TSC_SIGNING_STORE_PASSWORD: ${{ secrets.TSC_SIGNING_STORE_PASSWORD }}
+          TSC_SIGNING_KEY_ALIAS: ${{ secrets.TSC_SIGNING_KEY_ALIAS }}
+          TSC_SIGNING_KEY_PASSWORD: ${{ secrets.TSC_SIGNING_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::notice::No ANDROID_KEYSTORE_BASE64 secret: skipping the release APK"
+            exit 0
+          fi
+          export TSC_SIGNING_STORE_FILE="$RUNNER_TEMP/release.jks"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$TSC_SIGNING_STORE_FILE"
+          ./gradlew --no-daemon assembleRelease -Ptsc.abis=arm64-v8a,x86_64
+          rm -f "$TSC_SIGNING_STORE_FILE"
+      - name: Package
+        run: scripts/package.sh android dist
       - uses: actions/upload-artifact@v4
         with:
-          name: tsc-android-debug-arm64
-          path: android/app/build/outputs/apk/debug/*.apk
+          name: tsc-android
+          path: dist/
           if-no-files-found: error
+
+  # A v* tag: every package, attached to a draft GitHub release to review and
+  # publish by hand.
+  release:
+    name: draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, test, deny, notices, smoke, package-linux, package-windows, package-flatpak, package-gateway-image, android]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          rm -f SHA256SUMS-*
+          sha256sum -- * > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: dist/*
 
   # Licenses, bans, sources and RustSec advisories (the `cargo audit`
   # database); audit.yml repeats the advisories check daily.

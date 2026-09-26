@@ -102,6 +102,10 @@ Development switches of the desktop app (environment variables): `TSC_DATA_DIR` 
 `TSC_DEMO_STREAM=1` (a local test stream in the viewer, no server needed),
 `TSC_OPEN=share|settings[:<tab>]|about|client`, `TSC_AUTOWATCH=1`, `TSC_AUTOSHARE=test-pattern`.
 
+Ready-made packages (Linux `.tar.gz`/`.deb`/Flatpak, Windows zip and installer, Android APK)
+come from every CI run, and `scripts/docker-build.sh` builds the same ones locally in Docker:
+see [docs/building.md](docs/building.md).
+
 Building on Linux needs the ALSA headers (`libasound2-dev`), fontconfig and xkbcommon
 headers for the UI (`libfontconfig1-dev libxkbcommon-dev`), plus CMake and a C compiler for
 the bundled libopus; for streams also libvpx and PipeWire (see [docs/media.md](docs/media.md#build-requirements)).

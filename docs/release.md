@@ -138,8 +138,11 @@ repository; losing it means existing installs can no longer be updated.
   `TSC_SIGNING_STORE_PASSWORD`, `TSC_SIGNING_KEY_ALIAS`,
   `TSC_SIGNING_KEY_PASSWORD` ([android.md](android.md)). Without them it
   builds unsigned or debug-signed artifacts only.
-- CI: the keystore as a base64 secret, decoded to `$RUNNER_TEMP`, removed
-  afterwards. Check with `apksigner verify --print-certs app-release.apk`.
+- CI: the `android` job signs a release APK when the repository has the
+  secrets `ANDROID_KEYSTORE_BASE64` (`base64 -w0 tsc-release.jks`),
+  `TSC_SIGNING_STORE_PASSWORD`, `TSC_SIGNING_KEY_ALIAS` and
+  `TSC_SIGNING_KEY_PASSWORD`; the keystore is decoded to `$RUNNER_TEMP` and
+  removed afterwards. Check with `apksigner verify --print-certs app-release.apk`.
 - Google Play: use Play App Signing; our keystore is then the upload key
   (it can be reset through Play support if lost). F-Droid builds and signs
   itself unless reproducible builds are set up.
@@ -167,14 +170,17 @@ Before tagging:
 Release:
 
 7. Tag `v<version>` (signed) on the release commit and push it.
-8. Build the artifacts from the tag: Windows executable and installer
-   (signed), Linux tarball, Flatpak bundle, Android APK / AAB (signed); the
-   gateway container image if it changed.
+8. The tag's CI run builds every package ([building.md](building.md)): Linux
+   tarball and `.deb`, Flatpak bundle, Windows zip and installer, Android APKs
+   (signed when the secrets are set), the gateway image; its `release` job
+   attaches them with a `SHA256SUMS` to a draft GitHub release. Sign the
+   Windows executable and installer, and an AAB for Google Play, by hand
+   until CI has the certificates.
 9. Verify: signatures (`signtool verify`, `apksigner verify`), the installer
    and the Flatpak on a clean machine (matrix rows IN1-IN3), the version in
    the About page.
-10. `SHA256SUMS` (signed), a draft GitHub release with the changelog section,
-    known issues and the tested server versions; publish it.
+10. Sign `SHA256SUMS`; write the changelog section, known issues and the
+    tested server versions into the draft release; publish it.
 11. Update the Flathub manifest (tag, commit, `cargo-sources.json`), Google
     Play / F-Droid.
 

@@ -1,8 +1,10 @@
 # Windows build and installer
 
-CI (`release-build` in `.github/workflows/ci.yml`) builds `tsc-desktop.exe` on
-`windows-2025` and uploads it as an artifact, with the installer when NSIS is on
-the runner. Nothing is signed there.
+CI (`package-windows` in `.github/workflows/ci.yml`) builds `tsc-desktop.exe`,
+`tsctl.exe` and `tsgw.exe` on `windows-2025` and uploads the zip and the
+installer as the `tsc-windows-x86_64` artifact. Nothing is signed there.
+`docker/windows.Dockerfile` cross-compiles the same packages on Linux
+([docs/building.md](../../docs/building.md)).
 
 ## Build
 
