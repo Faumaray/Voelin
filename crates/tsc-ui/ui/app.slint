@@ -1010,6 +1010,7 @@ component LevelMeter inherits Rectangle {
 }
 
 component SettingsDialog inherits Dialog {
+    in-out property <int> tab;
     callback done();
     card-width: 640px;
     card-height: 660px;
@@ -1022,6 +1023,7 @@ component SettingsDialog inherits Dialog {
         }
         TabWidget {
             vertical-stretch: 1;
+            current-index <=> tab;
             Tab {
                 title: @tr("Audio");
                 ScrollView {
@@ -1454,7 +1456,8 @@ export component MainWindow inherits Window {
     default-font-size: 13px;
 
     property <bool> editing: false;
-    property <bool> show-about: false;
+    in-out property <bool> show-about: false;
+    in-out property <int> settings-tab: 0;
     in-out property <bool> sharing-dialog: false;
     in-out property <bool> settings-open: false;
     property <bool> client-open: false;
@@ -1668,6 +1671,7 @@ export component MainWindow inherits Window {
     }
 
     if settings-open: SettingsDialog {
+        tab <=> settings-tab;
         done => {
             settings-open = false;
             Bridge.close-settings();

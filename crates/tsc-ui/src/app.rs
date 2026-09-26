@@ -196,8 +196,8 @@ pub fn run(options: RunOptions) -> Result<()> {
 	// TSC_AUTOCONNECT=voice|observe connects the first bookmark on start,
 	// TSC_SCREENSHOT=<png> saves the window after TSC_SCREENSHOT_DELAY seconds and exits,
 	// TSC_DEMO_STREAM=1 shows a local test stream in the viewer,
-	// TSC_OPEN=share|settings opens that dialog on start, TSC_AUTOWATCH=1 watches the
-	// first stream that shows up.
+	// TSC_OPEN=share|settings[:<tab>]|about opens that on start, TSC_AUTOWATCH=1
+	// watches the first stream that shows up.
 	let dir: PathBuf = match (options.data_dir, std::env::var_os("TSC_DATA_DIR")) {
 		(Some(dir), _) => dir,
 		(None, Some(dir)) => dir.into(),
@@ -309,8 +309,14 @@ pub fn run(options: RunOptions) -> Result<()> {
 	}
 	match std::env::var("TSC_OPEN").as_deref() {
 		Ok("share") => ui.invoke_open_share_dialog(),
-		Ok("settings") => {
+		Ok("about") => {
+			with_app(|app| app.load_notices());
+			ui.set_show_about(true);
+		}
+		Ok(open) if open.starts_with("settings") => {
 			with_app(|app| app.open_settings());
+			let tab = open.strip_prefix("settings:").and_then(|t| t.parse().ok());
+			ui.set_settings_tab(tab.unwrap_or(0));
 			ui.set_settings_open(true);
 		}
 		_ => {}
