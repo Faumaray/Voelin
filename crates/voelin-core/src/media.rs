@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 use voelin_audio::{VoiceCodec, VoiceEncoder};
 pub use voelin_media;
-use voelin_media::capture::synthetic::{SineSource, SyntheticScreen};
+use voelin_media::capture::synthetic::{Pattern, SineSource, SyntheticScreen};
 use voelin_media::capture::{
 	self, AudioCapture, CaptureOptions, CaptureSource, ScreenCapture, SourceId,
 };
@@ -202,6 +202,8 @@ pub struct StreamerConfig {
 	pub cursor: bool,
 	/// Size of the test pattern ([`SourceId::Synthetic`]).
 	pub synthetic_size: (u32, u32),
+	/// What the test pattern shows.
+	pub synthetic_pattern: Pattern,
 	/// Portal restore token from an earlier share: the desktop may skip its
 	/// dialog. The new one is [`Streamer::restore_token`].
 	pub restore_token: Option<String>,
@@ -220,6 +222,7 @@ impl Default for StreamerConfig {
 			audio: true,
 			cursor: true,
 			synthetic_size: (1280, 720),
+			synthetic_pattern: Pattern::Simple,
 			restore_token: None,
 			layers: Vec::new(),
 		}
@@ -296,7 +299,7 @@ impl Streamer {
 		let (screen, frames, restore_token): (Box<dyn ScreenCapture>, _, _) = match &config.source {
 			SourceId::Synthetic => {
 				let (w, h) = config.synthetic_size;
-				let mut screen = SyntheticScreen::new(w, h);
+				let mut screen = SyntheticScreen::with_pattern(w, h, config.synthetic_pattern);
 				let frames = screen.start(&SourceId::Synthetic, &options).await?;
 				(Box::new(screen), frames, None)
 			}

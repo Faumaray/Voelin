@@ -1,5 +1,7 @@
 //! `voelinctl`: headless TeamSpeak 3/6 client for development and integration tests.
 
+mod alloc;
+mod bench;
 mod gateway;
 mod identity;
 mod observe;
@@ -16,6 +18,10 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
+
+/// Counts heap allocations for `stream bench`.
+#[global_allocator]
+static ALLOCATOR: alloc::Counting = alloc::Counting;
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -46,6 +52,8 @@ enum Command {
 	Relay(observe::RelayArgs),
 	/// Use a tsgw gateway as a user: presence, chat, history.
 	Gateway(gateway::GatewayArgs),
+	/// Stream tools that need no server (`bench`).
+	Stream(bench::StreamToolArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -208,6 +216,7 @@ fn main() -> Result<()> {
 		Command::Observe(args) => tokio::runtime::Runtime::new()?.block_on(observe::observe(args)),
 		Command::Relay(args) => tokio::runtime::Runtime::new()?.block_on(observe::relay(args)),
 		Command::Gateway(args) => tokio::runtime::Runtime::new()?.block_on(gateway::run(args)),
+		Command::Stream(args) => bench::run(args),
 	}
 }
 
