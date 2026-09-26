@@ -118,7 +118,7 @@ Permissions: `INTERNET`, `ACCESS_NETWORK_STATE`, `RECORD_AUDIO`,
 | Engine host replay, voice service policy | unit tests (`cargo test -p voelin-android`) | tested |
 | External capture providers, MediaCodec buffer layouts | `voelin-media` unit tests | tested |
 | The app on a device: UI, voice in the background, screen sharing, watching, Keystore | manual matrix row IN3 and the Android rows | not run yet (no device or emulator in this environment) |
-| Waydroid (Mesa GL) | the debug APK, `waydroid logcat` | the first start failed: Skia could not create its GL context; worked around (below), to be re-checked |
+| Waydroid (Mesa GL) | the debug APK, `waydroid logcat` | works with the EGL workaround (below); before it, the app ended at start because Skia could not create its GL context |
 
 Known gaps:
 
