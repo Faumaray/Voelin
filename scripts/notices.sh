@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Regenerate THIRD_PARTY_NOTICES.md from Cargo.lock with cargo-about
 # (about.toml, about.hbs). The app shows the file in its About page
-# (tsc_platform::notices::text()), so it is committed; run this after changing
+# (voelin_platform::notices::text()), so it is committed; run this after changing
 # dependencies.
 #
 # Usage: scripts/notices.sh           regenerate THIRD_PARTY_NOTICES.md

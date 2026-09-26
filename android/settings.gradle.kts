@@ -20,5 +20,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "tsc"
+rootProject.name = "voelin"
 include(":app")

@@ -16,9 +16,9 @@ facts constrain it, how the code is organised, and the milestone order.
   `respondjoinstreamrequest`, `streamsignaling`, `notifystream*`, ...). See
   [protocol-notes/ts6-streaming.md](protocol-notes/ts6-streaming.md).
 - `clientinit` must carry a `client_version_sign` signed by TeamSpeak, so the
-  client reuses known version/signature pairs (`tsctl versions`).
+  client reuses known version/signature pairs (`voelinctl versions`).
 - TeamSpeak 6 servers still accept the TeamSpeak 3 client protocol; verified with
-  `tsctl` against 6.0.0-beta13.1.
+  `voelinctl` against 6.0.0-beta13.1.
 
 ### What "invisible" means for query clients (verified on 3.13.8 and 6.0.0-beta13.1)
 
@@ -41,18 +41,18 @@ the admin grants them to the guest query group.
 | Feature | Mechanism |
 |---|---|
 | Server chat | Voice connection: `targetmode=3`. Without one: gateway or own query session (`servernotifyregister event=textserver`) |
-| Channel chat without joining | Relay pool (`tsc-observer`): invisible query sessions sit in channels and relay both ways; posts appear as `[Nick] text` |
+| Channel chat without joining | Relay pool (`voelin-observer`): invisible query sessions sit in channels and relay both ways; posts appear as `[Nick] text` |
 | Voice | tsproto UDP transport, Opus (`opus2`), echo cancellation / noise suppression (sonora), own jitter buffer, cpal / AAudio |
 | Invisible presence | Gateway presence stream (snapshot + deltas from query events) or direct query; `channelsubscribeall` when voice-connected |
-| Screen share with sound | TS6 stream signalling (`tsc-stream`), str0m WebRTC, per-platform capture and codecs (`tsc-media`) |
+| Screen share with sound | TS6 stream signalling (`voelin-stream`), str0m WebRTC, per-platform capture and codecs (`voelin-media`) |
 
 ## Workspace layout
 
 ```
 crates/proto/        vendored tsclientlib (tsproto, tsproto-packets, tsproto-types,
                      tsproto-structs + declarations, ts-bookkeeping, tsclientlib)
-crates/<tsc-*>       our crates (table below)
-tools/tsctl          headless CLI
+crates/<voelin-*>       our crates (table below)
+tools/voelinctl          headless CLI
 dev/                 docker-compose TS3 + TS6 servers, gateway configs
 scripts/             it-smoke.sh, own-crates.sh
 fuzz/                cargo-fuzz targets
@@ -60,18 +60,18 @@ fuzz/                cargo-fuzz targets
 
 | Crate | Responsibility | State |
 |---|---|---|
-| `tsc-model` | UI-facing domain model (servers, channels, clients, chat, capabilities), no IO | done |
-| `tsc-query` | ServerQuery codec and transports: raw TCP, SSH (russh), HTTP WebQuery | done |
-| `tsc-observer` | Presence tracker + chat relay pool over `tsc-query` | done |
-| `tsc-gateway-proto`, `tsc-gateway` (`tsgw`) | Companion service for server admins: identity-challenge auth, permission-mirroring authorization, presence stream, chat relay, SQLite history, WebSocket + JSON (`tsgw.v1+json`) | done |
-| `tsc-store` | Identities, bookmarks, settings, chat cache, secrets (keyring / Android Keystore) | done |
-| `tsc-audio` | Capture/playback, Opus, echo cancellation, resampling, jitter buffer, mixer, VAD/push-to-talk | v0 (no AEC yet) |
-| `tsc-stream` | TS6 stream commands, JSON signalling, str0m peer connections, host/STUN candidates, streamer/viewer sessions, frame-source seam | sessions + transport |
-| `tsc-core` | Engine: runtime, per-server sessions, merge of voice/gateway/query sources, event bus, command API, audio settings and volumes, streams on TS6; `media` module (capture → encoder → stream, stream → decoder) | done |
-| `tsc-ui` | Slint UI and the desktop binary: streams panel, viewer, share dialog, audio / hotkey / codec settings | done (desktop) |
-| `tsc-media` | Screen and system-audio capture backends (PipeWire portal, X11, Windows Graphics Capture, Android MediaProjection), video codecs | done (desktop hardware encoders planned; MediaCodec not run on a device yet) |
-| `tsc-platform` | Global hotkeys, notifications, paths, crash reports, notices | done |
-| `tsc-android` + `android/` | Android library + Gradle/Kotlin app (foreground services for voice and screen capture); see [android.md](android.md) | builds, not yet run on a device |
+| `voelin-model` | UI-facing domain model (servers, channels, clients, chat, capabilities), no IO | done |
+| `voelin-query` | ServerQuery codec and transports: raw TCP, SSH (russh), HTTP WebQuery | done |
+| `voelin-observer` | Presence tracker + chat relay pool over `voelin-query` | done |
+| `voelin-gateway-proto`, `voelin-gateway` (`tsgw`) | Companion service for server admins: identity-challenge auth, permission-mirroring authorization, presence stream, chat relay, SQLite history, WebSocket + JSON (`tsgw.v1+json`) | done |
+| `voelin-store` | Identities, bookmarks, settings, chat cache, secrets (keyring / Android Keystore) | done |
+| `voelin-audio` | Capture/playback, Opus, echo cancellation, resampling, jitter buffer, mixer, VAD/push-to-talk | v0 (no AEC yet) |
+| `voelin-stream` | TS6 stream commands, JSON signalling, str0m peer connections, host/STUN candidates, streamer/viewer sessions, frame-source seam | sessions + transport |
+| `voelin-core` | Engine: runtime, per-server sessions, merge of voice/gateway/query sources, event bus, command API, audio settings and volumes, streams on TS6; `media` module (capture → encoder → stream, stream → decoder) | done |
+| `voelin-ui` | Slint UI and the desktop binary: streams panel, viewer, share dialog, audio / hotkey / codec settings | done (desktop) |
+| `voelin-media` | Screen and system-audio capture backends (PipeWire portal, X11, Windows Graphics Capture, Android MediaProjection), video codecs | done (desktop hardware encoders planned; MediaCodec not run on a device yet) |
+| `voelin-platform` | Global hotkeys, notifications, paths, crash reports, notices | done |
+| `voelin-android` + `android/` | Android library + Gradle/Kotlin app (foreground services for voice and screen capture); see [android.md](android.md) | builds, not yet run on a device |
 
 ## Merging sources
 
@@ -84,7 +84,7 @@ gateway, otherwise a local query relay. UI states: `Offline`,
 
 ## Streams
 
-`tsc-stream::Streams` holds the stream state of one TS6 connection without
+`voelin-stream::Streams` holds the stream state of one TS6 connection without
 doing connection IO: it is fed stream notifications (and failed commands) and
 the app's decisions, owns the str0m peers, and queues requests to send plus
 events. Inside it, `StreamerSession` runs our stream (one peer per viewer, our
@@ -92,34 +92,34 @@ offer in `respondjoinstreamrequest`), `ViewerSession` one watched stream
 (answer through `streamsignaling`), and `StreamDirectory` the streams of our
 channel. Its tests drive two instances through a fake relay server.
 
-In `tsc-core` a stream task per voice connection runs `Streams`; the voice task
+In `voelin-core` a stream task per voice connection runs `Streams`; the voice task
 forwards `MessageEvent`s and sends the requests. Encoders push frames through
 the `StreamSink` of `StreamState::Live`; received frames of watched streams go
 to `Engine::subscribe_frames`, not the event bus. The audio of watched streams
 goes straight to the session's audio thread, which mixes it like a talker
 with its own volume (`Command::SetStreamVolume`).
 
-`tsc-core::media` (feature `media`) connects this to `tsc-media`:
+`voelin-core::media` (feature `media`) connects this to `voelin-media`:
 `Streamer` captures (screen, window, portal or the test pattern, plus system
 audio), encodes with the codec of our offer (VP8 by default; the offer carries
 only the codec we encode, since every viewer gets the same frames) and Opus,
 and feeds the `StreamSink`, honouring keyframe requests. `Viewer` decodes a
 watched stream on its own thread (skipping to the next keyframe after losses
 and asking for one) and hands pictures to the UI, which keeps only the newest
-(`Latest`). `EncodedSource` wraps a `Streamer` as a `tsc-stream::FrameSource`
-for `tsctl stream start`; `SyntheticSource` (fake VP8 bytes) remains for
-tsc-stream's own tests.
+(`Latest`). `EncodedSource` wraps a `Streamer` as a `voelin-stream::FrameSource`
+for `voelinctl stream start`; `SyntheticSource` (fake VP8 bytes) remains for
+voelin-stream's own tests.
 
 ## Milestones
 
 | | Scope | Exit criteria |
 |---|---|---|
-| **M0** | Vendoring, workspace, `tsctl`, dev servers, CI | Builds on Linux + Windows; smoke test passes on TS3 and TS6 |
+| **M0** | Vendoring, workspace, `voelinctl`, dev servers, CI | Builds on Linux + Windows; smoke test passes on TS3 and TS6 |
 | M1 | Protocol modernisation: edition 2024, dependency updates, puzzle rewrite (off-thread, progress, cancel), TS6 declarations (`client_is_streaming`, stream commands), fuzzing | Tests green on both servers, clippy clean |
-| M2 | Identities/bookmarks store, audio v0 (Opus, jitter buffer), `tsctl voice` | Tone round-trips between two clients on both servers |
-| M3 | `tsc-query` (raw/SSH/HTTP) + observer | Invisible presence and relay chat verified |
+| M2 | Identities/bookmarks store, audio v0 (Opus, jitter buffer), `voelinctl voice` | Tone round-trips between two clients on both servers |
+| M3 | `voelin-query` (raw/SSH/HTTP) + observer | Invisible presence and relay chat verified |
 | M4 | Gateway v1 | Presence + channel chat without appearing in the client list, permission denials tested |
-| M5 | `tsc-core` + Slint desktop UI (Linux) | Daily use on GNOME, KDE, X11 |
+| M5 | `voelin-core` + Slint desktop UI (Linux) | Daily use on GNOME, KDE, X11 |
 | M6 | Audio quality, global push-to-talk, Windows parity and packaging | One-hour call without drift or echo |
 | M7 | TS6 stream viewer | Watch an official TS6 client's stream |
 | M8 | Streamer: capture, system audio, encoders | Official TS6 client watches our 1080p30 stream with sound |

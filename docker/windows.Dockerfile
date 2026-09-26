@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 #
 # Windows packages, cross-compiled on Linux (docs/building.md):
-# tsc-<version>-windows-x86_64.zip with tsc-desktop.exe, tsctl.exe and
-# tsgw.exe, and the NSIS installer tsc-desktop-<version>-setup.exe.
+# voelin-<version>-windows-x86_64.zip with voelin.exe, and the NSIS installer
+# voelin-<version>-setup.exe.
 #
 #   docker build -f docker/windows.Dockerfile -o dist/windows .
 #
@@ -59,9 +59,9 @@ ENV VPX_LIB_DIR=/opt/libvpx/lib VPX_INCLUDE_DIR=/opt/libvpx/include \
 	VPX_VERSION=$LIBVPX_VERSION VPX_STATIC=1
 WORKDIR /src
 COPY . .
-RUN --mount=type=cache,id=tsc-cargo-registry,target=/usr/local/cargo/registry \
-	--mount=type=cache,id=tsc-target-windows,target=/src/target \
-	cargo build --release --locked --target x86_64-pc-windows-gnu -p tsc-ui -p tsctl -p tsc-gateway \
+RUN --mount=type=cache,id=voelin-cargo-registry,target=/usr/local/cargo/registry \
+	--mount=type=cache,id=voelin-target-windows,target=/src/target \
+	cargo build --release --locked --target x86_64-pc-windows-gnu -p voelin-ui \
 	&& WINDOWS_TARGET=x86_64-pc-windows-gnu scripts/package.sh windows /out
 
 FROM scratch AS artifacts

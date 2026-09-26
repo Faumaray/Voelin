@@ -20,12 +20,12 @@
         restored on another device anyway.
     -->
     <application
-        android:name=".TscApp"
+        android:name=".VoelinApp"
         android:allowBackup="false"
         android:hasCode="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
-        android:theme="@style/Theme.Tsc">
+        android:theme="@style/Theme.Voelin">
 
         <!--
             The Rust UI runs in this NativeActivity (android.app.lib_name).
@@ -40,7 +40,7 @@
             android:windowSoftInputMode="adjustResize">
             <meta-data
                 android:name="android.app.lib_name"
-                android:value="tsc_android" />
+                android:value="voelin_android" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

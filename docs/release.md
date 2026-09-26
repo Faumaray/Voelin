@@ -1,19 +1,18 @@
 # Releasing
 
-How a release is versioned, built, signed and checked. The product name and
-app id are still placeholders (see [packaging/README.md](../packaging/README.md));
-rename them before the first public release, since the app id cannot change
-afterwards on Flathub or Google Play.
+How a release is versioned, built, signed and checked. The app id
+`io.github.faumaray.Voelin` ([packaging/README.md](../packaging/README.md))
+cannot change after the first release on Flathub or Google Play.
 
 ## Versioning
 
-- One version for the apps: `version` of `crates/tsc-ui` (desktop; the
-  installer and the About page read it), `crates/tsc-android` and the
+- One version for the apps: `version` of `crates/voelin-ui` (desktop; the
+  installer and the About page read it), `crates/voelin-android` and the
   Android app's `versionName`. Semantic versioning; before 1.0 a minor bump
   may break settings or the gateway protocol, and the changelog says so.
 - Android `versionCode` must grow with every upload:
   `major * 1000000 + minor * 1000 + patch` (0.2.3 is 2003).
-- The gateway `tsgw` (`crates/tsc-gateway`) is versioned on its own, since
+- The gateway `tsgw` (`crates/voelin-gateway`) is versioned on its own, since
   server admins update it separately. Its wire protocol is versioned in the
   WebSocket subprotocol (`tsgw.v1+json`); a breaking change needs `v2` and a
   period in which the gateway serves both.
@@ -28,7 +27,7 @@ afterwards on Flathub or Google Play.
 change a user or server admin notices adds a line under `Unreleased`
 (Added / Changed / Fixed / Removed / Security). At release the section gets
 the version and date, and its highlights also go into the `<releases>` entry
-of `packaging/linux/io.github.faumaray.TsClient.metainfo.xml` (shown by
+of `packaging/linux/io.github.faumaray.Voelin.metainfo.xml` (shown by
 software centers and Flathub). Release notes also state the TeamSpeak server
 versions the release was tested against (TS3 and TS6 from
 `dev/docker-compose.yml`).
@@ -36,7 +35,7 @@ versions the release was tested against (TS3 and TS6 from
 ## Third-party notices
 
 `THIRD_PARTY_NOTICES.md` lists the licenses of everything compiled into the
-apps. It is shown in the About page (`tsc_platform::notices::text()`) and
+apps. It is shown in the About page (`voelin_platform::notices::text()`) and
 shipped in every package. It is generated, never edited:
 
 ```sh
@@ -74,7 +73,7 @@ are written to `$RUNNER_TEMP` in the job and deleted at its end.
 ### Windows (Authenticode)
 
 Unsigned executables trigger SmartScreen warnings; signed ones build
-reputation with the publisher's certificate. Sign `tsc-desktop.exe` first,
+reputation with the publisher's certificate. Sign `voelin.exe` first,
 then build the installer with `/DSIGN=...`, which signs the installer and the
 uninstaller it writes (see [packaging/windows/README.md](../packaging/windows/README.md)).
 Always timestamp (`/tr ... /td SHA256`), so signatures stay valid after the
@@ -92,7 +91,7 @@ Options for the certificate:
   # metadata.json: {"Endpoint": "https://<region>.codesigning.azure.net",
   #   "CodeSigningAccountName": "<account>", "CertificateProfileName": "<profile>"}
   signtool sign /v /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 `
-    /dlib Azure.CodeSigning.Dlib.dll /dmdf metadata.json target\release\tsc-desktop.exe
+    /dlib Azure.CodeSigning.Dlib.dll /dmdf metadata.json target\release\voelin.exe
   ```
 
   In GitHub Actions, `azure/trusted-signing-action` does the same with a
@@ -116,7 +115,7 @@ the installer and `uninstall.exe` after installing.
   and `... repo`, `appstreamcli validate` on the metainfo, add screenshots
   and the release entry to the metainfo. Flathub reviews names and branding:
   the app must not look like an official TeamSpeak product.
-- For our own releases (GitHub): a tarball of `tsc-desktop` with the desktop
+- For our own releases (GitHub): a tarball of `voelin` with the desktop
   file, metainfo, icon and notices, and optionally a Flatpak bundle
   (`flatpak build-bundle --gpg-sign=<key> ...`). Publish `SHA256SUMS` and
   sign it (`gpg --detach-sign` or minisign) with a key whose fingerprint is
@@ -128,20 +127,20 @@ APKs and app bundles are signed with a keystore kept outside the
 repository; losing it means existing installs can no longer be updated.
 
 - Create it once:
-  `keytool -genkeypair -v -keystore tsc-release.jks -alias tsc -keyalg RSA -keysize 4096 -validity 10000`,
+  `keytool -genkeypair -v -keystore voelin-release.jks -alias voelin -keyalg RSA -keysize 4096 -validity 10000`,
   and back it up (two offline copies, password in a password manager).
 - The Gradle build reads the keystore path, alias and passwords from Gradle
   properties or environment variables (`~/.gradle/gradle.properties`, CI
-  secrets), never from files in the repository: `tsc.signing.storeFile`,
-  `tsc.signing.storePassword`, `tsc.signing.keyAlias`,
-  `tsc.signing.keyPassword`, or `TSC_SIGNING_STORE_FILE`,
-  `TSC_SIGNING_STORE_PASSWORD`, `TSC_SIGNING_KEY_ALIAS`,
-  `TSC_SIGNING_KEY_PASSWORD` ([android.md](android.md)). Without them it
+  secrets), never from files in the repository: `voelin.signing.storeFile`,
+  `voelin.signing.storePassword`, `voelin.signing.keyAlias`,
+  `voelin.signing.keyPassword`, or `VOELIN_SIGNING_STORE_FILE`,
+  `VOELIN_SIGNING_STORE_PASSWORD`, `VOELIN_SIGNING_KEY_ALIAS`,
+  `VOELIN_SIGNING_KEY_PASSWORD` ([android.md](android.md)). Without them it
   builds unsigned or debug-signed artifacts only.
 - CI: the `android` job signs a release APK when the repository has the
-  secrets `ANDROID_KEYSTORE_BASE64` (`base64 -w0 tsc-release.jks`),
-  `TSC_SIGNING_STORE_PASSWORD`, `TSC_SIGNING_KEY_ALIAS` and
-  `TSC_SIGNING_KEY_PASSWORD`; the keystore is decoded to `$RUNNER_TEMP` and
+  secrets `ANDROID_KEYSTORE_BASE64` (`base64 -w0 voelin-release.jks`),
+  `VOELIN_SIGNING_STORE_PASSWORD`, `VOELIN_SIGNING_KEY_ALIAS` and
+  `VOELIN_SIGNING_KEY_PASSWORD`; the keystore is decoded to `$RUNNER_TEMP` and
   removed afterwards. Check with `apksigner verify --print-certs app-release.apk`.
 - Google Play: use Play App Signing; our keystore is then the upload key
   (it can be reset through Play support if lost). F-Droid builds and signs
@@ -163,16 +162,17 @@ Before tagging:
    version, results committed; failures are fixed or listed as known issues.
 5. Translations: `.pot` regenerated and `.po` files merged
    ([i18n.md](i18n.md)); string freeze announced a week before.
-6. Versions bumped (`crates/tsc-ui`, `crates/tsc-android`, Android
-   `versionName` / `versionCode`, `tsc-gateway` if it changed),
+6. Versions bumped (`crates/voelin-ui`, `crates/voelin-android`, Android
+   `versionName` / `versionCode`, `voelin-gateway` if it changed),
    `Cargo.lock` updated, changelog and metainfo `<release>` written.
 
 Release:
 
 7. Tag `v<version>` (signed) on the release commit and push it.
-8. The tag's CI run builds every package ([building.md](building.md)): Linux
-   tarball and `.deb`, Flatpak bundle, Windows zip and installer, Android APKs
-   (signed when the secrets are set), the gateway image; its `release` job
+8. The tag's CI run builds every package ([building.md](building.md)): the
+   app's Linux tarball and `.deb`, Flatpak bundle, Windows zip and installer
+   and Android APKs (signed when the secrets are set), and the gateway's
+   Linux tarball, `.deb` and image; its `release` job
    attaches them with a `SHA256SUMS` to a draft GitHub release. Sign the
    Windows executable and installer, and an AAB for Google Play, by hand
    until CI has the certificates.

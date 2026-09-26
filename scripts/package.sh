@@ -2,14 +2,18 @@
 # Package release builds into the files CI uploads and the Docker builds
 # produce (docs/building.md). Build first, then:
 #
-#   scripts/package.sh linux   [out-dir]  tsc-<version>-linux-<arch>.tar.gz and
-#                                         tsc-desktop_<version>_<arch>.deb
-#                                         from target/release
-#   scripts/package.sh windows [out-dir]  tsc-<version>-windows-x86_64.zip and
-#                                         tsc-desktop-<version>-setup.exe (NSIS)
+#   scripts/package.sh linux   [out-dir]  from target/release:
+#                                         voelin-<version>-linux-<arch>.tar.gz,
+#                                         voelin_<version>_<arch>.deb (the app),
+#                                         tsgw-<version>-linux-<arch>.tar.gz,
+#                                         tsgw_<version>_<arch>.deb (the gateway,
+#                                         for servers)
+#   scripts/package.sh windows [out-dir]  voelin-<version>-windows-x86_64.zip and
+#                                         voelin-<version>-setup.exe (NSIS)
 #   scripts/package.sh android [out-dir]  the APKs Gradle built, renamed
 #
 # out-dir defaults to dist/. Each run also writes SHA256SUMS-<kind> there.
+# voelinctl (a development tool) is in no package.
 #
 # Environment:
 #   CARGO_TARGET_DIR  cargo's target directory (default: target)
@@ -32,91 +36,118 @@ target_dir=${CARGO_TARGET_DIR:-target}
 
 # The version of a crate, from its manifest.
 crate_version() {
-	sed -n 's/^version = "\(.*\)"$/\1/p' "$1/Cargo.toml" | head -n 1
+	local v
+	v=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$1/Cargo.toml" | head -n 1)
+	[[ -n $v ]] || { echo "no version in $1/Cargo.toml" >&2; exit 1; }
+	printf '%s\n' "$v"
 }
-version=$(crate_version crates/tsc-ui)
-[[ -n $version ]] || { echo "no version in crates/tsc-ui/Cargo.toml" >&2; exit 1; }
+version=$(crate_version crates/voelin-ui)
 
-app_id=io.github.faumaray.TsClient
-bins=(tsc-desktop tsctl tsgw)
+app_id=io.github.faumaray.Voelin
+homepage=https://github.com/Faumaray/teamspeak_client_rs
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 files=()
 
-package_linux() {
-	local bin=$target_dir/release arch name stage pkg deb_arch depends
-	arch=$(uname -m)
-	name=tsc-$version-linux-$arch
+# make_deb <package> <version> <depends suffix> <description…>: builds
+# <package>_<version>_<arch>.deb from the tree in $tmp/debian/<package>, with
+# Depends from its /usr/bin binaries (dpkg-shlibdeps) plus <depends suffix>.
+# Extra control fields can be passed in $deb_extra.
+make_deb() {
+	local pkg=$1 ver=$2 extra_depends=$3 root=$tmp/debian/$1 deb_arch depends bins
+	shift 3
+	deb_arch=$(dpkg --print-architecture)
+	mkdir -p "$tmp/debian"
+	printf 'Source: %s\n\nPackage: %s\nArchitecture: any\n' "$pkg" "$pkg" >"$tmp/debian/control"
+	bins=("$root"/usr/bin/*)
+	depends=$(cd "$tmp" && dpkg-shlibdeps -O "${bins[@]#"$tmp/"}" | sed -n 's/^shlibs:Depends=//p')
+	depends=${depends:+$depends${extra_depends:+, }}$extra_depends
+	cat >"$root/usr/share/doc/$pkg/copyright" <<-EOF
+		Upstream: $homepage
+		License: MIT OR Apache-2.0
+		Third-party licenses: /usr/share/doc/$pkg/THIRD_PARTY_NOTICES.md
+	EOF
+	mkdir -p "$root/DEBIAN"
+	{
+		printf 'Package: %s\nVersion: %s\nArchitecture: %s\n' "$pkg" "$ver" "$deb_arch"
+		printf 'Maintainer: Faumaray <23194470+Faumaray@users.noreply.github.com>\n'
+		printf 'Section: net\nPriority: optional\nHomepage: %s\n' "$homepage"
+		printf 'Depends: %s\n' "$depends"
+		[[ -z ${deb_extra:-} ]] || printf '%s\n' "$deb_extra"
+		printf 'Description: %s\n' "$1"
+		shift
+		printf ' %s\n' "$@"
+	} >"$root/DEBIAN/control"
+	dpkg-deb --root-owner-group --build "$root" "$out/${pkg}_${ver}_$deb_arch.deb" >/dev/null
+	files+=("${pkg}_${ver}_$deb_arch.deb")
+}
 
-	# Archive: a prefix layout, e.g. `tar -xzf … --strip-components=1 -C ~/.local`.
+package_linux() {
+	local bin=$target_dir/release arch name stage root gw_version
+	arch=$(uname -m)
+	gw_version=$(crate_version crates/voelin-gateway)
+
+	# The app. Archives use a prefix layout, e.g.
+	# `tar -xzf … --strip-components=1 -C ~/.local`.
+	name=voelin-$version-linux-$arch
 	stage=$tmp/$name
-	for b in "${bins[@]}"; do
-		install -Dm755 "$bin/$b" -t "$stage/bin"
-	done
+	install -Dm755 "$bin/voelin" -t "$stage/bin"
 	install -Dm644 packaging/linux/$app_id.desktop -t "$stage/share/applications"
 	install -Dm644 packaging/linux/$app_id.metainfo.xml -t "$stage/share/metainfo"
 	install -Dm644 packaging/linux/$app_id.svg -t "$stage/share/icons/hicolor/scalable/apps"
-	install -Dm644 THIRD_PARTY_NOTICES.md crates/tsc-gateway/tsgw.example.toml -t "$stage/share/doc/tsc"
+	install -Dm644 THIRD_PARTY_NOTICES.md -t "$stage/share/doc/voelin"
 	tar -C "$tmp" -czf "$out/$name.tar.gz" "$name"
 	files+=("$name.tar.gz")
 
-	# Debian package, with dependencies from the binaries' shared libraries.
-	command -v dpkg-deb >/dev/null || { echo "dpkg-deb not found: skipping the .deb" >&2; return; }
-	pkg=$tmp/debian/tsc-desktop
-	for b in "${bins[@]}"; do
-		install -Dm755 "$bin/$b" -t "$pkg/usr/bin"
-	done
-	install -Dm644 packaging/linux/$app_id.desktop -t "$pkg/usr/share/applications"
-	install -Dm644 packaging/linux/$app_id.metainfo.xml -t "$pkg/usr/share/metainfo"
-	install -Dm644 packaging/linux/$app_id.svg -t "$pkg/usr/share/icons/hicolor/scalable/apps"
-	install -Dm644 THIRD_PARTY_NOTICES.md -t "$pkg/usr/share/doc/tsc-desktop"
-	install -Dm644 crates/tsc-gateway/tsgw.example.toml -t "$pkg/usr/share/doc/tsc-desktop/examples"
-	cat >"$pkg/usr/share/doc/tsc-desktop/copyright" <<-EOF
-		Upstream: https://github.com/Faumaray/teamspeak_client_rs
-		License: MIT OR Apache-2.0
-		Third-party licenses: /usr/share/doc/tsc-desktop/THIRD_PARTY_NOTICES.md
-	EOF
-	deb_arch=$(dpkg --print-architecture)
-	mkdir -p "$tmp/debian"
-	printf 'Source: tsc-desktop\n\nPackage: tsc-desktop\nArchitecture: any\n' >"$tmp/debian/control"
-	depends=$(cd "$tmp" && dpkg-shlibdeps -O "${bins[@]/#/debian/tsc-desktop/usr/bin/}" |
-		sed -n 's/^shlibs:Depends=//p')
-	# Loaded at run time (dlopen), so dpkg-shlibdeps cannot see them: the
-	# keyboard, then Wayland or X11 and EGL for the window.
-	depends=${depends:+$depends, }libxkbcommon0
-	mkdir -p "$pkg/DEBIAN"
-	cat >"$pkg/DEBIAN/control" <<-EOF
-		Package: tsc-desktop
-		Version: $version
-		Architecture: $deb_arch
-		Maintainer: Faumaray <23194470+Faumaray@users.noreply.github.com>
-		Section: net
-		Priority: optional
-		Homepage: https://github.com/Faumaray/teamspeak_client_rs
-		Depends: $depends
-		Recommends: libwayland-client0, libwayland-cursor0, libxkbcommon-x11-0, libx11-xcb1, libxcursor1, libxi6, libxrandr2, libegl1
-		Description: TeamSpeak 3 and 6 client
-		 Desktop client for TeamSpeak 3 and TeamSpeak 6 servers (tsc-desktop), with
-		 the tsctl command line client and the tsgw companion gateway.
-	EOF
-	dpkg-deb --root-owner-group --build "$pkg" "$out/tsc-desktop_${version}_$deb_arch.deb" >/dev/null
-	files+=("tsc-desktop_${version}_$deb_arch.deb")
+	# The gateway, for servers: nothing of the app, no GUI libraries.
+	name=tsgw-$gw_version-linux-$arch
+	stage=$tmp/$name
+	install -Dm755 "$bin/tsgw" -t "$stage/bin"
+	install -Dm644 packaging/linux/tsgw.service -t "$stage/lib/systemd/system"
+	install -Dm644 THIRD_PARTY_NOTICES.md crates/voelin-gateway/tsgw.example.toml -t "$stage/share/doc/tsgw"
+	tar -C "$tmp" -czf "$out/$name.tar.gz" "$name"
+	files+=("$name.tar.gz")
+
+	command -v dpkg-deb >/dev/null || { echo "dpkg-deb not found: skipping the .deb files" >&2; return; }
+
+	root=$tmp/debian/voelin
+	install -Dm755 "$bin/voelin" -t "$root/usr/bin"
+	install -Dm644 packaging/linux/$app_id.desktop -t "$root/usr/share/applications"
+	install -Dm644 packaging/linux/$app_id.metainfo.xml -t "$root/usr/share/metainfo"
+	install -Dm644 packaging/linux/$app_id.svg -t "$root/usr/share/icons/hicolor/scalable/apps"
+	install -Dm644 THIRD_PARTY_NOTICES.md -t "$root/usr/share/doc/voelin"
+	# libxkbcommon, Wayland/X11 and EGL are loaded at run time (dlopen), so
+	# dpkg-shlibdeps cannot see them.
+	deb_extra="Recommends: libwayland-client0, libwayland-cursor0, libxkbcommon-x11-0, libx11-xcb1, libxcursor1, libxi6, libxrandr2, libegl1" \
+		make_deb voelin "$version" libxkbcommon0 \
+		"Voelin, a TeamSpeak 3 and 6 client" \
+		"Desktop client for TeamSpeak 3 and TeamSpeak 6 servers: voice, chat," \
+		"screen sharing and invisible presence through a tsgw gateway."
+
+	root=$tmp/debian/tsgw
+	install -Dm755 "$bin/tsgw" -t "$root/usr/bin"
+	install -Dm644 packaging/linux/tsgw.service -t "$root/usr/lib/systemd/system"
+	install -Dm644 THIRD_PARTY_NOTICES.md -t "$root/usr/share/doc/tsgw"
+	install -Dm644 crates/voelin-gateway/tsgw.example.toml -t "$root/usr/share/doc/tsgw/examples"
+	make_deb tsgw "$gw_version" "" \
+		"Voelin gateway for TeamSpeak servers" \
+		"Runs next to a TeamSpeak 3 or 6 server and gives Voelin users invisible" \
+		"presence and channel chat over ServerQuery. Configure /etc/tsgw/tsgw.toml" \
+		"(example in /usr/share/doc/tsgw/examples), then systemctl enable --now tsgw."
 }
 
-# A path makensis.exe understands when running on Windows (Git Bash).
+# A path Windows programs understand when running on Windows (Git Bash):
+# backslashes, since makensis's File finds nothing through "D:/a/…" paths.
 native_path() {
-	if command -v cygpath >/dev/null; then cygpath -m "$1"; else printf '%s\n' "$1"; fi
+	if command -v cygpath >/dev/null; then cygpath -w "$1"; else printf '%s\n' "$1"; fi
 }
 
 package_windows() {
 	local bin=$target_dir/${WINDOWS_TARGET:+$WINDOWS_TARGET/}release name stage makensis
-	name=tsc-$version-windows-x86_64
+	name=voelin-$version-windows-x86_64
 	stage=$tmp/$name
 	mkdir -p "$stage"
-	for b in "${bins[@]}"; do
-		cp "$bin/$b.exe" "$stage/"
-	done
-	cp THIRD_PARTY_NOTICES.md crates/tsc-gateway/tsgw.example.toml "$stage/"
+	cp "$bin/voelin.exe" THIRD_PARTY_NOTICES.md "$stage/"
 	if command -v zip >/dev/null; then
 		(cd "$tmp" && zip -qr "$out/$name.zip" "$name")
 	elif command -v 7z >/dev/null; then
@@ -137,21 +168,20 @@ package_windows() {
 	fi
 	# Absolute paths: makensis changes into the script's directory.
 	"$makensis" -V2 -DVERSION="$version" -DOUTDIR="$(native_path "$out")" \
-		-DBINARY="$(native_path "$(cd "$bin" && pwd)/tsc-desktop.exe")" packaging/windows/installer.nsi
-	files+=("tsc-desktop-$version-setup.exe")
+		-DBINARY="$(native_path "$(cd "$bin" && pwd)/voelin.exe")" packaging/windows/installer.nsi
+	files+=("voelin-$version-setup.exe")
 }
 
 package_android() {
-	local apk android_version found=0
-	android_version=$(crate_version crates/tsc-android)
+	local apk android_version variant found=0
+	android_version=$(crate_version crates/voelin-android)
 	for apk in android/app/build/outputs/apk/*/*.apk; do
 		[[ -e $apk ]] || continue
 		# app-debug.apk, app-release.apk, app-release-unsigned.apk
-		local variant
 		variant=$(basename "$apk" .apk)
 		variant=${variant#app-}
-		cp "$apk" "$out/tsc-$android_version-android-$variant.apk"
-		files+=("tsc-$android_version-android-$variant.apk")
+		cp "$apk" "$out/voelin-$android_version-android-$variant.apk"
+		files+=("voelin-$android_version-android-$variant.apk")
 		found=1
 	done
 	((found)) || { echo "no APKs in android/app/build/outputs/apk: build with Gradle first" >&2; exit 1; }

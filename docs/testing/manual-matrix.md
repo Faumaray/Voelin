@@ -159,7 +159,7 @@ noted.
   no Rust toolchain): SmartScreen and UAC show the publisher of the
   signature, the app starts from the Start menu, an update over the
   previous version keeps the settings, uninstall from Settings > Apps
-  removes the files, shortcut and registry key and keeps `%APPDATA%\tsc`;
+  removes the files, shortcut and registry key and keeps `%APPDATA%\voelin`;
   `uninstall.exe /S` works too.
 - **IN3** Android APK: install, update over the previous version (same
   signature, data kept), uninstall.
@@ -177,11 +177,11 @@ noted.
 - **GE1** About page: the AboutSlint widget, the OpenH264 attribution and
   the full third-party notices (scrollable) are shown.
 - **GE2** Crash reports: with reports enabled, start the app with
-  `TSC_TEST_CRASH=1`: it exits with a panic and, on the next start, offers
+  `VOELIN_TEST_CRASH=1`: it exits with a panic and, on the next start, offers
   the report (open folder, delete). With reports disabled nothing is
-  written. Reports are in `~/.local/state/tsc/crash-reports` (Flatpak:
-  `~/.var/app/<app id>/.local/state/tsc/crash-reports`) or
-  `%LOCALAPPDATA%\tsc\crash-reports`.
+  written. Reports are in `~/.local/state/voelin/crash-reports` (Flatpak:
+  `~/.var/app/<app id>/.local/state/voelin/crash-reports`) or
+  `%LOCALAPPDATA%\voelin\crash-reports`.
 - **GE3** Saved passwords survive a restart (GNOME Keyring, KWallet, Windows
   Credential Manager, Android Keystore); without a keyring the app warns
   and keeps them for the session only.

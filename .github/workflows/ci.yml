@@ -55,7 +55,7 @@ jobs:
       # XTEST input) run instead of skipping.
       - name: Test (Linux, Xvfb)
         if: runner.os == 'Linux'
-        run: xvfb-run -a bash -c 'TSC_X11_TEST_DISPLAY="$DISPLAY" cargo test --workspace --locked'
+        run: xvfb-run -a bash -c 'VOELIN_X11_TEST_DISPLAY="$DISPLAY" cargo test --workspace --locked'
       - name: Test
         if: runner.os != 'Linux'
         run: cargo test --workspace --locked
@@ -74,7 +74,7 @@ jobs:
         with:
           key: release
       - name: Build
-        run: cargo build --release --locked -p tsc-ui -p tsctl -p tsc-gateway
+        run: cargo build --release --locked -p voelin-ui -p voelin-gateway
       # dpkg-shlibdeps works out the .deb's dependencies.
       - name: Package (.tar.gz, .deb)
         run: |
@@ -82,7 +82,7 @@ jobs:
           scripts/package.sh linux dist
       - uses: actions/upload-artifact@v4
         with:
-          name: tsc-linux-x86_64
+          name: voelin-linux-x86_64
           path: dist/
           if-no-files-found: error
 
@@ -98,7 +98,7 @@ jobs:
         with:
           key: release
       - name: Build
-        run: cargo build --release --locked -p tsc-ui -p tsctl -p tsc-gateway
+        run: cargo build --release --locked -p voelin-ui
       # The installer is required here: install NSIS when the image lacks it.
       - name: NSIS
         shell: pwsh
@@ -115,12 +115,12 @@ jobs:
         run: scripts/package.sh windows dist
       - uses: actions/upload-artifact@v4
         with:
-          name: tsc-windows-x86_64
+          name: voelin-windows-x86_64
           path: dist/
           if-no-files-found: error
 
   # Flatpak bundle from packaging/flatpak (install with
-  # `flatpak install --user tsc-desktop.flatpak`). flatpak-builder builds
+  # `flatpak install --user voelin.flatpak`). flatpak-builder builds
   # offline, from the crates that flatpak-cargo-generator lists.
   package-flatpak:
     name: package (Flatpak)
@@ -143,17 +143,17 @@ jobs:
           /tmp/venv/bin/python /tmp/flatpak-cargo-generator.py Cargo.lock -o packaging/flatpak/cargo-sources.json
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
-          bundle: tsc-desktop.flatpak
-          manifest-path: packaging/flatpak/io.github.faumaray.TsClient.yml
+          bundle: voelin.flatpak
+          manifest-path: packaging/flatpak/io.github.faumaray.Voelin.yml
           cache-key: flatpak-builder-${{ hashFiles('Cargo.lock') }}
           upload-artifact: false
       - uses: actions/upload-artifact@v4
         with:
-          name: tsc-flatpak-x86_64
-          path: tsc-desktop.flatpak
+          name: voelin-flatpak-x86_64
+          path: voelin.flatpak
           if-no-files-found: error
 
-  # The gateway's container image (crates/tsc-gateway/Dockerfile), saved as a
+  # The gateway's container image (crates/voelin-gateway/Dockerfile), saved as a
   # file: `docker load -i tsgw-image.tar.gz`.
   package-gateway-image:
     name: package (gateway image)
@@ -162,8 +162,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build and save
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/tsc-gateway/Cargo.toml | head -n 1)
-          docker build -f crates/tsc-gateway/Dockerfile -t "tsgw:$version" -t tsgw:latest .
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/voelin-gateway/Cargo.toml | head -n 1)
+          docker build -f crates/voelin-gateway/Dockerfile -t "tsgw:$version" -t tsgw:latest .
           mkdir -p dist
           docker save "tsgw:$version" tsgw:latest | gzip > dist/tsgw-image.tar.gz
           (cd dist && sha256sum tsgw-image.tar.gz > SHA256SUMS-gateway)
@@ -209,33 +209,33 @@ jobs:
         run: cargo install cargo-ndk --locked --version 4.1.2
       - name: clippy (Android target, deny warnings)
         run: |
-          cargo ndk -t arm64-v8a --platform 29 clippy --locked -p tsc-android -p tsc-ui --no-deps -- -D warnings
-          cargo ndk -t arm64-v8a --platform 29 clippy --locked -p tsc-media --no-default-features --no-deps -- -D warnings
+          cargo ndk -t arm64-v8a --platform 29 clippy --locked -p voelin-android -p voelin-ui --no-deps -- -D warnings
+          cargo ndk -t arm64-v8a --platform 29 clippy --locked -p voelin-media --no-default-features --no-deps -- -D warnings
       - name: Debug APK
         working-directory: android
-        run: ./gradlew --no-daemon assembleDebug -Ptsc.abis=arm64-v8a,x86_64
+        run: ./gradlew --no-daemon assembleDebug -Pvoelin.abis=arm64-v8a,x86_64
       # Only with the signing secrets; an unsigned release APK is not installable.
       - name: Release APK (signed)
         working-directory: android
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          TSC_SIGNING_STORE_PASSWORD: ${{ secrets.TSC_SIGNING_STORE_PASSWORD }}
-          TSC_SIGNING_KEY_ALIAS: ${{ secrets.TSC_SIGNING_KEY_ALIAS }}
-          TSC_SIGNING_KEY_PASSWORD: ${{ secrets.TSC_SIGNING_KEY_PASSWORD }}
+          VOELIN_SIGNING_STORE_PASSWORD: ${{ secrets.VOELIN_SIGNING_STORE_PASSWORD }}
+          VOELIN_SIGNING_KEY_ALIAS: ${{ secrets.VOELIN_SIGNING_KEY_ALIAS }}
+          VOELIN_SIGNING_KEY_PASSWORD: ${{ secrets.VOELIN_SIGNING_KEY_PASSWORD }}
         run: |
           if [ -z "$KEYSTORE_BASE64" ]; then
             echo "::notice::No ANDROID_KEYSTORE_BASE64 secret: skipping the release APK"
             exit 0
           fi
-          export TSC_SIGNING_STORE_FILE="$RUNNER_TEMP/release.jks"
-          echo "$KEYSTORE_BASE64" | base64 -d > "$TSC_SIGNING_STORE_FILE"
-          ./gradlew --no-daemon assembleRelease -Ptsc.abis=arm64-v8a,x86_64
-          rm -f "$TSC_SIGNING_STORE_FILE"
+          export VOELIN_SIGNING_STORE_FILE="$RUNNER_TEMP/release.jks"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$VOELIN_SIGNING_STORE_FILE"
+          ./gradlew --no-daemon assembleRelease -Pvoelin.abis=arm64-v8a,x86_64
+          rm -f "$VOELIN_SIGNING_STORE_FILE"
       - name: Package
         run: scripts/package.sh android dist
       - uses: actions/upload-artifact@v4
         with:
-          name: tsc-android
+          name: voelin-android
           path: dist/
           if-no-files-found: error
 
@@ -296,7 +296,7 @@ jobs:
       - name: Check THIRD_PARTY_NOTICES.md
         run: scripts/notices.sh --check
 
-  # tsctl, the gateway, the engine and tsc-stream against real TS3 and TS6
+  # voelinctl, the gateway, the engine and voelin-stream against real TS3 and TS6
   # servers, including a synthetic VP8 + Opus stream through the TS6 server
   # (scripts/it-smoke.sh).
   smoke:
@@ -331,7 +331,7 @@ jobs:
   # reported on the job but does not fail the workflow, since it depends on
   # a browser download and the runner's network interfaces.
   browser-interop:
-    name: browser interop (tsc-stream, Chromium)
+    name: browser interop (voelin-stream, Chromium)
     runs-on: ubuntu-24.04
     needs: test
     continue-on-error: true
@@ -358,4 +358,4 @@ jobs:
           npm install -g "playwright@$PLAYWRIGHT_VERSION"
           playwright install --with-deps chromium
       - name: Browser interop test
-        run: TSC_INTEROP=1 cargo test --locked -p tsc-stream --test browser_interop -- --nocapture
+        run: VOELIN_INTEROP=1 cargo test --locked -p voelin-stream --test browser_interop -- --nocapture

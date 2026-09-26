@@ -4,30 +4,36 @@ Every platform has installable packages. CI builds them on each run, and the
 Dockerfiles in `docker/` build the same kinds of packages on any machine with
 Docker. Both use `scripts/package.sh`, so file names and contents match.
 
+The packages hold the app, Voelin. The gateway `tsgw` runs on servers and is
+packaged for Linux only, separately. `voelinctl` is a development tool and is
+in no package (`cargo run -p voelinctl`).
+
 | Platform | Files | Install |
 |---|---|---|
-| Linux x86_64 | `tsc-<version>-linux-x86_64.tar.gz` | unpack; `bin/` has `tsc-desktop`, `tsctl`, `tsgw` (prefix layout: `tar -xzf … --strip-components=1 -C ~/.local`) |
-| | `tsc-desktop_<version>_amd64.deb` | `sudo apt install ./tsc-desktop_<version>_amd64.deb` (Ubuntu 24.04+, Debian 13+) |
-| | `tsc-desktop.flatpak` (CI only) | `flatpak install --user tsc-desktop.flatpak` |
-| Windows x86_64 | `tsc-<version>-windows-x86_64.zip` | unpack; `tsc-desktop.exe`, `tsctl.exe`, `tsgw.exe` |
-| | `tsc-desktop-<version>-setup.exe` | run it (per-machine install, uninstaller in Settings → Apps) |
-| Android | `tsc-<version>-android-debug.apk` | `adb install …` or open it on the phone (arm64-v8a and x86_64) |
-| | `tsc-<version>-android-release.apk` | only with signing configured ([release.md](release.md#android-apk-signing)) |
+| Linux x86_64 | `voelin-<version>-linux-x86_64.tar.gz` | unpack; `bin/voelin` plus desktop file and icon (prefix layout: `tar -xzf … --strip-components=1 -C ~/.local`) |
+| | `voelin_<version>_amd64.deb` | `sudo apt install ./voelin_<version>_amd64.deb` (Ubuntu 24.04+, Debian 13+) |
+| | `voelin.flatpak` (CI only) | `flatpak install --user voelin.flatpak` |
+| Linux server | `tsgw_<version>_amd64.deb` | `sudo apt install ./tsgw_<version>_amd64.deb`, then configure and start it ([gateway-admin.md](gateway-admin.md#install)) |
+| | `tsgw-<version>-linux-x86_64.tar.gz` | unpack; `bin/tsgw`, the systemd unit and the example config |
+| | `tsgw-image.tar.gz` (CI only) | `docker load -i tsgw-image.tar.gz` |
+| Windows x86_64 | `voelin-<version>-windows-x86_64.zip` | unpack; `voelin.exe` |
+| | `voelin-<version>-setup.exe` | run it (per-machine install, uninstaller in Settings → Apps) |
+| Android | `voelin-<version>-android-debug.apk` | `adb install …` or open it on the phone (arm64-v8a and x86_64) |
+| | `voelin-<version>-android-release.apk` | only with signing configured ([release.md](release.md#android-apk-signing)) |
 
 Each package run also writes `SHA256SUMS-<platform>`. Nothing is code-signed
 yet: Windows SmartScreen warns about the installer, and the debug APK is
 signed with a debug key (fine for testing, not for the Play Store).
 
-The gateway also runs as a container ([gateway-admin.md](gateway-admin.md)):
-CI uploads the image as `tsgw-image.tar.gz` (`docker load -i tsgw-image.tar.gz`,
-then `docker run … tsgw:<version>`), or build it with
-`docker build -f crates/tsc-gateway/Dockerfile -t tsgw .`.
+The gateway's image can also be built directly:
+`docker build -f crates/voelin-gateway/Dockerfile -t tsgw .`.
 
 ## From CI
 
 `.github/workflows/ci.yml` uploads one artifact per platform on every run:
-`tsc-linux-x86_64`, `tsc-windows-x86_64`, `tsc-flatpak-x86_64`,
-`tsc-android` and `tsgw-image`. Download them from the run's page (Actions → the run →
+`voelin-linux-x86_64` (the app's and the gateway's Linux packages),
+`voelin-windows-x86_64`, `voelin-flatpak-x86_64`, `voelin-android` and
+`tsgw-image`. Download them from the run's page (Actions → the run →
 Artifacts), or with the GitHub CLI:
 
 ```sh
@@ -43,8 +49,8 @@ to a **draft** GitHub release, which you review and publish by hand
 
 The Windows packages from CI use the MSVC toolchain and libvpx from vcpkg.
 The Android job builds a signed release APK only when the repository has the
-signing secrets (`ANDROID_KEYSTORE_BASE64`, `TSC_SIGNING_STORE_PASSWORD`,
-`TSC_SIGNING_KEY_ALIAS`, `TSC_SIGNING_KEY_PASSWORD`).
+signing secrets (`ANDROID_KEYSTORE_BASE64`, `VOELIN_SIGNING_STORE_PASSWORD`,
+`VOELIN_SIGNING_KEY_ALIAS`, `VOELIN_SIGNING_KEY_PASSWORD`).
 
 `.github/workflows/docker.yml` builds the Docker files below weekly, by hand
 (Actions → Docker builds → Run workflow) and when they change, and uploads
@@ -68,7 +74,7 @@ BuildKit cache mounts (`docker builder prune` frees them).
 
 | Dockerfile | Builds | Notes |
 |---|---|---|
-| `docker/linux.Dockerfile` | `.tar.gz` and `.deb` on Ubuntu 24.04 | the binaries need glibc 2.39+ and the libraries the `.deb` lists |
+| `docker/linux.Dockerfile` | the app's and the gateway's `.tar.gz` and `.deb` on Ubuntu 24.04 | the binaries need glibc 2.39+ and the libraries the `.deb` lists |
 | `docker/windows.Dockerfile` | `.zip` and the NSIS installer | cross-compiled for `x86_64-pc-windows-gnu` with mingw-w64 and a static libvpx; works on Windows 10 and 11 |
 | `docker/android.Dockerfile` | debug APK | SDK, NDK and cargo-ndk as in CI; `--build-arg ABIS=arm64-v8a,x86_64,armeabi-v7a` picks the ABIs |
 
@@ -80,8 +86,8 @@ scripts/docker-build.sh android --build-arg APK=release \
   --secret id=keystore,src=release.jks --secret id=signing,src=signing.env
 ```
 
-For the signed release APK, `signing.env` holds `TSC_SIGNING_STORE_PASSWORD=…`,
-`TSC_SIGNING_KEY_ALIAS=…` and `TSC_SIGNING_KEY_PASSWORD=…`. Secrets are not
+For the signed release APK, `signing.env` holds `VOELIN_SIGNING_STORE_PASSWORD=…`,
+`VOELIN_SIGNING_KEY_ALIAS=…` and `VOELIN_SIGNING_KEY_PASSWORD=…`. Secrets are not
 stored in the image or the build cache.
 
 **Behind a proxy:** `scripts/docker-build.sh` passes `HTTPS_PROXY`,
@@ -93,7 +99,7 @@ the proxy is on localhost. If the proxy inspects TLS, set
 
 - **Linux:** the packages from the table above need
   `sudo apt install libasound2-dev libfontconfig1-dev libxkbcommon-dev libvpx-dev libdav1d-dev libpipewire-0.3-dev libspa-0.2-dev libclang-dev cmake dpkg-dev`,
-  then `cargo build --release --locked -p tsc-ui -p tsctl -p tsc-gateway`
+  then `cargo build --release --locked -p voelin-ui -p voelin-gateway`
   and `scripts/package.sh linux`.
 - **Windows:** [packaging/windows/README.md](../packaging/windows/README.md)
   (MSVC, vcpkg libvpx, NSIS), then `bash scripts/package.sh windows` from Git Bash.

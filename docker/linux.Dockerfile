@@ -1,8 +1,9 @@
 # syntax=docker/dockerfile:1
 #
-# Linux packages (docs/building.md): tsc-<version>-linux-x86_64.tar.gz with
-# tsc-desktop, tsctl and tsgw, and tsc-desktop_<version>_amd64.deb for
-# Ubuntu 24.04 and newer.
+# Linux packages (docs/building.md), for Ubuntu 24.04 and newer: the app as
+# voelin-<version>-linux-x86_64.tar.gz and voelin_<version>_amd64.deb, the
+# gateway (servers) as tsgw-<version>-linux-x86_64.tar.gz and
+# tsgw_<version>_amd64.deb.
 #
 #   docker build -f docker/linux.Dockerfile -o dist/linux .
 #
@@ -37,9 +38,9 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 FROM toolchain AS build
 WORKDIR /src
 COPY . .
-RUN --mount=type=cache,id=tsc-cargo-registry,target=/usr/local/cargo/registry \
-	--mount=type=cache,id=tsc-target-linux,target=/src/target \
-	cargo build --release --locked -p tsc-ui -p tsctl -p tsc-gateway \
+RUN --mount=type=cache,id=voelin-cargo-registry,target=/usr/local/cargo/registry \
+	--mount=type=cache,id=voelin-target-linux,target=/src/target \
+	cargo build --release --locked -p voelin-ui -p voelin-gateway \
 	&& scripts/package.sh linux /out
 
 FROM scratch AS artifacts

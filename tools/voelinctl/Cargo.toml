@@ -1,0 +1,36 @@
+[package]
+name = "voelinctl"
+version = "0.1.0"
+description = "Headless command-line client for TeamSpeak 3/6 servers, used for development and integration tests."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "6"
+futures = "0.3"
+png = "0.18"
+serde_json = "1"
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-thread", "signal", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tsclientlib = { path = "../../crates/proto/tsclientlib" }
+tsproto-packets = { path = "../../crates/proto/tsproto-packets" }
+voelin-model = { path = "../../crates/voelin-model" }
+voelin-query = { path = "../../crates/voelin-query" }
+voelin-observer = { path = "../../crates/voelin-observer" }
+voelin-audio = { path = "../../crates/voelin-audio", default-features = false }
+# The stream media pipeline (capture, VP8, decoding), without audio devices.
+voelin-core = { path = "../../crates/voelin-core", default-features = false, features = ["media-desktop"] }
+voelin-stream = { path = "../../crates/voelin-stream" }
+tokio-tungstenite = "0.30"
+futures-util = "0.3.34"
+voelin-gateway-proto = { path = "../../crates/voelin-gateway-proto" }
+
+[lints]
+workspace = true

@@ -35,7 +35,7 @@ allow = [
 	# app's About page and the README.
 	"LicenseRef-Slint-Royalty-free-2.0",
 	# Permissive BSD-style license of bzip2, kept by its pure Rust port
-	# (libbz2-rs-sys), which tsc-media uses to unpack Cisco's OpenH264 download.
+	# (libbz2-rs-sys), which voelin-media uses to unpack Cisco's OpenH264 download.
 	"bzip2-1.0.6",
 ]
 confidence-threshold = 0.9

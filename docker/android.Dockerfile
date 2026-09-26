@@ -13,8 +13,8 @@
 #     --secret id=keystore,src=release.jks --secret id=signing,src=signing.env \
 #     -o dist/android .
 #
-# signing.env holds TSC_SIGNING_STORE_PASSWORD, TSC_SIGNING_KEY_ALIAS and
-# TSC_SIGNING_KEY_PASSWORD lines (NAME=value). Without them a release APK is
+# signing.env holds VOELIN_SIGNING_STORE_PASSWORD, VOELIN_SIGNING_KEY_ALIAS and
+# VOELIN_SIGNING_KEY_PASSWORD lines (NAME=value). Without them a release APK is
 # unsigned.
 
 FROM ubuntu:24.04 AS toolchain
@@ -80,20 +80,20 @@ ARG ABIS=arm64-v8a,x86_64
 ARG APK=debug
 WORKDIR /src
 COPY . .
-RUN --mount=type=cache,id=tsc-cargo-registry,target=/usr/local/cargo/registry \
-	--mount=type=cache,id=tsc-target-android,target=/src/target \
-	--mount=type=cache,id=tsc-gradle,target=/root/.gradle \
+RUN --mount=type=cache,id=voelin-cargo-registry,target=/usr/local/cargo/registry \
+	--mount=type=cache,id=voelin-target-android,target=/src/target \
+	--mount=type=cache,id=voelin-gradle,target=/root/.gradle \
 	--mount=type=secret,id=keystore,required=false \
 	--mount=type=secret,id=signing,required=false \
 	set -e; \
 	if [ "$APK" = release ] && [ -f /run/secrets/keystore ]; then \
-		export TSC_SIGNING_STORE_FILE=/run/secrets/keystore; \
+		export VOELIN_SIGNING_STORE_FILE=/run/secrets/keystore; \
 		set -a; . /run/secrets/signing; set +a; \
 	fi; \
 	proxy="$(java-proxy-opts)"; \
 	export GRADLE_OPTS="$proxy"; \
 	task="assemble$(echo "$APK" | sed 's/./\U&/')"; \
-	(cd android && ./gradlew --no-daemon $proxy "$task" -Ptsc.abis="$ABIS") \
+	(cd android && ./gradlew --no-daemon $proxy "$task" -Pvoelin.abis="$ABIS") \
 	&& scripts/package.sh android /out
 
 FROM scratch AS artifacts

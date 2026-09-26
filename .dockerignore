@@ -1,4 +1,4 @@
-# Build context for docker/*.Dockerfile and crates/tsc-gateway/Dockerfile:
+# Build context for docker/*.Dockerfile and crates/voelin-gateway/Dockerfile:
 # the sources only. Builds keep target/ in cache mounts, never in the context.
 .git
 .claude

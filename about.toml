@@ -21,7 +21,7 @@ accepted = [
 	# Slint: GPL-3.0-only OR royalty-free OR commercial. We use the royalty-free
 	# license, which requires the AboutSlint widget in the About page.
 	"LicenseRef-Slint-Royalty-free-2.0",
-	# libbz2-rs-sys (unpacks Cisco's OpenH264 download in tsc-media).
+	# libbz2-rs-sys (unpacks Cisco's OpenH264 download in voelin-media).
 	"bzip2-1.0.6",
 ]
 
@@ -73,7 +73,7 @@ path = "opus/COPYING"
 license = "BSD-3-Clause"
 checksum = "01e1167d54a096d123cf6dfbbeb19587278845c6481d2d66d545669846079551"
 
-# Only the bindings are compiled (tsc-media loads Cisco's binary at runtime),
+# Only the bindings are compiled (voelin-media loads Cisco's binary at runtime),
 # but without this every header of the vendored OpenH264 sources would be
 # listed. upstream/LICENSE is also the license of Cisco's binary.
 [openh264-sys2.clarify]
@@ -155,7 +155,7 @@ path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md"
 license = "LicenseRef-Slint-Royalty-free-2.0-text"
 checksum = "5167f5056e850419106ab6265efbdca7cba4d99c849d1445ca0bbf6a1e2315fe"
 
-# Android (tsc-android).
+# Android (voelin-android).
 [i-slint-backend-android-activity.clarify]
 license = "GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0"
 [[i-slint-backend-android-activity.clarify.files]]

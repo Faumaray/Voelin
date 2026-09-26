@@ -1,14 +1,13 @@
-; NSIS installer for the desktop app (tsc-desktop.exe). See README.md.
+; NSIS installer for the desktop app (voelin.exe). See README.md.
 ;
 ;   makensis /DVERSION=0.1.0 packaging\windows\installer.nsi
 ;
 ; Paths are relative to this file. Optional defines:
-;   BINARY    the executable (default ..\..\target\release\tsc-desktop.exe)
+;   BINARY    the executable (default ..\..\target\release\voelin.exe)
 ;   OUTDIR    where the installer goes (default: next to this file)
 ;   SIGN      a signing command; "%1" is replaced by the file to sign, e.g.
 ;             /DSIGN="signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /a %1"
 ;
-; The product name and app id are placeholders until the product has a name.
 
 Unicode true
 SetCompressor /SOLID lzma
@@ -17,16 +16,16 @@ SetCompressor /SOLID lzma
 	!define VERSION "0.1.0"
 !endif
 !ifndef BINARY
-	!define BINARY "..\..\target\release\tsc-desktop.exe"
+	!define BINARY "..\..\target\release\voelin.exe"
 !endif
 !ifndef OUTDIR
 	!define OUTDIR "."
 !endif
 
-!define APP_NAME "TS Client"
-!define APP_ID "io.github.faumaray.TsClient"
+!define APP_NAME "Voelin"
+!define APP_ID "io.github.faumaray.Voelin"
 !define PUBLISHER "Faumaray"
-!define EXE "tsc-desktop.exe"
+!define EXE "voelin.exe"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}"
 
 !ifdef SIGN
@@ -36,7 +35,7 @@ SetCompressor /SOLID lzma
 !endif
 
 Name "${APP_NAME}"
-OutFile "${OUTDIR}\tsc-desktop-${VERSION}-setup.exe"
+OutFile "${OUTDIR}\voelin-${VERSION}-setup.exe"
 InstallDir "$PROGRAMFILES64\${APP_NAME}"
 InstallDirRegKey HKLM "${UNINSTALL_KEY}" "InstallLocation"
 RequestExecutionLevel admin
@@ -79,7 +78,7 @@ Section "Install"
 SectionEnd
 
 Section "Uninstall"
-	; User data in %APPDATA%\tsc (identities, bookmarks, history) is kept.
+	; User data in %APPDATA%\voelin (identities, bookmarks, history) is kept.
 	Delete "$INSTDIR\${EXE}"
 	Delete "$INSTDIR\THIRD_PARTY_NOTICES.md"
 	Delete "$INSTDIR\uninstall.exe"

@@ -8,8 +8,8 @@ plugins {
 /** The Cargo workspace the native library comes from. */
 val workspace: File = rootDir.parentFile
 
-/** `version` of crates/tsc-android, which is the app's version (docs/release.md). */
-val crateVersion: String = workspace.resolve("crates/tsc-android/Cargo.toml").readLines()
+/** `version` of crates/voelin-android, which is the app's version (docs/release.md). */
+val crateVersion: String = workspace.resolve("crates/voelin-android/Cargo.toml").readLines()
     .first { it.startsWith("version = ") }
     .substringAfter('"').substringBefore('"')
 
@@ -29,17 +29,17 @@ fun lockedVersion(crate: String): String {
 fun signing(property: String, env: String): String? =
     providers.gradleProperty(property).orElse(providers.environmentVariable(env)).orNull
 
-val releaseStoreFile = signing("tsc.signing.storeFile", "TSC_SIGNING_STORE_FILE")
+val releaseStoreFile = signing("voelin.signing.storeFile", "VOELIN_SIGNING_STORE_FILE")
 
 android {
-    namespace = "io.github.faumaray.tsc"
+    namespace = "io.github.faumaray.voelin"
     compileSdk = 36
     ndkVersion = "27.3.13750724"
 
     defaultConfig {
-        // Placeholder like the desktop app id (packaging/README.md); it cannot
-        // change after the first upload to Google Play.
-        applicationId = "io.github.faumaray.TsClient"
+        // The desktop app id (packaging/README.md); it cannot change after
+        // the first upload to Google Play.
+        applicationId = "io.github.faumaray.Voelin"
         minSdk = 29
         targetSdk = 36
         versionName = crateVersion
@@ -52,9 +52,9 @@ android {
         if (releaseStoreFile != null) {
             create("release") {
                 storeFile = file(releaseStoreFile)
-                storePassword = signing("tsc.signing.storePassword", "TSC_SIGNING_STORE_PASSWORD")
-                keyAlias = signing("tsc.signing.keyAlias", "TSC_SIGNING_KEY_ALIAS")
-                keyPassword = signing("tsc.signing.keyPassword", "TSC_SIGNING_KEY_PASSWORD")
+                storePassword = signing("voelin.signing.storePassword", "VOELIN_SIGNING_STORE_PASSWORD")
+                keyAlias = signing("voelin.signing.keyAlias", "VOELIN_SIGNING_KEY_ALIAS")
+                keyPassword = signing("voelin.signing.keyPassword", "VOELIN_SIGNING_KEY_PASSWORD")
             }
         }
     }
@@ -90,12 +90,12 @@ dependencies {
     implementation("org.rustls:rustls-platform-verifier:${lockedVersion("rustls-platform-verifier-android")}")
 }
 
-// libtsc_android.so, built with cargo-ndk into build/rust/<build type>/<abi>/
-// before the JNI libraries are merged. -Ptsc.skipCargo=true uses what is
+// libvoelin_android.so, built with cargo-ndk into build/rust/<build type>/<abi>/
+// before the JNI libraries are merged. -Pvoelin.skipCargo=true uses what is
 // there (e.g. built by CI in an earlier step).
-val abis = providers.gradleProperty("tsc.abis").getOrElse("arm64-v8a,x86_64")
+val abis = providers.gradleProperty("voelin.abis").getOrElse("arm64-v8a,x86_64")
     .split(',').map(String::trim).filter(String::isNotEmpty)
-val skipCargo = providers.gradleProperty("tsc.skipCargo").map(String::toBoolean).getOrElse(false)
+val skipCargo = providers.gradleProperty("voelin.skipCargo").map(String::toBoolean).getOrElse(false)
 
 for ((buildType, release) in listOf("debug" to false, "release" to true)) {
     val out = layout.buildDirectory.dir("rust/$buildType")
@@ -106,7 +106,7 @@ for ((buildType, release) in listOf("debug" to false, "release" to true)) {
         workingDir = workspace
         val command = mutableListOf("cargo", "ndk", "--platform", "29", "-o", out.get().asFile.path)
         abis.forEach { command += listOf("-t", it) }
-        command += listOf("build", "-p", "tsc-android")
+        command += listOf("build", "-p", "voelin-android")
         if (release) command += "--release"
         commandLine(command)
         val ndk = android.ndkDirectory.path

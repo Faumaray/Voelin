@@ -1,14 +1,14 @@
 # Android app
 
-The Android app is the desktop UI (`tsc-ui`, Slint) running in a
+The Android app is the desktop UI (`voelin-ui`, Slint) running in a
 `NativeActivity`, plus a thin Kotlin layer for what only Java APIs can do:
 foreground services, the screen-capture consent, the Keystore.
 
 ```
 android/                         Gradle project (AGP 8.13, Kotlin 2.3, Gradle 8.14.3 wrapper)
-  app/src/main/java/.../tsc/     MainActivity (NativeActivity), Bridge, Native,
+  app/src/main/java/.../voelin/     MainActivity (NativeActivity), Bridge, Native,
                                  VoiceService, ScreenCaptureService, SecretStore
-crates/tsc-android/              libtsc_android.so: android_main, engine host,
+crates/voelin-android/              libvoelin_android.so: android_main, engine host,
                                  JNI glue, capture providers, Keystore secrets
 ```
 
@@ -29,16 +29,16 @@ Requirements:
 ```sh
 cd android
 ./gradlew assembleDebug                         # arm64-v8a + x86_64 (emulator)
-./gradlew assembleDebug -Ptsc.abis=arm64-v8a    # phones only, half the build
+./gradlew assembleDebug -Pvoelin.abis=arm64-v8a    # phones only, half the build
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb logcat -s RustStdoutStderr ScreenCaptureService VoiceService SecretStore
 ```
 
-`assemble<BuildType>` runs `cargo ndk ... build -p tsc-android` (with
+`assemble<BuildType>` runs `cargo ndk ... build -p voelin-android` (with
 `--release` for release) into `app/build/rust/<build type>/<abi>/` before the
-native libraries are merged; `-Ptsc.skipCargo=true` packages what is there
+native libraries are merged; `-Pvoelin.skipCargo=true` packages what is there
 (for CI steps that built the library already). The app's `versionName` is the
-version of `crates/tsc-android`, and `versionCode` is derived from it
+version of `crates/voelin-android`, and `versionCode` is derived from it
 (docs/release.md). The Kotlin half of `rustls-platform-verifier` comes from
 its Maven archive in the version `Cargo.lock` pins.
 
@@ -48,14 +48,14 @@ environment variables; nothing of it lives in the repository:
 
 | Gradle property | Environment variable |
 |---|---|
-| `tsc.signing.storeFile` | `TSC_SIGNING_STORE_FILE` |
-| `tsc.signing.storePassword` | `TSC_SIGNING_STORE_PASSWORD` |
-| `tsc.signing.keyAlias` | `TSC_SIGNING_KEY_ALIAS` |
-| `tsc.signing.keyPassword` | `TSC_SIGNING_KEY_PASSWORD` |
+| `voelin.signing.storeFile` | `VOELIN_SIGNING_STORE_FILE` |
+| `voelin.signing.storePassword` | `VOELIN_SIGNING_STORE_PASSWORD` |
+| `voelin.signing.keyAlias` | `VOELIN_SIGNING_KEY_ALIAS` |
+| `voelin.signing.keyPassword` | `VOELIN_SIGNING_KEY_PASSWORD` |
 
 ```sh
-TSC_SIGNING_STORE_FILE=~/keys/tsc-release.jks TSC_SIGNING_STORE_PASSWORD=... \
-TSC_SIGNING_KEY_ALIAS=tsc TSC_SIGNING_KEY_PASSWORD=... ./gradlew assembleRelease bundleRelease
+VOELIN_SIGNING_STORE_FILE=~/keys/voelin-release.jks VOELIN_SIGNING_STORE_PASSWORD=... \
+VOELIN_SIGNING_KEY_ALIAS=voelin VOELIN_SIGNING_KEY_PASSWORD=... ./gradlew assembleRelease bundleRelease
 ```
 
 minSdk is 29 (Android 10: MediaProjection foreground service type, playback
@@ -63,19 +63,19 @@ capture, NDK MediaCodec format queries); targetSdk and compileSdk 36.
 
 ## How it fits together
 
-- **Entry**: the activity loads `libtsc_android.so` (`android.app.lib_name`);
+- **Entry**: the activity loads `libvoelin_android.so` (`android.app.lib_name`);
   android-activity calls `android_main` on a new thread for every activity
   instance. It installs crash reports (opt-in, `crash_reports` setting,
   `<files>/crash-reports`), looks up the Kotlin `Bridge` class, initialises
   `rustls-platform-verifier` (HTTPS certificate checks against the system
   trust store), asks for the microphone and notification permissions, sets
-  Slint's Android backend and runs `tsc_ui::run` with the app's files
+  Slint's Android backend and runs `voelin_ui::run` with the app's files
   directory, Keystore secrets and the process's engine.
 - **Engine for the process** (`host.rs`): one tokio runtime and `Engine`
   per process. The activity may be destroyed while voice goes on; a new
   window attaches and first receives events that rebuild the current state
   (server info, state, presence, the last 300 chat messages per session,
-  streams), then live events (`tsc_ui::HostedEngine`). Back moves the task
+  streams), then live events (`voelin_ui::HostedEngine`). Back moves the task
   to the background instead of finishing the activity; configuration changes
   do not recreate it.
 - **Voice in the background**: while any session has a voice connection,
@@ -83,7 +83,7 @@ capture, NDK MediaCodec format queries); targetSdk and compileSdk 36.
   notification ("In voice on …", Mute or Unmute, Disconnect). Rust drives it
   from engine events (`foreground.rs`, `Bridge.setVoiceNotification`). Audio
   itself is cpal on AAudio, as on desktop.
-- **Sharing the screen**: `tsc_media::capture::default_screen_capture()`
+- **Sharing the screen**: `voelin_media::capture::default_screen_capture()`
   returns the MediaProjection provider (`capture.rs`) registered at start.
   Starting shows the system consent dialog; on consent `ScreenCaptureService`
   (type `mediaProjection`) mirrors the display into an `ImageReader` at the
@@ -92,7 +92,7 @@ capture, NDK MediaCodec format queries); targetSdk and compileSdk 36.
   `AudioPlaybackCapture` of media, game and unknown usages, 48 kHz stereo
   float, only while the projection runs. Ending the projection from the
   status bar or the notification closes the capture channels.
-- **Watching and encoding**: `tsc_media::Codecs` uses the device's
+- **Watching and encoding**: `voelin_media::Codecs` uses the device's
   MediaCodec encoders (hardware first) and decoders on Android
   ([media.md](media.md)).
 - **Secrets**: `SecretStore` encrypts each password with AES-256-GCM under a
@@ -113,17 +113,17 @@ Permissions: `INTERNET`, `ACCESS_NETWORK_STATE`, `RECORD_AUDIO`,
 
 | What | How | Status |
 |---|---|---|
-| `libtsc_android.so` for `aarch64-linux-android` (Slint Android backend with Skia, AAudio, AWS-LC, SQLite, libopus) | `cargo ndk -t arm64-v8a build -p tsc-android` | builds; exports `android_main` and the `Native` methods |
-| Debug APK | `./gradlew assembleDebug -Ptsc.abis=arm64-v8a` | builds |
-| Engine host replay, voice service policy | unit tests (`cargo test -p tsc-android`) | tested |
-| External capture providers, MediaCodec buffer layouts | `tsc-media` unit tests | tested |
+| `libvoelin_android.so` for `aarch64-linux-android` (Slint Android backend with Skia, AAudio, AWS-LC, SQLite, libopus) | `cargo ndk -t arm64-v8a build -p voelin-android` | builds; exports `android_main` and the `Native` methods |
+| Debug APK | `./gradlew assembleDebug -Pvoelin.abis=arm64-v8a` | builds |
+| Engine host replay, voice service policy | unit tests (`cargo test -p voelin-android`) | tested |
+| External capture providers, MediaCodec buffer layouts | `voelin-media` unit tests | tested |
 | The app on a device: UI, voice in the background, screen sharing, watching, Keystore | manual matrix row IN3 and the Android rows | not run yet (no device or emulator in this environment) |
 
 Known gaps:
 
-- The streams panel of the UI and the stream media pipeline of `tsc-core`
+- The streams panel of the UI and the stream media pipeline of `voelin-core`
   must build without the desktop media backends on Android (libvpx, X11,
-  PipeWire): `tsc-media` with `default-features = false` there, so that
+  PipeWire): `voelin-media` with `default-features = false` there, so that
   `Codecs` uses MediaCodec.
 - Rotating the device while sharing letterboxes the picture (the virtual
   display keeps its size).

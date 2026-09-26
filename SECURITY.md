@@ -8,7 +8,7 @@ https://github.com/Faumaray/teamspeak_client_rs (private vulnerability
 reporting). Do not open a public issue for them. If private reporting is not
 available, open an issue asking for a contact, without details.
 
-Include what is affected (desktop app, Android app, `tsgw` gateway, `tsctl`),
+Include what is affected (desktop app, Android app, `tsgw` gateway, `voelinctl`),
 the version or commit, and how to reproduce. You should get an answer within
 a week. Fixes are released as soon as they are ready and credited in the
 changelog unless you prefer otherwise.
@@ -26,10 +26,10 @@ us.
 
 | What | Where | Protection |
 |---|---|---|
-| Identities (TeamSpeak private keys) | SQLite database `client.db` in the data directory (`~/.local/share/tsc`, Flatpak `~/.var/app/<app id>/data/tsc`, `%APPDATA%\tsc`, Android app storage) | File permissions of the user account only; not encrypted. An identity is the account on every server that knows it: back it up, do not share the file |
-| Server and ServerQuery passwords | OS keyring (Secret Service, Windows Credential Manager, Android Keystore), service `tsc-client` | Keyring; kept in memory for the session only when there is no keyring |
+| Identities (TeamSpeak private keys) | SQLite database `client.db` in the data directory (`~/.local/share/voelin`, Flatpak `~/.var/app/<app id>/data/voelin`, `%APPDATA%\voelin`, Android app storage) | File permissions of the user account only; not encrypted. An identity is the account on every server that knows it: back it up, do not share the file |
+| Server and ServerQuery passwords | OS keyring (Secret Service, Windows Credential Manager, Android Keystore), service `voelin` | Keyring; kept in memory for the session only when there is no keyring |
 | Bookmarks, settings, chat history | `client.db` | File permissions; history stays until deleted |
-| Crash reports (opt-in) | `crash-reports` in the state directory (`~/.local/state/tsc`, `%LOCALAPPDATA%\tsc`) | Local only, never uploaded. They contain the panic message and a backtrace, which may include server addresses or names; review before attaching one to an issue |
+| Crash reports (opt-in) | `crash-reports` in the state directory (`~/.local/state/voelin`, `%LOCALAPPDATA%\voelin`) | Local only, never uploaded. They contain the panic message and a backtrace, which may include server addresses or names; review before attaching one to an issue |
 | OpenH264 (opt-in) | Downloaded from Cisco into the app's directories | Loaded only if its SHA-256 matches a known Cisco build |
 
 ## What others can see

@@ -1,5 +1,5 @@
 // Headless Chromium as the remote WebRTC peer for
-// crates/tsc-stream/tests/browser_interop.rs (see README.md here).
+// crates/voelin-stream/tests/browser_interop.rs (see README.md here).
 //
 // Reads one JSON command per line on stdin and writes one JSON reply per line
 // on stdout; logs go to stderr. Commands (`op`):

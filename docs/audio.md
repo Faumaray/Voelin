@@ -9,8 +9,8 @@ voice connection ─ Mixer (jitter buffer, Opus decode, per-client volume/mute)
                            └─ Processor::render (echo canceller reference)
 ```
 
-The audio thread lives in `tsc-core/src/audio.rs`; the building blocks are in
-`tsc-audio`. All user settings are one serde struct, `tsc_audio::AudioSettings`.
+The audio thread lives in `voelin-core/src/audio.rs`; the building blocks are in
+`voelin-audio`. All user settings are one serde struct, `voelin_audio::AudioSettings`.
 
 ## Echo cancellation, noise suppression, gain control
 
@@ -57,7 +57,7 @@ frame, and the talker is dropped after three in a row), and when the smallest
 queue length over the last 255 packets exceeds its spread, it drops every 100th
 sample (1 % faster) until the surplus is gone; queues above 0.5 s are truncated.
 
-`crates/tsc-audio/tests/drift.rs` simulates one hour of continuous speech with
+`crates/voelin-audio/tests/drift.rs` simulates one hour of continuous speech with
 20–60 ms network jitter, reordering and 0.5 % loss, with the sender clock at
 +200 and -200 ppm (720 ms of disagreement per hour). Marker frames every 30 s
 measure the end-to-end latency:
@@ -88,7 +88,7 @@ Watched streams play through the same mixer under made-up client ids (counting
 down from 65535) with their own volume (`SetStreamVolume`).
 
 Push-to-talk works with the button in the window and a global hotkey
-(`tsc_platform::HotkeyManager`: the portal on Wayland, XInput2 on X11, a hook on
+(`voelin_platform::HotkeyManager`: the portal on Wayland, XInput2 on X11, a hook on
 Windows), configurable as e.g. `Ctrl+Shift+T`.
 
 ## Devices
