@@ -40,7 +40,8 @@ use voelin_media::{
 	AudioBuffer, Codec, Codecs, ContentHint, EncoderConfig, FrameReceiver, VideoEncoder, VideoFrame,
 };
 use voelin_stream::{
-	EncodedFrame, FrameSource, Frequency, MediaFrame, MediaKind, MediaTime, PeerConfig, VideoCodec,
+	EncodedFrame, FrameSource, Frequency, LayerId, LayerSet, LayerSpec, MediaFrame, MediaKind,
+	MediaTime, PeerConfig, VideoCodec,
 };
 
 use crate::stream::StreamSink;
@@ -139,6 +140,21 @@ pub trait MediaSink: Send + Sync {
 
 	/// Whether a keyframe was asked for since the last call.
 	fn take_keyframe_request(&self) -> bool;
+
+	/// Adds to `layers` the simulcast layers a keyframe was asked for since
+	/// the last call. Sinks without simulcast report a request as layer 0.
+	fn take_layer_keyframes(&self, layers: &mut LayerSet) {
+		if self.take_keyframe_request() {
+			layers.insert(0);
+		}
+	}
+
+	/// Bitrate (bit/s) the bandwidth estimates of `layer`'s viewers allow,
+	/// once known; the encoder of the layer follows it.
+	fn layer_bitrate(&self, layer: LayerId) -> Option<u64> {
+		let _ = layer;
+		None
+	}
 }
 
 impl MediaSink for StreamSink {
@@ -181,6 +197,8 @@ pub struct StreamerConfig {
 	/// Portal restore token from an earlier share: the desktop may skip its
 	/// dialog. The new one is [`Streamer::restore_token`].
 	pub restore_token: Option<String>,
+	/// Simulcast layers to encode. Empty: one layer at `bitrate_kbps`.
+	pub layers: Vec<LayerSpec>,
 }
 
 impl Default for StreamerConfig {
@@ -195,6 +213,7 @@ impl Default for StreamerConfig {
 			cursor: true,
 			synthetic_size: (1280, 720),
 			restore_token: None,
+			layers: Vec::new(),
 		}
 	}
 }
@@ -438,6 +457,7 @@ fn video_loop(
 						kind: MediaKind::Video,
 						time: MediaTime::from_90khz(f.pts_90khz),
 						data: f.data.into(),
+						layer: 0,
 					};
 					if sink.send(frame) {
 						shared.video_frames.fetch_add(1, Ordering::Relaxed);
@@ -502,7 +522,7 @@ fn audio_loop(shared: &Shared, mut buffers: FrameReceiver<AudioBuffer>, mut enco
 			pending.drain(..OPUS_FRAME * 2);
 			if let Some(data) = data {
 				let time = MediaTime::new(frames * OPUS_FRAME as u64, Frequency::FORTY_EIGHT_KHZ);
-				if sink.send(EncodedFrame { kind: MediaKind::Audio, time, data }) {
+				if sink.send(EncodedFrame { kind: MediaKind::Audio, time, data, layer: 0 }) {
 					shared.audio_frames.fetch_add(1, Ordering::Relaxed);
 				}
 			}

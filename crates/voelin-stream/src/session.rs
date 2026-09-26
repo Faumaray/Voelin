@@ -284,6 +284,8 @@ pub struct StreamerOptions {
 	/// Accept every join request. Otherwise each one is reported as
 	/// [`StreamerEvent::Request`] and answered with [`Streams::respond`].
 	pub auto_accept: bool,
+	/// The simulcast layers the source produces. Empty: one layer (0).
+	pub layers: Vec<crate::LayerSpec>,
 }
 
 struct ViewerSlot {
@@ -1206,7 +1208,7 @@ mod tests {
 		let config = PeerConfig::loopback();
 		let mut s = Streams::new(OWN, config.clone());
 		let setup = StreamSetup { name: "t".into(), ..Default::default() };
-		s.start(StreamerOptions { setup, auto_accept: false }).unwrap();
+		s.start(StreamerOptions { setup, auto_accept: false, ..Default::default() }).unwrap();
 		assert_eq!(s.start(StreamerOptions::default()), Err(SessionError::AlreadyStreaming));
 		let (requests, _) = drain(&mut s);
 		assert_eq!(

@@ -204,11 +204,12 @@ impl StreamTask {
 	async fn input(&mut self, input: StreamInput) {
 		let session = self.session;
 		let result = match input {
-			StreamInput::Start { setup, auto_accept } => {
-				self.streams.start(StreamerOptions { setup, auto_accept }).map(|()| {
+			StreamInput::Start { setup, auto_accept } => self
+				.streams
+				.start(StreamerOptions { setup, auto_accept, ..Default::default() })
+				.map(|()| {
 					self.emit(Event::StreamState { session, state: StreamState::Starting });
-				})
-			}
+				}),
 			StreamInput::Stop => self.streams.stop(),
 			StreamInput::Respond { viewer, accept } => {
 				self.streams.respond(ClientId(viewer), accept).await

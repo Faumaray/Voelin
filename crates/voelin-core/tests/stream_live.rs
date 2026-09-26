@@ -224,6 +224,7 @@ async fn ts6_stream_between_sessions() {
 		kind: MediaKind::Audio,
 		time: voelin_core::stream::MediaTime::from_90khz(0),
 		data: vec![0].into(),
+		layer: 0,
 	}));
 	feeder.await.unwrap();
 

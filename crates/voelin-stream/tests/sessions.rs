@@ -199,7 +199,9 @@ async fn stream_between_sessions() {
 	let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
 	let mut net = Net::new();
 	let setup = StreamSetup { name: "fake".into(), kind: StreamKind::Screen, ..Default::default() };
-	net.clients[STREAMER].start(StreamerOptions { setup, auto_accept: false }).unwrap();
+	net.clients[STREAMER]
+		.start(StreamerOptions { setup, auto_accept: false, ..Default::default() })
+		.unwrap();
 	net.until("live", |i, e| {
 		i == STREAMER && matches!(e, StreamEvent::Streamer(StreamerEvent::Live { .. }))
 	})

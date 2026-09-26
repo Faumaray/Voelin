@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 use str0m::media::{Frequency, MediaKind, MediaTime};
 
+use crate::layer::LayerId;
+
 /// One encoded video or audio frame.
 #[derive(Clone, Debug)]
 pub struct EncodedFrame {
@@ -16,6 +18,9 @@ pub struct EncodedFrame {
 	/// RTP time: 90 kHz for video, 48 kHz for Opus.
 	pub time: MediaTime,
 	pub data: Arc<[u8]>,
+	/// The simulcast layer of a video frame (0 without simulcast, and for
+	/// audio).
+	pub layer: LayerId,
 }
 
 /// Produces encoded frames in real time.
@@ -25,6 +30,17 @@ pub trait FrameSource: Send {
 
 	/// A viewer needs a keyframe soon.
 	fn request_keyframe(&mut self) {}
+
+	/// A viewer of simulcast layer `layer` needs a keyframe soon.
+	fn request_layer_keyframe(&mut self, layer: LayerId) {
+		let _ = layer;
+		self.request_keyframe();
+	}
+
+	/// The bandwidth estimates of the viewers of `layer` allow `bitrate` bit/s.
+	fn set_layer_bitrate(&mut self, layer: LayerId, bitrate: u64) {
+		let _ = (layer, bitrate);
+	}
 
 	/// How often `poll_frames` should be called.
 	fn interval(&self) -> Duration {
@@ -89,6 +105,7 @@ impl FrameSource for SyntheticSource {
 				kind: MediaKind::Video,
 				time: MediaTime::from_90khz(n * 90_000 / u64::from(self.fps)),
 				data: Self::video_frame(n, self.video_size).into(),
+				layer: 0,
 			});
 			self.video_frames += 1;
 		}
@@ -98,7 +115,7 @@ impl FrameSource for SyntheticSource {
 				let time =
 					MediaTime::new(self.audio_frames * OPUS_FRAME, Frequency::FORTY_EIGHT_KHZ);
 				let data = Arc::from(&OPUS_SILENCE[..]);
-				out.push(EncodedFrame { kind: MediaKind::Audio, time, data });
+				out.push(EncodedFrame { kind: MediaKind::Audio, time, data, layer: 0 });
 				self.audio_frames += 1;
 			}
 		}

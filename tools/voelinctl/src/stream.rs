@@ -159,7 +159,8 @@ pub async fn run(con: &mut Connection, args: &StreamArgs) -> Result<()> {
 				audio: streamer.has_audio(),
 				..Default::default()
 			};
-			let options = StreamerOptions { setup, auto_accept: *auto_accept };
+			let options =
+				StreamerOptions { setup, auto_accept: *auto_accept, ..Default::default() };
 			let source = EncodedSource::new(streamer);
 			start(con, &mut driver, options, source, seconds.map(Duration::from_secs)).await
 		}
