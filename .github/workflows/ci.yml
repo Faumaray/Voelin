@@ -110,6 +110,51 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  # The Android app (docs/android.md): clippy on the Android-only code and a
+  # debug APK for arm64. Nothing runs on a device here.
+  android:
+    name: android (arm64 APK)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      NDK_VERSION: 27.3.13750724
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustup target add aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Android SDK packages
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "ndk;$NDK_VERSION" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          # CMake (libopus) and Slint's Java helper.
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_JAR=$ANDROID_HOME/platforms/android-36/android.jar" >> "$GITHUB_ENV"
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked --version 4.1.2
+      - name: clippy (Android target, deny warnings)
+        run: |
+          cargo ndk -t arm64-v8a --platform 29 clippy --locked -p tsc-android -p tsc-ui --no-deps -- -D warnings
+          cargo ndk -t arm64-v8a --platform 29 clippy --locked -p tsc-media --no-default-features --no-deps -- -D warnings
+      - name: Debug APK
+        working-directory: android
+        run: ./gradlew --no-daemon assembleDebug -Ptsc.abis=arm64-v8a
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tsc-android-debug-arm64
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
   # Licenses, bans, sources and RustSec advisories (the `cargo audit`
   # database); audit.yml repeats the advisories check daily.
   deny:

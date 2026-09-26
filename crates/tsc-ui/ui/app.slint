@@ -1470,6 +1470,13 @@ export component MainWindow inherits Window {
     changed width => { narrow = self.width < 800px; }
     init => { narrow = self.width < 800px; }
     property <int> pane: 1;
+    // Android: the space under the on-screen keyboard (the window is not
+    // resized for it). Zero on desktop.
+    property <length> keyboard-inset: 0;
+    changed virtual-keyboard-size => {
+        keyboard-inset = self.virtual-keyboard-size.height > 0 ? self.height - self.virtual-keyboard-position.y : 0;
+    }
+
     // The viewer takes the whole window in full screen.
     property <bool> chrome: !(Bridge.viewer-open && Bridge.viewer-fullscreen);
 
@@ -1479,6 +1486,11 @@ export component MainWindow inherits Window {
     }
 
     VerticalLayout {
+        // Android draws the window under the status and navigation bars.
+        padding-top: root.safe-area-insets.top;
+        padding-left: root.safe-area-insets.left;
+        padding-right: root.safe-area-insets.right;
+        padding-bottom: max(root.safe-area-insets.bottom, root.keyboard-inset);
         // Toolbar
         if chrome: Rectangle {
             height: 48px;

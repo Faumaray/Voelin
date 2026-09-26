@@ -2,7 +2,7 @@
 //! (portal on Wayland, XInput2 on X11, a hook on Windows) and reports
 //! presses and releases.
 
-use tokio::runtime::Runtime;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
 /// Id of the push-to-talk registration (the portal remembers it).
@@ -18,7 +18,7 @@ impl GlobalPtt {
 	/// Start the task. `status` gets a line for the settings page,
 	/// `transmit` the key's state; both are called on the runtime.
 	pub fn start(
-		runtime: &Runtime,
+		runtime: &Handle,
 		status: impl Fn(String) + Send + 'static,
 		transmit: impl Fn(bool) + Send + 'static,
 	) -> Self {

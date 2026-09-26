@@ -51,9 +51,12 @@ Done so far (milestones M0–M4 and the first part of M5 of [the plan](docs/arch
   checks tree, server chat, channel chat, a voice tone round-trip, invisible presence,
   relay chat and the gateway on both
 - `fuzz/`: cargo-fuzz targets for packets, commands and the license chain
+- `android/` + `crates/tsc-android`: the Android app (the same Slint UI in a NativeActivity,
+  voice in a foreground service, screen sharing through MediaProjection, MediaCodec, Keystore
+  passwords). It builds; it has not run on a device yet ([docs/android.md](docs/android.md))
 
 Screen sharing works between our clients through a TeamSpeak 6 server (VP8 video, Opus audio);
-interop with the official TeamSpeak 6 client is not verified yet. No Android build yet.
+interop with the official TeamSpeak 6 client is not verified yet.
 
 | Connected with voice | Observing invisibly through the gateway |
 |---|---|

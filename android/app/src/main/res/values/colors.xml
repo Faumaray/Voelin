@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="window_background">#FF1C1C1C</color>
+    <!-- The placeholder icon's green (packaging/linux/*.svg). -->
+    <color name="ic_launcher_background">#FF238636</color>
+</resources>

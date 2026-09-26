@@ -119,6 +119,49 @@ for these implementations of WebM shall terminate as of the date such
 litigation is filed.
 ````
 
+- Skia (Android app only: Slint draws with it there), compiled into the app
+  from rust-skia's prebuilt binaries (skia-bindings). Its license:
+
+````text
+Copyright (c) 2011 Google Inc. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+  * Redistributions of source code must retain the above copyright
+    notice, this list of conditions and the following disclaimer.
+
+  * Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in
+    the documentation and/or other materials provided with the
+    distribution.
+
+  * Neither the name of the copyright holder nor the names of its
+    contributors may be used to endorse or promote products derived
+    from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+````
+
+  The Skia build includes further libraries under their own licenses:
+  FreeType (FreeType License: portions of this software are copyright © The
+  FreeType Project, www.freetype.org, all rights reserved), libpng (PNG
+  Reference Library License), libjpeg-turbo (IJG License, BSD-3-Clause and
+  zlib License: this software is based in part on the work of the Independent
+  JPEG Group), zlib (zlib License), Expat (MIT), Wuffs (Apache-2.0) and the
+  Vulkan Memory Allocator (MIT).
+
 Other system libraries the app uses at runtime (ALSA, PipeWire, fontconfig,
 xkbcommon, the C and C++ runtimes) belong to the operating system and are not
 distributed with it.
@@ -132,11 +175,11 @@ the crate's authors are listed as its copyright holders.
 
 | License | Crates |
 |---|---|
-| MIT License | 617 |
+| MIT License | 619 |
 | Apache License 2.0 | 29 |
 | Unicode License v3 | 26 |
 | BSD 3-Clause "New" or "Revised" License | 22 |
-| LicenseRef-Slint-Royalty-free-2.0 | 10 |
+| LicenseRef-Slint-Royalty-free-2.0 | 12 |
 | ISC License | 8 |
 | BSD 2-Clause "Simplified" License | 3 |
 | zlib License | 3 |
@@ -2631,7 +2674,7 @@ THE SOFTWARE IS PROVIDED "AS IS" AND ISC DISCLAIMS ALL WARRANTIES WITH REGARD TO
 
 ### LicenseRef-Slint-Royalty-free-2.0
 
-Used by: i-slint-backend-selector 1.18.1, i-slint-backend-winit 1.18.1, i-slint-common 1.18.1, i-slint-compiler 1.18.1, i-slint-core-macros 1.18.1, i-slint-core 1.18.1, i-slint-renderer-femtovg 1.18.1, i-slint-renderer-software 1.18.1, slint-macros 1.18.1, slint 1.18.1
+Used by: i-slint-backend-android-activity 1.18.1, i-slint-backend-selector 1.18.1, i-slint-backend-winit 1.18.1, i-slint-common 1.18.1, i-slint-compiler 1.18.1, i-slint-core-macros 1.18.1, i-slint-core 1.18.1, i-slint-renderer-femtovg 1.18.1, i-slint-renderer-skia 1.18.1, i-slint-renderer-software 1.18.1, slint-macros 1.18.1, slint 1.18.1
 
 ````text
 # Slint Royalty-free Desktop, Mobile, and Web Applications License
@@ -9498,6 +9541,8 @@ Standard text, used by:
 - rcgen 0.14.10 (https://github.com/rustls/rcgen)
 - realfft 3.5.0: HEnquist <henrik.enquist@gmail.com> (https://github.com/HEnquist/realfft)
 - rustls-platform-verifier-android 0.2.0 (https://github.com/rustls/rustls-platform-verifier)
+- skia-bindings 0.153.3: LongYinan <lynweklm@gmail.com>, Armin Sander <armin@replicator.org> (https://github.com/rust-skia/rust-skia)
+- skia-safe 0.153.3: Armin Sander <armin@replicator.org> (https://github.com/rust-skia/rust-skia)
 - str0m-aws-lc-rs 0.6.0: Martin Algesten <martin@algesten.se> (https://github.com/algesten/str0m)
 - str0m-proto 0.7.0: Martin Algesten <martin@algesten.se> (https://github.com/algesten/str0m)
 - taffy 0.10.1: Alice Cecile <alice.i.cecile@gmail.com>, Johnathan Kelley <jkelleyrtp@gmail.com>, Nico Burns <nico@nicoburns.com> (https://github.com/DioxusLabs/taffy)
