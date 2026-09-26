@@ -80,6 +80,36 @@ opt-level = 3
 [profile.dev.package.sonora-simd]
 opt-level = 3
 
+# Screen sharing runs pixel conversion, codecs and RTP for every frame;
+# unoptimized, a debug build manages a few frames per second at 1080p.
+# (libvpx, dav1d and libopus are system / release-built C libraries.)
+[profile.dev.package.yuv]
+opt-level = 3
+[profile.dev.package.voelin-media]
+opt-level = 3
+[profile.dev.package.str0m]
+opt-level = 3
+[profile.dev.package.str0m-proto]
+opt-level = 3
+[profile.dev.package.str0m-aws-lc-rs]
+opt-level = 3
+[profile.dev.package.openh264]
+opt-level = 3
+[profile.dev.package.dav1d]
+opt-level = 3
+[profile.dev.package.opus2]
+opt-level = 3
+[profile.dev.package.pipewire]
+opt-level = 3
+[profile.dev.package.libspa]
+opt-level = 3
+[profile.dev.package.x11rb-protocol]
+opt-level = 3
+[profile.dev.package.wayland-backend]
+opt-level = 3
+[profile.dev.package.wayland-client]
+opt-level = 3
+
 [profile.dev]
 # Line tables (for backtraces) for workspace crates, no debug info for
 # dependencies: keeps target/ several times smaller. Override locally for
@@ -88,3 +118,12 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+[profile.release]
+# One optimisation unit across all crates: inlining across crate boundaries
+# matters for the per-pixel and per-packet code of streams. Panics still
+# unwind (no `panic = "abort"`): a panic in one tokio task or media thread
+# must not end the app (tasks and threads report it, mutexes recover from
+# poisoning), and the crash reporter's hook runs either way.
+lto = "fat"
+codegen-units = 1
