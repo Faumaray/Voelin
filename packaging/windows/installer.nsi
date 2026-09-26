@@ -61,6 +61,8 @@ VIAddVersionKey "LegalCopyright" "MIT OR Apache-2.0"
 Section "Install"
 	SetOutPath "$INSTDIR"
 	File "/oname=${EXE}" "${BINARY}"
+	; Also shown in the app's About page.
+	File "/oname=THIRD_PARTY_NOTICES.md" "..\..\THIRD_PARTY_NOTICES.md"
 	WriteUninstaller "$INSTDIR\uninstall.exe"
 
 	CreateShortcut "$SMPROGRAMS\${APP_NAME}.lnk" "$INSTDIR\${EXE}"
@@ -79,6 +81,7 @@ SectionEnd
 Section "Uninstall"
 	; User data in %APPDATA%\tsc (identities, bookmarks, history) is kept.
 	Delete "$INSTDIR\${EXE}"
+	Delete "$INSTDIR\THIRD_PARTY_NOTICES.md"
 	Delete "$INSTDIR\uninstall.exe"
 	RMDir "$INSTDIR"
 	Delete "$SMPROGRAMS\${APP_NAME}.lnk"
