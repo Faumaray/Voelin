@@ -7,7 +7,8 @@
 
 pub(crate) use imp::*;
 
-/// Human-readable text for a capture source size.
+/// Human-readable text for a picture size.
+#[cfg(feature = "media")]
 fn size_text(width: u32, height: u32) -> String {
 	if width == 0 || height == 0 { String::new() } else { format!("{width}×{height}") }
 }
@@ -442,6 +443,7 @@ mod imp {
 
 	pub(crate) struct H264Download;
 
+	#[allow(dead_code, reason = "the same fields as with video")]
 	pub(crate) struct CaptureRequest {
 		pub fps: u32,
 		pub bitrate_kbps: u32,
