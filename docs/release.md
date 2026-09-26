@@ -132,8 +132,12 @@ repository; losing it means existing installs can no longer be updated.
   and back it up (two offline copies, password in a password manager).
 - The Gradle build reads the keystore path, alias and passwords from Gradle
   properties or environment variables (`~/.gradle/gradle.properties`, CI
-  secrets), never from files in the repository. Without them it builds
-  unsigned or debug-signed artifacts only.
+  secrets), never from files in the repository: `tsc.signing.storeFile`,
+  `tsc.signing.storePassword`, `tsc.signing.keyAlias`,
+  `tsc.signing.keyPassword`, or `TSC_SIGNING_STORE_FILE`,
+  `TSC_SIGNING_STORE_PASSWORD`, `TSC_SIGNING_KEY_ALIAS`,
+  `TSC_SIGNING_KEY_PASSWORD` ([android.md](android.md)). Without them it
+  builds unsigned or debug-signed artifacts only.
 - CI: the keystore as a base64 secret, decoded to `$RUNNER_TEMP`, removed
   afterwards. Check with `apksigner verify --print-certs app-release.apk`.
 - Google Play: use Play App Signing; our keystore is then the upload key

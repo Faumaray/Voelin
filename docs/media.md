@@ -50,6 +50,17 @@ software). `Codecs` filters both lists by what is compiled in and loaded.
 | OpenH264 | `openh264` (default) | H.264 Constrained High / Baseline | H.264 | Cisco's prebuilt binary, loaded at runtime |
 | dav1d | `av1` | – | AV1 | system libdav1d >= 1.3 (1.4.1 tested) |
 | hardware | – | not yet | – | `codec::hw::HardwareEncoderFactory`; VA-API and Media Foundation stubs report nothing (TODO) |
+| MediaCodec (Android) | – | H.264, VP8, VP9 | VP8, VP9, H.264, AV1 | the device's default codec per type through the NDK (`ndk` crate); a hardware encoder factory named `mediacodec` |
+
+On Android, `codec::mediacodec` uses byte-buffer mode on both sides, so it
+takes and returns `VideoFrame`s like the software codecs. Encoders get NV12
+(else I420) in the layout the codec reports (`image-data` / `stride` /
+`slice-height`, parsed by `codec::image_layout`, which is tested on every
+platform); H.264 is High (preferably Constrained High) without B-frames, SPS/PPS
+in front of every keyframe, keyframes on request (`request-sync`), bitrate
+changes at runtime (`video-bitrate`). Encoder order: the device's hardware
+encoders (H.264, VP9, VP8), then Google's software VP8 and H.264. Decoders
+return the newest finished picture per `decode` call (NV12 or I420).
 
 libvpx settings follow libwebrtc's realtime setup: one pass CBR, no lag,
 `VPX_DL_REALTIME`, error resilient, `cpu-used` 8 (VP8: fixed speed −8), keyframes
@@ -57,7 +68,8 @@ only at start and on request unless `keyframe_interval` is set, screen content
 tuning (`VP8E_SET_SCREEN_CONTENT_MODE`, `VP9E_SET_TUNE_CONTENT`, static
 threshold), VP9 row-mt, tiles and cyclic-refresh AQ. `set_bitrate` reconfigures
 the running encoder (`vpx_codec_enc_config_set`). The C API is wrapped in
-`codec/vpx/raw.rs`, one of the two modules with `unsafe` code; existing safe
+`codec/vpx/raw.rs`, one of three modules with `unsafe` code (with the X11 SHM
+mapping and the `Send` wrapper in `codec/mediacodec.rs`); existing safe
 wrappers either encode only or cannot change the bitrate at runtime.
 
 The OpenH264 encoder has no safe runtime bitrate change in the `openh264`
@@ -98,9 +110,13 @@ found at ...").
 | Linux X11 (`x11`, default) | `X11Capture`: MIT-SHM 1.2 (memfd passed to the server) or GetImage; RandR 1.5 monitors; windows from `_NET_CLIENT_LIST` (root children without a WM); XFixes cursor blended in | |
 | Linux Wayland (`pipewire`, default) | `PortalCapture`: xdg-desktop-portal ScreenCast via `ashpd`, frames from a PipeWire video stream | `PipeWireAudioCapture`: default sink monitor (`stream.capture.sink = true`) |
 | Windows | `WindowsCapture`: Windows Graphics Capture (`windows-capture`), monitors and windows | `WasapiLoopback`: process loopback excluding our own process tree, falling back to plain loopback |
+| Android | `ExternalScreenCapture` fed by the app (MediaProjection → `ImageReader`, RGBA; see [android.md](android.md)) | `ExternalAudioCapture` fed by the app (`AudioPlaybackCapture`, 48 kHz float) |
 
-`default_screen_capture()` picks the portal when `WAYLAND_DISPLAY` is set (or
-`XDG_SESSION_TYPE=wayland`), X11 when `DISPLAY` is set, WGC on Windows.
+`default_screen_capture()` picks a registered external provider first
+(`capture::external::set_screen_provider`, which the Android app calls at
+start), then the portal when `WAYLAND_DISPLAY` is set (or
+`XDG_SESSION_TYPE=wayland`), X11 when `DISPLAY` is set, WGC on Windows;
+`default_audio_capture()` likewise.
 
 Notes:
 
@@ -171,3 +187,6 @@ run on Windows yet.
 | Portal capture, PipeWire video and audio streams | – | compiles only (no portal or PipeWire daemon here) |
 | Windows Graphics Capture, WASAPI | – | type-checked for `x86_64-pc-windows-gnu` only |
 | Hardware encoders | – | stubs |
+| External capture providers (start, refusal, end of capture, default selection) | unit tests | tested |
+| MediaCodec buffer layouts (I420, NV12 with padding, `MediaImage2` NV21, crop) | unit tests (`codec::image_layout`) | tested |
+| MediaCodec encoders and decoders | – | compiles for `aarch64-linux-android` only (no device or emulator here) |

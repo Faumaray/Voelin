@@ -8,6 +8,8 @@
 //!   loaded at runtime
 //! - [`av1`] (feature `av1`): AV1 decoding with the system libdav1d
 //! - [`hw`]: hardware encoders (VA-API, Media Foundation); not implemented yet
+//! - `mediacodec` (Android): the device's MediaCodec encoders and decoders
+//!   (hardware, or Google's software VP8 / VP9 / H.264)
 
 use std::fmt;
 use std::str::FromStr;
@@ -20,6 +22,9 @@ pub mod av1;
 #[cfg(feature = "openh264")]
 pub mod h264;
 pub mod hw;
+pub mod image_layout;
+#[cfg(target_os = "android")]
+pub mod mediacodec;
 #[cfg(feature = "vpx")]
 pub mod vpx;
 
@@ -263,6 +268,10 @@ impl Codecs {
 
 	/// Whether `codec` can be decoded, or why not.
 	pub fn check_decoder(&self, codec: Codec) -> Result<()> {
+		#[cfg(target_os = "android")]
+		if mediacodec::check_decoder(codec).is_ok() {
+			return Ok(());
+		}
 		match codec {
 			Codec::Vp8 | Codec::Vp9 => {
 				#[cfg(feature = "vpx")]
@@ -321,6 +330,10 @@ impl Codecs {
 	}
 
 	pub fn new_decoder(&self, codec: Codec) -> Result<Box<dyn VideoDecoder>> {
+		#[cfg(target_os = "android")]
+		if mediacodec::check_decoder(codec).is_ok() {
+			return Ok(Box::new(mediacodec::MediaCodecDecoder::new(codec)?));
+		}
 		self.check_decoder(codec)?;
 		match codec {
 			#[cfg(feature = "vpx")]
