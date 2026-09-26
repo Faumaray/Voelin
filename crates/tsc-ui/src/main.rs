@@ -1,7 +1,5 @@
 //! Desktop client.
 
-mod app;
-
 use anyhow::Result;
 use tracing_subscriber::EnvFilter;
 
@@ -11,5 +9,5 @@ fn main() -> Result<()> {
 			EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
 		)
 		.init();
-	app::run()
+	tsc_ui::run(tsc_ui::RunOptions::default())
 }

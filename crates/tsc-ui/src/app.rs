@@ -104,16 +104,27 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 	APP.with(|app| app.borrow_mut().as_mut().map(f))
 }
 
-pub fn run() -> Result<()> {
+/// Start options for [`run`].
+#[derive(Clone, Debug, Default)]
+pub struct RunOptions {
+	/// Where the client database lives. Default: `TSC_DATA_DIR`, else
+	/// `<data dir>/tsc`. Mobile platforms pass their app storage directory.
+	pub data_dir: Option<std::path::PathBuf>,
+}
+
+/// Run the app on the current thread until the window closes. The Slint
+/// platform must be set up before (the default backend on desktop).
+pub fn run(options: RunOptions) -> Result<()> {
 	let runtime = Runtime::new()?;
 	let engine = runtime.block_on(async { Engine::start() });
 
 	// Development switches: TSC_DATA_DIR isolates the database,
 	// TSC_AUTOCONNECT=voice|observe connects the first bookmark on start,
 	// TSC_SCREENSHOT=<png> saves the window after TSC_SCREENSHOT_DELAY seconds and exits.
-	let dir = match std::env::var_os("TSC_DATA_DIR") {
-		Some(dir) => dir.into(),
-		None => dirs::data_dir().unwrap_or_else(|| ".".into()).join("tsc"),
+	let dir = match (options.data_dir, std::env::var_os("TSC_DATA_DIR")) {
+		(Some(dir), _) => dir,
+		(None, Some(dir)) => dir.into(),
+		(None, None) => dirs::data_dir().unwrap_or_else(|| ".".into()).join("tsc"),
 	};
 	let store =
 		Store::open(&dir.join("client.db")).context("failed to open the client database")?;
