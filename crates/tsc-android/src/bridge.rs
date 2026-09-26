@@ -39,8 +39,13 @@ pub fn context<'local>(env: &mut Env<'local>) -> Result<JObject<'local>> {
 	let class = BRIDGE
 		.get()
 		.ok_or_else(|| Error::ClassNotFound { name: "io.github.faumaray.tsc.Bridge".into() })?;
-	env.call_static_method(class, jni_str!("context"), jni_sig!(() -> android.content.Context), &[])?
-		.l()
+	env.call_static_method(
+		class,
+		jni_str!("context"),
+		jni_sig!(() -> android.content.Context),
+		&[],
+	)?
+	.l()
 }
 
 /// Ask for the microphone and notification permissions if not granted yet.

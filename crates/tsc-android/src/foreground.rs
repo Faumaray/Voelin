@@ -91,7 +91,10 @@ mod tests {
 			capabilities: Capabilities::default(),
 		};
 		assert_eq!(fg.update(&info), Some(Some("Connecting to Home".into())));
-		assert_eq!(fg.update(&voice(1, VoiceState::Connected)), Some(Some("In voice on Home".into())));
+		assert_eq!(
+			fg.update(&voice(1, VoiceState::Connected)),
+			Some(Some("In voice on Home".into()))
+		);
 		assert_eq!(fg.update(&voice(1, VoiceState::Connected)), None, "no change");
 		assert_eq!(
 			fg.update(&voice(2, VoiceState::Connecting)),

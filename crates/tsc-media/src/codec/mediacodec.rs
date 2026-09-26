@@ -25,7 +25,9 @@ use ndk::media::media_format::MediaFormat;
 use tracing::{debug, info};
 
 use super::hw::HardwareEncoderFactory;
-use super::image_layout::{COLOR_FORMAT_FLEXIBLE, COLOR_FORMAT_I420, COLOR_FORMAT_NV12, ImageLayout};
+use super::image_layout::{
+	COLOR_FORMAT_FLEXIBLE, COLOR_FORMAT_I420, COLOR_FORMAT_NV12, ImageLayout,
+};
 use super::{Codec, EncodedFrame, EncoderBackend, EncoderConfig, VideoDecoder, VideoEncoder};
 use crate::frame::{FrameData, VideoFrame};
 use crate::{Error, Result, convert};
@@ -178,7 +180,13 @@ struct EncoderSession {
 }
 
 impl MediaCodecEncoder {
-	fn format(&self, width: u32, height: u32, color_format: i32, profile: Option<i32>) -> MediaFormat {
+	fn format(
+		&self,
+		width: u32,
+		height: u32,
+		color_format: i32,
+		profile: Option<i32>,
+	) -> MediaFormat {
 		let mut format = MediaFormat::new();
 		format.set_str("mime", mime(self.codec));
 		format.set_i32("width", width as i32);

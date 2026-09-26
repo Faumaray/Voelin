@@ -159,7 +159,13 @@ pub fn wants_frames() -> bool {
 }
 
 /// A captured RGBA frame. Returns `false` once nobody wants frames.
-pub fn on_frame(pixels: Vec<u8>, width: u32, height: u32, stride: usize, timestamp_ns: i64) -> bool {
+pub fn on_frame(
+	pixels: Vec<u8>,
+	width: u32,
+	height: u32,
+	stride: usize,
+	timestamp_ns: i64,
+) -> bool {
 	with_state(|s| {
 		let timestamp = since(&mut s.first_frame_ns, timestamp_ns);
 		let Some(frames) = &s.frames else {

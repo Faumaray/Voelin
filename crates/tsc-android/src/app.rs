@@ -111,10 +111,10 @@ fn watch_voice(host: &'static EngineHost) {
 		loop {
 			match events.recv().await {
 				Ok(event) => {
-					if let Some(text) = with_foreground(|f| f.update(&event)) {
-						if let Err(e) = bridge::set_voice_notification(text.as_deref()) {
-							warn!("voice service: {e}");
-						}
+					if let Some(text) = with_foreground(|f| f.update(&event))
+						&& let Err(e) = bridge::set_voice_notification(text.as_deref())
+					{
+						warn!("voice service: {e}");
 					}
 				}
 				Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,

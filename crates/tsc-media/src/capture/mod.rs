@@ -22,13 +22,13 @@ use crate::frame::{AudioBuffer, VideoFrame};
 use crate::queue::FrameReceiver;
 use crate::{Error, Result};
 
+pub mod external;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod pipewire_audio;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod portal;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 mod pw;
-pub mod external;
 pub mod synthetic;
 #[cfg(windows)]
 pub mod windows;

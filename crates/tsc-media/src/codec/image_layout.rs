@@ -130,7 +130,11 @@ impl ImageLayout {
 	pub fn buffer_len(&self) -> usize {
 		let (cw, ch) = chroma_size(self.width, self.height);
 		let end = |p: &PlaneLayout, w: usize, h: usize| {
-			if w == 0 || h == 0 { 0 } else { p.offset + (h - 1) * p.row_inc + (w - 1) * p.col_inc + 1 }
+			if w == 0 || h == 0 {
+				0
+			} else {
+				p.offset + (h - 1) * p.row_inc + (w - 1) * p.col_inc + 1
+			}
 		};
 		let (w, h) = (self.width as usize, self.height as usize);
 		end(&self.y, w, h).max(end(&self.u, cw, ch)).max(end(&self.v, cw, ch))
@@ -163,7 +167,11 @@ impl ImageLayout {
 			let uv = PlaneLayout { col_inc: 1, ..self.u };
 			FrameData::Nv12 { y, uv: read_plane(buf, &uv, cw * 2, ch) }
 		} else {
-			FrameData::I420 { y, u: read_plane(buf, &self.u, cw, ch), v: read_plane(buf, &self.v, cw, ch) }
+			FrameData::I420 {
+				y,
+				u: read_plane(buf, &self.u, cw, ch),
+				v: read_plane(buf, &self.v, cw, ch),
+			}
 		};
 		let frame = VideoFrame {
 			width: self.width,
@@ -303,9 +311,8 @@ mod tests {
 	#[test]
 	fn crop_and_size_checks() {
 		// A decoder buffer of 8x6 (stride 8) showing 6x4.
-		let layout = ImageLayout::from_color_format(COLOR_FORMAT_I420, 8, 6, 8, 6)
-			.unwrap()
-			.cropped(6, 4);
+		let layout =
+			ImageLayout::from_color_format(COLOR_FORMAT_I420, 8, 6, 8, 6).unwrap().cropped(6, 4);
 		assert_eq!((layout.width, layout.height), (6, 4));
 		assert_eq!(layout.u.offset, 48);
 		assert!(ImageLayout::from_color_format(COLOR_FORMAT_FLEXIBLE, 8, 6, 8, 6).is_none());
