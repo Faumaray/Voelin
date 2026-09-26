@@ -20,8 +20,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig1-dev libxkbcommon-dev
+      - uses: ./.github/actions/system-deps
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
@@ -44,16 +43,72 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install system dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig1-dev libxkbcommon-dev
+      - uses: ./.github/actions/system-deps
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --workspace --all-targets --locked
+      # Under Xvfb, so X11 tests (screen capture, global hotkeys through
+      # XTEST input) run instead of skipping.
+      - name: Test (Linux, Xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a bash -c 'TSC_X11_TEST_DISPLAY="$DISPLAY" cargo test --workspace --locked'
       - name: Test
+        if: runner.os != 'Linux'
         run: cargo test --workspace --locked
+
+  release-build:
+    name: release build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            artifact: tsc-desktop-linux-x86_64
+          - os: windows-2025
+            artifact: tsc-desktop-windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/system-deps
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+      - name: Build tsc-desktop
+        run: cargo build --release --locked -p tsc-ui
+      - name: Stage (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          cp target/release/tsc-desktop dist/
+          cp packaging/linux/* dist/
+      # The installer is built when NSIS is on the runner; unsigned.
+      - name: Stage (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\release\tsc-desktop.exe dist\
+          $makensis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
+          if (-not $makensis) {
+            $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          }
+          if (Test-Path $makensis) {
+            $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+              Where-Object name -eq 'tsc-ui' | Select-Object -ExpandProperty version
+            & $makensis "/DVERSION=$version" "/DOUTDIR=$PWD\dist" packaging\windows\installer.nsi
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            Write-Host "::notice::NSIS not found, uploading the executable only"
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/
+          if-no-files-found: error
 
   deny:
     name: cargo-deny
@@ -72,8 +127,7 @@ jobs:
     needs: test
     steps:
       - uses: actions/checkout@v4
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig1-dev libxkbcommon-dev
+      - uses: ./.github/actions/system-deps
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2

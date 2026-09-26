@@ -5,14 +5,22 @@
 //! - [`framer`]: slice an arbitrary sample stream into codec frames
 //! - [`resample`]: sample-rate conversion to the 48 kHz the codec uses
 //! - [`wav`]: WAV file input/output
-//! - [`Mixer`]: per-client jitter buffer, decoder and mixer (from the vendored
-//!   `tsclientlib::audio::AudioHandler`)
-//! - `device` (feature `device`): capture and playback through cpal
+//! - [`process`]: echo cancellation, noise suppression and gain control
+//! - [`vad`]: voice activity detection
+//! - [`mixer`]: per-client jitter buffer, decoder, volume and mixing (on the
+//!   vendored `tsclientlib::audio::AudioHandler`)
+//! - [`settings`]: all user audio settings in one serde struct
+//! - `device` (feature `device`): capture and playback through cpal, device
+//!   lists and loss detection
 
 pub mod encode;
 pub mod framer;
+pub mod mixer;
 pub mod pcm;
+pub mod process;
 pub mod resample;
+pub mod settings;
+pub mod vad;
 pub mod wav;
 
 #[cfg(feature = "device")]
@@ -20,10 +28,11 @@ pub mod device;
 
 pub use encode::{VoiceCodec, VoiceEncoder};
 pub use framer::Framer;
+pub use mixer::Mixer;
+pub use process::{ProcessingSettings, Processor};
+pub use settings::AudioSettings;
 pub use tsclientlib::audio::AudioHandler;
-
-/// Jitter buffer, decoder and mixer for incoming voice, keyed by sender.
-pub type Mixer = AudioHandler<tsclientlib::ClientId>;
+pub use vad::{Vad, VadSettings};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
