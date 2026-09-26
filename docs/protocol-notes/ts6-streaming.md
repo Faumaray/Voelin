@@ -167,6 +167,44 @@ property for the planned SFU mode.
 Errors: `setupstream` refused with error 2568 ("insufficient client
 permissions") has been seen; no stream permission names are documented.
 
+More text commands and notifications named in the server binary (not probed
+yet): `requeststreaminfo` (its protobuf request only has `stream_id`, so it
+cannot discover the ids of unknown streams), `updatestream` (`stream_id`,
+`stream_name`, `max_width`, `max_height`, `max_framerate`, `properties`),
+`notifystreamupdated`, `notifystreamattendees` (`return_code`, `client_id`).
+
+### Streams that started before we joined (open)
+
+`initserver` and `notifycliententerview` carry `client_is_streaming`, but no
+stream id. Whether the server sends `notifystreamstarted` for running streams
+to a client that connects or enters the channel later is not confirmed yet.
+`tsctl stream list` shows such streamers as "id not announced"; `tsctl stream
+watch --id <uuid>` can still join when the streamer is known (`--streamer-nick`,
+or the only other client streaming). The smoke test starts the viewer first.
+
+### WebRTC interop with Chromium (confirmed, Chromium 141, 2026-09-26)
+
+`crates/tsc-stream/tests/browser_interop.rs` (`TSC_INTEROP=1`, see
+`tests/interop/README.md`) runs our str0m peers against headless Chromium's
+libwebrtc, the stack the official client is built on:
+
+- Our streamer offer (VP8 + Opus, BUNDLE, `setup:actpass`, host candidates in
+  the SDP) is accepted; Chromium answers `setup:active` and decodes the
+  synthetic 1x1 VP8 keyframes. Opus packets arrive.
+- Chromium's offers (canvas video + oscillator audio) with VP8, VP9 or AV1
+  preferred are answered by our viewer, which receives frames of that codec
+  and Opus; a PLI from us yields a VP8 keyframe. Playwright's Chromium cannot
+  send H.264.
+- Trickled candidates must carry the real `sdpMid`: str0m's mids are random
+  strings (e.g. `fhs`), not `0`. Our `iceCandidate` signals use the peer's
+  first mid and `sdpMLineIndex` 0; Chromium's `addIceCandidate` accepts them.
+- Without camera/microphone permission Chromium hides host candidates behind
+  mDNS names (`<uuid>.local`), which str0m cannot resolve. The test disables
+  that; the official client may send mDNS candidates, which would then need a
+  resolver (or its server-reflexive candidates) on our side.
+- str0m answers in its own codec order and the offerer sends the answer's
+  first codec, so `Peer::answer` orders the viewer's codecs like the offer.
+
 ## Open questions
 
 - [x] Viewer side: `joinstreamrequest id clid msg is_remove` (see above).
@@ -174,9 +212,11 @@ permissions") has been seen; no stream permission names are documented.
 - [x] Parameters of `stopstream` and `removeclientfromstream` (`reason` is required).
 - [ ] Which permission gates `setupstream` (error 2568).
 - [x] Contents of `notifystreamstarted` (see probe results).
-- [ ] Contents of `notifystreaminfo` (`requeststreaminfo`).
+- [ ] Contents of `notifystreaminfo` (`requeststreaminfo id=<uuid>`).
+- [ ] Whether a client that joins later is told about running streams (see above).
 - [ ] Interop with the official TS6 client (its offer/answer details, codecs it
-      actually picks, whether it trickles candidates).
+      actually picks, whether it trickles candidates, mDNS host candidates).
+      Chromium's WebRTC stack interoperates (see above).
 - [ ] Whether stream audio can be sent without video.
 - [ ] The WebRTC/protobuf transport some TS6 clients use on UDP 9987
       (`client_protocol_format=proto`, reported in community reverse engineering).
