@@ -48,10 +48,14 @@ fn panic_hook_writes_reports() {
 	assert!(text.contains("Thread:   crash-test ("), "{text}");
 	assert!(text.contains("Message:  boom 42\n          second line"), "{text}");
 	assert!(text.contains(&format!("System:   {}", std::env::consts::OS)), "{text}");
-	assert!(text.contains("Location: crates/tsc-platform/tests/crash.rs:"), "{text}");
+	// The path separator is the platform's.
+	let location = text.lines().find(|l| l.starts_with("Location: ")).unwrap_or_default();
+	assert!(location.contains("tests") && location.contains("crash.rs:"), "{text}");
 	assert!(text.contains("Backtrace:\n"), "{text}");
-	// Line tables are on in the dev profile: the backtrace names this file.
-	assert!(text.contains("panic_in_thread"), "{text}");
+	// Symbols resolve on Linux (MSVC needs the PDB files next to the binary).
+	if cfg!(target_os = "linux") {
+		assert!(text.contains("panic_in_thread"), "{text}");
+	}
 	// No partial files are left behind.
 	assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
 
