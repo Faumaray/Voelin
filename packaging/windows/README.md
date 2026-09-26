@@ -1,13 +1,17 @@
 # Windows build and installer
 
-CI (`release-build` in `.github/workflows/ci.yml`) builds `tsc-desktop.exe` on
-`windows-2025` and uploads it as an artifact, with the installer when NSIS is on
-the runner. Nothing is signed there.
+The release workflow (`package-windows` in `.github/workflows/release.yml`)
+builds `voelin.exe` on `windows-2025` and attaches the zip and the installer to
+the release (artifact `voelin-windows-x86_64` when run by hand). Nothing is
+signed there. Regular CI only runs clippy on Windows. The gateway `tsgw`
+is for servers and packaged for Linux only.
+`docker/windows.Dockerfile` cross-compiles the same packages on Linux
+([docs/building.md](../../docs/building.md)).
 
 ## Build
 
 Needs the MSVC build tools, CMake (bundled libopus), NASM (assembly of
-`aws-lc-sys`, used by the WebRTC stack) and libvpx (video, `tsc-media`):
+`aws-lc-sys`, used by the WebRTC stack) and libvpx (video, `voelin-media`):
 
 ```powershell
 winget install NASM.NASM Kitware.CMake NSIS.NSIS
@@ -19,14 +23,14 @@ $env:VPX_INCLUDE_DIR = "$vpx\include"
 $env:VPX_VERSION = "1.15.2"   # what `vcpkg list libvpx` shows
 $env:VPX_STATIC = "1"
 
-cargo build --release --locked -p tsc-ui
+cargo build --release --locked -p voelin-ui
 makensis /DVERSION=0.1.0 packaging\windows\installer.nsi
 ```
 
-This gives `target\release\tsc-desktop.exe` and
-`packaging\windows\tsc-desktop-0.1.0-setup.exe`. The installer puts the app in
-`Program Files\TS Client`, adds a Start menu shortcut and an uninstaller; user
-data stays in `%APPDATA%\tsc`.
+This gives `target\release\voelin.exe` and
+`packaging\windows\voelin-0.1.0-setup.exe`. The installer puts the app in
+`Program Files\Voelin`, adds a Start menu shortcut and an uninstaller; user
+data stays in `%APPDATA%\voelin`.
 
 The executable uses the dynamic MSVC runtime (`VCRUNTIME140.dll`, present on most
 systems). To drop that dependency build with
@@ -40,7 +44,7 @@ it, then the installer and the uninstaller it writes (NSIS 3.08+ runs the `SIGN`
 command on both):
 
 ```powershell
-signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f cert.pfx /p $env:CERT_PASSWORD target\release\tsc-desktop.exe
+signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f cert.pfx /p $env:CERT_PASSWORD target\release\voelin.exe
 makensis /DVERSION=0.1.0 "/DSIGN=signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f cert.pfx /p $env:CERT_PASSWORD %1" packaging\windows\installer.nsi
 ```
 

@@ -1,0 +1,39 @@
+name: Docker builds
+
+# The local builds in docker/ (docs/building.md), checked at every release
+# tag and on demand (Actions → Docker builds → Run workflow). Each build
+# uploads what it made: the same kinds of packages as release.yml, the
+# Windows one cross-compiled with mingw-w64.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: docker (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux, windows, android]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      # The Android build needs more room than the runner leaves free.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          df -h /
+      - name: Build
+        run: scripts/docker-build.sh ${{ matrix.platform }} --progress=plain
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docker-${{ matrix.platform }}
+          path: dist/${{ matrix.platform }}/
+          if-no-files-found: error

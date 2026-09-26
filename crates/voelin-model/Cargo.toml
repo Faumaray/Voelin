@@ -1,0 +1,18 @@
+[package]
+name = "voelin-model"
+version = "0.1.0"
+description = "UI-facing domain model shared by the client engine, gateway and UI (no IO)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

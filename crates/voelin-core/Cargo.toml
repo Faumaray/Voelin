@@ -1,0 +1,46 @@
+[package]
+name = "voelin-core"
+version = "0.1.0"
+description = "Client engine: server sessions merging voice, gateway and query sources; the API the UI drives."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = ["audio-device"]
+# Capture and play audio through the system's devices.
+audio-device = ["voelin-audio/device"]
+# The `media` module: capture and video codecs for streams, with whatever
+# voelin-media backends are enabled (e.g. MediaCodec and a registered capture
+# source on Android).
+media = ["dep:voelin-media"]
+# `media` with voelin-media's desktop backends: libvpx, OpenH264 loaded at
+# runtime, X11 and PipeWire on Linux. Not for Android (libvpx does not
+# cross-compile there).
+media-desktop = ["media", "voelin-media/default"]
+
+[dependencies]
+anyhow = "1"
+futures = "0.3"
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = "0.30"
+tracing = "0.1"
+voelin-audio = { path = "../voelin-audio", default-features = false }
+voelin-gateway-proto = { path = "../voelin-gateway-proto" }
+voelin-media = { path = "../voelin-media", default-features = false, features = ["str0m"], optional = true }
+voelin-model = { path = "../voelin-model" }
+voelin-observer = { path = "../voelin-observer" }
+voelin-query = { path = "../voelin-query" }
+voelin-stream = { path = "../voelin-stream" }
+tsclientlib = { path = "../proto/tsclientlib" }
+tsproto-packets = { path = "../proto/tsproto-packets" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+
+[lints]
+workspace = true

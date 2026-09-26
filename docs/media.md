@@ -1,8 +1,8 @@
-# Media: frames, codecs and capture (`tsc-media`)
+# Media: frames, codecs and capture (`voelin-media`)
 
-`crates/tsc-media` turns screens and system audio into frames, encodes and
+`crates/voelin-media` turns screens and system audio into frames, encodes and
 decodes video, and converts pixels for rendering. It does no networking:
-`tsc-stream` carries the encoded frames (`Peer::write(MediaKind::Video,
+`voelin-stream` carries the encoded frames (`Peer::write(MediaKind::Video,
 MediaTime::new(frame.pts_90khz, Frequency::NINETY_KHZ), data)`), and received
 `MediaFrame`s go to `VideoDecoder::decode`.
 
@@ -27,7 +27,7 @@ MediaTime::new(frame.pts_90khz, Frequency::NINETY_KHZ), data)`), and received
 
 ```rust
 let codecs = Codecs::new().with_openh264(OpenH264::find_in(&data_dir)?); // H.264 optional
-let mut capture = tsc_media::capture::default_screen_capture()?;
+let mut capture = voelin_media::capture::default_screen_capture()?;
 let mut frames = capture.start(&SourceId::Monitor(0), &CaptureOptions::default()).await?;
 let codec = codecs.pick_encoder(&viewer_codecs).unwrap();
 let mut encoder = codecs.new_encoder(codec, EncoderConfig::default())?;
@@ -37,6 +37,46 @@ while let Some(frame) = frames.recv().await {
     }
 }
 ```
+
+## The pipeline in `voelin-core` (`media` module)
+
+Feature `media` of voelin-core builds the module with whatever voelin-media backends
+are enabled (on Android: MediaCodec and the app's capture source);
+`media-desktop` adds voelin-media's default backends (libvpx, OpenH264, X11,
+PipeWire). The desktop app and voelinctl use `media-desktop`, the Android app
+`media`. Codecs are always chosen through `Codecs`, so each build uses its own.
+
+```
+streamer: ScreenCapture ─ VideoEncoder (codec of our offer) ─┐
+          AudioCapture ─ 20 ms stereo Opus (128 kbit/s) ─────┴─ MediaSink: StreamSink / EncodedSource
+viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder ─ picture callback ─ Latest
+          stream audio ─ session audio thread (mixer, own volume) ─ speakers
+```
+
+- `Streamer::start(&codecs, StreamerConfig)` starts capturing right away (the
+  portal asks the user then), so a cancelled dialog never starts a stream;
+  frames are encoded only after `attach(sink)`, i.e. once the stream is live.
+  The encoder runs at the setup's bitrate; a viewer's keyframe request (on
+  the sink) forces a keyframe, and is kept until the encoder produced one.
+  Audio follows the capture clock across gaps. With the test pattern
+  (`SourceId::Synthetic`) the audio is a quiet sine tone. The portal's restore
+  token is available afterwards (`restore_token()`) to store.
+- `peer_config(&codecs, config)` makes a viewer accept only what we decode
+  and a streamer offer only the codec it encodes (VP8 unless changed): all
+  viewers get the same frames, and a viewer picks from the offer.
+- `VideoPipeline` decodes on its own thread. It starts at a keyframe, and
+  after a lost frame (`contiguous == false`, a lagging frame bus, a queue
+  longer than 30 frames) or a decoder error it skips to the next keyframe,
+  asking for one at most every 500 ms. Keyframes are recognised from the
+  bitstream (VP8 frame tag, VP9 header, H.264 IDR/SPS NAL units, AV1
+  sequence header OBU).
+- `Viewer` feeds a `VideoPipeline` from the engine and sends
+  `RequestStreamKeyframe`; `LocalPreview` runs capture → encoder → decoder
+  without a server (the desktop app's `VOELIN_DEMO_STREAM`).
+- The audio of watched streams does not go through this module: the session
+  hands the Opus frames to its audio thread, which plays them through the
+  jitter buffer and mixer under a made-up client id, with its own volume.
+  Playback is mono like the rest of the audio path.
 
 ## Codecs
 
@@ -50,6 +90,17 @@ software). `Codecs` filters both lists by what is compiled in and loaded.
 | OpenH264 | `openh264` (default) | H.264 Constrained High / Baseline | H.264 | Cisco's prebuilt binary, loaded at runtime |
 | dav1d | `av1` | – | AV1 | system libdav1d >= 1.3 (1.4.1 tested) |
 | hardware | – | not yet | – | `codec::hw::HardwareEncoderFactory`; VA-API and Media Foundation stubs report nothing (TODO) |
+| MediaCodec (Android) | – | H.264, VP8, VP9 | VP8, VP9, H.264, AV1 | the device's default codec per type through the NDK (`ndk` crate); a hardware encoder factory named `mediacodec` |
+
+On Android, `codec::mediacodec` uses byte-buffer mode on both sides, so it
+takes and returns `VideoFrame`s like the software codecs. Encoders get NV12
+(else I420) in the layout the codec reports (`image-data` / `stride` /
+`slice-height`, parsed by `codec::image_layout`, which is tested on every
+platform); H.264 is High (preferably Constrained High) without B-frames, SPS/PPS
+in front of every keyframe, keyframes on request (`request-sync`), bitrate
+changes at runtime (`video-bitrate`). Encoder order: the device's hardware
+encoders (H.264, VP9, VP8), then Google's software VP8 and H.264. Decoders
+return the newest finished picture per `decode` call (NV12 or I420).
 
 libvpx settings follow libwebrtc's realtime setup: one pass CBR, no lag,
 `VPX_DL_REALTIME`, error resilient, `cpu-used` 8 (VP8: fixed speed −8), keyframes
@@ -57,7 +108,8 @@ only at start and on request unless `keyframe_interval` is set, screen content
 tuning (`VP8E_SET_SCREEN_CONTENT_MODE`, `VP9E_SET_TUNE_CONTENT`, static
 threshold), VP9 row-mt, tiles and cyclic-refresh AQ. `set_bitrate` reconfigures
 the running encoder (`vpx_codec_enc_config_set`). The C API is wrapped in
-`codec/vpx/raw.rs`, one of the two modules with `unsafe` code; existing safe
+`codec/vpx/raw.rs`, one of three modules with `unsafe` code (with the X11 SHM
+mapping and the `Send` wrapper in `codec/mediacodec.rs`); existing safe
 wrappers either encode only or cannot change the bitrate at runtime.
 
 The OpenH264 encoder has no safe runtime bitrate change in the `openh264`
@@ -98,9 +150,13 @@ found at ...").
 | Linux X11 (`x11`, default) | `X11Capture`: MIT-SHM 1.2 (memfd passed to the server) or GetImage; RandR 1.5 monitors; windows from `_NET_CLIENT_LIST` (root children without a WM); XFixes cursor blended in | |
 | Linux Wayland (`pipewire`, default) | `PortalCapture`: xdg-desktop-portal ScreenCast via `ashpd`, frames from a PipeWire video stream | `PipeWireAudioCapture`: default sink monitor (`stream.capture.sink = true`) |
 | Windows | `WindowsCapture`: Windows Graphics Capture (`windows-capture`), monitors and windows | `WasapiLoopback`: process loopback excluding our own process tree, falling back to plain loopback |
+| Android | `ExternalScreenCapture` fed by the app (MediaProjection → `ImageReader`, RGBA; see [android.md](android.md)) | `ExternalAudioCapture` fed by the app (`AudioPlaybackCapture`, 48 kHz float) |
 
-`default_screen_capture()` picks the portal when `WAYLAND_DISPLAY` is set (or
-`XDG_SESSION_TYPE=wayland`), X11 when `DISPLAY` is set, WGC on Windows.
+`default_screen_capture()` picks a registered external provider first
+(`capture::external::set_screen_provider`, which the Android app calls at
+start), then the portal when `WAYLAND_DISPLAY` is set (or
+`XDG_SESSION_TYPE=wayland`), X11 when `DISPLAY` is set, WGC on Windows;
+`default_audio_capture()` likewise.
 
 Notes:
 
@@ -111,7 +167,7 @@ Notes:
   our memfd (`capture/x11/shm.rs`).
 - Portal: `start` needs a tokio runtime (zbus runs on it) and may show the
   desktop's picker. Choices persist with `PersistMode::ExplicitlyRevoked`: store
-  `PortalCapture::restore_token()` (e.g. in `tsc-store` settings) and pass it to
+  `PortalCapture::restore_token()` (e.g. in `voelin-store` settings) and pass it to
   `PortalCapture::with_restore_token` next time. The cursor is embedded when
   the portal supports it. Only shared-memory buffers (BGRx/BGRA/RGBx/RGBA) are
   negotiated; DMA-BUF import is a TODO. Without a session bus or portal,
@@ -132,12 +188,12 @@ Linux (Debian/Ubuntu packages): `libvpx-dev` (feature `vpx`),
 PipeWire bindings run bindgen), `pkg-config`, and `libdav1d-dev` for
 `--features av1`. X11 capture is pure Rust (x11rb) and needs no packages.
 Tests of X11 capture need an X server: `xvfb`, run with `xvfb-run -a cargo
-test -p tsc-media` (skipped without `DISPLAY`).
+test -p voelin-media` (skipped without `DISPLAY`).
 
 Windows: libvpx is not found through pkg-config there. Install it (e.g.
 `vcpkg install libvpx:x64-windows`) and set `VPX_LIB_DIR`, `VPX_INCLUDE_DIR`
 and `VPX_VERSION`, or build without the `vpx` feature. The Windows capture
-code is type-checked on Linux (`cargo clippy -p tsc-media --target
+code is type-checked on Linux (`cargo clippy -p voelin-media --target
 x86_64-pc-windows-gnu --no-default-features --features openh264`) but has not
 run on Windows yet.
 
@@ -162,7 +218,7 @@ run on Windows yet.
 |---|---|---|
 | Frame validation, YUV ↔ RGB (values, NV12, odd sizes, strides) | unit tests | tested |
 | VP8 / VP9 encode → decode (PSNR > 30 dB, rectangle colour, forced keyframes, bitrate change, resolution change) | unit tests, `tests/codec_roundtrip.rs` | tested |
-| H.264 with Cisco's 2.6.0 library (PSNR, Constrained High `profile_idc` 100, Baseline 66) | `tests/openh264.rs` with `TSC_OPENH264_LIB` | tested locally, skipped without the library |
+| H.264 with Cisco's 2.6.0 library (PSNR, Constrained High `profile_idc` 100, Baseline 66) | `tests/openh264.rs` with `VOELIN_OPENH264_LIB` | tested locally, skipped without the library |
 | OpenH264 download, SHA-256 check, reuse | `tests/openh264.rs -- --ignored` | tested locally (network) |
 | H.264 library missing / unknown file | unit + integration tests | tested |
 | AV1 decoder construction, garbage input | unit test (`--features av1`) | tested; no AV1 stream decoded (no encoder available) |
@@ -171,3 +227,12 @@ run on Windows yet.
 | Portal capture, PipeWire video and audio streams | – | compiles only (no portal or PipeWire daemon here) |
 | Windows Graphics Capture, WASAPI | – | type-checked for `x86_64-pc-windows-gnu` only |
 | Hardware encoders | – | stubs |
+| Test pattern → VP8 → decoder, rectangle position and colour | `voelin-core` `media::tests::local_preview_decodes_the_pattern` | tested |
+| Test pattern → two engine stream tasks → str0m peers on loopback → decoder | `voelin-core` `stream::tests::test_pattern_through_stream_tasks` | tested |
+| Stream audio (RTP time → jitter buffer ids, volume, end) | `voelin-core` `audio::tests::stream_audio_with_volume`, stream task test | tested |
+| The same through the TeamSpeak 6 server | `voelin-core/tests/media_live.rs` (`VOELIN_LIVE=1`), `voelinctl stream start --synthetic` / `watch --expect-frames` | tested against 6.0.0-beta13.1 |
+| X11 monitor capture → VP8 → server → decoder | `voelinctl stream start --source x11` under Xvfb | tested manually (debug build: about 8 fps at 1400×900) |
+| Desktop app watching and sharing | Xvfb, `VOELIN_AUTOWATCH` / `VOELIN_AUTOSHARE` against voelinctl, screenshots | tested manually |
+| External capture providers (start, refusal, end of capture, default selection) | unit tests | tested |
+| MediaCodec buffer layouts (I420, NV12 with padding, `MediaImage2` NV21, crop) | unit tests (`codec::image_layout`) | tested |
+| MediaCodec encoders and decoders | – | compiles for `aarch64-linux-android` only (no device or emulator here) |

@@ -1,0 +1,15 @@
+# Build context for docker/*.Dockerfile and crates/voelin-gateway/Dockerfile:
+# the sources only. Builds keep target/ in cache mounts, never in the context.
+.git
+.claude
+target
+dist
+fuzz/target
+fuzz/corpus
+fuzz/artifacts
+dev/.state
+android/.gradle
+android/build
+android/app/build
+android/local.properties
+**/node_modules

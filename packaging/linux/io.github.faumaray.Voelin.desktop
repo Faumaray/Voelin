@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Voelin
+Comment=Voice chat, text chat and screen sharing
+Exec=voelin
+Icon=io.github.faumaray.Voelin
+Terminal=false
+Categories=Network;Chat;InstantMessaging;AudioVideo;
+Keywords=voice;chat;voip;push-to-talk;
+StartupNotify=true
+StartupWMClass=io.github.faumaray.Voelin

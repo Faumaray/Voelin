@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Monochrome speech bubble with sound waves (status bar, themed icon). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="128"
+    android:viewportHeight="128">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M36,40h56a8,8 0,0 1,8 8v28a8,8 0,0 1,-8 8H60l-16,14v-14h-8a8,8 0,0 1,-8 -8V48a8,8 0,0 1,8 -8z M49.5,56a2.5,2.5 0,0 1,5 0v12a2.5,2.5 0,0 1,-5 0z M61.5,50a2.5,2.5 0,0 1,5 0v24a2.5,2.5 0,0 1,-5 0z M73.5,56a2.5,2.5 0,0 1,5 0v12a2.5,2.5 0,0 1,-5 0z" />
+</vector>

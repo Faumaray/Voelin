@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Integration smoke test: tsctl against the TS3 and TS6 servers from
+# Integration smoke test: voelinctl against the TS3 and TS6 servers from
 # dev/docker-compose.yml.
 #
 # For each server it checks:
@@ -14,7 +14,7 @@
 #   8. stream (TeamSpeak 6 only): a viewer watches a synthetic VP8 + Opus stream
 #
 # Usage: scripts/it-smoke.sh [ts3|ts6]...   (default: both)
-# Env:   TSCTL=path/to/tsctl (default: builds target/debug/tsctl)
+# Env:   VOELINCTL=path/to/voelinctl (default: builds target/debug/voelinctl)
 #        COMPOSE_FILE=dev/docker-compose.yml
 set -euo pipefail
 
@@ -27,9 +27,9 @@ mkdir -p "$STATE_DIR"
 # Never leave background clients behind.
 trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
 
-if [[ -z "${TSCTL:-}" ]]; then
-	cargo build --quiet -p tsctl -p tsc-gateway
-	TSCTL=target/debug/tsctl
+if [[ -z "${VOELINCTL:-}" ]]; then
+	cargo build --quiet -p voelinctl -p voelin-gateway
+	VOELINCTL=target/debug/voelinctl
 fi
 TSGW="${TSGW:-target/debug/tsgw}"
 
@@ -37,7 +37,7 @@ declare -A PORTS=([ts3]=9987 [ts6]=9988)
 # ServerQuery transport and address per server (dev/docker-compose.yml).
 declare -A QUERY=([ts3]="raw 127.0.0.1:10011" [ts6]="ssh 127.0.0.1:10022")
 declare -A GATEWAY=([ts3]=7787 [ts6]=7788)
-QUERY_SECRET=tsc-dev-admin
+QUERY_SECRET=voelin-dev-admin
 SERVERS=("$@")
 [[ ${#SERVERS[@]} -eq 0 ]] && SERVERS=(ts3 ts6)
 
@@ -63,15 +63,15 @@ privilege_key() {
 admin_args() {
 	local svc=$1 addr=$2 id="$STATE_DIR/$svc-admin.json"
 	if [[ ! -f "$id" ]]; then
-		"$TSCTL" identity new --out "$id.tmp" --force >/dev/null
-		if ! "$TSCTL" connect "$addr" --identity "$id.tmp" --nick admin \
+		"$VOELINCTL" identity new --out "$id.tmp" --force >/dev/null
+		if ! "$VOELINCTL" connect "$addr" --identity "$id.tmp" --nick admin \
 			--privilege-key "$(privilege_key "$svc")" tree >/dev/null; then
 			fail "could not redeem the $svc privilege key (already used?). Reset the servers:
   docker compose -f $COMPOSE_FILE down -v && docker compose -f $COMPOSE_FILE up -d && rm -rf $STATE_DIR"
 		fi
 		mv "$id.tmp" "$id"
 		# The rapid test connections would trip the per-IP anti-flood ban.
-		"$TSCTL" connect "$addr" --identity "$id" --nick admin raw \
+		"$VOELINCTL" connect "$addr" --identity "$id" --nick admin raw \
 			"serveredit virtualserver_antiflood_points_needed_ip_block=100000 virtualserver_antiflood_points_needed_command_block=100000" >/dev/null
 	fi
 	echo "--identity $id"
@@ -81,12 +81,12 @@ admin_args() {
 chat_roundtrip() {
 	local addr=$1 kind=$2 sender_args=$3
 	local token="smoke-$kind-$RANDOM$RANDOM" out="$STATE_DIR/listen.log"
-	"$TSCTL" connect "$addr" --nick listener listen --expect "$token" --timeout 20 >"$out" 2>&1 &
+	"$VOELINCTL" connect "$addr" --nick listener listen --expect "$token" --timeout 20 >"$out" 2>&1 &
 	local listener=$!
 	# Give the listener time to connect before sending.
 	for _ in $(seq 1 40); do grep -q "listener" "$out" 2>/dev/null && break; sleep 0.25; done
 	# shellcheck disable=SC2086
-	"$TSCTL" connect "$addr" --nick sender $sender_args chat "$kind" "$token"
+	"$VOELINCTL" connect "$addr" --nick sender $sender_args chat "$kind" "$token"
 	if ! wait "$listener"; then
 		cat "$out"
 		fail "$kind chat message not received"
@@ -97,11 +97,11 @@ chat_roundtrip() {
 # One client records while another sends a tone; Goertzel checks the result.
 voice_roundtrip() {
 	local addr=$1 out="$STATE_DIR/voice.log"
-	"$TSCTL" connect "$addr" --nick recorder voice record "$STATE_DIR/voice.wav" \
+	"$VOELINCTL" connect "$addr" --nick recorder voice record "$STATE_DIR/voice.wav" \
 		--seconds 6 --expect-tone 1000 >"$out" 2>&1 &
 	local recorder=$!
 	sleep 2
-	"$TSCTL" connect "$addr" --nick talker voice send --tone 1000 --seconds 2 >/dev/null
+	"$VOELINCTL" connect "$addr" --nick talker voice send --tone 1000 --seconds 2 >/dev/null
 	if ! wait "$recorder"; then
 		cat "$out"
 		fail "voice tone not received"
@@ -114,11 +114,11 @@ stream_check() {
 	local addr=$1 out="$STATE_DIR/stream-watch.log" streamer_out="$STATE_DIR/stream-start.log"
 	# Unique nicknames: other clients may stream on the same server.
 	local streamer="streamer-$$-$RANDOM"
-	"$TSCTL" connect "$addr" --nick "viewer-$$" stream --loopback watch --streamer-nick "$streamer" \
+	"$VOELINCTL" connect "$addr" --nick "viewer-$$" stream --loopback watch --streamer-nick "$streamer" \
 		--expect-frames 60 --timeout 30 >"$out" 2>&1 &
 	local viewer=$!
 	sleep 2
-	if ! "$TSCTL" connect "$addr" --nick "$streamer" stream --loopback start --synthetic \
+	if ! "$VOELINCTL" connect "$addr" --nick "$streamer" stream --loopback start --synthetic \
 		--auto-accept --seconds 10 >"$streamer_out" 2>&1; then
 		cat "$streamer_out" "$out"
 		fail "streamer failed"
@@ -134,11 +134,11 @@ stream_check() {
 presence_check() {
 	local addr=$1 query=$2 out="$STATE_DIR/observe.log"
 	# shellcheck disable=SC2086
-	"$TSCTL" observe $query --secret "$QUERY_SECRET" --allowlisted --poll 2 \
+	"$VOELINCTL" observe $query --secret "$QUERY_SECRET" --allowlisted --poll 2 \
 		--seconds 20 --expect-client presence-probe >"$out" 2>&1 &
 	local observer=$!
 	sleep 2
-	"$TSCTL" connect "$addr" --nick presence-probe listen --timeout 4 >/dev/null 2>&1 || true
+	"$VOELINCTL" connect "$addr" --nick presence-probe listen --timeout 4 >/dev/null 2>&1 || true
 	if ! wait "$observer"; then
 		cat "$out"
 		fail "observer did not see the voice client"
@@ -151,16 +151,16 @@ relay_check() {
 	local addr=$1 query=$2 out="$STATE_DIR/relay.log" heard="$STATE_DIR/relay-heard.log"
 	local token="relay-$RANDOM$RANDOM"
 	# shellcheck disable=SC2086
-	"$TSCTL" relay $query --secret "$QUERY_SECRET" --allowlisted --channel 1 \
+	"$VOELINCTL" relay $query --secret "$QUERY_SECRET" --allowlisted --channel 1 \
 		--expect "to-relay-$token" --seconds 20 >"$out" 2>&1 &
 	local relay=$!
-	"$TSCTL" connect "$addr" --nick relay-listener listen --expect "from-relay-$token" \
+	"$VOELINCTL" connect "$addr" --nick relay-listener listen --expect "from-relay-$token" \
 		--timeout 20 >"$heard" 2>&1 &
 	local listener=$!
 	sleep 4
-	"$TSCTL" connect "$addr" --nick relay-talker chat channel "to-relay-$token"
+	"$VOELINCTL" connect "$addr" --nick relay-talker chat channel "to-relay-$token"
 	# shellcheck disable=SC2086
-	"$TSCTL" relay $query --secret "$QUERY_SECRET" --allowlisted --channel 1 --nick Alice \
+	"$VOELINCTL" relay $query --secret "$QUERY_SECRET" --allowlisted --channel 1 --nick Alice \
 		--send "from-relay-$token" --seconds 1 >/dev/null
 	if ! wait "$relay"; then
 		cat "$out"
@@ -187,22 +187,22 @@ gateway_check() {
 
 	# The gateway only knows identities that connected with voice once.
 	local user="$STATE_DIR/$svc-gateway-user.json" stranger="$STATE_DIR/stranger.json"
-	[[ -f "$user" ]] || "$TSCTL" identity new --out "$user" >/dev/null
-	"$TSCTL" connect "$addr" --identity "$user" --nick gateway-user tree >/dev/null
-	"$TSCTL" identity new --out "$stranger" --force >/dev/null
-	if "$TSCTL" gateway "$url" --identity "$stranger" --seconds 3 >/dev/null 2>&1; then
+	[[ -f "$user" ]] || "$VOELINCTL" identity new --out "$user" >/dev/null
+	"$VOELINCTL" connect "$addr" --identity "$user" --nick gateway-user tree >/dev/null
+	"$VOELINCTL" identity new --out "$stranger" --force >/dev/null
+	if "$VOELINCTL" gateway "$url" --identity "$stranger" --seconds 3 >/dev/null 2>&1; then
 		fail "gateway accepted an identity the server does not know"
 	fi
 
-	"$TSCTL" gateway "$url" --identity "$user" --presence --open channel:1 \
+	"$VOELINCTL" gateway "$url" --identity "$user" --presence --open channel:1 \
 		--expect "to-gateway-$token" --seconds 20 >"$out" 2>&1 &
 	local reader=$!
-	"$TSCTL" connect "$addr" --nick gateway-listener listen --expect "from-gateway-$token" \
+	"$VOELINCTL" connect "$addr" --nick gateway-listener listen --expect "from-gateway-$token" \
 		--timeout 20 >"$STATE_DIR/gateway-heard.log" 2>&1 &
 	local listener=$!
 	sleep 4
-	"$TSCTL" connect "$addr" --nick gateway-talker chat channel "to-gateway-$token"
-	"$TSCTL" gateway "$url" --identity "$user" --send "channel:1=from-gateway-$token" --seconds 3 >/dev/null
+	"$VOELINCTL" connect "$addr" --nick gateway-talker chat channel "to-gateway-$token"
+	"$VOELINCTL" gateway "$url" --identity "$user" --send "channel:1=from-gateway-$token" --seconds 3 >/dev/null
 	if ! wait "$reader"; then
 		cat "$out" "$STATE_DIR/tsgw-$svc.log"
 		fail "gateway user did not receive the channel message"
@@ -224,7 +224,7 @@ for svc in "${SERVERS[@]}"; do
 
 	admin=$(admin_args "$svc" "$addr")
 
-	tree=$("$TSCTL" connect "$addr" --nick tree-check tree)
+	tree=$("$VOELINCTL" connect "$addr" --nick tree-check tree)
 	echo "$tree"
 	grep -q "tree-check" <<<"$tree" || fail "own client missing from tree"
 
@@ -240,10 +240,10 @@ for svc in "${SERVERS[@]}"; do
 	fi
 done
 
-log "engine (tsc-core) against both servers"
-TSC_LIVE=1 cargo test --quiet -p tsc-core --test live --test stream_live 2>&1 | grep -E "test result|panicked|timed out" || fail "engine tests failed"
+log "engine (voelin-core) against both servers, media pipeline through TS6"
+VOELIN_LIVE=1 cargo test --quiet -p voelin-core --features media-desktop --test live --test stream_live --test media_live 2>&1 | grep -E "test result|panicked|timed out" || fail "engine tests failed"
 
-log "stream (tsc-stream) through the TeamSpeak 6 server"
-TSC_LIVE=1 cargo test --quiet -p tsc-stream --test live_ts6 2>&1 | grep -E "test result|panicked|timed out" || fail "stream test failed"
+log "stream (voelin-stream) through the TeamSpeak 6 server"
+VOELIN_LIVE=1 cargo test --quiet -p voelin-stream --test live_ts6 2>&1 | grep -E "test result|panicked|timed out" || fail "stream test failed"
 
 log "all smoke tests passed"

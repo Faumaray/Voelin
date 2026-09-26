@@ -1,6 +1,6 @@
 # Browser interop test
 
-`crates/tsc-stream/tests/browser_interop.rs` checks our str0m peers against
+`crates/voelin-stream/tests/browser_interop.rs` checks our str0m peers against
 the WebRTC stack of Chromium (libwebrtc, the same stack as the official
 TeamSpeak 6 client). `browser-peer.cjs` runs headless Chromium through
 Playwright and exchanges SDP and candidates with the Rust test as JSON lines
@@ -19,11 +19,11 @@ chromium` on a new machine; `PLAYWRIGHT_BROWSERS_PATH` if the browsers live
 elsewhere).
 
 ```sh
-TSC_INTEROP=1 cargo test -p tsc-stream --test browser_interop -- --nocapture
+VOELIN_INTEROP=1 cargo test -p voelin-stream --test browser_interop -- --nocapture
 ```
 
-Without `TSC_INTEROP=1` the tests return immediately, so `cargo test` passes on
-machines without a browser. `TSC_NODE` selects the node binary; `NODE_PATH`
+Without `VOELIN_INTEROP=1` the tests return immediately, so `cargo test` passes on
+machines without a browser. `VOELIN_NODE` selects the node binary; `NODE_PATH`
 defaults to `npm root -g` so a global Playwright is found.
 
 Chromium is started with `--disable-features=WebRtcHideLocalIpsWithMdns`:

@@ -1,0 +1,59 @@
+[package]
+name = "voelin-ui"
+version = "0.1.0"
+description = "Slint user interface and the desktop binary."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "voelin_ui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "voelin"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+dirs = "6"
+png = "0.18"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+voelin-audio = { path = "../voelin-audio" }
+voelin-core = { path = "../voelin-core", default-features = false, features = ["audio-device"] }
+voelin-model = { path = "../voelin-model" }
+# Crash reports and notices everywhere; hotkey backends on desktop (below).
+voelin-platform = { path = "../voelin-platform", default-features = false }
+voelin-query = { path = "../voelin-query" }
+voelin-store = { path = "../voelin-store" }
+tsclientlib = { path = "../proto/tsclientlib" }
+
+# Desktop: the keyring for passwords, stream media with libvpx, OpenH264, X11
+# and PipeWire, global hotkeys through the portal and X11.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+slint = { version = "1.18", features = ["renderer-software"] }
+voelin-core = { path = "../voelin-core", default-features = false, features = ["media-desktop"] }
+voelin-platform = { path = "../voelin-platform" }
+voelin-store = { path = "../voelin-store", features = ["keyring"] }
+
+# Android (voelin-android): no keyring backend (the app passes Keystore-backed
+# secrets), no winit/femtovg (the app picks Slint's Android backend), stream
+# media through MediaCodec and the app's capture source.
+[target.'cfg(target_os = "android")'.dependencies]
+slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "renderer-software"] }
+voelin-core = { path = "../voelin-core", default-features = false, features = ["media"] }
+
+[dev-dependencies]
+serde_json = "1"
+
+[build-dependencies]
+slint-build = "1.18"
+
+[lints]
+workspace = true

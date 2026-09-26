@@ -1,5 +1,5 @@
 # Gateway for the ts6 development server (dev/docker-compose.yml).
-#   cargo run -p tsc-gateway -- --config dev/tsgw-ts6.toml
+#   cargo run -p voelin-gateway -- --config dev/tsgw-ts6.toml
 
 [server]
 # Inside the container the voice port is always 9987.
@@ -9,7 +9,7 @@ voice_port = 9987
 transport = "ssh"
 addr = "127.0.0.1:10022"
 user = "serveradmin"
-password = "tsc-dev-admin"
+password = "voelin-dev-admin"
 allowlisted = true
 
 [listen]

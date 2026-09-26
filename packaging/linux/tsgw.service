@@ -1,0 +1,45 @@
+# systemd unit for tsgw, the Voelin gateway (docs/gateway-admin.md).
+#
+# Write /etc/tsgw/tsgw.toml (example in /usr/share/doc/tsgw/examples), put the
+# query password in /etc/tsgw/tsgw.env as TSGW_QUERY_PASSWORD=… (mode 600),
+# then: systemctl enable --now tsgw. State (tsgw.db) is kept in /var/lib/tsgw.
+[Unit]
+Description=tsgw, the Voelin gateway for TeamSpeak servers
+Documentation=https://github.com/Faumaray/Voelin/blob/main/docs/gateway-admin.md
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/tsgw/tsgw.toml
+
+[Service]
+ExecStart=/usr/bin/tsgw --config /etc/tsgw/tsgw.toml
+# Read by systemd before dropping privileges, so it can stay root-only.
+EnvironmentFile=-/etc/tsgw/tsgw.env
+DynamicUser=yes
+StateDirectory=tsgw
+WorkingDirectory=/var/lib/tsgw
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

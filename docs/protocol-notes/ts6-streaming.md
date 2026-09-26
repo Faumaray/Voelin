@@ -7,7 +7,7 @@ capture teaches something new.
 
 ## Legacy protocol on TS6 servers
 
-- **Confirmed** (tsctl, 6.0.0-beta13.1, 2026-09-25): the TS3 client protocol
+- **Confirmed** (voelinctl, 6.0.0-beta13.1, 2026-09-25): the TS3 client protocol
   connects (`initivexpand2` license chain with the TS5-server block type),
   channel tree, server chat and channel chat work. Client version: the vendored
   default `Windows_3_X_X__1`.
@@ -19,7 +19,7 @@ capture teaches something new.
   (28 characters), TeamSpeak 6 uses `base64(SHA256(omega))` (44 characters),
   where omega is the base64 public key string. The same identity therefore has
   a different `client_unique_identifier` on each server generation
-  (`tsc-gateway-proto::UniqueIds`).
+  (`voelin-gateway-proto::UniqueIds`).
 - **Confirmed**: TS6 has no raw ServerQuery port; SSH query on 10022 and HTTP
   WebQuery on 10080 (HTTPS 10443).
 - **Reported**: beta13 made the Init1 puzzle difficulty adaptive to the server's
@@ -64,7 +64,7 @@ candidates come back through `streamsignaling` / `notifystreamsignaling`.
 
 ### Probe results (confirmed, 6.0.0-beta13.1, default permissions, 2026-09-25)
 
-Sent with `tsctl connect 127.0.0.1:9988 raw '<command>'` as a plain guest:
+Sent with `voelinctl connect 127.0.0.1:9988 raw '<command>'` as a plain guest:
 
 | Command | Result |
 |---|---|
@@ -104,7 +104,7 @@ server binary against a live stream (`is_remove` matches the
 
 ### End-to-end stream (confirmed, 6.0.0-beta13.1, 2026-09-25)
 
-`crates/tsc-stream/tests/live_ts6.rs` runs a whole stream between two of our
+`crates/voelin-stream/tests/live_ts6.rs` runs a whole stream between two of our
 clients through the server, with str0m on both ends:
 
 ```
@@ -173,18 +173,22 @@ cannot discover the ids of unknown streams), `updatestream` (`stream_id`,
 `stream_name`, `max_width`, `max_height`, `max_framerate`, `properties`),
 `notifystreamupdated`, `notifystreamattendees` (`return_code`, `client_id`).
 
-### Streams that started before we joined (open)
+### Streams that started before we joined (confirmed, 6.0.0-beta13.1, 2026-09-26)
 
 `initserver` and `notifycliententerview` carry `client_is_streaming`, but no
-stream id. Whether the server sends `notifystreamstarted` for running streams
-to a client that connects or enters the channel later is not confirmed yet.
-`tsctl stream list` shows such streamers as "id not announced"; `tsctl stream
-watch --id <uuid>` can still join when the streamer is known (`--streamer-nick`,
-or the only other client streaming). The smoke test starts the viewer first.
+stream id, and the server does not send `notifystreamstarted` for running
+streams to a client that connects later: a `voelinctl stream list` started while
+the desktop app streamed printed only "id not announced", while one connected
+before the stream started got the id. Entering the channel later was not
+probed separately. `voelinctl stream list` shows such streamers as "id not
+announced"; `voelinctl stream watch --id <uuid>` can still join when the streamer
+is known (`--streamer-nick`, or the only other client streaming). The desktop
+app lists them as streaming but not watchable. The smoke test starts the
+viewer first. How the official client learns these ids is open.
 
 ### WebRTC interop with Chromium (confirmed, Chromium 141, 2026-09-26)
 
-`crates/tsc-stream/tests/browser_interop.rs` (`TSC_INTEROP=1`, see
+`crates/voelin-stream/tests/browser_interop.rs` (`VOELIN_INTEROP=1`, see
 `tests/interop/README.md`) runs our str0m peers against headless Chromium's
 libwebrtc, the stack the official client is built on:
 
@@ -213,7 +217,8 @@ libwebrtc, the stack the official client is built on:
 - [ ] Which permission gates `setupstream` (error 2568).
 - [x] Contents of `notifystreamstarted` (see probe results).
 - [ ] Contents of `notifystreaminfo` (`requeststreaminfo id=<uuid>`).
-- [ ] Whether a client that joins later is told about running streams (see above).
+- [x] Whether a client that connects later is told about running streams: no (see above).
+- [ ] How the official client finds running streams after connecting.
 - [ ] Interop with the official TS6 client (its offer/answer details, codecs it
       actually picks, whether it trickles candidates, mDNS host candidates).
       Chromium's WebRTC stack interoperates (see above).

@@ -1,0 +1,22 @@
+[package]
+name = "voelin-observer"
+version = "0.1.0"
+description = "Invisible presence and channel-chat relays over ServerQuery."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tracing = "0.1"
+voelin-model = { path = "../voelin-model" }
+voelin-query = { path = "../voelin-query" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+
+[lints]
+workspace = true

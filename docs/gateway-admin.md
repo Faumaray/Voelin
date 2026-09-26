@@ -1,9 +1,9 @@
 # Running the tsgw gateway
 
-`tsgw` lets users of this client see who is in which channel and read and
+`tsgw` lets users of Voelin see who is in which channel and read and
 write channel chat **without joining voice**, on a server you administer. It
 holds ServerQuery sessions (invisible to normal users of the official clients)
-and serves users over a WebSocket (`tsgw.v1+json`, see `crates/tsc-gateway-proto`).
+and serves users over a WebSocket (`tsgw.v1+json`, see `crates/voelin-gateway-proto`).
 
 ## What users get
 
@@ -56,16 +56,52 @@ is written to the audit table.
    `relay.max_channel_relays` below the server's per-IP connection limit.
    Relays count toward a channel's max clients unless their group has
    `b_channel_join_ignore_maxclients`.
-5. Copy `crates/tsc-gateway/tsgw.example.toml` to `tsgw.toml`, set the query
-   address and credentials (`TSGW_QUERY_PASSWORD` or `password_file`).
+5. Install tsgw ([below](#install)), copy the example config to
+   `/etc/tsgw/tsgw.toml` and set the query address and credentials
+   (`TSGW_QUERY_PASSWORD` or `password_file`).
 6. Run it behind TLS (Caddy, nginx) and give users the `wss://…/v1` URL.
 
+## Install
+
+tsgw is packaged for Linux servers, separately from the app
+([building.md](building.md)): the release workflow attaches the packages and
+the image (`tsgw-image.tar.gz`) to each release and uploads them as artifacts
+when run by hand, and
+`scripts/docker-build.sh linux` builds them locally.
+
+**Debian/Ubuntu** (`tsgw_<version>_amd64.deb`, Ubuntu 24.04+ / Debian 13+).
+It installs `/usr/bin/tsgw` and a systemd unit that is not started until
+there is a config:
+
 ```sh
-cargo run --release -p tsc-gateway -- --config tsgw.toml
-# or
-docker build -f crates/tsc-gateway/Dockerfile -t tsgw .
-docker run -v $PWD/tsgw.toml:/etc/tsgw/tsgw.toml -p 7788:7788 tsgw
+sudo apt install ./tsgw_<version>_amd64.deb
+sudo install -d -m 755 /etc/tsgw
+sudo cp /usr/share/doc/tsgw/examples/tsgw.example.toml /etc/tsgw/tsgw.toml
+sudoedit /etc/tsgw/tsgw.toml
+# The query password, readable by root only (systemd reads it before
+# starting tsgw as an unprivileged dynamic user).
+echo 'TSGW_QUERY_PASSWORD=…' | sudo install -m 600 /dev/stdin /etc/tsgw/tsgw.env
+sudo systemctl enable --now tsgw
+journalctl -u tsgw -f
 ```
+
+The audit database (`path = "tsgw.db"`) ends up in `/var/lib/tsgw`. The unit
+(`packaging/linux/tsgw.service`) runs tsgw sandboxed: no write access outside
+that directory, network only.
+
+**Other distributions** (`tsgw-<version>-linux-x86_64.tar.gz`): `bin/tsgw`,
+the same unit in `lib/systemd/system/` and the example config in
+`share/doc/tsgw/`. Copy the binary to `/usr/bin` (or change `ExecStart`) and
+the unit to `/etc/systemd/system/`.
+
+**Container** (`tsgw-image.tar.gz`, or build it):
+
+```sh
+docker load -i tsgw-image.tar.gz        # or: docker build -f crates/voelin-gateway/Dockerfile -t tsgw .
+docker run -v $PWD/tsgw.toml:/etc/tsgw/tsgw.toml -e TSGW_QUERY_PASSWORD=… -p 7788:7788 tsgw
+```
+
+**From source:** `cargo run --release -p voelin-gateway -- --config tsgw.toml`.
 
 ## Visibility
 

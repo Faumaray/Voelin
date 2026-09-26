@@ -1,0 +1,320 @@
+//! Interop with a browser WebRTC stack: headless Chromium (Playwright) is the
+//! other peer, driven by `tests/interop/browser-peer.cjs` over stdin/stdout.
+//! No TeamSpeak server is involved; SDP goes straight between the peers.
+//!
+//! Runs only with `VOELIN_INTEROP=1` (see `tests/interop/README.md`).
+
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::time::timeout;
+use voelin_stream::{
+	Codec, FrameSource, MediaKind, Peer, PeerConfig, PeerEvent, Signal, SyntheticSource,
+};
+
+fn enabled() -> bool {
+	std::env::var("VOELIN_INTEROP").is_ok_and(|v| v == "1")
+}
+
+/// The Node.js side (headless Chromium).
+struct Browser {
+	_child: Child,
+	stdin: ChildStdin,
+	stdout: Lines<BufReader<ChildStdout>>,
+}
+
+impl Browser {
+	async fn start() -> Self {
+		let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+			.join("../../tests/interop/browser-peer.cjs")
+			.canonicalize()
+			.expect("tests/interop/browser-peer.cjs");
+		let node = std::env::var("VOELIN_NODE").unwrap_or_else(|_| "node".into());
+		let mut command = Command::new(node);
+		command
+			.arg(script)
+			.stdin(Stdio::piped())
+			.stdout(Stdio::piped())
+			.stderr(Stdio::inherit())
+			.kill_on_drop(true);
+		// Playwright is usually installed globally.
+		if std::env::var_os("NODE_PATH").is_none()
+			&& let Ok(out) = std::process::Command::new("npm").args(["root", "-g"]).output()
+		{
+			command.env("NODE_PATH", String::from_utf8_lossy(&out.stdout).trim());
+		}
+		let mut child = command.spawn().expect("cannot start node (set VOELIN_NODE)");
+		let stdin = child.stdin.take().unwrap();
+		let stdout = BufReader::new(child.stdout.take().unwrap()).lines();
+		let mut browser = Self { _child: child, stdin, stdout };
+		let ready = browser.read().await;
+		eprintln!("browser: {}", ready["userAgent"]);
+		browser
+	}
+
+	async fn read(&mut self) -> Value {
+		let line = timeout(Duration::from_secs(60), self.stdout.next_line())
+			.await
+			.expect("browser did not answer")
+			.unwrap()
+			.expect("browser exited");
+		let value: Value = serde_json::from_str(&line).unwrap();
+		if let Some(error) = value.get("error") {
+			panic!("browser: {error}");
+		}
+		value
+	}
+
+	async fn call(&mut self, command: Value) -> Value {
+		let mut line = command.to_string();
+		line.push('\n');
+		self.stdin.write_all(line.as_bytes()).await.unwrap();
+		self.read().await
+	}
+
+	async fn quit(mut self) {
+		let _ = self.call(json!({ "op": "quit" })).await;
+	}
+}
+
+async fn wait_connected(peer: &mut Peer) {
+	timeout(Duration::from_secs(15), async {
+		loop {
+			match peer.next_event().await {
+				Some(PeerEvent::Connected) => return,
+				Some(PeerEvent::Closed) | None => panic!("closed before connecting"),
+				_ => {}
+			}
+		}
+	})
+	.await
+	.expect("no connection with the browser");
+}
+
+/// Our streamer peer (as in a TeamSpeak stream) sends VP8 + Opus to Chromium.
+#[tokio::test(flavor = "multi_thread")]
+async fn rust_streams_to_browser() {
+	if !enabled() {
+		eprintln!("skipped: set VOELIN_INTEROP=1 (needs node, Playwright and Chromium)");
+		return;
+	}
+	let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
+	let mut browser = Browser::start().await;
+	let config = PeerConfig::loopback();
+	let (mut peer, offer) = Peer::offer(&config, "interop").await.unwrap();
+	let answer = browser.call(json!({ "op": "answer", "sdp": offer })).await;
+	let answer = answer["sdp"].as_str().unwrap();
+	eprintln!("browser answer:\n{answer}");
+	peer.accept_answer(answer).await.unwrap();
+	wait_connected(&mut peer).await;
+
+	// Three seconds of synthetic media.
+	let mut source = SyntheticSource::new(30, 3000, true);
+	let mut frames = Vec::new();
+	let mut keyframe_requests = 0;
+	let end = Instant::now() + Duration::from_secs(3);
+	while Instant::now() < end {
+		source.poll_frames(Instant::now(), &mut frames);
+		for f in frames.drain(..) {
+			peer.write(f.kind, f.time, f.data);
+		}
+		while let Some(event) = peer.try_next_event() {
+			if let PeerEvent::KeyframeRequest = event {
+				keyframe_requests += 1;
+			}
+		}
+		tokio::time::sleep(Duration::from_millis(10)).await;
+	}
+	let stats = browser.call(json!({ "op": "stats" })).await;
+	eprintln!("browser stats: {stats:#}\nkeyframe requests from the browser: {keyframe_requests}");
+	assert_eq!(stats["connectionState"], "connected");
+	let video = &stats["inbound"]["video"];
+	let audio = &stats["inbound"]["audio"];
+	assert_eq!(video["codec"], "video/VP8");
+	assert!(video["packetsReceived"].as_u64().unwrap() > 100, "video packets: {video}");
+	assert!(video["bytesReceived"].as_u64().unwrap() > 100_000, "video bytes: {video}");
+	assert_eq!(audio["codec"], "audio/opus");
+	assert!(audio["packetsReceived"].as_u64().unwrap() > 50, "audio packets: {audio}");
+	// The synthetic frames are real (tiny) VP8 keyframes.
+	assert!(video["framesDecoded"].as_u64().unwrap() > 30, "decoded: {video}");
+	browser.quit().await;
+}
+
+/// Answer STUN binding requests with a made-up public address, so a peer
+/// reports a server-reflexive candidate without internet access.
+async fn fake_stun_server() -> std::net::SocketAddr {
+	let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+	let addr = socket.local_addr().unwrap();
+	tokio::spawn(async move {
+		let mut buf = [0; 1500];
+		while let Ok((n, from)) = socket.recv_from(&mut buf).await {
+			if n < 20 || buf[..2] != [0, 1] {
+				continue;
+			}
+			// Binding success with XOR-MAPPED-ADDRESS 203.0.113.9:40000.
+			let mut resp = vec![0x01, 0x01, 0, 12];
+			resp.extend_from_slice(&buf[4..20]);
+			resp.extend_from_slice(&[0, 0x20, 0, 8, 0, 1]);
+			resp.extend_from_slice(&(40000u16 ^ 0x2112).to_be_bytes());
+			let ip = u32::from(std::net::Ipv4Addr::new(203, 0, 113, 9)) ^ 0x2112_A442;
+			resp.extend_from_slice(&ip.to_be_bytes());
+			let _ = socket.send_to(&resp, from).await;
+		}
+	});
+	addr
+}
+
+/// A trickled candidate as our sessions send it (`iceCandidate` signal with
+/// the peer's mid) must be accepted by the browser.
+#[tokio::test(flavor = "multi_thread")]
+async fn trickled_candidates_reach_browser() {
+	if !enabled() {
+		eprintln!("skipped: set VOELIN_INTEROP=1 (needs node, Playwright and Chromium)");
+		return;
+	}
+	let mut browser = Browser::start().await;
+	// Primary address (STUN is not sent from loopback) and the fake STUN server.
+	let stun = fake_stun_server().await;
+	let config = PeerConfig {
+		hosts: Vec::new(),
+		stun_servers: vec![stun.to_string()],
+		..PeerConfig::loopback()
+	};
+	let (mut peer, offer) = Peer::offer(&config, "interop").await.unwrap();
+	let answer = browser.call(json!({ "op": "answer", "sdp": offer })).await;
+	peer.accept_answer(answer["sdp"].as_str().unwrap()).await.unwrap();
+	let (candidate, mid) = timeout(Duration::from_secs(10), async {
+		loop {
+			match peer.next_event().await {
+				Some(PeerEvent::LocalCandidate { candidate, mid }) => return (candidate, mid),
+				Some(PeerEvent::Closed) | None => panic!("closed"),
+				_ => {}
+			}
+		}
+	})
+	.await
+	.expect("no server-reflexive candidate");
+	assert!(candidate.contains("203.0.113.9 40000 typ srflx"), "{candidate}");
+	let first_mid = offer.lines().find_map(|l| l.strip_prefix("a=mid:")).unwrap().trim();
+	assert_eq!(mid.as_deref(), Some(first_mid));
+	// Through the signal JSON, as the server relays it.
+	let json = Signal::IceCandidate { candidate, mid, mline_index: Some(0) }.to_json();
+	let Signal::IceCandidate { candidate, mid, mline_index } = Signal::parse(&json).unwrap() else {
+		unreachable!()
+	};
+	let add = json!({
+		"op": "candidate", "candidate": candidate, "sdpMid": mid, "sdpMLineIndex": mline_index
+	});
+	browser.call(add).await;
+	wait_connected(&mut peer).await;
+	browser.quit().await;
+}
+
+/// Frames per codec.
+#[derive(Debug, Default)]
+struct Counts(Vec<(Codec, usize)>);
+
+impl Counts {
+	fn add(&mut self, codec: Codec) {
+		match self.0.iter_mut().find(|(c, _)| *c == codec) {
+			Some((_, n)) => *n += 1,
+			None => self.0.push((codec, 1)),
+		}
+	}
+
+	fn get(&self, codec: Codec) -> usize {
+		self.0.iter().find(|(c, _)| *c == codec).map_or(0, |(_, n)| *n)
+	}
+
+	fn total(&self) -> usize {
+		self.0.iter().map(|(_, n)| n).sum()
+	}
+}
+
+struct Received {
+	video: Counts,
+	audio: Counts,
+	/// VP8 keyframes (frame tag bit 0 clear).
+	vp8_keyframes: usize,
+}
+
+/// Collect frames from `peer` for up to `limit` or until `enough`.
+async fn receive(peer: &mut Peer, limit: Duration, enough: usize) -> Received {
+	let mut r = Received { video: Counts::default(), audio: Counts::default(), vp8_keyframes: 0 };
+	let _ = timeout(limit, async {
+		while let Some(event) = peer.next_event().await {
+			if let PeerEvent::Media(frame) = event {
+				let map = match frame.kind {
+					MediaKind::Video => &mut r.video,
+					MediaKind::Audio => &mut r.audio,
+				};
+				map.add(frame.codec);
+				if frame.codec == Codec::Vp8 && frame.data.first().is_some_and(|b| b & 1 == 0) {
+					r.vp8_keyframes += 1;
+				}
+				if r.video.total() >= enough && r.audio.total() >= enough {
+					return;
+				}
+			}
+		}
+	})
+	.await;
+	r
+}
+
+/// Chromium sends a canvas stream and an oscillator; our viewer peer answers.
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_streams_to_rust() {
+	if !enabled() {
+		eprintln!("skipped: set VOELIN_INTEROP=1 (needs node, Playwright and Chromium)");
+		return;
+	}
+	let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
+	let mut browser = Browser::start().await;
+	let config = PeerConfig::loopback();
+	let mut tested = Vec::new();
+	for (name, codec) in
+		[("VP8", Codec::Vp8), ("VP9", Codec::Vp9), ("H264", Codec::H264), ("AV1", Codec::Av1)]
+	{
+		// VP8 with trickled browser candidates, the others with candidates in the SDP.
+		let trickle = codec == Codec::Vp8;
+		let offer = browser.call(json!({ "op": "offer", "codec": name, "trickle": trickle })).await;
+		if offer.get("unsupported").is_some() {
+			eprintln!("{name}: the browser cannot send it, skipped");
+			continue;
+		}
+		let offer = offer["sdp"].as_str().unwrap();
+		let (mut peer, answer) = Peer::answer(&config, offer).await.unwrap();
+		browser.call(json!({ "op": "accept", "sdp": answer })).await;
+		if trickle {
+			let candidates = browser.call(json!({ "op": "candidates" })).await;
+			let candidates = candidates["candidates"].as_array().unwrap();
+			assert!(!candidates.is_empty(), "no browser candidates");
+			for c in candidates {
+				peer.add_remote_candidate(c["candidate"].as_str().unwrap());
+			}
+		}
+		wait_connected(&mut peer).await;
+		let received = receive(&mut peer, Duration::from_secs(8), 60).await;
+		eprintln!(
+			"{name}: video {:?}, audio {:?}, VP8 keyframes {}",
+			received.video, received.audio, received.vp8_keyframes
+		);
+		assert!(received.video.get(codec) >= 30, "{name} video frames");
+		assert!(received.audio.get(Codec::Opus) >= 30, "{name} Opus frames");
+		if codec == Codec::Vp8 {
+			// A keyframe request (PLI) makes the browser's encoder send one.
+			let before = received.vp8_keyframes;
+			peer.request_keyframe();
+			let after = receive(&mut peer, Duration::from_secs(3), 90).await;
+			assert!(after.vp8_keyframes > 0, "no keyframe after PLI (had {before} before)");
+		}
+		tested.push(name);
+	}
+	assert!(tested.contains(&"VP8") && tested.contains(&"VP9"), "tested {tested:?}");
+	browser.quit().await;
+}

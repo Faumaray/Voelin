@@ -1,0 +1,1704 @@
+import { Button, LineEdit, ListView, ComboBox, CheckBox, Slider, AboutSlint, VerticalBox, HorizontalBox, ScrollView, TabWidget } from "std-widgets.slint";
+
+export struct ServerItem {
+    id: int,
+    name: string,
+    address: string,
+    // "offline", "connecting", "observing" or "connected"
+    status: string,
+}
+
+export struct TreeItem {
+    is-channel: bool,
+    depth: int,
+    id: int,
+    name: string,
+    own: bool,
+    talking: bool,
+    muted: bool,
+    sound-off: bool,
+    away: bool,
+    streaming: bool,
+    locked: bool,
+    collapsed: bool,
+    // Local playback of this client: muted, or its volume in percent
+    // (100 = unchanged).
+    local-muted: bool,
+    local-volume: int,
+    // Our own client.
+    myself: bool,
+}
+
+export struct ChatTab {
+    title: string,
+    // 0 = server chat, 1 = channel chat
+    kind: int,
+    id: int,
+    unread: int,
+}
+
+export struct ChatLine {
+    author: string,
+    text: string,
+    time: string,
+    relayed: bool,
+}
+
+export struct BookmarkForm {
+    id: int,
+    name: string,
+    address: string,
+    nickname: string,
+    server-password: string,
+    gateway-url: string,
+    query-transport: string,
+    query-addr: string,
+    query-user: string,
+    query-password: string,
+}
+
+// A stream in our channel. An empty id: a client that streams, but the
+// server did not announce the stream to us (it started before we joined).
+export struct StreamItem {
+    id: string,
+    name: string,
+    streamer: string,
+    audio: bool,
+    // Shown in the viewer.
+    watching: bool,
+    // Our own stream.
+    own: bool,
+}
+
+// A viewer of our stream. state: "requested", "connecting" or "connected".
+export struct ViewerItem {
+    client: int,
+    name: string,
+    state: string,
+    message: string,
+}
+
+// A capture source for the share dialog.
+export struct SourceItem {
+    name: string,
+    detail: string,
+}
+
+export struct ShareForm {
+    source: int,
+    name: string,
+    // Index into the frame rate choices (15, 30, 60).
+    fps-index: int,
+    // Index into the bitrate choices (2.5, 4.6, 8, 10 Mbit/s).
+    bitrate-index: int,
+    audio: bool,
+    auto-accept: bool,
+}
+
+export struct AudioForm {
+    // 0 = system default, then the devices.
+    input-index: int,
+    output-index: int,
+    // 0 = push-to-talk, 1 = voice activation, 2 = continuous.
+    transmit: int,
+    // dBFS.
+    vad-threshold: float,
+    echo-cancellation: bool,
+    noise-suppression: bool,
+    // 0 = low ... 3 = very high.
+    noise-level: int,
+    auto-gain: bool,
+    // dB.
+    input-gain: float,
+    // Percent.
+    output-volume: float,
+    // Milliseconds.
+    playback-buffer: float,
+}
+
+// Local playback settings of one client. volume in percent.
+export struct ClientAudio {
+    id: int,
+    name: string,
+    volume: float,
+    muted: bool,
+}
+
+export global Bridge {
+    in property <[ServerItem]> servers;
+    in-out property <int> current-server: -1;
+    in property <[TreeItem]> tree;
+    in property <[ChatTab]> tabs;
+    in-out property <int> current-tab: 0;
+    in property <[ChatLine]> messages;
+    in property <string> status-text;
+    in property <string> server-title: @tr("No server selected");
+    in property <bool> voice-connected;
+    in property <bool> voice-connecting;
+    in property <bool> observing;
+    in property <bool> can-observe;
+    in property <bool> input-muted;
+    in property <bool> output-muted;
+    in property <bool> transmitting;
+    in property <string> presence-source;
+
+    // Streams (TeamSpeak 6 while connected with voice).
+    in property <bool> streams-available;
+    in property <[StreamItem]> streams;
+    // Our stream: "", "starting", "live" or "ended".
+    in property <string> share-state;
+    in property <string> share-status;
+    in property <[ViewerItem]> share-viewers;
+    in property <int> share-requests;
+    in property <[SourceItem]> share-sources;
+    in property <string> share-error;
+    in property <bool> share-busy;
+    // Whether capture and encoding are built in.
+    in property <bool> can-share: true;
+
+    // The stream shown in the viewer.
+    in property <bool> viewer-open;
+    in property <image> viewer-frame;
+    in property <bool> viewer-has-frame;
+    in property <string> viewer-title;
+    // Shown instead of (or over) the picture: waiting, ended, errors.
+    in property <string> viewer-status;
+    in property <string> viewer-info;
+    in property <bool> viewer-ended;
+    in-out property <float> viewer-volume: 100;
+    in property <bool> viewer-fullscreen;
+
+    // Settings.
+    in property <[string]> input-devices;
+    in property <[string]> output-devices;
+    in-out property <AudioForm> audio;
+    // Microphone level in dBFS and whether voice is sent.
+    in property <float> input-level: -100;
+    in property <bool> input-sending;
+    in property <bool> mic-test;
+    in-out property <bool> global-ptt;
+    in-out property <string> ptt-key;
+    in property <string> ptt-status;
+    in-out property <bool> h264-enabled;
+    in property <bool> h264-loaded;
+    in property <bool> h264-busy;
+    in property <string> h264-status;
+    in property <string> h264-attribution;
+    // The product name (voelin_platform::APP_NAME, not translated) and version.
+    in property <string> app-name: "Voelin";
+    in property <string> app-version;
+    in-out property <ClientAudio> client-audio;
+    // Opt-in local crash reports, and a notice about reports on disk.
+    in-out property <bool> crash-reports;
+    in property <string> crash-notice;
+    // Third-party notices, one entry per line, for the About page.
+    in property <[string]> notices;
+
+    callback select-server(int);
+    callback connect-voice();
+    callback disconnect-voice();
+    callback toggle-observe();
+    callback join-channel(int);
+    callback open-channel-chat(int);
+    callback toggle-collapse(int);
+    callback select-tab(int);
+    callback close-tab(int);
+    callback send-message(string);
+    callback set-input-muted(bool);
+    callback set-output-muted(bool);
+    callback push-to-talk(bool);
+    callback edit-bookmark(int) -> BookmarkForm;
+    callback save-bookmark(BookmarkForm);
+    callback delete-bookmark(int);
+
+    callback open-share() -> ShareForm;
+    callback start-share(ShareForm);
+    callback stop-share();
+    callback respond-viewer(int, bool);
+    callback kick-viewer(int);
+    callback watch-stream(string);
+    callback show-viewer();
+    callback hide-viewer();
+    callback leave-stream();
+    callback set-stream-volume(float);
+    callback toggle-fullscreen();
+
+    callback open-settings();
+    callback close-settings();
+    callback audio-changed(AudioForm);
+    callback toggle-mic-test();
+    callback apply-ptt(bool, string);
+    callback set-h264(bool);
+    callback download-h264();
+    callback open-client(int) -> bool;
+    callback client-audio-changed(ClientAudio);
+    callback set-crash-reports(bool);
+    callback open-crash-folder();
+    callback delete-crash-reports();
+    callback dismiss-crash-notice();
+    callback open-about();
+}
+
+component StatusDot inherits Rectangle {
+    in property <string> status;
+    width: 10px;
+    height: 10px;
+    border-radius: 5px;
+    background: status == "connected" ? #3fb950 : status == "observing" ? #58a6ff : status == "connecting" ? #d29922 : #6e7681;
+}
+
+component Field inherits HorizontalLayout {
+    in property <string> label;
+    in-out property <string> value;
+    in property <string> placeholder;
+    in property <InputType> input-type: InputType.text;
+    spacing: 8px;
+    Text {
+        text: label;
+        width: 130px;
+        vertical-alignment: center;
+    }
+    LineEdit {
+        text <=> value;
+        placeholder-text: placeholder;
+        input-type: input-type;
+        accessible-label: label;
+    }
+}
+
+// A label beside a control, for settings rows.
+component Row inherits HorizontalLayout {
+    in property <string> label;
+    spacing: 8px;
+    Text {
+        text: label;
+        width: 170px;
+        vertical-alignment: center;
+        wrap: word-wrap;
+    }
+    @children
+}
+
+// Small text tag in a list row.
+component Tag inherits Text {
+    font-size: 10px;
+    vertical-alignment: center;
+}
+
+// A dimmed full-window backdrop with a centered card.
+component Dialog inherits Rectangle {
+    in property <length> card-width: 520px;
+    in property <length> card-height: 520px;
+    callback dismissed();
+    background: #000000a0;
+    TouchArea {
+        clicked => { dismissed(); }
+    }
+    Rectangle {
+        width: min(parent.width - 32px, card-width);
+        height: min(parent.height - 32px, card-height);
+        background: #1f2328;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: #30363d;
+        // Clicks inside the card do not dismiss it.
+        TouchArea { }
+        @children
+    }
+}
+
+component BookmarkEditor inherits Dialog {
+    in-out property <BookmarkForm> form;
+    callback done();
+    dismissed => { done(); }
+    VerticalBox {
+        Text {
+            text: form.id < 0 ? @tr("Add server") : @tr("Edit server");
+            font-size: 18px;
+            font-weight: 700;
+        }
+        ScrollView {
+            VerticalLayout {
+                spacing: 6px;
+                Field { label: @tr("Name"); value <=> form.name; placeholder: @tr("My server"); }
+                Field { label: @tr("Address"); value <=> form.address; placeholder: "ts.example.org:9987"; }
+                Field { label: @tr("Nickname"); value <=> form.nickname; }
+                Field { label: @tr("Server password"); value <=> form.server-password; input-type: InputType.password; }
+                Text {
+                    text: @tr("Invisible presence and chat without joining (optional)");
+                    font-weight: 600;
+                }
+                Field { label: @tr("Gateway URL"); value <=> form.gateway-url; placeholder: "wss://gw.example.org/v1"; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: @tr("Query transport");
+                        width: 130px;
+                        vertical-alignment: center;
+                    }
+                    ComboBox {
+                        model: ["none", "ssh", "raw", "http"];
+                        current-value <=> form.query-transport;
+                        accessible-label: @tr("Query transport");
+                    }
+                }
+                Field { label: @tr("Query address"); value <=> form.query-addr; placeholder: "ts.example.org:10022"; }
+                Field { label: @tr("Query login"); value <=> form.query-user; }
+                Field { label: @tr("Query password"); value <=> form.query-password; input-type: InputType.password; }
+            }
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            if form.id >= 0: Button {
+                text: @tr("Delete");
+                clicked => {
+                    Bridge.delete-bookmark(form.id);
+                    done();
+                }
+            }
+            Button {
+                text: @tr("Cancel");
+                clicked => { done(); }
+            }
+            Button {
+                text: @tr("Save");
+                primary: true;
+                enabled: form.address != "" && form.nickname != "";
+                clicked => {
+                    Bridge.save-bookmark(form);
+                    done();
+                }
+            }
+        }
+    }
+}
+
+component ServerList inherits Rectangle {
+    callback add();
+    callback edit(int);
+    background: #161b22;
+    accessible-role: list;
+    accessible-label: @tr("Servers");
+    VerticalBox {
+        HorizontalLayout {
+            Text {
+                text: @tr("Servers");
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+            Button {
+                text: "+";
+                width: 32px;
+                accessible-label: @tr("Add server");
+                clicked => { add(); }
+            }
+        }
+        ListView {
+            for server[i] in Bridge.servers: Rectangle {
+                height: 48px;
+                border-radius: 6px;
+                background: Bridge.current-server == server.id ? #30363d : area.has-hover ? #21262d : transparent;
+                accessible-role: list-item;
+                accessible-label: server.name;
+                accessible-description: server.address;
+                accessible-item-selectable: true;
+                accessible-item-selected: Bridge.current-server == server.id;
+                accessible-action-default => { Bridge.select-server(server.id); }
+                area := TouchArea {
+                    clicked => { Bridge.select-server(server.id); }
+                    double-clicked => { edit(server.id); }
+                }
+                HorizontalLayout {
+                    padding: 6px;
+                    spacing: 8px;
+                    StatusDot {
+                        status: server.status;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    VerticalLayout {
+                        Text {
+                            text: server.name;
+                            font-weight: 600;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: server.address;
+                            font-size: 11px;
+                            color: #8b949e;
+                            overflow: elide;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component ChannelTree inherits Rectangle {
+    // A client row was clicked: its local volume and mute.
+    callback client-clicked(int);
+    background: #0d1117;
+    accessible-role: list;
+    accessible-label: @tr("Channels and clients");
+    ListView {
+        for row in Bridge.tree: Rectangle {
+            height: 26px;
+            background: row-area.has-hover ? #161b22 : transparent;
+            accessible-role: list-item;
+            accessible-label: row.is-channel ? @tr("Channel {}", row.name) : row.name;
+            accessible-description: (row.talking ? @tr("talking") + " " : "") + (row.streaming ? @tr("streaming") + " " : "") + (row.muted ? @tr("microphone off") + " " : "") + (row.local-muted ? @tr("muted for you") : "");
+            accessible-action-default => {
+                if (row.is-channel) {
+                    Bridge.open-channel-chat(row.id);
+                } else {
+                    client-clicked(row.id);
+                }
+            }
+            row-area := TouchArea {
+                double-clicked => {
+                    if (row.is-channel) {
+                        Bridge.join-channel(row.id);
+                    }
+                }
+                clicked => {
+                    if (row.is-channel) {
+                        Bridge.open-channel-chat(row.id);
+                    } else if (!row.myself) {
+                        client-clicked(row.id);
+                    }
+                }
+            }
+            HorizontalLayout {
+                padding-left: 8px + row.depth * 18px;
+                padding-right: 8px;
+                spacing: 6px;
+                if row.is-channel: Text {
+                    text: row.collapsed ? "▸" : "▾";
+                    vertical-alignment: center;
+                    accessible-role: button;
+                    accessible-label: row.collapsed ? @tr("Expand") : @tr("Collapse");
+                    accessible-action-default => { Bridge.toggle-collapse(row.id); }
+                    TouchArea {
+                        clicked => { Bridge.toggle-collapse(row.id); }
+                    }
+                }
+                if !row.is-channel: Rectangle {
+                    width: 10px;
+                    height: 10px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 5px;
+                    background: row.talking ? #3fb950 : #30363d;
+                }
+                Text {
+                    text: (row.is-channel ? "# " : "") + row.name;
+                    horizontal-stretch: 1;
+                    horizontal-alignment: left;
+                    vertical-alignment: center;
+                    font-weight: row.is-channel || row.own ? 600 : 400;
+                    color: row.away ? #8b949e : row.own ? #58a6ff : #e6edf3;
+                    overflow: elide;
+                }
+                if row.locked: Tag { text: @tr("password"); color: #d29922; }
+                if row.muted: Tag { text: @tr("mic off"); color: #f85149; }
+                if row.sound-off: Tag { text: @tr("sound off"); color: #f85149; }
+                if row.local-muted: Tag { text: @tr("muted for you"); color: #f0883e; }
+                if !row.local-muted && row.local-volume != 100 && !row.is-channel: Tag {
+                    text: @tr("{}%", row.local-volume);
+                    color: #8b949e;
+                }
+                if row.streaming: Tag { text: @tr("LIVE"); color: #a371f7; font-weight: 700; }
+                if row.away: Tag { text: @tr("away"); color: #8b949e; }
+            }
+        }
+    }
+}
+
+// Streams in our channel, requests to watch ours.
+component StreamsPanel inherits Rectangle {
+    callback manage-share();
+    background: #0d1117;
+    border-width: 1px;
+    border-color: #21262d;
+    accessible-role: groupbox;
+    accessible-label: @tr("Streams");
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+        HorizontalLayout {
+            spacing: 6px;
+            Text {
+                text: @tr("Streams");
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+            if Bridge.share-state == "live": Text {
+                text: @tr("● You are live");
+                color: #f85149;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+            Rectangle { }
+            if Bridge.share-state == "live" || Bridge.share-state == "starting": Button {
+                text: Bridge.share-requests > 0 ? @tr("Viewers ({})", Bridge.share-requests) : @tr("Manage");
+                clicked => { manage-share(); }
+            }
+        }
+        if Bridge.streams.length == 0: Text {
+            text: @tr("No streams in your channel.");
+            color: #8b949e;
+            font-size: 12px;
+        }
+        for stream in Bridge.streams: HorizontalLayout {
+            spacing: 6px;
+            Rectangle {
+                width: 6px;
+                height: 6px;
+                y: (parent.height - self.height) / 2;
+                border-radius: 3px;
+                background: #a371f7;
+            }
+            VerticalLayout {
+                horizontal-stretch: 1;
+                Text {
+                    text: stream.id == "" ? @tr("{} is streaming", stream.streamer) : stream.name == "" ? @tr("Untitled stream") : stream.name;
+                    font-weight: 600;
+                    overflow: elide;
+                }
+                Text {
+                    text: stream.id == "" ? @tr("Started before you joined; the server did not announce it.") : stream.own ? @tr("your stream") : stream.audio ? @tr("by {} · with sound", stream.streamer) : @tr("by {}", stream.streamer);
+                    font-size: 11px;
+                    color: #8b949e;
+                    overflow: elide;
+                }
+            }
+            if stream.id != "" && !stream.own && !stream.watching: Button {
+                text: @tr("Watch");
+                accessible-label: @tr("Watch {}", stream.name);
+                clicked => { Bridge.watch-stream(stream.id); }
+            }
+            if stream.watching && !Bridge.viewer-open: Button {
+                text: @tr("Show");
+                clicked => { Bridge.show-viewer(); }
+            }
+            if stream.watching: Button {
+                text: @tr("Leave");
+                clicked => { Bridge.leave-stream(); }
+            }
+        }
+        for viewer in Bridge.share-viewers: HorizontalLayout {
+            spacing: 6px;
+            if viewer.state == "requested": Text {
+                text: @tr("{} wants to watch", viewer.name);
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+                overflow: elide;
+                color: #d29922;
+            }
+            if viewer.state == "requested": Button {
+                text: @tr("Accept");
+                primary: true;
+                clicked => { Bridge.respond-viewer(viewer.client, true); }
+            }
+            if viewer.state == "requested": Button {
+                text: @tr("Deny");
+                clicked => { Bridge.respond-viewer(viewer.client, false); }
+            }
+        }
+    }
+}
+
+component ChatPanel inherits Rectangle {
+    background: #0d1117;
+    VerticalLayout {
+        HorizontalLayout {
+            height: 34px;
+            spacing: 2px;
+            accessible-role: tab-list;
+            accessible-label: @tr("Chats");
+            for tab[i] in Bridge.tabs: Rectangle {
+                width: tab-text.preferred-width + 28px;
+                background: Bridge.current-tab == i ? #30363d : tab-area.has-hover ? #21262d : #161b22;
+                accessible-role: AccessibleRole.tab;
+                accessible-label: tab.title;
+                accessible-description: tab.unread > 0 ? @tr("{} unread", tab.unread) : "";
+                accessible-item-selectable: true;
+                accessible-item-selected: Bridge.current-tab == i;
+                accessible-action-default => { Bridge.select-tab(i); }
+                tab-area := TouchArea {
+                    clicked => { Bridge.select-tab(i); }
+                }
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 6px;
+                    spacing: 4px;
+                    tab-text := Text {
+                        text: tab.title + (tab.unread > 0 ? " (" + tab.unread + ")" : "");
+                        vertical-alignment: center;
+                        font-weight: tab.unread > 0 ? 700 : 400;
+                    }
+                    if tab.kind == 1: Text {
+                        text: "×";
+                        vertical-alignment: center;
+                        accessible-role: button;
+                        accessible-label: @tr("Close {}", tab.title);
+                        accessible-action-default => { Bridge.close-tab(i); }
+                        TouchArea {
+                            clicked => { Bridge.close-tab(i); }
+                        }
+                    }
+                }
+            }
+            Rectangle { }
+        }
+        ListView {
+            accessible-label: @tr("Messages");
+            for line in Bridge.messages: VerticalLayout {
+                padding: 6px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: line.author;
+                        font-weight: 700;
+                        color: line.relayed ? #58a6ff : #e6edf3;
+                    }
+                    Text {
+                        text: line.time + (line.relayed ? "  " + @tr("via relay") : "");
+                        font-size: 11px;
+                        color: #8b949e;
+                        vertical-alignment: center;
+                    }
+                }
+                Text {
+                    text: line.text;
+                    wrap: word-wrap;
+                }
+            }
+        }
+        HorizontalLayout {
+            padding: 6px;
+            spacing: 6px;
+            input := LineEdit {
+                placeholder-text: @tr("Message");
+                accessible-label: @tr("Message");
+                accepted(text) => {
+                    if (text != "") {
+                        Bridge.send-message(text);
+                        self.text = "";
+                    }
+                }
+            }
+            Button {
+                text: @tr("Send");
+                clicked => {
+                    if (input.text != "") {
+                        Bridge.send-message(input.text);
+                        input.text = "";
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The stream we watch: title, picture, and player controls below it.
+component StreamViewer inherits Rectangle {
+    background: #010409;
+    accessible-role: groupbox;
+    accessible-label: @tr("Stream viewer");
+    VerticalLayout {
+        Rectangle {
+            height: 42px;
+            background: #161b22;
+            VerticalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                alignment: center;
+                Text {
+                    text: Bridge.viewer-title;
+                    font-weight: 700;
+                    overflow: elide;
+                }
+                Text {
+                    text: Bridge.viewer-info;
+                    font-size: 11px;
+                    color: #8b949e;
+                    overflow: elide;
+                }
+            }
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            Image {
+                width: parent.width;
+                height: parent.height;
+                source: Bridge.viewer-frame;
+                image-fit: contain;
+                visible: Bridge.viewer-has-frame;
+                accessible-role: image;
+                accessible-label: @tr("Stream picture");
+            }
+            if Bridge.viewer-status != "": Rectangle {
+                width: min(parent.width - 32px, status-text.preferred-width + 32px);
+                height: status-text.preferred-height + 20px;
+                border-radius: 6px;
+                background: #161b22e0;
+                status-text := Text {
+                    width: min(root.width - 64px, self.preferred-width);
+                    text: Bridge.viewer-status;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                    accessible-live-region: polite;
+                }
+            }
+        }
+        Rectangle {
+            height: 44px;
+            background: #161b22;
+            HorizontalLayout {
+                padding: 6px;
+                padding-left: 10px;
+                spacing: 8px;
+                Text {
+                    text: @tr("Volume");
+                    vertical-alignment: center;
+                    color: #8b949e;
+                }
+                Slider {
+                    width: 140px;
+                    minimum: 0;
+                    maximum: 200;
+                    value <=> Bridge.viewer-volume;
+                    enabled: !Bridge.viewer-ended;
+                    accessible-label: @tr("Stream volume");
+                    changed(v) => { Bridge.set-stream-volume(v); }
+                }
+                Text {
+                    text: @tr("{}%", round(Bridge.viewer-volume));
+                    width: 40px;
+                    vertical-alignment: center;
+                    color: #8b949e;
+                }
+                Rectangle { }
+                Button {
+                    text: Bridge.viewer-fullscreen ? @tr("Exit full screen") : @tr("Full screen");
+                    clicked => { Bridge.toggle-fullscreen(); }
+                }
+                if !Bridge.viewer-fullscreen: Button {
+                    text: @tr("Chat");
+                    accessible-label: @tr("Back to the chat");
+                    clicked => { Bridge.hide-viewer(); }
+                }
+                Button {
+                    text: Bridge.viewer-ended ? @tr("Close") : @tr("Leave");
+                    clicked => { Bridge.leave-stream(); }
+                }
+            }
+        }
+    }
+}
+
+component ShareDialog inherits Dialog {
+    in-out property <ShareForm> form;
+    callback done();
+    card-width: 560px;
+    card-height: 560px;
+    dismissed => { done(); }
+    VerticalBox {
+        Text {
+            text: Bridge.share-state == "live" ? @tr("You are sharing your screen") : Bridge.share-state == "starting" ? @tr("Starting…") : @tr("Share screen");
+            font-size: 18px;
+            font-weight: 700;
+        }
+        if Bridge.share-state == "live" || Bridge.share-state == "starting": VerticalLayout {
+            spacing: 8px;
+            vertical-stretch: 1;
+            Text {
+                text: Bridge.share-status;
+                color: #8b949e;
+                wrap: word-wrap;
+            }
+            Text {
+                text: @tr("Viewers");
+                font-weight: 600;
+            }
+            if Bridge.share-viewers.length == 0: Text {
+                text: @tr("Nobody is watching yet. Viewers in your channel can join from their streams list.");
+                color: #8b949e;
+                wrap: word-wrap;
+            }
+            ListView {
+                vertical-stretch: 1;
+                accessible-label: @tr("Viewers");
+                for viewer in Bridge.share-viewers: HorizontalLayout {
+                    padding-top: 4px;
+                    padding-bottom: 4px;
+                    spacing: 8px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+                        Text {
+                            text: viewer.name;
+                            font-weight: 600;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: viewer.state == "requested" ? (viewer.message == "" ? @tr("asks to watch") : @tr("asks to watch: {}", viewer.message)) : viewer.state == "connecting" ? @tr("connecting") : @tr("watching");
+                            font-size: 11px;
+                            color: viewer.state == "requested" ? #d29922 : viewer.state == "connected" ? #3fb950 : #8b949e;
+                            overflow: elide;
+                        }
+                    }
+                    if viewer.state == "requested": Button {
+                        text: @tr("Accept");
+                        primary: true;
+                        clicked => { Bridge.respond-viewer(viewer.client, true); }
+                    }
+                    if viewer.state == "requested": Button {
+                        text: @tr("Deny");
+                        clicked => { Bridge.respond-viewer(viewer.client, false); }
+                    }
+                    if viewer.state != "requested": Button {
+                        text: @tr("Remove");
+                        accessible-label: @tr("Remove {}", viewer.name);
+                        clicked => { Bridge.kick-viewer(viewer.client); }
+                    }
+                }
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: 8px;
+                Button {
+                    text: @tr("Close");
+                    clicked => { done(); }
+                }
+                Button {
+                    text: @tr("Stop sharing");
+                    primary: true;
+                    clicked => { Bridge.stop-share(); }
+                }
+            }
+        }
+        if Bridge.share-state != "live" && Bridge.share-state != "starting": VerticalLayout {
+            spacing: 8px;
+            vertical-stretch: 1;
+            Text {
+                text: @tr("What to share");
+                font-weight: 600;
+            }
+            ListView {
+                vertical-stretch: 1;
+                min-height: 120px;
+                accessible-label: @tr("What to share");
+                for source[i] in Bridge.share-sources: Rectangle {
+                    height: 40px;
+                    border-radius: 6px;
+                    background: form.source == i ? #1f6feb40 : source-area.has-hover ? #21262d : transparent;
+                    border-width: form.source == i ? 1px : 0px;
+                    border-color: #1f6feb;
+                    accessible-role: list-item;
+                    accessible-label: source.name;
+                    accessible-description: source.detail;
+                    accessible-item-selectable: true;
+                    accessible-item-selected: form.source == i;
+                    accessible-action-default => { form.source = i; }
+                    source-area := TouchArea {
+                        clicked => { form.source = i; }
+                    }
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 8px;
+                        Text {
+                            text: source.name;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: source.detail;
+                            vertical-alignment: center;
+                            font-size: 11px;
+                            color: #8b949e;
+                        }
+                    }
+                }
+            }
+            Field { label: @tr("Stream name"); value <=> form.name; }
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: @tr("Frame rate");
+                    width: 130px;
+                    vertical-alignment: center;
+                }
+                ComboBox {
+                    model: [@tr("15 fps"), @tr("30 fps"), @tr("60 fps")];
+                    current-index <=> form.fps-index;
+                    accessible-label: @tr("Frame rate");
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: @tr("Quality");
+                    width: 130px;
+                    vertical-alignment: center;
+                }
+                ComboBox {
+                    model: [@tr("Low (2.5 Mbit/s)"), @tr("Standard (4.6 Mbit/s)"), @tr("High (8 Mbit/s)"), @tr("Best (10 Mbit/s)")];
+                    current-index <=> form.bitrate-index;
+                    accessible-label: @tr("Quality");
+                }
+            }
+            CheckBox {
+                text: @tr("Share system audio");
+                checked <=> form.audio;
+            }
+            CheckBox {
+                text: @tr("Let everyone in the channel watch without asking");
+                checked <=> form.auto-accept;
+            }
+            if Bridge.share-error != "": Text {
+                text: Bridge.share-error;
+                color: #f85149;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: 8px;
+                Button {
+                    text: @tr("Cancel");
+                    clicked => { done(); }
+                }
+                Button {
+                    text: Bridge.share-busy ? @tr("Starting…") : @tr("Start sharing");
+                    primary: true;
+                    enabled: !Bridge.share-busy && Bridge.streams-available && Bridge.share-sources.length > 0;
+                    clicked => { Bridge.start-share(form); }
+                }
+            }
+        }
+    }
+}
+
+// Microphone level with the voice activation threshold.
+component LevelMeter inherits Rectangle {
+    in property <float> level: -100;
+    in property <float> threshold: -40;
+    in property <bool> show-threshold: true;
+    // dBFS shown at the left edge.
+    property <float> floor: -70;
+    height: 12px;
+    border-radius: 3px;
+    background: #0d1117;
+    border-width: 1px;
+    border-color: #30363d;
+    accessible-role: progress-indicator;
+    accessible-label: @tr("Microphone level");
+    accessible-value: @tr("{} dB", round(level));
+    accessible-value-minimum: floor;
+    accessible-value-maximum: 0;
+    Rectangle {
+        x: 0;
+        width: parent.width * clamp((level - floor) / (0 - floor), 0, 1);
+        border-radius: 3px;
+        background: level >= threshold ? #3fb950 : #58a6ff;
+    }
+    if show-threshold: Rectangle {
+        x: parent.width * clamp((threshold - floor) / (0 - floor), 0, 1) - 1px;
+        width: 2px;
+        background: #e6edf3;
+    }
+}
+
+component SettingsDialog inherits Dialog {
+    in-out property <int> tab;
+    callback done();
+    card-width: 640px;
+    card-height: 660px;
+    dismissed => { done(); }
+    VerticalBox {
+        Text {
+            text: @tr("Settings");
+            font-size: 18px;
+            font-weight: 700;
+        }
+        TabWidget {
+            vertical-stretch: 1;
+            current-index <=> tab;
+            Tab {
+                title: @tr("Audio");
+                ScrollView {
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 8px;
+                        Row {
+                            label: @tr("Microphone");
+                            ComboBox {
+                                model: Bridge.input-devices;
+                                current-index: Bridge.audio.input-index;
+                                accessible-label: @tr("Microphone");
+                                selected => {
+                                    Bridge.audio.input-index = self.current-index;
+                                    Bridge.audio-changed(Bridge.audio);
+                                }
+                            }
+                        }
+                        Row {
+                            label: @tr("Speakers");
+                            ComboBox {
+                                model: Bridge.output-devices;
+                                current-index: Bridge.audio.output-index;
+                                accessible-label: @tr("Speakers");
+                                selected => {
+                                    Bridge.audio.output-index = self.current-index;
+                                    Bridge.audio-changed(Bridge.audio);
+                                }
+                            }
+                        }
+                        Row {
+                            label: @tr("Transmit");
+                            ComboBox {
+                                model: [@tr("Push-to-talk"), @tr("Voice activation"), @tr("Continuously")];
+                                current-index: Bridge.audio.transmit;
+                                accessible-label: @tr("Transmit");
+                                selected => {
+                                    Bridge.audio.transmit = self.current-index;
+                                    Bridge.audio-changed(Bridge.audio);
+                                }
+                            }
+                        }
+                        Row {
+                            label: @tr("Voice activation level");
+                            Slider {
+                                minimum: -70;
+                                maximum: -10;
+                                value: Bridge.audio.vad-threshold;
+                                enabled: Bridge.audio.transmit == 1;
+                                accessible-label: @tr("Voice activation level");
+                                changed(v) => {
+                                    Bridge.audio.vad-threshold = round(v);
+                                    Bridge.audio-changed(Bridge.audio);
+                                }
+                            }
+                            Text {
+                                text: @tr("{} dB", round(Bridge.audio.vad-threshold));
+                                width: 56px;
+                                vertical-alignment: center;
+                                horizontal-alignment: right;
+                            }
+                        }
+                        Row {
+                            label: @tr("Microphone level");
+                            VerticalLayout {
+                                alignment: center;
+                                LevelMeter {
+                                    level: Bridge.input-level;
+                                    threshold: Bridge.audio.vad-threshold;
+                                    show-threshold: Bridge.audio.transmit == 1;
+                                }
+                            }
+                            Button {
+                                text: Bridge.mic-test ? @tr("Stop test") : @tr("Test");
+                                enabled: !Bridge.voice-connected;
+                                accessible-label: Bridge.mic-test ? @tr("Stop the microphone test") : @tr("Test the microphone");
+                                clicked => { Bridge.toggle-mic-test(); }
+                            }
+                        }
+                        Text {
+                            text: Bridge.voice-connected ? (Bridge.input-sending ? @tr("Sending voice") : @tr("Not sending")) : @tr("The meter shows the microphone while connected or during a test.");
+                            font-size: 11px;
+                            color: Bridge.input-sending ? #3fb950 : #8b949e;
+                            wrap: word-wrap;
+                        }
+                        Text {
+                            text: @tr("Processing");
+                            font-weight: 600;
+                        }
+                        CheckBox {
+                            text: @tr("Echo cancellation");
+                            checked: Bridge.audio.echo-cancellation;
+                            toggled => {
+                                Bridge.audio.echo-cancellation = self.checked;
+                                Bridge.audio-changed(Bridge.audio);
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            CheckBox {
+                                text: @tr("Noise suppression");
+                                checked: Bridge.audio.noise-suppression;
+                                toggled => {
+                                    Bridge.audio.noise-suppression = self.checked;
+                                    Bridge.audio-changed(Bridge.audio);
+                                }
+                            }
+                            ComboBox {
+                                model: [@tr("Low"), @tr("Moderate"), @tr("High"), @tr("Very high")];
+                                current-index: Bridge.audio.noise-level;
+                                enabled: Bridge.audio.noise-suppression;
+                                accessible-label: @tr("Noise suppression level");
+                                selected => {
+                                    Bridge.audio.noise-level = self.current-index;
+                                    Bridge.audio-changed(Bridge.audio);
+                                }
+                            }
+                        }
+                        CheckBox {
+                            text: @tr("Automatic gain control");
+                            checked: Bridge.audio.auto-gain;
+                            toggled => {
+                                Bridge.audio.auto-gain = self.checked;
+                                Bridge.audio-changed(Bridge.audio);
+                            }
+                        }
+                        Row {
+                            label: @tr("Microphone gain");
+                            Slider {
+                                minimum: -30;
+                                maximum: 30;
+                                value: Bridge.audio.input-gain;
+                                accessible-label: @tr("Microphone gain");
+                                changed(v) => {
+                                    Bridge.audio.input-gain = round(v);
+                                    Bridge.audio-changed(Bridge.audio);
+                                }
+                            }
+                            Text {
+                                text: @tr("{} dB", round(Bridge.audio.input-gain));
+                                width: 56px;
+                                vertical-alignment: center;
+                                horizontal-alignment: right;
+                            }
+                        }
+                        Text {
+                            text: @tr("Playback");
+                            font-weight: 600;
+                        }
+                        Row {
+                            label: @tr("Volume");
+                            Slider {
+                                minimum: 0;
+                                maximum: 200;
+                                value: Bridge.audio.output-volume;
+                                accessible-label: @tr("Playback volume");
+                                changed(v) => {
+                                    Bridge.audio.output-volume = round(v);
+                                    Bridge.audio-changed(Bridge.audio);
+                                }
+                            }
+                            Text {
+                                text: @tr("{}%", round(Bridge.audio.output-volume));
+                                width: 56px;
+                                vertical-alignment: center;
+                                horizontal-alignment: right;
+                            }
+                        }
+                        Row {
+                            label: @tr("Playback buffer");
+                            Slider {
+                                minimum: 20;
+                                maximum: 180;
+                                value: Bridge.audio.playback-buffer;
+                                accessible-label: @tr("Playback buffer");
+                                changed(v) => {
+                                    Bridge.audio.playback-buffer = round(v / 10) * 10;
+                                    Bridge.audio-changed(Bridge.audio);
+                                }
+                            }
+                            Text {
+                                text: @tr("{} ms", round(Bridge.audio.playback-buffer));
+                                width: 56px;
+                                vertical-alignment: center;
+                                horizontal-alignment: right;
+                            }
+                        }
+                    }
+                }
+            }
+            Tab {
+                title: @tr("Push-to-talk");
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 8px;
+                    alignment: start;
+                    CheckBox {
+                        text: @tr("Global push-to-talk key (works while other windows have focus)");
+                        checked <=> Bridge.global-ptt;
+                        toggled => { Bridge.apply-ptt(Bridge.global-ptt, Bridge.ptt-key); }
+                    }
+                    Row {
+                        label: @tr("Key");
+                        key-edit := LineEdit {
+                            text <=> Bridge.ptt-key;
+                            placeholder-text: "Ctrl+Shift+T";
+                            enabled: Bridge.global-ptt;
+                            accessible-label: @tr("Push-to-talk key");
+                            accepted => { Bridge.apply-ptt(Bridge.global-ptt, Bridge.ptt-key); }
+                        }
+                        Button {
+                            text: @tr("Apply");
+                            enabled: Bridge.global-ptt;
+                            clicked => { Bridge.apply-ptt(Bridge.global-ptt, Bridge.ptt-key); }
+                        }
+                    }
+                    Text {
+                        text: Bridge.ptt-status;
+                        color: #8b949e;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: @tr("Keys are written like Ctrl+Shift+T, Alt+F1, CapsLock or MouseBack. On Wayland the desktop asks to confirm the key and may let you pick another one. The \"Hold to talk\" button in the window always works.");
+                        font-size: 11px;
+                        color: #8b949e;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+            Tab {
+                title: @tr("Streaming");
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 8px;
+                    alignment: start;
+                    CheckBox {
+                        text: @tr("Enable H.264 (downloads OpenH264 from Cisco)");
+                        checked <=> Bridge.h264-enabled;
+                        toggled => { Bridge.set-h264(Bridge.h264-enabled); }
+                    }
+                    Text {
+                        text: Bridge.h264-attribution;
+                        font-size: 11px;
+                        color: #8b949e;
+                        wrap: word-wrap;
+                    }
+                    if Bridge.h264-enabled: HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: Bridge.h264-status;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        if !Bridge.h264-loaded: Button {
+                            text: Bridge.h264-busy ? @tr("Downloading…") : @tr("Download OpenH264");
+                            enabled: !Bridge.h264-busy;
+                            clicked => { Bridge.download-h264(); }
+                        }
+                    }
+                    Text {
+                        text: @tr("VP8 and VP9 work without it. H.264 lets you watch streams that other clients send as H.264. The library is downloaded from Cisco only when you click Download, and Cisco's license covers its patent royalties.");
+                        font-size: 11px;
+                        color: #8b949e;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+            Tab {
+                title: @tr("Privacy");
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 8px;
+                    alignment: start;
+                    CheckBox {
+                        text: @tr("Save crash reports on this device (never uploaded)");
+                        checked <=> Bridge.crash-reports;
+                        toggled => { Bridge.set-crash-reports(Bridge.crash-reports); }
+                    }
+                    Text {
+                        text: @tr("A report is a text file with the error and where it happened. It may contain a server address from the error message. You can attach it to a bug report yourself; the app never sends it anywhere.");
+                        font-size: 11px;
+                        color: #8b949e;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+        HorizontalLayout {
+            alignment: end;
+            Button {
+                text: @tr("Close");
+                clicked => { done(); }
+            }
+        }
+    }
+}
+
+// Local volume and mute of one client.
+component ClientAudioDialog inherits Dialog {
+    callback done();
+    card-width: 380px;
+    card-height: content.preferred-height;
+    dismissed => { done(); }
+    content := VerticalBox {
+        alignment: start;
+        Text {
+            text: Bridge.client-audio.name;
+            font-size: 16px;
+            font-weight: 700;
+            overflow: elide;
+        }
+        Text {
+            text: @tr("Only changes what you hear.");
+            color: #8b949e;
+            font-size: 11px;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: @tr("Volume");
+                vertical-alignment: center;
+            }
+            Slider {
+                minimum: 0;
+                maximum: 400;
+                value: Bridge.client-audio.volume;
+                enabled: !Bridge.client-audio.muted;
+                accessible-label: @tr("Volume of {}", Bridge.client-audio.name);
+                changed(v) => {
+                    Bridge.client-audio.volume = round(v / 5) * 5;
+                    Bridge.client-audio-changed(Bridge.client-audio);
+                }
+            }
+            Text {
+                text: @tr("{}%", round(Bridge.client-audio.volume));
+                width: 48px;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+            }
+        }
+        CheckBox {
+            text: @tr("Mute for me");
+            checked: Bridge.client-audio.muted;
+            toggled => {
+                Bridge.client-audio.muted = self.checked;
+                Bridge.client-audio-changed(Bridge.client-audio);
+            }
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            Button {
+                text: @tr("Reset");
+                clicked => {
+                    Bridge.client-audio.volume = 100;
+                    Bridge.client-audio.muted = false;
+                    Bridge.client-audio-changed(Bridge.client-audio);
+                }
+            }
+            Button {
+                text: @tr("Close");
+                primary: true;
+                clicked => { done(); }
+            }
+        }
+    }
+}
+
+component AboutDialog inherits Dialog {
+    callback done();
+    card-width: 720px;
+    card-height: 680px;
+    dismissed => { done(); }
+    VerticalBox {
+        Text {
+            text: Bridge.app-name + " " + Bridge.app-version;
+            font-size: 18px;
+            font-weight: 700;
+        }
+        Text {
+            text: @tr("Unofficial TeamSpeak 3/6 compatible client. Not affiliated with TeamSpeak Systems GmbH.");
+            wrap: word-wrap;
+        }
+        AboutSlint {
+            max-height: 150px;
+        }
+        if Bridge.h264-enabled: Text {
+            text: Bridge.h264-attribution;
+            wrap: word-wrap;
+        }
+        Text {
+            text: @tr("Third-party notices");
+            font-weight: 600;
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            background: #0d1117;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: #30363d;
+            ListView {
+                accessible-label: @tr("Third-party notices");
+                for line in Bridge.notices: Text {
+                    x: 8px;
+                    width: parent.width - 16px;
+                    text: line;
+                    font-size: 11px;
+                    color: #c9d1d9;
+                    wrap: word-wrap;
+                }
+            }
+        }
+        HorizontalLayout {
+            alignment: end;
+            Button {
+                text: @tr("Close");
+                clicked => { done(); }
+            }
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: Bridge.app-name;
+    preferred-width: 1200px;
+    preferred-height: 760px;
+    min-width: 360px;
+    min-height: 480px;
+    background: #0d1117;
+    default-font-size: 13px;
+
+    property <bool> editing: false;
+    in-out property <bool> show-about: false;
+    in-out property <int> settings-tab: 0;
+    in-out property <bool> sharing-dialog: false;
+    in-out property <bool> settings-open: false;
+    in-out property <bool> client-open: false;
+    property <BookmarkForm> form;
+    property <ShareForm> share-form;
+    // Phones and narrow windows show one pane at a time. Set from a change
+    // handler: a binding on `width` would loop through the layout.
+    property <bool> narrow: false;
+    changed width => { narrow = self.width < 800px; }
+    init => { narrow = self.width < 800px; }
+    property <int> pane: 1;
+    // Android: the space under the on-screen keyboard (the window is not
+    // resized for it). Zero on desktop.
+    property <length> keyboard-inset: 0;
+    changed virtual-keyboard-size => {
+        keyboard-inset = self.virtual-keyboard-size.height > 0 ? self.height - self.virtual-keyboard-position.y : 0;
+    }
+
+    // The viewer takes the whole window in full screen.
+    property <bool> chrome: !(Bridge.viewer-open && Bridge.viewer-fullscreen);
+
+    public function open-share-dialog() {
+        share-form = Bridge.open-share();
+        sharing-dialog = true;
+    }
+
+    VerticalLayout {
+        // Android draws the window under the status and navigation bars.
+        padding-top: root.safe-area-insets.top;
+        padding-left: root.safe-area-insets.left;
+        padding-right: root.safe-area-insets.right;
+        padding-bottom: max(root.safe-area-insets.bottom, root.keyboard-inset);
+        // Toolbar
+        if chrome: Rectangle {
+            height: 48px;
+            background: #161b22;
+            accessible-role: banner;
+            HorizontalLayout {
+                padding: 6px;
+                spacing: 6px;
+                if narrow: Button {
+                    text: pane == 0 ? @tr("Tree") : pane == 1 ? (Bridge.viewer-open ? @tr("Stream") : @tr("Chat")) : @tr("Servers");
+                    accessible-label: @tr("Switch pane");
+                    clicked => { pane = mod(pane + 1, 3); }
+                }
+                Text {
+                    text: Bridge.server-title;
+                    font-size: 15px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Rectangle { }
+                Button {
+                    text: Bridge.voice-connected ? @tr("Disconnect") : Bridge.voice-connecting ? @tr("Connecting…") : @tr("Connect");
+                    enabled: Bridge.current-server >= 0 && !Bridge.voice-connecting;
+                    primary: !Bridge.voice-connected;
+                    clicked => {
+                        if (Bridge.voice-connected) {
+                            Bridge.disconnect-voice();
+                        } else {
+                            Bridge.connect-voice();
+                        }
+                    }
+                }
+                Button {
+                    text: Bridge.observing ? @tr("Stop observing") : @tr("Observe (invisible)");
+                    enabled: Bridge.can-observe;
+                    clicked => { Bridge.toggle-observe(); }
+                }
+                Button {
+                    text: Bridge.input-muted ? @tr("Mic: off") : @tr("Mic: on");
+                    enabled: Bridge.voice-connected;
+                    clicked => { Bridge.set-input-muted(!Bridge.input-muted); }
+                }
+                Button {
+                    text: Bridge.output-muted ? @tr("Sound: off") : @tr("Sound: on");
+                    enabled: Bridge.voice-connected;
+                    clicked => { Bridge.set-output-muted(!Bridge.output-muted); }
+                }
+                ptt := Rectangle {
+                    width: 110px;
+                    border-radius: 4px;
+                    background: Bridge.transmitting ? #238636 : ptt-area.has-hover ? #30363d : #21262d;
+                    opacity: Bridge.voice-connected ? 1.0 : 0.4;
+                    accessible-role: button;
+                    accessible-label: @tr("Hold to talk");
+                    accessible-enabled: Bridge.voice-connected;
+                    accessible-checkable: true;
+                    accessible-checked: Bridge.transmitting;
+                    accessible-action-default => { Bridge.push-to-talk(!Bridge.transmitting); }
+                    Text {
+                        text: Bridge.transmitting ? @tr("Talking…") : @tr("Hold to talk");
+                    }
+                    ptt-area := TouchArea {
+                        enabled: Bridge.voice-connected;
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down) {
+                                Bridge.push-to-talk(true);
+                            } else if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                                Bridge.push-to-talk(false);
+                            }
+                        }
+                    }
+                }
+                if Bridge.streams-available && Bridge.can-share: Button {
+                    text: Bridge.share-state == "live" ? @tr("Sharing") : @tr("Share screen");
+                    primary: Bridge.share-state == "live";
+                    clicked => { open-share-dialog(); }
+                }
+                Button {
+                    text: @tr("Settings");
+                    clicked => {
+                        Bridge.open-settings();
+                        settings-open = true;
+                    }
+                }
+                Button {
+                    text: @tr("About");
+                    clicked => {
+                        Bridge.open-about();
+                        show-about = true;
+                    }
+                }
+            }
+        }
+        if chrome && Bridge.crash-notice != "": Rectangle {
+            background: #3d2a0a;
+            accessible-role: groupbox;
+            accessible-label: @tr("Crash reports");
+            HorizontalLayout {
+                padding: 6px;
+                padding-left: 10px;
+                spacing: 8px;
+                Text {
+                    text: Bridge.crash-notice;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                Button {
+                    text: @tr("Open folder");
+                    clicked => { Bridge.open-crash-folder(); }
+                }
+                Button {
+                    text: @tr("Delete");
+                    clicked => { Bridge.delete-crash-reports(); }
+                }
+                Button {
+                    text: "×";
+                    accessible-label: @tr("Dismiss");
+                    clicked => { Bridge.dismiss-crash-notice(); }
+                }
+            }
+        }
+        HorizontalLayout {
+            if chrome && (!narrow || pane == 2): ServerList {
+                // Fixed width beside the other panes, all the space alone.
+                min-width: narrow ? 0px : 230px;
+                max-width: narrow ? 100000px : 230px;
+                horizontal-stretch: narrow ? 1 : 0;
+                add => {
+                    form = Bridge.edit-bookmark(-1);
+                    editing = true;
+                }
+                edit(id) => {
+                    form = Bridge.edit-bookmark(id);
+                    editing = true;
+                }
+            }
+            if chrome && (!narrow || pane == 0): VerticalLayout {
+                min-width: narrow ? 0px : 360px;
+                max-width: narrow ? 100000px : 360px;
+                horizontal-stretch: narrow ? 1 : 0;
+                ChannelTree {
+                    vertical-stretch: 1;
+                    client-clicked(id) => {
+                        if (Bridge.open-client(id)) {
+                            client-open = true;
+                        }
+                    }
+                }
+                if Bridge.streams-available: StreamsPanel {
+                    vertical-stretch: 0;
+                    manage-share => { open-share-dialog(); }
+                }
+            }
+            if (!narrow || pane == 1) && Bridge.viewer-open: StreamViewer { }
+            if chrome && (!narrow || pane == 1) && !Bridge.viewer-open: ChatPanel { }
+        }
+        // Status bar
+        if chrome: Rectangle {
+            height: 26px;
+            background: #161b22;
+            accessible-role: content-info;
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                Text {
+                    text: Bridge.status-text;
+                    color: #8b949e;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Rectangle { }
+                Text {
+                    text: Bridge.presence-source;
+                    color: #58a6ff;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    if editing: BookmarkEditor {
+        form <=> form;
+        done => { editing = false; }
+    }
+
+    if sharing-dialog: ShareDialog {
+        form <=> share-form;
+        done => { sharing-dialog = false; }
+    }
+
+    if settings-open: SettingsDialog {
+        tab <=> settings-tab;
+        done => {
+            settings-open = false;
+            Bridge.close-settings();
+        }
+    }
+
+    if client-open: ClientAudioDialog {
+        done => { client-open = false; }
+    }
+
+    if show-about: AboutDialog {
+        done => { show-about = false; }
+    }
+}

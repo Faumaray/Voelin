@@ -8,19 +8,20 @@ members = [
 	"crates/proto/tsproto",
 	"crates/proto/ts-bookkeeping",
 	"crates/proto/tsclientlib",
-	"crates/tsc-audio",
-	"crates/tsc-core",
-	"crates/tsc-gateway",
-	"crates/tsc-gateway-proto",
-	"crates/tsc-media",
-	"crates/tsc-model",
-	"crates/tsc-observer",
-	"crates/tsc-platform",
-	"crates/tsc-query",
-	"crates/tsc-store",
-	"crates/tsc-stream",
-	"crates/tsc-ui",
-	"tools/tsctl",
+	"crates/voelin-android",
+	"crates/voelin-audio",
+	"crates/voelin-core",
+	"crates/voelin-gateway",
+	"crates/voelin-gateway-proto",
+	"crates/voelin-media",
+	"crates/voelin-model",
+	"crates/voelin-observer",
+	"crates/voelin-platform",
+	"crates/voelin-query",
+	"crates/voelin-store",
+	"crates/voelin-stream",
+	"crates/voelin-ui",
+	"tools/voelinctl",
 ]
 default-members = [
 	"crates/proto/tsproto-types",
@@ -29,25 +30,25 @@ default-members = [
 	"crates/proto/tsproto",
 	"crates/proto/ts-bookkeeping",
 	"crates/proto/tsclientlib",
-	"crates/tsc-audio",
-	"crates/tsc-core",
-	"crates/tsc-gateway",
-	"crates/tsc-gateway-proto",
-	"crates/tsc-model",
-	"crates/tsc-observer",
-	"crates/tsc-platform",
-	"crates/tsc-query",
-	"crates/tsc-store",
-	"crates/tsc-stream",
-	"crates/tsc-ui",
-	"tools/tsctl",
+	"crates/voelin-audio",
+	"crates/voelin-core",
+	"crates/voelin-gateway",
+	"crates/voelin-gateway-proto",
+	"crates/voelin-model",
+	"crates/voelin-observer",
+	"crates/voelin-platform",
+	"crates/voelin-query",
+	"crates/voelin-store",
+	"crates/voelin-stream",
+	"crates/voelin-ui",
+	"tools/voelinctl",
 ]
 
 [workspace.package]
 edition = "2024"
 rust-version = "1.94"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/Faumaray/teamspeak_client_rs"
+repository = "https://github.com/Faumaray/Voelin"
 publish = false
 
 [workspace.lints.rust]
