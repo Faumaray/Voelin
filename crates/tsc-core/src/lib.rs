@@ -209,6 +209,8 @@ pub struct SessionState {
 	pub presence_source: Option<Source>,
 	/// Our own channel while voice-connected.
 	pub own_channel: Option<ChannelId>,
+	/// Our own client id while voice-connected.
+	pub own_client: Option<u16>,
 	pub input_muted: bool,
 	pub output_muted: bool,
 	pub transmitting: bool,

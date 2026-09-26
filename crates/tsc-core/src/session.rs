@@ -433,6 +433,7 @@ impl Session {
 		match e {
 			VoiceEvent::Connected { name, flavor, own_client } => {
 				self.state.voice = VoiceState::Connected;
+				self.state.own_client = Some(own_client);
 				self.emit_state();
 				let capabilities = flavor.capabilities();
 				if capabilities.streams
@@ -501,6 +502,7 @@ impl Session {
 				self.audio = None;
 				self.state.voice = VoiceState::Disconnected;
 				self.state.own_channel = None;
+				self.state.own_client = None;
 				self.emit_state();
 				if let Some(reason) = reason {
 					self.error(format!("voice: {reason}"));

@@ -1,5 +1,9 @@
 //! Desktop client.
 
+// Release builds on Windows are GUI programs (no console window); debug
+// builds keep the console for logs.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use anyhow::Result;
 use tracing_subscriber::EnvFilter;
 
