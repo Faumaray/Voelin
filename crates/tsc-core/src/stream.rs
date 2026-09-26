@@ -587,7 +587,7 @@ mod tests {
 	/// The whole path: test pattern → VP8 → stream task → str0m peers on
 	/// loopback → the viewer's frame bus → decoder. The pictures show the
 	/// moving rectangle.
-	#[cfg(feature = "media")]
+	#[cfg(feature = "media-desktop")]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_pattern_through_stream_tasks() {
 		use std::sync::mpsc as std_mpsc;

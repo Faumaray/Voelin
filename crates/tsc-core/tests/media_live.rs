@@ -2,7 +2,7 @@
 //! server (dev/docker-compose.yml): one session streams the test pattern
 //! (VP8 + Opus), another decodes it. Runs only with `TSC_LIVE=1`.
 
-#![cfg(feature = "media")]
+#![cfg(feature = "media-desktop")]
 
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;

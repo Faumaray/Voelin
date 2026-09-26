@@ -18,6 +18,9 @@
 //! - [`LocalPreview`] runs capture → encoder → decoder without a server.
 //!
 //! [`tsc_media`] is re-exported for sources, codecs and pixel conversion.
+//! Codecs are chosen through `tsc_media::Codecs`, so whatever backends the
+//! build has are used (libvpx and OpenH264 with feature `media-desktop`,
+//! MediaCodec on Android).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -262,38 +265,38 @@ impl Streamer {
 			},
 		)?;
 		let options = CaptureOptions { fps, cursor: config.cursor, ..CaptureOptions::default() };
-		let mut restore_token = None;
-		let (screen, frames): (Box<dyn ScreenCapture>, _) = match &config.source {
+		// The portal's token for this choice comes with the capture.
+		let (screen, frames, restore_token): (Box<dyn ScreenCapture>, _, _) = match &config.source {
 			SourceId::Synthetic => {
 				let (w, h) = config.synthetic_size;
 				let mut screen = SyntheticScreen::new(w, h);
 				let frames = screen.start(&SourceId::Synthetic, &options).await?;
-				(Box::new(screen), frames)
+				(Box::new(screen), frames, None)
 			}
-			#[cfg(target_os = "linux")]
+			#[cfg(all(target_os = "linux", feature = "media-desktop"))]
 			SourceId::Portal => {
 				use tsc_media::capture::portal::PortalCapture;
 				let mut portal = PortalCapture::with_restore_token(config.restore_token.clone());
 				let frames = portal.start(&SourceId::Portal, &options).await?;
-				restore_token = portal.restore_token().map(str::to_owned);
-				(Box::new(portal), frames)
+				let token = portal.restore_token().map(str::to_owned);
+				(Box::new(portal), frames, token)
 			}
 			source => {
 				let mut screen = match config.backend {
 					CaptureBackend::Auto => capture::default_screen_capture()?,
-					#[cfg(target_os = "linux")]
+					#[cfg(all(target_os = "linux", feature = "media-desktop"))]
 					CaptureBackend::X11 => Box::new(tsc_media::capture::x11::X11Capture::new()),
-					#[cfg(not(target_os = "linux"))]
+					#[cfg(not(all(target_os = "linux", feature = "media-desktop")))]
 					CaptureBackend::X11 => {
 						return Err(tsc_media::Error::CaptureUnavailable {
 							backend: "x11",
-							reason: "X11 capture is only built on Linux".into(),
+							reason: "X11 capture is only in Linux desktop builds".into(),
 						}
 						.into());
 					}
 				};
 				let frames = screen.start(source, &options).await?;
-				(screen, frames)
+				(screen, frames, None)
 			}
 		};
 		let backend = screen.backend();
@@ -969,7 +972,7 @@ impl LocalPreview {
 /// decoded test pattern. Checks that pixels further than two columns from
 /// its edges (which the codec blurs) have the colour of the rectangle or
 /// the background.
-#[cfg(test)]
+#[cfg(all(test, feature = "media-desktop"))]
 pub(crate) fn rectangle_span(picture: &VideoFrame) -> (u32, u32) {
 	use tsc_media::capture::synthetic::{BACKGROUND, RECT_COLOR};
 
@@ -1024,6 +1027,7 @@ mod tests {
 		assert!(latest.put(3));
 	}
 
+	#[cfg(feature = "media-desktop")]
 	#[test]
 	fn peer_config_follows_codecs() {
 		let codecs = Codecs::new();
@@ -1038,6 +1042,7 @@ mod tests {
 
 	/// The test pattern through VP8 and back, without a network: pictures
 	/// show the moving rectangle.
+	#[cfg(feature = "media-desktop")]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn local_preview_decodes_the_pattern() {
 		let codecs = Arc::new(Codecs::new());
@@ -1071,6 +1076,7 @@ mod tests {
 	}
 
 	/// Audio of the test pattern: 20 ms Opus frames on a 48 kHz clock.
+	#[cfg(feature = "media-desktop")]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn streamer_sends_opus() {
 		let codecs = Codecs::new();

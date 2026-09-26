@@ -26,7 +26,7 @@ tsc-query = { path = "../../crates/tsc-query" }
 tsc-observer = { path = "../../crates/tsc-observer" }
 tsc-audio = { path = "../../crates/tsc-audio", default-features = false }
 # The stream media pipeline (capture, VP8, decoding), without audio devices.
-tsc-core = { path = "../../crates/tsc-core", default-features = false, features = ["media"] }
+tsc-core = { path = "../../crates/tsc-core", default-features = false, features = ["media-desktop"] }
 tsc-stream = { path = "../../crates/tsc-stream" }
 tokio-tungstenite = "0.30"
 futures-util = "0.3.34"
