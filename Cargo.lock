@@ -8265,6 +8265,7 @@ dependencies = [
  "tsc-model",
  "tsc-observer",
  "tsc-query",
+ "tsc-stream",
  "tsclientlib",
  "tsproto-packets",
 ]

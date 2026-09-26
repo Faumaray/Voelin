@@ -1,6 +1,6 @@
 //! One server session: merges its sources and routes commands.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use tokio::sync::{broadcast, mpsc};
@@ -11,6 +11,7 @@ use crate::audio::{self, AudioHandle, AudioIn};
 use crate::gateway::{self, GatewayCmd, GatewayEvent};
 use crate::query::{self, QueryCmd, QueryEvent};
 use crate::route::{ChatRoute, Dedup, route_chat};
+use crate::stream::{PeerConfig, StreamFrame, StreamHandle, StreamInput};
 use crate::voice::{self, VoiceCmd, VoiceEvent};
 use crate::{Command, Event, ObserveState, SessionId, SessionState, Source, VoiceState};
 
@@ -19,9 +20,13 @@ pub(crate) struct SessionHandle {
 }
 
 impl SessionHandle {
-	pub fn spawn(id: SessionId, events: broadcast::Sender<Event>) -> Self {
+	pub fn spawn(
+		id: SessionId,
+		events: broadcast::Sender<Event>,
+		frames: broadcast::Sender<StreamFrame>,
+	) -> Self {
 		let (tx, rx) = mpsc::unbounded_channel();
-		tokio::spawn(Session::new(id, events).run(rx));
+		tokio::spawn(Session::new(id, events, frames).run(rx));
 		Self { tx }
 	}
 
@@ -53,6 +58,12 @@ struct Session {
 	query: Option<(u64, mpsc::UnboundedSender<QueryCmd>)>,
 	query_presence: Option<Presence>,
 	audio: Option<AudioHandle>,
+	/// Streams of the voice connection (TeamSpeak 6 only).
+	streams: Option<StreamHandle>,
+	stream_peer: PeerConfig,
+	frames: broadcast::Sender<StreamFrame>,
+	/// `client_is_streaming` of the voice presence, as last told to the streams.
+	streaming_clients: BTreeMap<u16, Option<bool>>,
 	open_chats: HashSet<ChatTarget>,
 	dedup: Dedup,
 	sources_tx: mpsc::UnboundedSender<SourceEvent>,
@@ -60,7 +71,11 @@ struct Session {
 }
 
 impl Session {
-	fn new(id: SessionId, events: broadcast::Sender<Event>) -> Self {
+	fn new(
+		id: SessionId,
+		events: broadcast::Sender<Event>,
+		frames: broadcast::Sender<StreamFrame>,
+	) -> Self {
 		let (sources_tx, sources_rx) = mpsc::unbounded_channel();
 		Self {
 			id,
@@ -75,6 +90,10 @@ impl Session {
 			query: None,
 			query_presence: None,
 			audio: None,
+			streams: None,
+			stream_peer: PeerConfig::default(),
+			frames,
+			streaming_clients: BTreeMap::new(),
 			open_chats: HashSet::new(),
 			dedup: Dedup::default(),
 			sources_tx,
@@ -135,8 +154,10 @@ impl Session {
 				if let Some((_, tx)) = self.voice.take() {
 					let _ = tx.send(VoiceCmd::Disconnect);
 				}
+				self.stop_streams("voice reconnecting");
 				let generation = self.next_generation();
 				self.nickname = options.nickname.clone();
+				self.stream_peer = options.stream_peer.clone();
 				let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 				let (ev_tx, ev_rx) = mpsc::unbounded_channel();
 				if options.audio {
@@ -243,8 +264,48 @@ impl Session {
 				}
 				self.emit_state();
 			}
+			Command::StartStream { setup, auto_accept, .. } => {
+				self.stream_input(StreamInput::Start { setup, auto_accept });
+			}
+			Command::StopStream { .. } => self.stream_input(StreamInput::Stop),
+			Command::AcceptViewer { viewer, accept, .. } => {
+				self.stream_input(StreamInput::Respond { viewer, accept });
+			}
+			Command::KickViewer { viewer, .. } => self.stream_input(StreamInput::Kick { viewer }),
+			Command::SendStreamFrame { frame, .. } => {
+				// Frames without a stream are dropped silently.
+				if let Some(s) = &self.streams {
+					s.send(StreamInput::Frame(frame));
+				}
+			}
+			Command::WatchStream { stream_id, .. } => {
+				self.stream_input(StreamInput::Watch { stream_id });
+			}
+			Command::LeaveStream { stream_id, .. } => {
+				self.stream_input(StreamInput::Leave { stream_id });
+			}
+			Command::RequestStreamKeyframe { stream_id, .. } => {
+				self.stream_input(StreamInput::RequestKeyframe { stream_id });
+			}
 			Command::CloseSession { .. } => {}
 		}
+	}
+
+	fn stream_input(&self, input: StreamInput) {
+		match &self.streams {
+			Some(s) => s.send(input),
+			None if self.state.voice == VoiceState::Connected => {
+				self.error("streams need a TeamSpeak 6 server");
+			}
+			None => self.error("not connected with voice"),
+		}
+	}
+
+	fn stop_streams(&mut self, reason: &str) {
+		if let Some(s) = self.streams.take() {
+			s.send(StreamInput::Shutdown(reason.into()));
+		}
+		self.streaming_clients.clear();
 	}
 
 	fn voice_cmd(&self, cmd: VoiceCmd) {
@@ -299,6 +360,7 @@ impl Session {
 	}
 
 	fn stop_all(&mut self) {
+		self.stop_streams("session closed");
 		if let Some((_, tx)) = self.voice.take() {
 			let _ = tx.send(VoiceCmd::Disconnect);
 		}
@@ -334,16 +396,46 @@ impl Session {
 
 	fn voice_event(&mut self, e: VoiceEvent) {
 		match e {
-			VoiceEvent::Connected { name, flavor } => {
+			VoiceEvent::Connected { name, flavor, own_client } => {
 				self.state.voice = VoiceState::Connected;
 				self.emit_state();
 				let capabilities = flavor.capabilities();
+				if capabilities.streams
+					&& let Some((_, voice)) = &self.voice
+				{
+					self.streams = Some(StreamHandle::spawn(
+						self.id,
+						own_client,
+						self.stream_peer.clone(),
+						voice.clone(),
+						self.events.clone(),
+						self.frames.clone(),
+					));
+				}
 				self.emit(Event::ServerInfo { session: self.id, name, flavor, capabilities });
 				self.reopen_relayed_chats();
 			}
 			VoiceEvent::Presence(p) => {
+				if let Some(s) = &self.streams {
+					let clients: BTreeMap<_, _> =
+						p.clients.values().map(|c| (c.id, c.streaming)).collect();
+					if clients != self.streaming_clients {
+						self.streaming_clients = clients.clone();
+						s.send(StreamInput::Clients(clients));
+					}
+				}
 				self.voice_presence = Some(p);
 				self.publish_presence();
+			}
+			VoiceEvent::Stream(n) => {
+				if let Some(s) = &self.streams {
+					s.send(StreamInput::Notification(n));
+				}
+			}
+			VoiceEvent::StreamRequestFailed(request, error) => {
+				if let Some(s) = &self.streams {
+					s.send(StreamInput::RequestFailed(request, error));
+				}
 			}
 			VoiceEvent::OwnChannel(cid) => {
 				if self.state.own_channel != Some(cid) {
@@ -361,6 +453,7 @@ impl Session {
 				self.emit(Event::Talking { session: self.id, client, talking });
 			}
 			VoiceEvent::Disconnected(reason) => {
+				self.stop_streams("voice disconnected");
 				self.voice = None;
 				self.voice_presence = None;
 				self.audio = None;
