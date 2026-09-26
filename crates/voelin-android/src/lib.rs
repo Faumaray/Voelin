@@ -14,6 +14,8 @@
 //! - `capture` (Android): screen and system-audio capture through
 //!   MediaProjection, registered as `voelin_media` capture providers
 //! - `secrets` (Android): passwords encrypted with an Android Keystore key
+//! - `egl` (Android): keeps EGL extension slots for Skia, without which the
+//!   UI cannot draw on Mesa-based Android (Waydroid)
 //!
 //! Only [`host`] and [`foreground`] build on other platforms, for tests.
 
@@ -26,5 +28,7 @@ mod app;
 mod bridge;
 #[cfg(target_os = "android")]
 mod capture;
+#[cfg(target_os = "android")]
+mod egl;
 #[cfg(target_os = "android")]
 mod secrets;

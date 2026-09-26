@@ -118,6 +118,7 @@ Permissions: `INTERNET`, `ACCESS_NETWORK_STATE`, `RECORD_AUDIO`,
 | Engine host replay, voice service policy | unit tests (`cargo test -p voelin-android`) | tested |
 | External capture providers, MediaCodec buffer layouts | `voelin-media` unit tests | tested |
 | The app on a device: UI, voice in the background, screen sharing, watching, Keystore | manual matrix row IN3 and the Android rows | not run yet (no device or emulator in this environment) |
+| Waydroid (Mesa GL) | the debug APK, `waydroid logcat` | the first start failed: Skia could not create its GL context; worked around (below), to be re-checked |
 
 Known gaps:
 
@@ -133,3 +134,23 @@ Known gaps:
 - No audio focus handling yet: a phone call does not pause our audio
   (matrix row AN4). After a network change (Wi-Fi to mobile data) only
   tsclientlib's own reconnect applies; untested on a phone.
+
+### Mesa-based Android (Waydroid)
+
+Slint draws with Skia over OpenGL ES. Before Skia looks up its functions,
+Slint's surface loads glow's whole GL function table through
+`eglGetProcAddress`. Android's libEGL gives every function it has no built-in
+entry point for one of 256 "extension slots", and Mesa answers every name,
+desktop GL included, so the slots run out; Skia then gets nothing for an
+extension function it needs (`glTextureBarrierNV`) and the app ends right
+after start:
+
+```
+E libEGL  : no more slots for eglGetProcAddress("glTextureBarrierNV")
+I RustStdoutStderr: … Could not create Skia Direct Context from GL interface
+```
+
+`crates/voelin-android/src/egl.rs` looks up Skia's extension functions once
+at start, before Slint's surface, so they get slots first (logcat:
+`EGL: N of 83 Skia extension functions resolved`). Vendor GPU drivers on
+phones return nothing for desktop-only names and are not affected.

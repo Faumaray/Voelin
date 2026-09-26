@@ -14,7 +14,7 @@ use voelin_core::Command;
 
 use crate::foreground::Foreground;
 use crate::host::EngineHost;
-use crate::{bridge, capture, secrets};
+use crate::{bridge, capture, egl, secrets};
 
 /// Store setting (`bool`): the user's opt-in to local crash reports.
 pub const CRASH_REPORTS_SETTING: &str = "crash_reports";
@@ -73,6 +73,8 @@ fn run(app: AndroidApp) -> anyhow::Result<()> {
 	let host = host()?;
 	static PROCESS: Once = Once::new();
 	PROCESS.call_once(|| {
+		// Before Slint creates the first window surface.
+		egl::reserve_skia_extension_slots();
 		capture::register();
 		watch_voice(host);
 	});
