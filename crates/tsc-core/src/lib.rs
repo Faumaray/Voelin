@@ -10,12 +10,17 @@
 //! Presence comes from the most authoritative connected source
 //! (voice > gateway > query). Channel chat goes through the voice connection
 //! when the user is in that channel, otherwise through a relay.
+//!
+//! On TeamSpeak 6 servers the voice connection also carries streams (screen
+//! sharing): see the `*Stream*` commands and events, and
+//! [`Engine::subscribe_frames`] for the frames of watched streams.
 
 mod audio;
 mod gateway;
 mod query;
 mod route;
 mod session;
+pub mod stream;
 mod voice;
 
 use std::collections::HashMap;
@@ -25,6 +30,8 @@ use tokio::sync::{broadcast, mpsc};
 use tsc_model::{Capabilities, ChannelId, ChatMessage, ChatTarget, Presence, ServerFlavor};
 
 pub use route::{ChatRoute, Dedup, route_chat};
+pub use stream::{StreamFrame, StreamSink, StreamState, WatchState};
+use tsc_stream::{EncodedFrame, StreamInfo, StreamSetup, ViewerInfo};
 pub use voice::VoiceOptions;
 
 pub type SessionId = u64;
@@ -83,6 +90,49 @@ pub enum Command {
 	SetTransmitting {
 		session: SessionId,
 		on: bool,
+	},
+	/// Start streaming in our channel (TeamSpeak 6 only). Progress comes as
+	/// [`Event::StreamState`]; frames go in through the sink of
+	/// [`StreamState::Live`] or [`Command::SendStreamFrame`].
+	StartStream {
+		session: SessionId,
+		setup: StreamSetup,
+		/// Accept every viewer instead of asking with [`Event::StreamViewerRequest`].
+		auto_accept: bool,
+	},
+	StopStream {
+		session: SessionId,
+	},
+	/// Answer an [`Event::StreamViewerRequest`].
+	AcceptViewer {
+		session: SessionId,
+		viewer: u16,
+		accept: bool,
+	},
+	/// Remove a viewer from our stream.
+	KickViewer {
+		session: SessionId,
+		viewer: u16,
+	},
+	/// An encoded frame for our stream.
+	SendStreamFrame {
+		session: SessionId,
+		frame: EncodedFrame,
+	},
+	/// Watch a stream from [`Event::StreamsChanged`]. Frames arrive through
+	/// [`Engine::subscribe_frames`].
+	WatchStream {
+		session: SessionId,
+		stream_id: String,
+	},
+	LeaveStream {
+		session: SessionId,
+		stream_id: String,
+	},
+	/// Ask the streamer of a watched stream for a keyframe.
+	RequestStreamKeyframe {
+		session: SessionId,
+		stream_id: String,
 	},
 	/// Close everything of a session.
 	CloseSession {
@@ -159,6 +209,37 @@ pub enum Event {
 		session: SessionId,
 		message: String,
 	},
+	/// The streams in our channel (TeamSpeak 6), full list.
+	StreamsChanged {
+		session: SessionId,
+		streams: Vec<StreamInfo>,
+	},
+	/// Our own stream.
+	StreamState {
+		session: SessionId,
+		state: StreamState,
+	},
+	/// Someone asks to watch our stream; answer with [`Command::AcceptViewer`].
+	StreamViewerRequest {
+		session: SessionId,
+		viewer: u16,
+		message: String,
+	},
+	/// The viewers of our stream and their state, full list.
+	StreamViewers {
+		session: SessionId,
+		viewers: Vec<ViewerInfo>,
+	},
+	/// A viewer needs a keyframe (also flagged on the [`StreamSink`]).
+	StreamKeyframeRequest {
+		session: SessionId,
+	},
+	/// A stream we watch.
+	WatchState {
+		session: SessionId,
+		stream_id: String,
+		state: WatchState,
+	},
 }
 
 /// Handle to the engine. Cheap to clone; all methods are non-blocking.
@@ -166,6 +247,7 @@ pub enum Event {
 pub struct Engine {
 	commands: mpsc::UnboundedSender<Command>,
 	events: broadcast::Sender<Event>,
+	frames: broadcast::Sender<StreamFrame>,
 }
 
 impl Engine {
@@ -173,8 +255,10 @@ impl Engine {
 	pub fn start() -> Self {
 		let (commands, rx) = mpsc::unbounded_channel();
 		let (events, _) = broadcast::channel(4096);
-		tokio::spawn(run(rx, events.clone()));
-		Self { commands, events }
+		// About a minute of one watched stream.
+		let (frames, _) = broadcast::channel(4096);
+		tokio::spawn(run(rx, events.clone(), frames.clone()));
+		Self { commands, events, frames }
 	}
 
 	pub fn send(&self, command: Command) {
@@ -184,9 +268,18 @@ impl Engine {
 	pub fn subscribe(&self) -> broadcast::Receiver<Event> {
 		self.events.subscribe()
 	}
+
+	/// Encoded frames of the streams we watch (kept off the event bus).
+	pub fn subscribe_frames(&self) -> broadcast::Receiver<StreamFrame> {
+		self.frames.subscribe()
+	}
 }
 
-async fn run(mut commands: mpsc::UnboundedReceiver<Command>, events: broadcast::Sender<Event>) {
+async fn run(
+	mut commands: mpsc::UnboundedReceiver<Command>,
+	events: broadcast::Sender<Event>,
+	frames: broadcast::Sender<StreamFrame>,
+) {
 	let mut sessions: HashMap<SessionId, session::SessionHandle> = HashMap::new();
 	while let Some(command) = commands.recv().await {
 		let id = command_session(&command);
@@ -198,7 +291,7 @@ async fn run(mut commands: mpsc::UnboundedReceiver<Command>, events: broadcast::
 		}
 		sessions
 			.entry(id)
-			.or_insert_with(|| session::SessionHandle::spawn(id, events.clone()))
+			.or_insert_with(|| session::SessionHandle::spawn(id, events.clone(), frames.clone()))
 			.send(command);
 	}
 }
@@ -217,6 +310,14 @@ fn command_session(command: &Command) -> SessionId {
 		| Command::SetInputMuted { session, .. }
 		| Command::SetOutputMuted { session, .. }
 		| Command::SetTransmitting { session, .. }
+		| Command::StartStream { session, .. }
+		| Command::StopStream { session }
+		| Command::AcceptViewer { session, .. }
+		| Command::KickViewer { session, .. }
+		| Command::SendStreamFrame { session, .. }
+		| Command::WatchStream { session, .. }
+		| Command::LeaveStream { session, .. }
+		| Command::RequestStreamKeyframe { session, .. }
 		| Command::CloseSession { session } => *session,
 	}
 }

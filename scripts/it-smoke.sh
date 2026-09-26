@@ -11,6 +11,7 @@
 #   6. relay chat: a query relay reads channel chat and posts into the channel
 #   7. gateway (tsgw): login with a TeamSpeak identity, presence, channel chat
 #      both ways, refusal of an identity the server does not know
+#   8. stream (TeamSpeak 6 only): a viewer watches a synthetic VP8 + Opus stream
 #
 # Usage: scripts/it-smoke.sh [ts3|ts6]...   (default: both)
 # Env:   TSCTL=path/to/tsctl (default: builds target/debug/tsctl)
@@ -106,6 +107,27 @@ voice_roundtrip() {
 		fail "voice tone not received"
 	fi
 	grep "tone ratio" "$out"
+}
+
+# TeamSpeak 6: a viewer waits for a stream, a streamer sends synthetic frames.
+stream_check() {
+	local addr=$1 out="$STATE_DIR/stream-watch.log" streamer_out="$STATE_DIR/stream-start.log"
+	# Unique nicknames: other clients may stream on the same server.
+	local streamer="streamer-$$-$RANDOM"
+	"$TSCTL" connect "$addr" --nick "viewer-$$" stream --loopback watch --streamer-nick "$streamer" \
+		--expect-frames 60 --timeout 30 >"$out" 2>&1 &
+	local viewer=$!
+	sleep 2
+	if ! "$TSCTL" connect "$addr" --nick "$streamer" stream --loopback start --synthetic \
+		--auto-accept --seconds 10 >"$streamer_out" 2>&1; then
+		cat "$streamer_out" "$out"
+		fail "streamer failed"
+	fi
+	if ! wait "$viewer"; then
+		cat "$out" "$streamer_out"
+		fail "stream frames not received"
+	fi
+	grep -E "first video frame|received" "$out"
 }
 
 # An observer over ServerQuery must see a voice client join.
@@ -213,10 +235,13 @@ for svc in "${SERVERS[@]}"; do
 	presence_check "$addr" "${QUERY[$svc]}"
 	relay_check "$addr" "${QUERY[$svc]}"
 	gateway_check "$svc" "$addr"
+	if [[ $svc == ts6 ]]; then
+		stream_check "$addr"
+	fi
 done
 
 log "engine (tsc-core) against both servers"
-TSC_LIVE=1 cargo test --quiet -p tsc-core --test live 2>&1 | grep -E "test result|panicked|timed out" || fail "engine tests failed"
+TSC_LIVE=1 cargo test --quiet -p tsc-core --test live --test stream_live 2>&1 | grep -E "test result|panicked|timed out" || fail "engine tests failed"
 
 log "stream (tsc-stream) through the TeamSpeak 6 server"
 TSC_LIVE=1 cargo test --quiet -p tsc-stream --test live_ts6 2>&1 | grep -E "test result|panicked|timed out" || fail "stream test failed"

@@ -24,6 +24,7 @@ tsc-model = { path = "../../crates/tsc-model" }
 tsc-query = { path = "../../crates/tsc-query" }
 tsc-observer = { path = "../../crates/tsc-observer" }
 tsc-audio = { path = "../../crates/tsc-audio", default-features = false }
+tsc-stream = { path = "../../crates/tsc-stream" }
 tokio-tungstenite = "0.30"
 futures-util = "0.3.34"
 tsc-gateway-proto = { path = "../../crates/tsc-gateway-proto" }

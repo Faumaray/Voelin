@@ -26,6 +26,7 @@ tsc-gateway-proto = { path = "../tsc-gateway-proto" }
 tsc-model = { path = "../tsc-model" }
 tsc-observer = { path = "../tsc-observer" }
 tsc-query = { path = "../tsc-query" }
+tsc-stream = { path = "../tsc-stream" }
 tsclientlib = { path = "../proto/tsclientlib" }
 tsproto-packets = { path = "../proto/tsproto-packets" }
 

@@ -1,5 +1,6 @@
 //! The voice source: a normal client connection.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use futures::prelude::*;
@@ -9,12 +10,13 @@ use tracing::{info, warn};
 use tsc_model::{
 	ChannelId, ChannelInfo, ChatMessage, ChatTarget, ClientInfo, Presence, ServerFlavor,
 };
+use tsc_stream::{PeerConfig, Request, StreamNotification};
 use tsclientlib::data;
 use tsclientlib::events::Event as BookEvent;
 use tsclientlib::prelude::*;
 use tsclientlib::{
-	ClientType, Connection, DisconnectOptions, Identity, MaxClients, MessageTarget, StreamItem,
-	Version,
+	ClientType, Connection, DisconnectOptions, Identity, MaxClients, MessageHandle, MessageTarget,
+	StreamItem, Version,
 };
 use tsproto_packets::packets::{AudioData, InAudioBuf, OutPacket};
 
@@ -30,6 +32,8 @@ pub struct VoiceOptions {
 	pub channel: Option<String>,
 	/// Open the audio devices (capture and playback).
 	pub audio: bool,
+	/// Network settings for stream peer connections (TeamSpeak 6).
+	pub stream_peer: PeerConfig,
 }
 
 impl VoiceOptions {
@@ -42,6 +46,7 @@ impl VoiceOptions {
 			server_password: None,
 			channel: None,
 			audio: false,
+			stream_peer: PeerConfig::default(),
 		}
 	}
 }
@@ -53,6 +58,8 @@ pub(crate) enum VoiceCmd {
 	SetOutputMuted(bool),
 	/// An encoded voice packet from the audio thread.
 	Audio(OutPacket),
+	/// A stream command; failures come back as [`VoiceEvent::StreamRequestFailed`].
+	Stream(Request),
 	Disconnect,
 }
 
@@ -60,6 +67,7 @@ pub(crate) enum VoiceEvent {
 	Connected {
 		name: String,
 		flavor: ServerFlavor,
+		own_client: u16,
 	},
 	Presence(Presence),
 	OwnChannel(ChannelId),
@@ -70,6 +78,8 @@ pub(crate) enum VoiceEvent {
 		client: u16,
 		talking: bool,
 	},
+	Stream(StreamNotification),
+	StreamRequestFailed(Request, String),
 	Disconnected(Option<String>),
 }
 
@@ -192,7 +202,11 @@ async fn run_inner(
 		let state = con.get_state()?;
 		let flavor = ServerFlavor::from_version_string(&state.server.version);
 		info!(server = %state.server.name, ?flavor, "voice connected");
-		let _ = events.send(VoiceEvent::Connected { name: state.server.name.clone(), flavor });
+		let _ = events.send(VoiceEvent::Connected {
+			name: state.server.name.clone(),
+			flavor,
+			own_client: state.own_client.0,
+		});
 	}
 	// Subscribe to all channels to see everyone.
 	let cmd = con.get_state()?.server.set_subscribed(true);
@@ -202,6 +216,8 @@ async fn run_inner(
 	// Who is talking: last voice packet per client.
 	let mut talking: std::collections::HashMap<u16, Instant> = Default::default();
 	let mut tick = tokio::time::interval(Duration::from_millis(250));
+	// Stream commands waiting for the server's answer.
+	let mut stream_requests: HashMap<MessageHandle, Request> = HashMap::new();
 
 	loop {
 		let input = {
@@ -258,12 +274,27 @@ async fn run_inner(
 					}
 					let _ = events.send(VoiceEvent::Audio(packet));
 				}
+				StreamItem::MessageEvent(msg) => {
+					for n in StreamNotification::from_message(&msg) {
+						let _ = events.send(VoiceEvent::Stream(n));
+					}
+				}
+				StreamItem::MessageResult(handle, result) => {
+					if let (Some(request), Err(e)) = (stream_requests.remove(&handle), result) {
+						let _ =
+							events.send(VoiceEvent::StreamRequestFailed(request, e.to_string()));
+					}
+				}
 				StreamItem::DisconnectedTemporarily(reason) => {
 					warn!(?reason, "voice connection interrupted, reconnecting");
 				}
 				_ => {}
 			},
 			Input::Cmd(None) | Input::Cmd(Some(VoiceCmd::Disconnect)) => break,
+			Input::Cmd(Some(VoiceCmd::Stream(request))) => {
+				let handle = request.to_command().send_with_result(&mut con)?;
+				stream_requests.insert(handle, request);
+			}
 			Input::Cmd(Some(cmd)) => handle_command(&mut con, cmd)?,
 			Input::Tick => {
 				talking.retain(|client, last| {
@@ -335,6 +366,9 @@ fn handle_command(con: &mut Connection, cmd: VoiceCmd) -> anyhow::Result<()> {
 		}
 		VoiceCmd::Audio(packet) => {
 			con.send_audio(packet)?;
+		}
+		VoiceCmd::Stream(request) => {
+			request.to_command().send(con)?;
 		}
 		VoiceCmd::Disconnect => {}
 	}
