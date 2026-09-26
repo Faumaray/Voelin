@@ -132,11 +132,11 @@ the crate's authors are listed as its copyright holders.
 
 | License | Crates |
 |---|---|
-| MIT License | 617 |
+| MIT License | 619 |
 | Apache License 2.0 | 29 |
 | Unicode License v3 | 26 |
 | BSD 3-Clause "New" or "Revised" License | 22 |
-| LicenseRef-Slint-Royalty-free-2.0 | 10 |
+| LicenseRef-Slint-Royalty-free-2.0 | 12 |
 | ISC License | 8 |
 | BSD 2-Clause "Simplified" License | 3 |
 | zlib License | 3 |
@@ -2631,7 +2631,7 @@ THE SOFTWARE IS PROVIDED "AS IS" AND ISC DISCLAIMS ALL WARRANTIES WITH REGARD TO
 
 ### LicenseRef-Slint-Royalty-free-2.0
 
-Used by: i-slint-backend-selector 1.18.1, i-slint-backend-winit 1.18.1, i-slint-common 1.18.1, i-slint-compiler 1.18.1, i-slint-core-macros 1.18.1, i-slint-core 1.18.1, i-slint-renderer-femtovg 1.18.1, i-slint-renderer-software 1.18.1, slint-macros 1.18.1, slint 1.18.1
+Used by: i-slint-backend-android-activity 1.18.1, i-slint-backend-selector 1.18.1, i-slint-backend-winit 1.18.1, i-slint-common 1.18.1, i-slint-compiler 1.18.1, i-slint-core-macros 1.18.1, i-slint-core 1.18.1, i-slint-renderer-femtovg 1.18.1, i-slint-renderer-skia 1.18.1, i-slint-renderer-software 1.18.1, slint-macros 1.18.1, slint 1.18.1
 
 ````text
 # Slint Royalty-free Desktop, Mobile, and Web Applications License
@@ -9498,6 +9498,8 @@ Standard text, used by:
 - rcgen 0.14.10 (https://github.com/rustls/rcgen)
 - realfft 3.5.0: HEnquist <henrik.enquist@gmail.com> (https://github.com/HEnquist/realfft)
 - rustls-platform-verifier-android 0.2.0 (https://github.com/rustls/rustls-platform-verifier)
+- skia-bindings 0.153.3: LongYinan <lynweklm@gmail.com>, Armin Sander <armin@replicator.org> (https://github.com/rust-skia/rust-skia)
+- skia-safe 0.153.3: Armin Sander <armin@replicator.org> (https://github.com/rust-skia/rust-skia)
 - str0m-aws-lc-rs 0.6.0: Martin Algesten <martin@algesten.se> (https://github.com/algesten/str0m)
 - str0m-proto 0.7.0: Martin Algesten <martin@algesten.se> (https://github.com/algesten/str0m)
 - taffy 0.10.1: Alice Cecile <alice.i.cecile@gmail.com>, Johnathan Kelley <jkelleyrtp@gmail.com>, Nico Burns <nico@nicoburns.com> (https://github.com/DioxusLabs/taffy)

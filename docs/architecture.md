@@ -71,7 +71,7 @@ fuzz/                cargo-fuzz targets
 | `tsc-ui` | Slint UI and the desktop binary | done (no streams yet) |
 | `tsc-media` | Screen and system-audio capture backends (PipeWire portal, X11, Windows Graphics Capture, Android MediaProjection), video codecs | planned |
 | `tsc-platform` | Global hotkeys, notifications, paths | planned |
-| `tsc-android` + `android/` | Android library + Gradle/Kotlin app (foreground services for voice and screen capture) | planned |
+| `tsc-android` + `android/` | Android library + Gradle/Kotlin app (foreground services for voice and screen capture); see [android.md](android.md) | builds, not yet run on a device |
 
 ## Merging sources
 

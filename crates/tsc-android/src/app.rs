@@ -4,6 +4,7 @@
 //! (the process can outlive activities while voice runs in the service).
 //! Process-wide setup happens once; the window is built per activity.
 
+use std::path::Path;
 use std::sync::{Mutex, Once, OnceLock, PoisonError};
 
 use anyhow::Context as _;
@@ -14,6 +15,9 @@ use tsc_core::Command;
 use crate::foreground::Foreground;
 use crate::host::EngineHost;
 use crate::{bridge, capture, secrets};
+
+/// Store setting (`bool`): the user's opt-in to local crash reports.
+pub const CRASH_REPORTS_SETTING: &str = "crash_reports";
 
 static HOST: OnceLock<EngineHost> = OnceLock::new();
 static FOREGROUND: Mutex<Option<Foreground>> = Mutex::new(None);
@@ -56,6 +60,8 @@ fn init_logging() {
 }
 
 fn run(app: AndroidApp) -> anyhow::Result<()> {
+	let data_dir = app.internal_data_path().context("the app has no internal storage path")?;
+	install_crash_reports(&data_dir);
 	jni::JavaVM::singleton()?.attach_current_thread(|env| -> jni::errors::Result<()> {
 		bridge::init(env)?;
 		// reqwest (HTTPS queries, tsclientlib) verifies certificates with
@@ -74,7 +80,6 @@ fn run(app: AndroidApp) -> anyhow::Result<()> {
 		warn!("requesting permissions: {e}");
 	}
 
-	let data_dir = app.internal_data_path().context("the app has no internal storage path")?;
 	slint::android::init(app).context("Slint Android backend")?;
 	let attached = host.attach();
 	tsc_ui::run(tsc_ui::RunOptions {
@@ -86,6 +91,17 @@ fn run(app: AndroidApp) -> anyhow::Result<()> {
 			events: attached.events,
 		}),
 	})
+}
+
+/// Local crash reports in `<files dir>/crash-reports`, recorded only if the
+/// user opted in (off by default).
+fn install_crash_reports(data_dir: &Path) {
+	tsc_platform::crash::set_app_version(env!("CARGO_PKG_VERSION"));
+	let enabled = tsc_store::Store::open(&data_dir.join("client.db"))
+		.ok()
+		.and_then(|store| store.setting::<bool>(CRASH_REPORTS_SETTING).ok().flatten())
+		.unwrap_or(false);
+	tsc_platform::crash::install(data_dir.join(tsc_platform::crash::DIR_NAME), enabled);
 }
 
 /// Keep the voice foreground service in step with the voice connections.

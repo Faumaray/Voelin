@@ -8682,6 +8682,7 @@ dependencies = [
  "tsc-core",
  "tsc-media",
  "tsc-model",
+ "tsc-platform",
  "tsc-store",
  "tsc-ui",
 ]

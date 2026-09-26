@@ -26,6 +26,7 @@ rustls-platform-verifier = "0.7.1"
 slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-android-activity-06"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tsc-media = { path = "../tsc-media", default-features = false }
+tsc-platform = { path = "../tsc-platform", default-features = false }
 tsc-store = { path = "../tsc-store" }
 tsc-ui = { path = "../tsc-ui" }
 
