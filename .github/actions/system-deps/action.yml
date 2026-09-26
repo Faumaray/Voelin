@@ -1,0 +1,82 @@
+name: System dependencies
+description: >
+  Native libraries and tools the workspace builds against: apt packages on
+  Linux; NASM and libvpx (vcpkg, cached) on Windows, exporting VPX_LIB_DIR,
+  VPX_INCLUDE_DIR, VPX_VERSION and VPX_STATIC for libvpx-native-sys.
+
+inputs:
+  vpx-triplet:
+    description: vcpkg triplet for libvpx on Windows (static library, dynamic CRT like Rust's default)
+    default: x64-windows-static-md
+
+runs:
+  using: composite
+  steps:
+    - name: apt packages
+      if: runner.os == 'Linux'
+      shell: bash
+      # ALSA (audio devices), fontconfig + xkbcommon (UI), libvpx + dav1d
+      # (video codecs), PipeWire + SPA (screen and audio capture), libclang
+      # (bindgen), Xvfb (X11 tests).
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          libasound2-dev libfontconfig1-dev libxkbcommon-dev \
+          libvpx-dev libdav1d-dev libpipewire-0.3-dev libspa-0.2-dev libclang-dev \
+          xvfb
+
+    # aws-lc-sys (WebRTC DTLS through str0m) assembles with NASM on Windows.
+    - name: NASM
+      if: runner.os == 'Windows'
+      uses: ilammy/setup-nasm@v1
+
+    - name: vcpkg revision
+      if: runner.os == 'Windows'
+      id: vcpkg
+      shell: pwsh
+      run: |
+        "commit=$(git -C "$env:VCPKG_INSTALLATION_ROOT" rev-parse HEAD)" >> $env:GITHUB_OUTPUT
+
+    - name: Cache vcpkg packages
+      if: runner.os == 'Windows'
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}\vcpkg-archives
+        key: vcpkg-libvpx-${{ inputs.vpx-triplet }}-${{ steps.vcpkg.outputs.commit }}
+        restore-keys: vcpkg-libvpx-${{ inputs.vpx-triplet }}-
+
+    - name: libvpx
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        TRIPLET: ${{ inputs.vpx-triplet }}
+        VCPKG_BINARY_SOURCES: clear;files,${{ runner.temp }}\vcpkg-archives,readwrite
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $vcpkg = Join-Path $env:VCPKG_INSTALLATION_ROOT 'vcpkg.exe'
+        New-Item -ItemType Directory -Force (Join-Path $env:RUNNER_TEMP 'vcpkg-archives') | Out-Null
+        & $vcpkg install "libvpx:$env:TRIPLET"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+        # "libvpx:x64-windows-static-md   1.15.2#1   The reference ..."
+        $line = (& $vcpkg list libvpx | Select-String -Pattern "^libvpx:$env:TRIPLET\s").Line
+        if (-not $line) { throw "vcpkg list does not show libvpx:$env:TRIPLET" }
+        $version = (($line -split '\s+')[1] -split '#')[0]
+
+        $root = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed\$env:TRIPLET"
+        $libdir = Join-Path $root 'lib'
+        # libvpx-native-sys links "vpx"; libvpx's own MSVC build names the
+        # library vpxmd.lib / vpxmt.lib, so provide vpx.lib if needed.
+        if (-not (Test-Path (Join-Path $libdir 'vpx.lib'))) {
+          $lib = Get-ChildItem $libdir -Filter 'vpx*.lib' | Select-Object -First 1
+          if (-not $lib) { Get-ChildItem $libdir; throw "no vpx library in $libdir" }
+          $libdir = Join-Path $env:RUNNER_TEMP 'vpx-lib'
+          New-Item -ItemType Directory -Force $libdir | Out-Null
+          Copy-Item $lib.FullName (Join-Path $libdir 'vpx.lib')
+        }
+
+        "VPX_LIB_DIR=$libdir" >> $env:GITHUB_ENV
+        "VPX_INCLUDE_DIR=$(Join-Path $root 'include')" >> $env:GITHUB_ENV
+        "VPX_VERSION=$version" >> $env:GITHUB_ENV
+        "VPX_STATIC=1" >> $env:GITHUB_ENV
+        Write-Host "libvpx $version from $libdir"
