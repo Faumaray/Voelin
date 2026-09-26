@@ -6,9 +6,7 @@ use slint::{ComponentHandle, Model};
 use tsc_core::stream::{EndReason, LeaveReason, StreamSetup, ViewerInfo, ViewerState};
 use tsc_core::{Command, Event, StreamState, WatchState};
 
-use crate::app::{
-	App, Bridge, ShareForm, SourceItem, StreamItem, ViewerItem, later, model,
-};
+use crate::app::{App, Bridge, ShareForm, SourceItem, StreamItem, ViewerItem, later, model};
 use crate::settings::{BITRATE_CHOICES, FPS_CHOICES, ShareDefaults};
 use crate::video::{self, Capture, CaptureRequest, Decoder};
 
@@ -113,7 +111,11 @@ impl App {
 				let local = reason == EndReason::Local || share.stopping;
 				self.share = None;
 				self.share_error = if local { String::new() } else { share_end_text(&reason) };
-				self.set_status(if local { "You stopped sharing".into() } else { share_end_text(&reason) });
+				self.set_status(if local {
+					"You stopped sharing".into()
+				} else {
+					share_end_text(&reason)
+				});
 			}
 		}
 		self.refresh_streams();
@@ -159,9 +161,10 @@ impl App {
 		let mut items: Vec<StreamItem> = Vec::new();
 		if let Some(view) = view.filter(|v| v.streams_available()) {
 			for s in &view.streams {
-				let watching = self.watch.as_ref().is_some_and(|w| {
-					w.session == current && w.stream_id == s.id && !w.ended
-				});
+				let watching = self
+					.watch
+					.as_ref()
+					.is_some_and(|w| w.session == current && w.stream_id == s.id && !w.ended);
 				items.push(StreamItem {
 					id: s.id.clone().into(),
 					name: s.name.clone().into(),
@@ -178,8 +181,7 @@ impl App {
 				let announced = view.streams.iter().any(|s| s.streamer.0 == c.id);
 				if c.streaming == Some(true)
 					&& Some(c.channel) == channel
-					&& !announced
-					&& view.state.own_client != Some(c.id)
+					&& !announced && view.state.own_client != Some(c.id)
 				{
 					items.push(StreamItem {
 						name: c.nickname.clone().into(),
@@ -219,7 +221,9 @@ impl App {
 					.iter()
 					.map(|v| ViewerItem {
 						client: i32::from(v.client.0),
-						name: view.map_or_else(String::new, |view| view.nickname(v.client.0)).into(),
+						name: view
+							.map_or_else(String::new, |view| view.nickname(v.client.0))
+							.into(),
 						state: match v.state {
 							ViewerState::Requested => "requested",
 							ViewerState::Connecting => "connecting",
@@ -252,7 +256,9 @@ impl App {
 			bridge.set_viewer_frame(slint::Image::default());
 			return;
 		};
-		bridge.set_viewer_open(watch.shown && (watch.session.is_none() || watch.session == self.current));
+		bridge.set_viewer_open(
+			watch.shown && (watch.session.is_none() || watch.session == self.current),
+		);
 		bridge.set_viewer_title(watch.title.clone().into());
 		bridge.set_viewer_status(watch.status.clone().into());
 		bridge.set_viewer_ended(watch.ended);
@@ -418,7 +424,11 @@ impl App {
 					let reason = capture.audio_error().unwrap_or_default();
 					self.set_status(format!("Sharing without sound: {reason}"));
 				}
-				self.engine.send(Command::StartStream { session: session as u64, setup, auto_accept });
+				self.engine.send(Command::StartStream {
+					session: session as u64,
+					setup,
+					auto_accept,
+				});
 				self.share = Some(Share {
 					session,
 					capture,
@@ -462,9 +472,11 @@ impl App {
 		let Some(view) = self.sessions.get(&session) else { return };
 		let Some(info) = view.streams.iter().find(|s| s.id == stream_id) else { return };
 		let streamer = view.nickname(info.streamer.0);
-		let title = if info.name.is_empty() { format!("{streamer}'s stream") } else { info.name.clone() };
+		let title =
+			if info.name.is_empty() { format!("{streamer}'s stream") } else { info.name.clone() };
 		self.leave_stream();
-		self.engine.send(Command::WatchStream { session: session as u64, stream_id: stream_id.clone() });
+		self.engine
+			.send(Command::WatchStream { session: session as u64, stream_id: stream_id.clone() });
 		if self.stream_volume != 100.0 {
 			self.engine.send(Command::SetStreamVolume {
 				session: session as u64,
@@ -558,10 +570,8 @@ impl App {
 			&& let Some(session) = watch.session
 			&& !watch.ended
 		{
-			self.engine.send(Command::LeaveStream {
-				session: session as u64,
-				stream_id: watch.stream_id,
-			});
+			self.engine
+				.send(Command::LeaveStream { session: session as u64, stream_id: watch.stream_id });
 		}
 		self.set_fullscreen(false);
 		self.refresh_viewer();

@@ -1295,7 +1295,8 @@ impl App {
 	/// Send the stored volumes of clients that appeared in a voice session.
 	fn apply_client_playback(&mut self, session: i64) {
 		let Some(view) = self.sessions.get_mut(&session) else { return };
-		if view.state.voice != VoiceState::Connected || view.state.presence_source != Some(Source::Voice)
+		if view.state.voice != VoiceState::Connected
+			|| view.state.presence_source != Some(Source::Voice)
 		{
 			return;
 		}
@@ -1308,7 +1309,11 @@ impl App {
 			let stored = client.uid.as_ref().and_then(|uid| self.playback.get(uid));
 			let Some(playback) = stored else { continue };
 			let (s, c) = (session as u64, client.id);
-			self.engine.send(Command::SetClientVolume { session: s, client: c, volume: playback.volume });
+			self.engine.send(Command::SetClientVolume {
+				session: s,
+				client: c,
+				volume: playback.volume,
+			});
 			if playback.muted {
 				self.engine.send(Command::SetClientMuted { session: s, client: c, muted: true });
 			}

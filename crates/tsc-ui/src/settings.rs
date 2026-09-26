@@ -241,7 +241,8 @@ mod tests {
 		assert_eq!(form.output_volume, 50.0);
 		assert_eq!(apply_audio_form(&form, &settings, &inputs, &outputs), settings);
 
-		let form = AudioForm { transmit: 2, echo_cancellation: false, playback_buffer: 500.0, ..form };
+		let form =
+			AudioForm { transmit: 2, echo_cancellation: false, playback_buffer: 500.0, ..form };
 		let changed = apply_audio_form(&form, &settings, &inputs, &outputs);
 		assert_eq!(changed.transmit, TransmitMode::Continuous);
 		assert!(!changed.processing.echo_cancellation);

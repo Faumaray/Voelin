@@ -19,6 +19,7 @@ mod imp {
 
 	use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 	use tokio::runtime::Handle;
+	use tracing::warn;
 	use tsc_core::media::tsc_media::capture::SourceId;
 	use tsc_core::media::tsc_media::codec::h264::{self, OpenH264};
 	use tsc_core::media::tsc_media::{Codecs, VideoFrame, convert};
@@ -27,7 +28,6 @@ mod imp {
 	};
 	use tsc_core::stream::PeerConfig;
 	use tsc_core::{Engine, StreamSink};
-	use tracing::warn;
 
 	use super::size_text;
 
@@ -76,9 +76,10 @@ mod imp {
 				H264::Off => (false, String::new()),
 				H264::Missing(reason) => (false, reason.clone()),
 				H264::Downloading => (false, "Downloading OpenH264 from Cisco…".into()),
-				H264::Loaded(path) => {
-					(true, format!("OpenH264 {} is loaded ({}).", h264::OPENH264_VERSION, path.display()))
-				}
+				H264::Loaded(path) => (
+					true,
+					format!("OpenH264 {} is loaded ({}).", h264::OPENH264_VERSION, path.display()),
+				),
 			}
 		}
 
@@ -234,7 +235,8 @@ mod imp {
 			let pictures = Arc::new(Latest::new());
 			let on_frame = deliver(pictures.clone(), wake);
 			let codecs = self.codecs.clone();
-			let config = StreamerConfig { source: SourceId::Synthetic, ..StreamerConfig::default() };
+			let config =
+				StreamerConfig { source: SourceId::Synthetic, ..StreamerConfig::default() };
 			runtime.spawn(async move {
 				let result = LocalPreview::start(codecs, config, on_frame).await;
 				done(
