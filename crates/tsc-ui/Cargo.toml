@@ -28,8 +28,13 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tsc-core = { path = "../tsc-core" }
 tsc-model = { path = "../tsc-model" }
 tsc-query = { path = "../tsc-query" }
-tsc-store = { path = "../tsc-store", features = ["keyring"] }
+tsc-store = { path = "../tsc-store" }
 tsclientlib = { path = "../proto/tsclientlib" }
+
+# The keyring crate has no Android backend; the Android app passes its own
+# `Secrets` (Android Keystore) to `run_with_engine`.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+tsc-store = { path = "../tsc-store", features = ["keyring"] }
 
 [build-dependencies]
 slint-build = "1.18"

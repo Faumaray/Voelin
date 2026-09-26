@@ -8,6 +8,7 @@ members = [
 	"crates/proto/tsproto",
 	"crates/proto/ts-bookkeeping",
 	"crates/proto/tsclientlib",
+	"crates/tsc-android",
 	"crates/tsc-audio",
 	"crates/tsc-core",
 	"crates/tsc-gateway",

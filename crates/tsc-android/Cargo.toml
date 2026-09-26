@@ -1,0 +1,33 @@
+[package]
+name = "tsc-android"
+version = "0.1.0"
+description = "Android app library: native activity entry point, engine kept for the whole process, JNI bridge to the Kotlin services (voice, screen share), Android Keystore secrets."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "tsc_android"
+# cdylib: libtsc_android.so, loaded by the app's NativeActivity. rlib: tests
+# and type checks on the host.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tracing = "0.1.44"
+tsc-core = { path = "../tsc-core" }
+tsc-media = { path = "../tsc-media", default-features = false }
+tsc-model = { path = "../tsc-model" }
+tsc-store = { path = "../tsc-store" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.22.4"
+rustls-platform-verifier = "0.7.1"
+slint = { version = "1.18", features = ["backend-android-activity-06"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tsc-ui = { path = "../tsc-ui" }
+
+[lints]
+workspace = true
