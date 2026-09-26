@@ -36,9 +36,12 @@ Done so far (milestones M0–M4 and the first part of M5 of [the plan](docs/arch
 - `crates/tsc-gateway` (`tsgw`) + `tsc-gateway-proto`: companion gateway for server admins. Users log in
   with their TeamSpeak identity and get presence, channel chat and history without joining voice,
   limited by their server permissions ([admin guide](docs/gateway-admin.md))
-- `crates/tsc-core`: client engine; sessions merge voice, gateway and query sources, route chat, run audio
+- `crates/tsc-core`: client engine; sessions merge voice, gateway and query sources, route chat, run audio;
+  the media pipeline for streams (capture → VP8 + Opus → stream, stream → decoder)
 - `crates/tsc-ui` (`tsc-desktop`): Slint desktop app: servers, channel tree with talking indicators,
   chat tabs (own channel via voice, other channels via relay), connect / observe invisibly, mute, push-to-talk
+  (in the window and as a global hotkey), audio settings with a level meter, per-client volume, and on
+  TeamSpeak 6 streams: watch in a viewer, share the screen with sound
 - `crates/tsc-stream`: TeamSpeak 6 streams: stream commands and notifications, JSON signalling,
   WebRTC peers (str0m) with host and STUN candidates. A live test streams VP8 + Opus between two
   clients through a TS6 server
@@ -49,12 +52,14 @@ Done so far (milestones M0–M4 and the first part of M5 of [the plan](docs/arch
   relay chat and the gateway on both
 - `fuzz/`: cargo-fuzz targets for packets, commands and the license chain
 
-Screen sharing has its protocol and transport layer (`tsc-stream`); capture, codecs and the UI
-for it are in progress. No Android build yet.
+Screen sharing works between our clients through a TeamSpeak 6 server (VP8 video, Opus audio);
+interop with the official TeamSpeak 6 client is not verified yet. No Android build yet.
 
 | Connected with voice | Observing invisibly through the gateway |
 |---|---|
 | ![voice](docs/screenshots/desktop-voice.png) | ![observe](docs/screenshots/desktop-observe.png) |
+| **Watching a stream** | **Sharing the screen** |
+| ![viewer](docs/screenshots/desktop-stream-viewer.png) | ![share](docs/screenshots/desktop-share-dialog.png) |
 
 ## Try it
 
@@ -71,6 +76,10 @@ cargo run -p tsctl -- connect 127.0.0.1:9988 --nick me repl  # interactive chat
 cargo run -p tsctl -- connect 127.0.0.1:9988 --nick me voice send --tone 440
 cargo run -p tsctl -- connect 127.0.0.1:9988 --nick ear voice record out.wav
 
+# Streams (TeamSpeak 6): share the test pattern (or --source x11), watch and decode it
+cargo run -p tsctl -- connect 127.0.0.1:9988 --nick eye stream watch --save-frame shot.png &
+cargo run -p tsctl -- connect 127.0.0.1:9988 --nick me stream start --synthetic --auto-accept
+
 # ServerQuery (dev password tsc-dev-admin): invisible presence and relay chat
 cargo run -p tsctl -- observe ssh 127.0.0.1:10022 --secret tsc-dev-admin --allowlisted
 cargo run -p tsctl -- relay ssh 127.0.0.1:10022 --secret tsc-dev-admin --allowlisted --channel 1
@@ -85,9 +94,14 @@ scripts/it-smoke.sh   # all of the above, on both servers
 Other commands: `tsctl identity new`, `tsctl versions`, `tsctl connect <addr> listen|chat|raw`.
 `tsctl --help` lists all options.
 
+Development switches of the desktop app (environment variables): `TSC_DATA_DIR` (database),
+`TSC_AUTOCONNECT=voice|observe`, `TSC_SCREENSHOT=<png>` (with `TSC_SCREENSHOT_DELAY`),
+`TSC_DEMO_STREAM=1` (a local test stream in the viewer, no server needed),
+`TSC_OPEN=share|settings[:<tab>]|about|client`, `TSC_AUTOWATCH=1`, `TSC_AUTOSHARE=test-pattern`.
+
 Building on Linux needs the ALSA headers (`libasound2-dev`), fontconfig and xkbcommon
 headers for the UI (`libfontconfig1-dev libxkbcommon-dev`), plus CMake and a C compiler for
-the bundled libopus.
+the bundled libopus; for streams also libvpx and PipeWire (see [docs/media.md](docs/media.md#build-requirements)).
 
 ## License
 
