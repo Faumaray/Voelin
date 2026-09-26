@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- Placeholder icon: a speech bubble with sound waves. -->
+  <rect x="8" y="8" width="112" height="112" rx="24" fill="#238636"/>
+  <path d="M36 40h56a8 8 0 0 1 8 8v28a8 8 0 0 1-8 8H60l-16 14v-14h-8a8 8 0 0 1-8-8V48a8 8 0 0 1 8-8z" fill="#ffffff"/>
+  <g fill="none" stroke="#238636" stroke-width="5" stroke-linecap="round">
+    <path d="M52 56v12"/>
+    <path d="M64 50v24"/>
+    <path d="M76 56v12"/>
+  </g>
+</svg>

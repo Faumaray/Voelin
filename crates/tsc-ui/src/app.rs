@@ -601,6 +601,8 @@ impl App {
 			}
 			Event::Chat { session, message } => self.add_message(session as i64, message),
 			Event::Error { message, .. } => self.set_status(message),
+			// Stream events: the streams panel is not wired yet.
+			_ => {}
 		}
 	}
 

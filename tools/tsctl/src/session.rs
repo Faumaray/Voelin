@@ -58,6 +58,7 @@ pub async fn run(args: ConnectArgs) -> Result<()> {
 			send_and_wait(&mut con, cmd, "command").await.map(|()| println!("ok"))
 		}
 		Action::Voice { command } => crate::voice::run(&mut con, command).await,
+		Action::Stream(stream) => crate::stream::run(&mut con, stream).await,
 		Action::Repl => repl(&mut con).await,
 	};
 

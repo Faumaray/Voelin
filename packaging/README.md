@@ -1,0 +1,41 @@
+# Packaging
+
+The product name is not decided yet: `TS Client` and the app id
+`io.github.faumaray.TsClient` are placeholders (also in
+`tsc_platform::{APP_NAME, APP_ID}`); rename them everywhere together.
+
+| Path | What |
+|---|---|
+| `linux/` | Desktop file, AppStream metainfo and a placeholder icon, named by app id |
+| `flatpak/io.github.faumaray.TsClient.yml` | Flatpak manifest |
+| `windows/` | NSIS installer and how to build and sign on Windows ([README](windows/README.md)) |
+
+## Flatpak
+
+flatpak-builder builds offline, so the crates from `Cargo.lock` are listed as
+sources in `flatpak/cargo-sources.json`, generated (not committed) with
+[flatpak-cargo-generator](https://github.com/flatpak/flatpak-builder-tools/tree/master/cargo):
+
+```sh
+curl -LO https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py
+python3 flatpak-cargo-generator.py Cargo.lock -o packaging/flatpak/cargo-sources.json
+
+flatpak install flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08 \
+	org.freedesktop.Sdk.Extension.rust-stable//25.08
+flatpak-builder --user --install --force-clean build-flatpak packaging/flatpak/io.github.faumaray.TsClient.yml
+flatpak run io.github.faumaray.TsClient
+```
+
+Regenerate `cargo-sources.json` whenever `Cargo.lock` changes. Inside the build
+`rust-toolchain.toml` does not apply: the `rust-stable` extension must provide at
+least the workspace's `rust-version`. The SDK has everything else the build needs
+(CMake for libopus, ALSA, fontconfig, xkbcommon, libvpx, PipeWire, clang).
+
+Permissions (`finish-args`): network, Wayland with X11 fallback, DRI, PulseAudio
+(microphone and speakers), the PipeWire socket (application audio when streaming),
+notifications and the Secret Service. Push-to-talk (GlobalShortcuts) and screen
+capture (ScreenCast) go through portals and need no permission.
+
+Desktops match windows to the desktop file (taskbar icon, portal permissions) by
+X11 `WM_CLASS`, which is the binary name `tsc-desktop` (hence `StartupWMClass`),
+and on Wayland by the window's app id, which the app should set to the app id.

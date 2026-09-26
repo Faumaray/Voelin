@@ -16,6 +16,7 @@ members = [
 	"crates/tsc-media",
 	"crates/tsc-model",
 	"crates/tsc-observer",
+	"crates/tsc-platform",
 	"crates/tsc-query",
 	"crates/tsc-store",
 	"crates/tsc-stream",
@@ -35,6 +36,7 @@ default-members = [
 	"crates/tsc-gateway-proto",
 	"crates/tsc-model",
 	"crates/tsc-observer",
+	"crates/tsc-platform",
 	"crates/tsc-query",
 	"crates/tsc-store",
 	"crates/tsc-stream",
@@ -59,6 +61,23 @@ all = { level = "warn", priority = -1 }
 [profile.dev.package.num-bigint]
 # The Init1 puzzle does a large modular exponentiation on connect; unoptimized
 # it takes seconds.
+opt-level = 3
+
+# Audio processing (echo cancellation, noise suppression) runs in real time on
+# every 10 ms of microphone audio; unoptimized it needs about a third of a core.
+[profile.dev.package.sonora]
+opt-level = 3
+[profile.dev.package.sonora-aec3]
+opt-level = 3
+[profile.dev.package.sonora-agc2]
+opt-level = 3
+[profile.dev.package.sonora-common-audio]
+opt-level = 3
+[profile.dev.package.sonora-fft]
+opt-level = 3
+[profile.dev.package.sonora-ns]
+opt-level = 3
+[profile.dev.package.sonora-simd]
 opt-level = 3
 
 [profile.dev]

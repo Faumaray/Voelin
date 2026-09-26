@@ -13,6 +13,20 @@ pub fn sine(freq: f32, seconds: f32, amplitude: f32) -> Vec<f32> {
 	(0..n).map(|i| amplitude * (TAU * freq * i as f32 / SAMPLE_RATE as f32).sin()).collect()
 }
 
+/// Deterministic white noise, uniform in `[-amplitude, amplitude]`, for tests
+/// and calibration.
+pub fn white_noise(n: usize, amplitude: f32, seed: u64) -> Vec<f32> {
+	// PCG-style LCG; the top 24 bits are uniform enough.
+	let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+	(0..n)
+		.map(|_| {
+			state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+			let x = (state >> 40) as f32 / (1u64 << 24) as f32;
+			amplitude * (2.0 * x - 1.0)
+		})
+		.collect()
+}
+
 /// Average interleaved channels into mono.
 pub fn to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
 	if channels <= 1 {
@@ -91,6 +105,17 @@ mod tests {
 		assert!(tone_ratio(&padded, 1000.0, SAMPLE_RATE) < 0.5);
 		assert!(voiced_tone_ratio(&padded, 1000.0, SAMPLE_RATE) > 0.95);
 		assert_eq!(voiced_tone_ratio(&[0.0; 48_000], 1000.0, SAMPLE_RATE), 0.0);
+	}
+
+	#[test]
+	fn noise_is_white_and_deterministic() {
+		let n = white_noise(48_000, 0.5, 1);
+		assert_eq!(n, white_noise(48_000, 0.5, 1));
+		assert_ne!(n, white_noise(48_000, 0.5, 2));
+		assert!(n.iter().all(|s| s.abs() <= 0.5));
+		// Uniform in ±a has energy a²/3.
+		assert!((energy(&n) - 0.25 / 3.0).abs() < 0.005);
+		assert!(tone_ratio(&n, 1000.0, SAMPLE_RATE) < 0.01);
 	}
 
 	#[test]

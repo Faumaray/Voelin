@@ -66,8 +66,8 @@ fuzz/                cargo-fuzz targets
 | `tsc-gateway-proto`, `tsc-gateway` (`tsgw`) | Companion service for server admins: identity-challenge auth, permission-mirroring authorization, presence stream, chat relay, SQLite history, WebSocket + JSON (`tsgw.v1+json`) | done |
 | `tsc-store` | Identities, bookmarks, settings, chat cache, secrets (keyring / Android Keystore) | done |
 | `tsc-audio` | Capture/playback, Opus, echo cancellation, resampling, jitter buffer, mixer, VAD/push-to-talk | v0 (no AEC yet) |
-| `tsc-stream` | TS6 stream commands, JSON signalling, str0m peer connections, host/STUN candidates | signalling + transport |
-| `tsc-core` | Engine: runtime, per-server sessions, merge of voice/gateway/query sources, event bus, command API | done (no streams yet) |
+| `tsc-stream` | TS6 stream commands, JSON signalling, str0m peer connections, host/STUN candidates, streamer/viewer sessions, frame-source seam | sessions + transport |
+| `tsc-core` | Engine: runtime, per-server sessions, merge of voice/gateway/query sources, event bus, command API, streams on TS6 | done (streams with synthetic frames) |
 | `tsc-ui` | Slint UI and the desktop binary | done (no streams yet) |
 | `tsc-media` | Screen and system-audio capture backends (PipeWire portal, X11, Windows Graphics Capture, Android MediaProjection), video codecs | planned |
 | `tsc-platform` | Global hotkeys, notifications, paths | planned |
@@ -81,6 +81,23 @@ voice (after subscribing to all channels) > gateway > query. Channel chat uses
 the native command only when voice-connected *and* in that channel, otherwise the
 gateway, otherwise a local query relay. UI states: `Offline`,
 `Observing (Gateway|Query)` (invisible), `Connecting`, `Connected`.
+
+## Streams
+
+`tsc-stream::Streams` holds the stream state of one TS6 connection without
+doing connection IO: it is fed stream notifications (and failed commands) and
+the app's decisions, owns the str0m peers, and queues requests to send plus
+events. Inside it, `StreamerSession` runs our stream (one peer per viewer, our
+offer in `respondjoinstreamrequest`), `ViewerSession` one watched stream
+(answer through `streamsignaling`), and `StreamDirectory` the streams of our
+channel. Its tests drive two instances through a fake relay server.
+
+In `tsc-core` a stream task per voice connection runs `Streams`; the voice task
+forwards `MessageEvent`s and sends the requests. Encoders push frames through
+the `StreamSink` of `StreamState::Live`; received frames of watched streams go
+to `Engine::subscribe_frames`, not the event bus. `tsc-stream::FrameSource` is
+the seam for capture and encoders (`tsc-media`); `SyntheticSource` stands in
+for tests and `tsctl stream start --synthetic`.
 
 ## Milestones
 
