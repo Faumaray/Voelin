@@ -3,7 +3,7 @@ use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::crypto::{CryptoProvider, SupportedDtls12CipherSuite};
+use crate::crypto::{CryptoProvider, SrtpProfile, SupportedDtls12CipherSuite};
 use crate::crypto::{SupportedDtls13CipherSuite, SupportedKxGroup};
 use crate::dtls12::message::Dtls12CipherSuite;
 use crate::types::{Dtls13CipherSuite, NamedGroup};
@@ -75,6 +75,7 @@ pub struct Config {
     dtls12_cipher_suites: Option<Vec<Dtls12CipherSuite>>,
     dtls13_cipher_suites: Option<Vec<Dtls13CipherSuite>>,
     kx_groups: Option<Vec<NamedGroup>>,
+    srtp_profiles: Option<Vec<SrtpProfile>>,
     psk: Option<Psk>,
 }
 
@@ -96,6 +97,7 @@ impl Config {
             dtls12_cipher_suites: None,
             dtls13_cipher_suites: None,
             kx_groups: None,
+            srtp_profiles: None,
             psk: None,
         }
     }
@@ -285,6 +287,30 @@ impl Config {
                 None => true,
             })
     }
+
+    /// SRTP protection profiles in order of preference.
+    ///
+    /// The list set with the builder's `srtp_profiles` method, or all
+    /// supported profiles in the order of [`SrtpProfile::ALL`].
+    pub fn srtp_profiles(&self) -> &[SrtpProfile] {
+        self.srtp_profiles.as_deref().unwrap_or(SrtpProfile::ALL)
+    }
+
+    /// The SRTP profile a server selects from the client's `offered`
+    /// profiles: the first of [`srtp_profiles`](Self::srtp_profiles) that
+    /// the client offered, whatever the client's order.
+    pub fn select_srtp_profile(&self, offered: &[SrtpProfile]) -> Option<SrtpProfile> {
+        self.srtp_profiles()
+            .iter()
+            .copied()
+            .find(|profile| offered.contains(profile))
+    }
+
+    /// Whether an SRTP profile order was configured. Without one, a DTLS 1.3
+    /// server keeps the client's order.
+    pub(crate) fn has_srtp_profile_order(&self) -> bool {
+        self.srtp_profiles.is_some()
+    }
 }
 
 /// Builder for [`Config`]. See each setter for defaults.
@@ -303,6 +329,7 @@ pub struct ConfigBuilder {
     dtls12_cipher_suites: Option<Vec<Dtls12CipherSuite>>,
     dtls13_cipher_suites: Option<Vec<Dtls13CipherSuite>>,
     kx_groups: Option<Vec<NamedGroup>>,
+    srtp_profiles: Option<Vec<SrtpProfile>>,
     psk: Option<Psk>,
 }
 
@@ -452,6 +479,28 @@ impl ConfigBuilder {
         self
     }
 
+    /// Set the SRTP protection profiles (DTLS-SRTP, RFC 5764) in order of
+    /// preference.
+    ///
+    /// A client offers these profiles in this order and rejects a server
+    /// that selects another one. A server selects the first of them that
+    /// the client offered, whatever the client's order (DTLS 1.2 and 1.3).
+    /// Duplicates are ignored; an empty list fails [`build`](Self::build).
+    ///
+    /// By default all supported profiles are used in the order of
+    /// [`SrtpProfile::ALL`], and a DTLS 1.3 server selects the first
+    /// profile of the client's offer that it supports.
+    pub fn srtp_profiles(mut self, profiles: &[SrtpProfile]) -> Self {
+        let mut list: Vec<SrtpProfile> = Vec::with_capacity(profiles.len());
+        for profile in profiles {
+            if !list.contains(profile) {
+                list.push(*profile);
+            }
+        }
+        self.srtp_profiles = Some(list);
+        self
+    }
+
     /// Configure PSK for a client endpoint.
     ///
     /// The `identity` is sent to the server during the handshake.
@@ -516,6 +565,11 @@ impl ConfigBuilder {
         // Validate aead_encryption_limit: must be at least 1
         if self.aead_encryption_limit == 0 {
             return Err(Error::ConfigError(ConfigError::AeadEncryptionLimitTooSmall));
+        }
+
+        // Validate srtp_profiles: an empty list cannot be offered (RFC 5764)
+        if self.srtp_profiles.as_ref().is_some_and(Vec::is_empty) {
+            return Err(Error::ConfigError(ConfigError::NoSrtpProfiles));
         }
 
         // Validate cipher suite filters: at least one version must have suites.
@@ -609,6 +663,7 @@ impl ConfigBuilder {
             dtls12_cipher_suites: self.dtls12_cipher_suites,
             dtls13_cipher_suites: self.dtls13_cipher_suites,
             kx_groups: self.kx_groups,
+            srtp_profiles: self.srtp_profiles,
             psk: self.psk,
         })
     }
@@ -659,6 +714,7 @@ impl fmt::Debug for Config {
             .field("dtls12_cipher_suites", &self.dtls12_cipher_suites)
             .field("dtls13_cipher_suites", &self.dtls13_cipher_suites)
             .field("kx_groups", &self.kx_groups)
+            .field("srtp_profiles", &self.srtp_profiles)
             .field("psk", &self.psk)
             .finish()
     }
@@ -684,6 +740,7 @@ impl fmt::Debug for ConfigBuilder {
             .field("dtls12_cipher_suites", &self.dtls12_cipher_suites)
             .field("dtls13_cipher_suites", &self.dtls13_cipher_suites)
             .field("kx_groups", &self.kx_groups)
+            .field("srtp_profiles", &self.srtp_profiles)
             .field("psk", &self.psk)
             .finish()
     }
@@ -993,6 +1050,73 @@ mod tests {
             .kx_groups(&[])
             .build()
             .expect("PSK-only client with empty kx_groups should build");
+    }
+
+    #[test]
+    fn srtp_profiles_default_order() {
+        let config = Config::default();
+        assert_eq!(config.srtp_profiles(), SrtpProfile::ALL);
+        assert!(!config.has_srtp_profile_order());
+        // Upstream's server preference: AES-256-GCM, AES-128-GCM, then SHA1.
+        let offered = [
+            SrtpProfile::AES128_CM_SHA1_80,
+            SrtpProfile::AEAD_AES_128_GCM,
+            SrtpProfile::AEAD_AES_256_GCM,
+        ];
+        assert_eq!(
+            config.select_srtp_profile(&offered),
+            Some(SrtpProfile::AEAD_AES_256_GCM)
+        );
+        assert_eq!(
+            config.select_srtp_profile(&offered[..2]),
+            Some(SrtpProfile::AEAD_AES_128_GCM)
+        );
+        assert_eq!(config.select_srtp_profile(&[]), None);
+    }
+
+    #[test]
+    fn srtp_profiles_configured_order() {
+        let config = Config::builder()
+            .srtp_profiles(&[
+                SrtpProfile::AES128_CM_SHA1_80,
+                SrtpProfile::AEAD_AES_128_GCM,
+                SrtpProfile::AES128_CM_SHA1_80,
+            ])
+            .build()
+            .expect("should accept an SRTP profile order");
+        assert!(config.has_srtp_profile_order());
+        assert_eq!(
+            config.srtp_profiles(),
+            &[
+                SrtpProfile::AES128_CM_SHA1_80,
+                SrtpProfile::AEAD_AES_128_GCM
+            ],
+            "duplicates are dropped"
+        );
+        // Our order wins over the client's (a browser offers GCM first).
+        let browser = [
+            SrtpProfile::AEAD_AES_256_GCM,
+            SrtpProfile::AEAD_AES_128_GCM,
+            SrtpProfile::AES128_CM_SHA1_80,
+        ];
+        assert_eq!(
+            config.select_srtp_profile(&browser),
+            Some(SrtpProfile::AES128_CM_SHA1_80)
+        );
+        assert_eq!(
+            config.select_srtp_profile(&browser[..2]),
+            Some(SrtpProfile::AEAD_AES_128_GCM)
+        );
+        assert_eq!(config.select_srtp_profile(&browser[..1]), None);
+    }
+
+    #[test]
+    fn empty_srtp_profiles_rejected() {
+        match Config::builder().srtp_profiles(&[]).build() {
+            Err(Error::ConfigError(ConfigError::NoSrtpProfiles)) => {}
+            Err(other) => panic!("expected ConfigError, got: {other:?}"),
+            Ok(_) => panic!("expected error for an empty SRTP profile list"),
+        }
     }
 
     #[test]

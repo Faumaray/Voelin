@@ -732,15 +732,24 @@ impl State {
 
         server.shared_secret = Some(shared_secret);
 
-        // Select SRTP profile: first from client list that the server supports.
+        // Select SRTP profile: with a configured order, the first of ours
+        // that the client offers; otherwise the first from the client list
+        // that the server supports.
         // Per RFC 5764 Section 4.1.1, the server MUST select a profile that
         // both sides support.
         if let Some(ref profiles) = client_srtp_profiles {
-            for profile_id in profiles {
-                let profile: SrtpProfile = (*profile_id).into();
-                if SrtpProfile::ALL.contains(&profile) {
-                    server.negotiated_srtp_profile = Some(profile);
-                    break;
+            if server.engine.config().has_srtp_profile_order() {
+                let offered: ArrayVec<SrtpProfile, 3> =
+                    profiles.iter().map(|pid| (*pid).into()).collect();
+                server.negotiated_srtp_profile =
+                    server.engine.config().select_srtp_profile(&offered);
+            } else {
+                for profile_id in profiles {
+                    let profile: SrtpProfile = (*profile_id).into();
+                    if SrtpProfile::ALL.contains(&profile) {
+                        server.negotiated_srtp_profile = Some(profile);
+                        break;
+                    }
                 }
             }
         }

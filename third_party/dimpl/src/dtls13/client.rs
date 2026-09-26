@@ -718,7 +718,14 @@ impl State {
                 let (_, use_srtp) =
                     UseSrtpExtension::parse(ext_data).map_err(InternalError::from)?;
                 if !use_srtp.profiles.is_empty() {
-                    client.negotiated_srtp_profile = Some(use_srtp.profiles[0].into());
+                    let profile: SrtpProfile = use_srtp.profiles[0].into();
+                    if !client.engine.config().srtp_profiles().contains(&profile) {
+                        return Err(Error::SecurityError(
+                            crate::SecurityError::ServerSelectedUnofferedSrtpProfile(profile),
+                        )
+                        .into());
+                    }
+                    client.negotiated_srtp_profile = Some(profile);
                     trace!(
                         "EncryptedExtensions UseSRTP; selected profile: {:?}",
                         client.negotiated_srtp_profile
@@ -1272,7 +1279,7 @@ fn handshake_create_client_hello(
 
     // 5. use_srtp extension
     let srtp_start = ext_buf.len();
-    let use_srtp = UseSrtpExtension::default();
+    let use_srtp = UseSrtpExtension::from_profiles(engine.config().srtp_profiles());
     use_srtp.serialize(&mut ext_buf);
     let srtp_end = ext_buf.len();
     extensions.push(Extension {

@@ -87,7 +87,26 @@ impl UseSrtpExtension {
         UseSrtpExtension { profiles, mki }
     }
 
+    /// A UseSrtpExtension offering `profiles` in this order (duplicates
+    /// skipped).
+    pub fn from_profiles(profiles: &[SrtpProfile]) -> Self {
+        let mut ids = SrtpProfileVec::new();
+        for profile in profiles {
+            let id = SrtpProfileId::from(*profile);
+            if !ids.contains(&id) {
+                // At most one entry per profile, so this always fits.
+                let _ = ids.try_push(id);
+            }
+        }
+        UseSrtpExtension {
+            profiles: ids,
+            mki: ArrayVec::new(),
+        }
+    }
+
     /// Create a default UseSrtpExtension with standard profiles
+    // Offers now come from Config::srtp_profiles (from_profiles).
+    #[allow(dead_code)]
     pub fn default() -> Self {
         let mut profiles = SrtpProfileVec::new();
         // Add profiles in order of preference (most secure first)
@@ -204,6 +223,28 @@ mod tests {
 
         assert_eq!(parsed.profiles.as_slice(), ext.profiles.as_slice());
         assert_eq!(parsed.mki, mki);
+    }
+
+    #[test]
+    fn from_profiles_keeps_order() {
+        let ext = UseSrtpExtension::from_profiles(&[
+            SrtpProfile::AES128_CM_SHA1_80,
+            SrtpProfile::AEAD_AES_256_GCM,
+            SrtpProfile::AES128_CM_SHA1_80,
+        ]);
+        assert_eq!(
+            ext.profiles.as_slice(),
+            &[
+                SrtpProfileId::SRTP_AES128_CM_SHA1_80,
+                SrtpProfileId::SRTP_AEAD_AES_256_GCM
+            ]
+        );
+        assert!(ext.mki.is_empty());
+        // The default offer is the default configuration's.
+        assert_eq!(
+            UseSrtpExtension::from_profiles(SrtpProfile::ALL),
+            UseSrtpExtension::default()
+        );
     }
 
     #[test]

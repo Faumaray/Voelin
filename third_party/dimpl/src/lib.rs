@@ -1546,3 +1546,152 @@ mod test {
         );
     }
 }
+
+/// Voelin patch (VOELIN-PATCH.md): the SRTP profile a handshake ends with
+/// for the configured profile orders.
+#[cfg(test)]
+#[cfg(feature = "rcgen")]
+mod srtp_profile_order {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::certificate::generate_self_signed_certificate;
+
+    type New = fn(Arc<Config>, DtlsCertificate, Instant) -> Dtls;
+
+    const BROWSER: [SrtpProfile; 3] = [
+        SrtpProfile::AEAD_AES_256_GCM,
+        SrtpProfile::AEAD_AES_128_GCM,
+        SrtpProfile::AES128_CM_SHA1_80,
+    ];
+
+    fn config(profiles: Option<&[SrtpProfile]>) -> Config {
+        let builder = Config::builder();
+        match profiles {
+            Some(p) => builder.srtp_profiles(p),
+            None => builder,
+        }
+        .build()
+        .expect("config")
+    }
+
+    /// Poll `dtls` until `Timeout`: its packets, and its SRTP profile once
+    /// the keying material is out.
+    fn drain(dtls: &mut Dtls, profile: &mut Option<SrtpProfile>) -> Vec<Vec<u8>> {
+        let mut buf = vec![0; 2048];
+        let mut packets = Vec::new();
+        loop {
+            match dtls.poll_output(&mut buf) {
+                Output::Packet(p) => packets.push(p.to_vec()),
+                Output::KeyingMaterial(_, p) => *profile = Some(p),
+                Output::Timeout(_) => return packets,
+                _ => {}
+            }
+        }
+    }
+
+    /// Handshake `client` with `server`; the profile each side ends with.
+    fn negotiate(new: New, client: Config, server: Config) -> (SrtpProfile, SrtpProfile) {
+        let mut now = Instant::now();
+        let cert = || generate_self_signed_certificate().expect("certificate");
+        let mut client = new(Arc::new(client), cert(), now);
+        client.set_active(true);
+        let mut server = new(Arc::new(server), cert(), now);
+        server.set_active(false);
+        let (mut client_profile, mut server_profile) = (None, None);
+        for _ in 0..50 {
+            client.handle_timeout(now).expect("client timeout");
+            server.handle_timeout(now).expect("server timeout");
+            let to_server = drain(&mut client, &mut client_profile);
+            let to_client = drain(&mut server, &mut server_profile);
+            for p in to_server {
+                server.handle_packet(&p).expect("server input");
+            }
+            for p in to_client {
+                client.handle_packet(&p).expect("client input");
+            }
+            if let (Some(c), Some(s)) = (client_profile, server_profile) {
+                return (c, s);
+            }
+            now += Duration::from_millis(10);
+        }
+        panic!("no keying material: client {client_profile:?}, server {server_profile:?}");
+    }
+
+    #[test]
+    fn dtls12_server_order_wins() {
+        let server = config(Some(&[
+            SrtpProfile::AES128_CM_SHA1_80,
+            SrtpProfile::AEAD_AES_128_GCM,
+            SrtpProfile::AEAD_AES_256_GCM,
+        ]));
+        // A client offering everything, GCM first (as browsers do).
+        let client = config(Some(&BROWSER));
+        let (c, s) = negotiate(Dtls::new_12, client, server);
+        assert_eq!(
+            (c, s),
+            (
+                SrtpProfile::AES128_CM_SHA1_80,
+                SrtpProfile::AES128_CM_SHA1_80
+            )
+        );
+    }
+
+    #[test]
+    fn dtls12_default_order_unchanged() {
+        let (c, s) = negotiate(Dtls::new_12, config(None), config(None));
+        assert_eq!(
+            (c, s),
+            (SrtpProfile::AEAD_AES_256_GCM, SrtpProfile::AEAD_AES_256_GCM)
+        );
+        // Upstream's server preference with a client that offers SHA1 first.
+        let client = config(Some(&[
+            SrtpProfile::AES128_CM_SHA1_80,
+            SrtpProfile::AEAD_AES_128_GCM,
+        ]));
+        let (c, s) = negotiate(Dtls::new_12, client, config(None));
+        assert_eq!(
+            (c, s),
+            (SrtpProfile::AEAD_AES_128_GCM, SrtpProfile::AEAD_AES_128_GCM)
+        );
+    }
+
+    #[test]
+    fn dtls12_client_offers_configured_profiles() {
+        let client = config(Some(&[SrtpProfile::AES128_CM_SHA1_80]));
+        let (c, s) = negotiate(Dtls::new_12, client, config(None));
+        assert_eq!(
+            (c, s),
+            (
+                SrtpProfile::AES128_CM_SHA1_80,
+                SrtpProfile::AES128_CM_SHA1_80
+            )
+        );
+    }
+
+    #[test]
+    fn dtls13_server_order_wins() {
+        let server = config(Some(&[
+            SrtpProfile::AES128_CM_SHA1_80,
+            SrtpProfile::AEAD_AES_256_GCM,
+        ]));
+        let (c, s) = negotiate(Dtls::new_13, config(Some(&BROWSER)), server);
+        assert_eq!(
+            (c, s),
+            (
+                SrtpProfile::AES128_CM_SHA1_80,
+                SrtpProfile::AES128_CM_SHA1_80
+            )
+        );
+        // Without an order the DTLS 1.3 server keeps the client's (upstream).
+        let client = config(Some(&[
+            SrtpProfile::AEAD_AES_128_GCM,
+            SrtpProfile::AEAD_AES_256_GCM,
+        ]));
+        let (c, s) = negotiate(Dtls::new_13, client, config(None));
+        assert_eq!(
+            (c, s),
+            (SrtpProfile::AEAD_AES_128_GCM, SrtpProfile::AEAD_AES_128_GCM)
+        );
+    }
+}

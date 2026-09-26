@@ -245,3 +245,7 @@ version = "0.18"
 
 [target."cfg(not(windows))".dev-dependencies.wolfssl]
 version = "7.2.0"
+
+# Voelin: a workspace of its own, so its tests run from this directory
+# (see VOELIN-PATCH.md).
+[workspace]

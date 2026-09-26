@@ -436,6 +436,8 @@ pub enum SecurityError {
     ServerSelectedDisallowedCipherSuite(Dtls12CipherSuite),
     /// The server selected a DTLS 1.3 cipher suite disallowed by configuration.
     ServerSelectedDisallowedDtls13CipherSuite(Dtls13CipherSuite),
+    /// The server selected an SRTP protection profile the client did not offer.
+    ServerSelectedUnofferedSrtpProfile(crate::SrtpProfile),
     /// DTLS 1.2 extended master secret was required but not negotiated.
     ExtendedMasterSecretNotNegotiated,
     /// No mutually acceptable cipher suite was found.
@@ -555,6 +557,8 @@ pub enum ConfigError {
     NoDtls12KeyExchangeGroupsAfterFiltering,
     /// DTLS 1.3 suites are enabled but no key exchange group remains enabled.
     NoDtls13KeyExchangeGroupsAfterFiltering,
+    /// The configured list of SRTP protection profiles is empty.
+    NoSrtpProfiles,
     /// Crypto provider validation failed.
     CryptoProvider(CryptoProviderValidationError),
 }
@@ -1119,6 +1123,12 @@ impl fmt::Display for SecurityError {
             Self::ServerSelectedDisallowedDtls13CipherSuite(suite) => {
                 write!(f, "server selected disallowed cipher suite: {suite:?}")
             }
+            Self::ServerSelectedUnofferedSrtpProfile(profile) => {
+                write!(
+                    f,
+                    "server selected SRTP profile {profile} that was not offered"
+                )
+            }
             Self::ExtendedMasterSecretNotNegotiated => {
                 write!(f, "extended master secret not negotiated")
             }
@@ -1251,6 +1261,7 @@ impl fmt::Display for ConfigError {
                 f,
                 "DTLS 1.3 cipher suites are enabled but no key exchange groups remain after filtering"
             ),
+            Self::NoSrtpProfiles => write!(f, "no SRTP protection profiles configured"),
             Self::CryptoProvider(err) => write!(f, "crypto provider validation failed: {err}"),
         }
     }

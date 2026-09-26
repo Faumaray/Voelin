@@ -524,7 +524,14 @@ impl State {
                     UseSrtpExtension::parse(extension_data).map_err(InternalError::from)?;
                 // Store the first profile as our negotiated profile
                 if !use_srtp.profiles.is_empty() {
-                    client.negotiated_srtp_profile = Some(use_srtp.profiles[0].into());
+                    let profile: SrtpProfile = use_srtp.profiles[0].into();
+                    if !client.engine.config().srtp_profiles().contains(&profile) {
+                        return Err(Error::SecurityError(
+                            crate::SecurityError::ServerSelectedUnofferedSrtpProfile(profile),
+                        )
+                        .into());
+                    }
+                    client.negotiated_srtp_profile = Some(profile);
                     trace!(
                         "ServerHello UseSRTP extension processed; selected profile: {:?}",
                         client.negotiated_srtp_profile

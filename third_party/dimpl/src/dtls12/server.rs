@@ -471,21 +471,13 @@ impl State {
             .into());
         }
 
-        // Select SRTP profile according to server priority: AES256GCM, AES128GCM, then SHA1
+        // Select SRTP profile according to server priority: the configured
+        // profiles (by default AES256GCM, AES128GCM, then SHA1)
         if let Some(profiles) = client_srtp_profiles {
             // Map client profile ids to SrtpProfile, then pick our preferred
-            let mut selected_profile: Option<SrtpProfile> = None;
-            for preferred in [
-                SrtpProfile::AEAD_AES_256_GCM,
-                SrtpProfile::AEAD_AES_128_GCM,
-                SrtpProfile::AES128_CM_SHA1_80,
-            ] {
-                if profiles.iter().any(|pid| preferred == (*pid).into()) {
-                    selected_profile = Some(preferred);
-                    break;
-                }
-            }
-            server.negotiated_srtp_profile = selected_profile;
+            let offered: ArrayVec<SrtpProfile, { SrtpProfileId::supported().len() }> =
+                profiles.iter().map(|pid| (*pid).into()).collect();
+            server.negotiated_srtp_profile = server.engine.config().select_srtp_profile(&offered);
             if let Some(profile) = server.negotiated_srtp_profile {
                 debug!("Negotiated SRTP profile: {:?}", profile);
             }

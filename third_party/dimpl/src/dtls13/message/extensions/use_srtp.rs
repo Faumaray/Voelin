@@ -85,7 +85,26 @@ impl UseSrtpExtension {
         UseSrtpExtension { profiles, mki }
     }
 
+    /// A UseSrtpExtension offering `profiles` in this order (duplicates
+    /// skipped).
+    pub fn from_profiles(profiles: &[SrtpProfile]) -> Self {
+        let mut ids = ArrayVec::new();
+        for profile in profiles {
+            let id = SrtpProfileId::from(*profile);
+            if !ids.contains(&id) {
+                // At most one entry per profile, so this always fits.
+                let _ = ids.try_push(id);
+            }
+        }
+        UseSrtpExtension {
+            profiles: ids,
+            mki: ArrayVec::new(),
+        }
+    }
+
     /// Create a default UseSrtpExtension with standard profiles
+    // Offers now come from Config::srtp_profiles (from_profiles).
+    #[allow(dead_code)]
     pub fn default() -> Self {
         let mut profiles = ArrayVec::new();
         // Add profiles in order of preference (most secure first)
