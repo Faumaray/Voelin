@@ -5,6 +5,7 @@ mod identity;
 mod observe;
 mod query;
 mod session;
+mod stream;
 mod tree;
 mod versions;
 mod voice;
@@ -133,6 +134,8 @@ pub enum Action {
 		#[command(subcommand)]
 		command: VoiceCommand,
 	},
+	/// TeamSpeak 6 streams (screen sharing): start, list or watch.
+	Stream(stream::StreamArgs),
 	/// Interactive session. Type `/help` for commands.
 	Repl,
 }
