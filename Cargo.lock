@@ -2067,8 +2067,6 @@ dependencies = [
 [[package]]
 name = "dimpl"
 version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07d467d37bfdcc290bb8dcbedc8ca356eb730e46459b1687f98c3bae28aa6814"
 dependencies = [
  "aes 0.8.4",
  "arrayvec",

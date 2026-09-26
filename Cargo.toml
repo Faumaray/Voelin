@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
-exclude = ["fuzz"]
+# third_party: vendored crates patched in below (not workspace members, so
+# their own tests and dev-dependencies stay out of our builds).
+exclude = ["fuzz", "third_party"]
 members = [
 	"crates/proto/tsproto-types",
 	"crates/proto/tsproto-structs",
@@ -88,3 +90,8 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+# dimpl (DTLS for str0m), vendored to be patched; see
+# third_party/dimpl/VOELIN-PATCH.md.
+[patch.crates-io]
+dimpl = { path = "third_party/dimpl" }
