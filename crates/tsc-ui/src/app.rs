@@ -158,6 +158,8 @@ pub(crate) struct App {
 	pub demo: bool,
 	/// `TSC_AUTOSHARE=test-pattern`: share the test pattern once streams work.
 	pub autoshare: bool,
+	/// `TSC_OPEN=client`: open the volume dialog of the first other client.
+	open_client_pending: bool,
 	/// The notices are in the About page's model.
 	notices_loaded: bool,
 }
@@ -198,7 +200,8 @@ pub fn run(options: RunOptions) -> Result<()> {
 	// TSC_AUTOCONNECT=voice|observe connects the first bookmark on start,
 	// TSC_SCREENSHOT=<png> saves the window after TSC_SCREENSHOT_DELAY seconds and exits,
 	// TSC_DEMO_STREAM=1 shows a local test stream in the viewer,
-	// TSC_OPEN=share|settings[:<tab>]|about opens that on start, TSC_AUTOWATCH=1
+	// TSC_OPEN=share|settings[:<tab>]|about|client opens that on start (client: the
+	// volume dialog of the first other client once connected), TSC_AUTOWATCH=1
 	// watches the first stream that shows up, TSC_AUTOSHARE=test-pattern shares
 	// the test pattern (accepting everyone) once connected to a TeamSpeak 6 server.
 	let dir: PathBuf = match (options.data_dir, std::env::var_os("TSC_DATA_DIR")) {
@@ -272,6 +275,7 @@ pub fn run(options: RunOptions) -> Result<()> {
 		stream_volume: 100.0,
 		demo,
 		autoshare: std::env::var("TSC_AUTOSHARE").is_ok_and(|v| v == "test-pattern"),
+		open_client_pending: std::env::var("TSC_OPEN").is_ok_and(|v| v == "client"),
 		notices_loaded: false,
 	};
 	APP.with(|a| *a.borrow_mut() = Some(app));
@@ -865,6 +869,9 @@ impl App {
 					self.refresh_tree();
 					self.refresh_chat();
 					self.refresh_streams();
+					if self.open_client_pending {
+						self.open_first_client();
+					}
 				}
 			}
 			Event::Talking { session, client, talking } => {
@@ -1290,6 +1297,22 @@ impl App {
 			}
 		}
 		self.refresh_tree();
+	}
+
+	/// `TSC_OPEN=client`: the volume dialog of the first client that is not us.
+	fn open_first_client(&mut self) {
+		let Some(view) = self.view().filter(|v| v.state.own_client.is_some()) else { return };
+		let own = view.state.own_client;
+		let mut others: Vec<_> =
+			view.presence.clients.values().filter(|c| Some(c.id) != own && !c.is_query).collect();
+		others.sort_by_key(|c| c.id);
+		let Some(id) = others.first().map(|c| c.id) else { return };
+		self.open_client_pending = false;
+		if self.open_client(id)
+			&& let Some(ui) = self.ui.upgrade()
+		{
+			ui.set_client_open(true);
+		}
 	}
 
 	/// Send the stored volumes of clients that appeared in a voice session.

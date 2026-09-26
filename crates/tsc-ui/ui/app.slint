@@ -1326,9 +1326,10 @@ component SettingsDialog inherits Dialog {
 component ClientAudioDialog inherits Dialog {
     callback done();
     card-width: 380px;
-    card-height: 220px;
+    card-height: content.preferred-height;
     dismissed => { done(); }
-    VerticalBox {
+    content := VerticalBox {
+        alignment: start;
         Text {
             text: Bridge.client-audio.name;
             font-size: 16px;
@@ -1460,7 +1461,7 @@ export component MainWindow inherits Window {
     in-out property <int> settings-tab: 0;
     in-out property <bool> sharing-dialog: false;
     in-out property <bool> settings-open: false;
-    property <bool> client-open: false;
+    in-out property <bool> client-open: false;
     property <BookmarkForm> form;
     property <ShareForm> share-form;
     // Phones and narrow windows show one pane at a time. Set from a change
