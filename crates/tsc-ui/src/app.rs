@@ -156,6 +156,8 @@ pub(crate) struct App {
 	pub stream_volume: f32,
 	/// `TSC_DEMO_STREAM`: the viewer shows a local test stream.
 	pub demo: bool,
+	/// `TSC_AUTOSHARE=test-pattern`: share the test pattern once streams work.
+	pub autoshare: bool,
 	/// The notices are in the About page's model.
 	notices_loaded: bool,
 }
@@ -197,7 +199,8 @@ pub fn run(options: RunOptions) -> Result<()> {
 	// TSC_SCREENSHOT=<png> saves the window after TSC_SCREENSHOT_DELAY seconds and exits,
 	// TSC_DEMO_STREAM=1 shows a local test stream in the viewer,
 	// TSC_OPEN=share|settings[:<tab>]|about opens that on start, TSC_AUTOWATCH=1
-	// watches the first stream that shows up.
+	// watches the first stream that shows up, TSC_AUTOSHARE=test-pattern shares
+	// the test pattern (accepting everyone) once connected to a TeamSpeak 6 server.
 	let dir: PathBuf = match (options.data_dir, std::env::var_os("TSC_DATA_DIR")) {
 		(Some(dir), _) => dir,
 		(None, Some(dir)) => dir.into(),
@@ -268,6 +271,7 @@ pub fn run(options: RunOptions) -> Result<()> {
 		watch: None,
 		stream_volume: 100.0,
 		demo,
+		autoshare: std::env::var("TSC_AUTOSHARE").is_ok_and(|v| v == "test-pattern"),
 		notices_loaded: false,
 	};
 	APP.with(|a| *a.borrow_mut() = Some(app));
@@ -839,6 +843,7 @@ impl App {
 				self.refresh_servers();
 				self.refresh_toolbar();
 				self.refresh_streams();
+				self.autoshare();
 			}
 			Event::ServerInfo { session, name, flavor, capabilities } => {
 				self.sessions.entry(session as i64).or_default().capabilities = capabilities;
@@ -851,6 +856,7 @@ impl App {
 					self.set_status(format!("Connected to {name} ({kind})"));
 				}
 				self.refresh_streams();
+				self.autoshare();
 			}
 			Event::Presence { session, presence } => {
 				self.sessions.entry(session as i64).or_default().presence = presence;

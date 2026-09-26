@@ -2,7 +2,7 @@
 //! viewer. The engine runs the stream sessions; `video.rs` captures,
 //! encodes and decodes.
 
-use slint::ComponentHandle;
+use slint::{ComponentHandle, Model};
 use tsc_core::stream::{EndReason, LeaveReason, StreamSetup, ViewerInfo, ViewerState};
 use tsc_core::{Command, Event, StreamState, WatchState};
 
@@ -336,6 +336,23 @@ impl App {
 			audio: defaults.audio,
 			auto_accept: defaults.auto_accept,
 		}
+	}
+
+	/// Development switch `TSC_AUTOSHARE`: share the test pattern once.
+	pub(crate) fn autoshare(&mut self) {
+		if !self.autoshare || !self.view().is_some_and(|v| v.streams_available()) {
+			return;
+		}
+		self.autoshare = false;
+		let mut form = self.open_share();
+		let Some(ui) = self.ui.upgrade() else { return };
+		let sources = ui.global::<Bridge>().get_share_sources();
+		let pattern = (0..sources.row_count())
+			.find(|&i| sources.row_data(i).is_some_and(|s| s.name == "Test pattern"));
+		let Some(index) = pattern else { return };
+		form.source = index as i32;
+		form.auto_accept = true;
+		self.start_share(form);
 	}
 
 	pub(crate) fn start_share(&mut self, form: ShareForm) {
