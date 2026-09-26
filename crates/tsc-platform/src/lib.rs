@@ -5,8 +5,10 @@
 //!   Windows)
 //! - [`notify`]: desktop notifications
 //! - [`paths`]: data, config, cache and state directories
+//! - [`notices`]: third-party notices for the About page
 
 pub mod hotkey;
+pub mod notices;
 pub mod notify;
 pub mod paths;
 
