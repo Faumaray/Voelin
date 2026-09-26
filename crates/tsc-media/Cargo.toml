@@ -9,7 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
-default = ["vpx", "openh264", "openh264-download"]
+default = ["vpx", "openh264", "openh264-download", "x11", "pipewire"]
 # VP8 and VP9 through the system libvpx (pkg-config `vpx`).
 vpx = ["dep:libvpx-native-sys"]
 # H.264 through Cisco's prebuilt OpenH264 library, loaded at runtime. The

@@ -9,17 +9,23 @@
 //!   and the backends: libvpx (VP8/VP9, feature `vpx`), Cisco's OpenH264
 //!   loaded at runtime (H.264, feature `openh264`), dav1d (AV1 decoding,
 //!   feature `av1`)
+//! - [`capture`]: [`ScreenCapture`] and [`AudioCapture`] with a synthetic
+//!   test source, X11 (feature `x11`), the Wayland ScreenCast portal and
+//!   PipeWire system audio (feature `pipewire`), and Windows Graphics Capture
+//!   plus WASAPI loopback on Windows
 //! - [`queue`]: the bounded, drop-oldest channel capture backends deliver on
 //!
 //! Encoded frames go to `tsc_stream::Peer::write` with an RTP time of
 //! [`EncodedFrame::pts_90khz`] (90 kHz clock); received `MediaFrame`s go to
 //! [`VideoDecoder::decode`].
 
+pub mod capture;
 pub mod codec;
 pub mod convert;
 pub mod frame;
 pub mod queue;
 
+pub use capture::{AudioCapture, CaptureOptions, CaptureSource, ScreenCapture, SourceId};
 pub use codec::{
 	Codec, Codecs, ContentHint, EncodedFrame, EncoderBackend, EncoderConfig, VideoDecoder,
 	VideoEncoder,
@@ -44,6 +50,8 @@ pub enum Error {
 	CaptureUnavailable { backend: &'static str, reason: String },
 	#[error("{backend} capture: {message}")]
 	Capture { backend: &'static str, message: String },
+	#[error("capture source not found: {0:?}")]
+	SourceNotFound(SourceId),
 	#[error("the user cancelled the capture")]
 	Cancelled,
 	#[error("download failed: {0}")]
