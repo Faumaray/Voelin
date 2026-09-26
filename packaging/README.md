@@ -26,15 +26,17 @@ curl -LO https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/
 python3 flatpak-cargo-generator.py Cargo.lock -o packaging/flatpak/cargo-sources.json
 
 flatpak install flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08 \
-	org.freedesktop.Sdk.Extension.rust-stable//25.08
+	org.freedesktop.Sdk.Extension.rust-stable//25.08 org.freedesktop.Sdk.Extension.llvm20//25.08
 flatpak-builder --user --install --force-clean build-flatpak packaging/flatpak/io.github.faumaray.TsClient.yml
 flatpak run io.github.faumaray.TsClient
 ```
 
 Regenerate `cargo-sources.json` whenever `Cargo.lock` changes. Inside the build
 `rust-toolchain.toml` does not apply: the `rust-stable` extension must provide at
-least the workspace's `rust-version`. The SDK has everything else the build needs
-(CMake for libopus, ALSA, fontconfig, xkbcommon, libvpx, PipeWire, clang).
+least the workspace's `rust-version`. The `llvm20` extension provides libclang for
+bindgen (PipeWire bindings); the SDK has everything else the build needs (CMake for
+libopus, ALSA, fontconfig, xkbcommon, libvpx, PipeWire). CI builds the bundle in the
+`package-flatpak` job ([docs/building.md](../docs/building.md)).
 
 Permissions (`finish-args`): network, Wayland with X11 fallback, DRI, PulseAudio
 (microphone and speakers), the PipeWire socket (application audio when streaming),

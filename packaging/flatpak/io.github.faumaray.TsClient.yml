@@ -6,6 +6,8 @@ runtime-version: "25.08"
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
+  # libclang for bindgen (the PipeWire bindings); the SDK has none.
+  - org.freedesktop.Sdk.Extension.llvm20
 command: tsc-desktop
 
 finish-args:
@@ -30,10 +32,12 @@ finish-args:
   # no permission.
 
 build-options:
-  append-path: /usr/lib/sdk/rust-stable/bin
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm20/bin
+  prepend-ld-library-path: /usr/lib/sdk/llvm20/lib
   env:
     CARGO_HOME: /run/build/tsc/cargo
     CARGO_NET_OFFLINE: "true"
+    LIBCLANG_PATH: /usr/lib/sdk/llvm20/lib
 
 modules:
   - name: tsc
