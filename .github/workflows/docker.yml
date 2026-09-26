@@ -1,31 +1,14 @@
 name: Docker builds
 
-# The local builds in docker/ (docs/building.md), run here so they keep
-# working: weekly, by hand, and when they or the packaging change. Each build
-# uploads what it made, the same kinds of packages as CI's package jobs
-# (the Windows one cross-compiled with mingw-w64).
+# The local builds in docker/ (docs/building.md), checked at every release
+# tag and on demand (Actions → Docker builds → Run workflow). Each build
+# uploads what it made: the same kinds of packages as release.yml, the
+# Windows one cross-compiled with mingw-w64.
 
 on:
-  schedule:
-    - cron: "17 3 * * 1"
-  workflow_dispatch:
   push:
-    branches: [main, master]
-    paths:
-      - docker/**
-      - scripts/package.sh
-      - scripts/docker-build.sh
-      - .dockerignore
-      - packaging/**
-      - .github/workflows/docker.yml
-  pull_request:
-    paths:
-      - docker/**
-      - scripts/package.sh
-      - scripts/docker-build.sh
-      - .dockerignore
-      - packaging/**
-      - .github/workflows/docker.yml
+    tags: ["v*"]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

@@ -46,7 +46,8 @@ COPY <<-'EOF' /usr/local/bin/java-proxy-opts
 EOF
 RUN chmod +x /usr/local/bin/java-proxy-opts
 
-# The SDK packages CI installs (.github/workflows/ci.yml, android job).
+# The SDK packages the release workflow installs (.github/workflows/release.yml,
+# package-android job).
 ENV ANDROID_HOME=/opt/android-sdk
 ARG CMDLINE_TOOLS=commandlinetools-linux-16111833_latest.zip
 ARG CMDLINE_TOOLS_SHA1=e025545c62a8e64c7559119566a569fb1dec5f60

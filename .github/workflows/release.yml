@@ -1,0 +1,245 @@
+name: Release
+
+# The packages (docs/building.md), made by scripts/package.sh like the Docker
+# builds in docker/. A v* tag attaches them to a draft GitHub release; run by
+# hand (Actions → Release → Run workflow) they are only uploaded as artifacts.
+# The package jobs run alongside the checks, so a manual run yields packages
+# even when a check fails; a release needs everything green.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release-build-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "0"
+
+jobs:
+  # The same checks as every push (lint, Linux tests, Windows and Android
+  # clippy, deny, notices, integration tests).
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  test-windows:
+    name: test (Windows)
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/system-deps
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --all-targets --locked
+      - name: Test
+        run: cargo test --workspace --locked
+
+  package-linux:
+    name: package (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/system-deps
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+      - name: Build
+        run: cargo build --release --locked -p voelin-ui -p voelin-gateway
+      # dpkg-shlibdeps works out the .deb's dependencies.
+      - name: Package (.tar.gz, .deb)
+        run: |
+          sudo apt-get install -y --no-install-recommends dpkg-dev
+          scripts/package.sh linux dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voelin-linux-x86_64
+          path: dist/
+          if-no-files-found: error
+
+  package-windows:
+    name: package (Windows)
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/system-deps
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+      - name: Build
+        run: cargo build --release --locked -p voelin-ui
+      # The installer is required here: install NSIS when the image lacks it.
+      - name: NSIS
+        shell: pwsh
+        run: |
+          $makensis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
+          if (-not $makensis) { $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe" }
+          if (-not (Test-Path $makensis)) {
+            choco install nsis -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          "MAKENSIS=$($makensis.Replace('\', '/'))" >> $env:GITHUB_ENV
+      - name: Package (.zip, installer)
+        shell: bash
+        run: scripts/package.sh windows dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voelin-windows-x86_64
+          path: dist/
+          if-no-files-found: error
+
+  # Flatpak bundle from packaging/flatpak (install with
+  # `flatpak install --user voelin.flatpak`). flatpak-builder builds
+  # offline, from the crates that flatpak-cargo-generator lists.
+  package-flatpak:
+    name: package (Flatpak)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    env:
+      # flatpak-builder-tools, pinned.
+      FBT_COMMIT: 41c20aa10819cdb2a4f3ca171758a96d1955c018
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cargo sources
+        run: |
+          curl -sSfL -o /tmp/flatpak-cargo-generator.py \
+            "https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/$FBT_COMMIT/cargo/flatpak-cargo-generator.py"
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install --quiet "aiohttp>=3.9.5,<4" "tomlkit>=0.13.3,<1" "PyYAML>=6.0.2,<7"
+          /tmp/venv/bin/python /tmp/flatpak-cargo-generator.py Cargo.lock -o packaging/flatpak/cargo-sources.json
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: voelin.flatpak
+          manifest-path: packaging/flatpak/io.github.faumaray.Voelin.yml
+          cache-key: flatpak-builder-${{ hashFiles('Cargo.lock') }}
+          upload-artifact: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voelin-flatpak-x86_64
+          path: voelin.flatpak
+          if-no-files-found: error
+
+  # The gateway's container image (crates/voelin-gateway/Dockerfile), saved as a
+  # file: `docker load -i tsgw-image.tar.gz`.
+  package-gateway-image:
+    name: package (gateway image)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and save
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/voelin-gateway/Cargo.toml | head -n 1)
+          docker build -f crates/voelin-gateway/Dockerfile -t "tsgw:$version" -t tsgw:latest .
+          mkdir -p dist
+          docker save "tsgw:$version" tsgw:latest | gzip > dist/tsgw-image.tar.gz
+          (cd dist && sha256sum tsgw-image.tar.gz > SHA256SUMS-gateway)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tsgw-image
+          path: dist/
+          if-no-files-found: error
+
+  # The Android app (docs/android.md): a debug APK for arm64-v8a and x86_64
+  # (emulators), and a signed release APK when the signing secrets are set
+  # (docs/release.md).
+  package-android:
+    name: package (Android)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      NDK_VERSION: 27.3.13750724
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustup target add aarch64-linux-android x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Android SDK packages
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "ndk;$NDK_VERSION" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          # CMake (libopus) and Slint's Java helper.
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_JAR=$ANDROID_HOME/platforms/android-36/android.jar" >> "$GITHUB_ENV"
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked --version 4.1.2
+      - name: Debug APK
+        working-directory: android
+        run: ./gradlew --no-daemon assembleDebug -Pvoelin.abis=arm64-v8a,x86_64
+      # Only with the signing secrets; an unsigned release APK is not installable.
+      - name: Release APK (signed)
+        working-directory: android
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          VOELIN_SIGNING_STORE_PASSWORD: ${{ secrets.VOELIN_SIGNING_STORE_PASSWORD }}
+          VOELIN_SIGNING_KEY_ALIAS: ${{ secrets.VOELIN_SIGNING_KEY_ALIAS }}
+          VOELIN_SIGNING_KEY_PASSWORD: ${{ secrets.VOELIN_SIGNING_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::notice::No ANDROID_KEYSTORE_BASE64 secret: skipping the release APK"
+            exit 0
+          fi
+          export VOELIN_SIGNING_STORE_FILE="$RUNNER_TEMP/release.jks"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$VOELIN_SIGNING_STORE_FILE"
+          ./gradlew --no-daemon assembleRelease -Pvoelin.abis=arm64-v8a,x86_64
+          rm -f "$VOELIN_SIGNING_STORE_FILE"
+      - name: Package
+        run: scripts/package.sh android dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voelin-android
+          path: dist/
+          if-no-files-found: error
+
+  # A v* tag: every package, attached to a draft GitHub release to review and
+  # publish by hand.
+  release:
+    name: draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [checks, test-windows, package-linux, package-windows, package-flatpak, package-gateway-image, package-android]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: voelin-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: tsgw-image
+          path: dist
+      - name: Checksums
+        run: |
+          cd dist
+          rm -f SHA256SUMS-*
+          sha256sum -- * > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: dist/*

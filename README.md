@@ -102,9 +102,10 @@ Development switches of the desktop app (environment variables): `VOELIN_DATA_DI
 `VOELIN_DEMO_STREAM=1` (a local test stream in the viewer, no server needed),
 `VOELIN_OPEN=share|settings[:<tab>]|about|client`, `VOELIN_AUTOWATCH=1`, `VOELIN_AUTOSHARE=test-pattern`.
 
-Ready-made packages (Linux `.tar.gz`/`.deb`/Flatpak, Windows zip and installer, Android APK)
-come from every CI run, and `scripts/docker-build.sh` builds the same ones locally in Docker:
-see [docs/building.md](docs/building.md).
+Ready-made packages (Linux `.tar.gz`/`.deb`/Flatpak, Windows zip and installer, Android APK,
+and the `tsgw` gateway for Linux servers) come from the release workflow (version tags, or run by
+hand), and `scripts/docker-build.sh` builds the same ones locally in Docker: see
+[docs/building.md](docs/building.md).
 
 Building on Linux needs the ALSA headers (`libasound2-dev`), fontconfig and xkbcommon
 headers for the UI (`libfontconfig1-dev libxkbcommon-dev`), plus CMake and a C compiler for

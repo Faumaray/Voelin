@@ -64,8 +64,9 @@ is written to the audit table.
 ## Install
 
 tsgw is packaged for Linux servers, separately from the app
-([building.md](building.md)): every CI run uploads the packages in the
-`voelin-linux-x86_64` artifact and the image as `tsgw-image`, and
+([building.md](building.md)): the release workflow attaches the packages and
+the image (`tsgw-image.tar.gz`) to each release and uploads them as artifacts
+when run by hand, and
 `scripts/docker-build.sh linux` builds them locally.
 
 **Debian/Ubuntu** (`tsgw_<version>_amd64.deb`, Ubuntu 24.04+ / Debian 13+).

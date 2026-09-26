@@ -169,11 +169,12 @@ Before tagging:
 Release:
 
 7. Tag `v<version>` (signed) on the release commit and push it.
-8. The tag's CI run builds every package ([building.md](building.md)): the
-   app's Linux tarball and `.deb`, Flatpak bundle, Windows zip and installer
-   and Android APKs (signed when the secrets are set), and the gateway's
-   Linux tarball, `.deb` and image; its `release` job
-   attaches them with a `SHA256SUMS` to a draft GitHub release. Sign the
+8. The tag's release workflow (`release.yml`, [building.md](building.md))
+   runs the checks and the Windows tests and builds every package: the app's
+   Linux tarball and `.deb`, Flatpak bundle, Windows zip and installer and
+   Android APKs (signed when the secrets are set), and the gateway's Linux
+   tarball, `.deb` and image; its `release` job attaches them with a
+   `SHA256SUMS` to a draft GitHub release. Sign the
    Windows executable and installer, and an AAB for Google Play, by hand
    until CI has the certificates.
 9. Verify: signatures (`signtool verify`, `apksigner verify`), the installer

@@ -1,8 +1,10 @@
-# Packages: from CI and built locally
+# Packages: from releases and built locally
 
-Every platform has installable packages. CI builds them on each run, and the
-Dockerfiles in `docker/` build the same kinds of packages on any machine with
-Docker. Both use `scripts/package.sh`, so file names and contents match.
+Every platform has installable packages. The release workflow builds them,
+and the Dockerfiles in `docker/` build the same kinds of packages on any
+machine with Docker. Both use `scripts/package.sh`, so file names and
+contents match. Regular CI (`ci.yml`, every push and PR) only runs the fast
+checks and builds no packages.
 
 The packages hold the app, Voelin. The gateway `tsgw` runs on servers and is
 packaged for Linux only, separately. `voelinctl` is a development tool and is
@@ -12,10 +14,10 @@ in no package (`cargo run -p voelinctl`).
 |---|---|---|
 | Linux x86_64 | `voelin-<version>-linux-x86_64.tar.gz` | unpack; `bin/voelin` plus desktop file and icon (prefix layout: `tar -xzf … --strip-components=1 -C ~/.local`) |
 | | `voelin_<version>_amd64.deb` | `sudo apt install ./voelin_<version>_amd64.deb` (Ubuntu 24.04+, Debian 13+) |
-| | `voelin.flatpak` (CI only) | `flatpak install --user voelin.flatpak` |
+| | `voelin.flatpak` (release workflow only) | `flatpak install --user voelin.flatpak` |
 | Linux server | `tsgw_<version>_amd64.deb` | `sudo apt install ./tsgw_<version>_amd64.deb`, then configure and start it ([gateway-admin.md](gateway-admin.md#install)) |
 | | `tsgw-<version>-linux-x86_64.tar.gz` | unpack; `bin/tsgw`, the systemd unit and the example config |
-| | `tsgw-image.tar.gz` (CI only) | `docker load -i tsgw-image.tar.gz` |
+| | `tsgw-image.tar.gz` (release workflow only) | `docker load -i tsgw-image.tar.gz` |
 | Windows x86_64 | `voelin-<version>-windows-x86_64.zip` | unpack; `voelin.exe` |
 | | `voelin-<version>-setup.exe` | run it (per-machine install, uninstaller in Settings → Apps) |
 | Android | `voelin-<version>-android-debug.apk` | `adb install …` or open it on the phone (arm64-v8a and x86_64) |
@@ -28,32 +30,33 @@ signed with a debug key (fine for testing, not for the Play Store).
 The gateway's image can also be built directly:
 `docker build -f crates/voelin-gateway/Dockerfile -t tsgw .`.
 
-## From CI
+## From releases
 
-`.github/workflows/ci.yml` uploads one artifact per platform on every run:
-`voelin-linux-x86_64` (the app's and the gateway's Linux packages),
-`voelin-windows-x86_64`, `voelin-flatpak-x86_64`, `voelin-android` and
-`tsgw-image`. Download them from the run's page (Actions → the run →
-Artifacts), or with the GitHub CLI:
+`.github/workflows/release.yml` builds every package:
+
+- **A version tag** `v*` (`git tag -s v0.2.0 && git push origin v0.2.0`): the
+  packages and a `SHA256SUMS` are attached to a **draft** GitHub release once
+  all checks pass (the same checks as CI, plus the Windows tests); review and
+  publish it by hand ([release.md](release.md#checklist)).
+- **By hand**, for a build to test without a release: Actions → Release → Run
+  workflow (or `gh workflow run release.yml --ref <branch>`). The packages are
+  uploaded as artifacts, kept for 90 days: `voelin-linux-x86_64` (the app's and
+  the gateway's Linux packages), `voelin-windows-x86_64`,
+  `voelin-flatpak-x86_64`, `voelin-android` and `tsgw-image`.
 
 ```sh
-gh run list --workflow ci.yml --limit 5
+gh workflow run release.yml --ref main
+gh run list --workflow release.yml --limit 3
 gh run download <run id> --dir dist
 ```
 
-GitHub keeps artifacts for 90 days. For builds that stay, push a version tag:
-`git tag -s v0.2.0 && git push origin v0.2.0` runs the whole workflow and, if
-everything passes, the `release` job attaches all packages and a `SHA256SUMS`
-to a **draft** GitHub release, which you review and publish by hand
-([release.md](release.md#checklist)).
-
-The Windows packages from CI use the MSVC toolchain and libvpx from vcpkg.
-The Android job builds a signed release APK only when the repository has the
+The Windows packages use the MSVC toolchain and libvpx from vcpkg. The
+Android job builds a signed release APK only when the repository has the
 signing secrets (`ANDROID_KEYSTORE_BASE64`, `VOELIN_SIGNING_STORE_PASSWORD`,
 `VOELIN_SIGNING_KEY_ALIAS`, `VOELIN_SIGNING_KEY_PASSWORD`).
 
-`.github/workflows/docker.yml` builds the Docker files below weekly, by hand
-(Actions → Docker builds → Run workflow) and when they change, and uploads
+`.github/workflows/docker.yml` builds the Docker files below for every
+release tag and by hand (Actions → Docker builds → Run workflow), and uploads
 their output as `docker-linux`, `docker-windows` and `docker-android`.
 
 ## Locally with Docker

@@ -1,12 +1,29 @@
 name: CI
 
+# Fast checks on every push to main and every PR: lint, tests, license and
+# advisory checks, and the integration tests against TS3/TS6 servers.
+# Packages are built only by release.yml (tags, or by hand), which also runs
+# these checks through workflow_call.
+
+# Changes to documentation only need no build (same list twice: no YAML
+# anchors in workflows). THIRD_PARTY_NOTICES.md is compiled into the app
+# (About page) and checked below.
 on:
   push:
     branches: [main, master]
-    # A version tag also publishes the packages as a draft release (release job).
-    tags: ["v*"]
+    paths:
+      - "**"
+      - "!docs/**"
+      - "!**/*.md"
+      - "THIRD_PARTY_NOTICES.md"
   pull_request:
+    paths:
+      - "**"
+      - "!docs/**"
+      - "!**/*.md"
+      - "THIRD_PARTY_NOTICES.md"
   workflow_dispatch:
+  workflow_call:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -36,13 +53,11 @@ jobs:
       - name: clippy (workspace, report only)
         run: cargo clippy --workspace --all-targets
 
+  # Under Xvfb, so X11 tests (screen capture, global hotkeys through XTEST
+  # input) run instead of skipping. Windows tests run in release.yml.
   test:
-    name: test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, windows-2025]
-    runs-on: ${{ matrix.os }}
+    name: test (Linux)
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/system-deps
@@ -51,43 +66,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --workspace --all-targets --locked
-      # Under Xvfb, so X11 tests (screen capture, global hotkeys through
-      # XTEST input) run instead of skipping.
-      - name: Test (Linux, Xvfb)
-        if: runner.os == 'Linux'
-        run: xvfb-run -a bash -c 'VOELIN_X11_TEST_DISPLAY="$DISPLAY" cargo test --workspace --locked'
       - name: Test
-        if: runner.os != 'Linux'
-        run: cargo test --workspace --locked
+        run: xvfb-run -a bash -c 'VOELIN_X11_TEST_DISPLAY="$DISPLAY" cargo test --workspace --locked'
 
-  # Packages for every platform (docs/building.md), made by scripts/package.sh
-  # like the Docker builds in docker/; each job uploads them as an artifact.
-  package-linux:
-    name: package (Linux)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/system-deps
-      - name: Install toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release
-      - name: Build
-        run: cargo build --release --locked -p voelin-ui -p voelin-gateway
-      # dpkg-shlibdeps works out the .deb's dependencies.
-      - name: Package (.tar.gz, .deb)
-        run: |
-          sudo apt-get install -y --no-install-recommends dpkg-dev
-          scripts/package.sh linux dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: voelin-linux-x86_64
-          path: dist/
-          if-no-files-found: error
-
-  package-windows:
-    name: package (Windows)
+  # Windows-only code compiles and is lint-clean (MSVC, libvpx from vcpkg).
+  clippy-windows:
+    name: clippy (Windows)
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
@@ -95,92 +79,16 @@ jobs:
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-        with:
-          key: release
-      - name: Build
-        run: cargo build --release --locked -p voelin-ui
-      # The installer is required here: install NSIS when the image lacks it.
-      - name: NSIS
-        shell: pwsh
-        run: |
-          $makensis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
-          if (-not $makensis) { $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe" }
-          if (-not (Test-Path $makensis)) {
-            choco install nsis -y --no-progress
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-          "MAKENSIS=$($makensis.Replace('\', '/'))" >> $env:GITHUB_ENV
-      - name: Package (.zip, installer)
+      - name: clippy (own crates, deny warnings)
         shell: bash
-        run: scripts/package.sh windows dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: voelin-windows-x86_64
-          path: dist/
-          if-no-files-found: error
+        run: cargo clippy $(scripts/own-crates.sh) --all-targets --no-deps --locked -- -D warnings
 
-  # Flatpak bundle from packaging/flatpak (install with
-  # `flatpak install --user voelin.flatpak`). flatpak-builder builds
-  # offline, from the crates that flatpak-cargo-generator lists.
-  package-flatpak:
-    name: package (Flatpak)
+  # The Android-only code (docs/android.md), for the Android target. The APKs
+  # are built by release.yml.
+  clippy-android:
+    name: clippy (Android)
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
-      options: --privileged
-    env:
-      # flatpak-builder-tools, pinned.
-      FBT_COMMIT: 41c20aa10819cdb2a4f3ca171758a96d1955c018
-    steps:
-      - uses: actions/checkout@v4
-      - name: Cargo sources
-        run: |
-          curl -sSfL -o /tmp/flatpak-cargo-generator.py \
-            "https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/$FBT_COMMIT/cargo/flatpak-cargo-generator.py"
-          python3 -m venv /tmp/venv
-          /tmp/venv/bin/pip install --quiet "aiohttp>=3.9.5,<4" "tomlkit>=0.13.3,<1" "PyYAML>=6.0.2,<7"
-          /tmp/venv/bin/python /tmp/flatpak-cargo-generator.py Cargo.lock -o packaging/flatpak/cargo-sources.json
-      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
-        with:
-          bundle: voelin.flatpak
-          manifest-path: packaging/flatpak/io.github.faumaray.Voelin.yml
-          cache-key: flatpak-builder-${{ hashFiles('Cargo.lock') }}
-          upload-artifact: false
-      - uses: actions/upload-artifact@v4
-        with:
-          name: voelin-flatpak-x86_64
-          path: voelin.flatpak
-          if-no-files-found: error
-
-  # The gateway's container image (crates/voelin-gateway/Dockerfile), saved as a
-  # file: `docker load -i tsgw-image.tar.gz`.
-  package-gateway-image:
-    name: package (gateway image)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build and save
-        run: |
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/voelin-gateway/Cargo.toml | head -n 1)
-          docker build -f crates/voelin-gateway/Dockerfile -t "tsgw:$version" -t tsgw:latest .
-          mkdir -p dist
-          docker save "tsgw:$version" tsgw:latest | gzip > dist/tsgw-image.tar.gz
-          (cd dist && sha256sum tsgw-image.tar.gz > SHA256SUMS-gateway)
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tsgw-image
-          path: dist/
-          if-no-files-found: error
-
-  # The Android app (docs/android.md): clippy on the Android-only code, a
-  # debug APK for arm64-v8a and x86_64 (emulators), and a signed release APK
-  # when the signing secrets are set (docs/release.md). Nothing runs on a
-  # device here.
-  android:
-    name: android (APKs)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 45
     env:
       NDK_VERSION: 27.3.13750724
     steps:
@@ -188,7 +96,7 @@ jobs:
       - name: Install toolchain (rust-toolchain.toml)
         run: |
           rustup toolchain install
-          rustup target add aarch64-linux-android x86_64-linux-android
+          rustup target add aarch64-linux-android
       - uses: Swatinem/rust-cache@v2
         with:
           key: android
@@ -200,7 +108,7 @@ jobs:
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-            "ndk;$NDK_VERSION" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+            "ndk;$NDK_VERSION" "platforms;android-36" > /dev/null
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
           # CMake (libopus) and Slint's Java helper.
           echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
@@ -211,58 +119,6 @@ jobs:
         run: |
           cargo ndk -t arm64-v8a --platform 29 clippy --locked -p voelin-android -p voelin-ui --no-deps -- -D warnings
           cargo ndk -t arm64-v8a --platform 29 clippy --locked -p voelin-media --no-default-features --no-deps -- -D warnings
-      - name: Debug APK
-        working-directory: android
-        run: ./gradlew --no-daemon assembleDebug -Pvoelin.abis=arm64-v8a,x86_64
-      # Only with the signing secrets; an unsigned release APK is not installable.
-      - name: Release APK (signed)
-        working-directory: android
-        env:
-          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          VOELIN_SIGNING_STORE_PASSWORD: ${{ secrets.VOELIN_SIGNING_STORE_PASSWORD }}
-          VOELIN_SIGNING_KEY_ALIAS: ${{ secrets.VOELIN_SIGNING_KEY_ALIAS }}
-          VOELIN_SIGNING_KEY_PASSWORD: ${{ secrets.VOELIN_SIGNING_KEY_PASSWORD }}
-        run: |
-          if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "::notice::No ANDROID_KEYSTORE_BASE64 secret: skipping the release APK"
-            exit 0
-          fi
-          export VOELIN_SIGNING_STORE_FILE="$RUNNER_TEMP/release.jks"
-          echo "$KEYSTORE_BASE64" | base64 -d > "$VOELIN_SIGNING_STORE_FILE"
-          ./gradlew --no-daemon assembleRelease -Pvoelin.abis=arm64-v8a,x86_64
-          rm -f "$VOELIN_SIGNING_STORE_FILE"
-      - name: Package
-        run: scripts/package.sh android dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: voelin-android
-          path: dist/
-          if-no-files-found: error
-
-  # A v* tag: every package, attached to a draft GitHub release to review and
-  # publish by hand.
-  release:
-    name: draft release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [lint, test, deny, notices, smoke, package-linux, package-windows, package-flatpak, package-gateway-image, android]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-      - name: Checksums
-        run: |
-          cd dist
-          rm -f SHA256SUMS-*
-          sha256sum -- * > SHA256SUMS
-      - uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          generate_release_notes: true
-          files: dist/*
 
   # Licenses, bans, sources and RustSec advisories (the `cargo audit`
   # database); audit.yml repeats the advisories check daily.

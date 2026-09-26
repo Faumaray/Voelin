@@ -41,7 +41,7 @@ Regenerate `cargo-sources.json` whenever `Cargo.lock` changes. Inside the build
 least the workspace's `rust-version`. The `llvm20` extension provides libclang for
 bindgen (PipeWire bindings); the SDK has everything else the build needs (CMake for
 libopus, ALSA, fontconfig, xkbcommon, libvpx, PipeWire). CI builds the bundle in the
-`package-flatpak` job ([docs/building.md](../docs/building.md)).
+`package-flatpak` job of the release workflow ([docs/building.md](../docs/building.md)).
 
 Permissions (`finish-args`): network, Wayland with X11 fallback, DRI, PulseAudio
 (microphone and speakers), the PipeWire socket (application audio when streaming),

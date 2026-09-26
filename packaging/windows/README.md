@@ -1,8 +1,9 @@
 # Windows build and installer
 
-CI (`package-windows` in `.github/workflows/ci.yml`) builds `voelin.exe` on
-`windows-2025` and uploads the zip and the installer as the
-`voelin-windows-x86_64` artifact. Nothing is signed there. The gateway `tsgw`
+The release workflow (`package-windows` in `.github/workflows/release.yml`)
+builds `voelin.exe` on `windows-2025` and attaches the zip and the installer to
+the release (artifact `voelin-windows-x86_64` when run by hand). Nothing is
+signed there. Regular CI only runs clippy on Windows. The gateway `tsgw`
 is for servers and packaged for Linux only.
 `docker/windows.Dockerfile` cross-compiles the same packages on Linux
 ([docs/building.md](../../docs/building.md)).
