@@ -84,14 +84,14 @@ jobs:
         run: |
           mkdir -p dist
           cp target/release/tsc-desktop dist/
-          cp packaging/linux/* dist/
+          cp packaging/linux/* THIRD_PARTY_NOTICES.md dist/
       # The installer is built when NSIS is on the runner; unsigned.
       - name: Stage (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target\release\tsc-desktop.exe dist\
+          Copy-Item target\release\tsc-desktop.exe, THIRD_PARTY_NOTICES.md dist\
           $makensis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
           if (-not $makensis) {
             $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
@@ -110,6 +110,8 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  # Licenses, bans, sources and RustSec advisories (the `cargo audit`
+  # database); audit.yml repeats the advisories check daily.
   deny:
     name: cargo-deny
     runs-on: ubuntu-24.04
@@ -121,10 +123,33 @@ jobs:
         with:
           arguments: --workspace
 
+  # THIRD_PARTY_NOTICES.md (shown in the About page) must match Cargo.lock.
+  # cargo-about's output is independent of the host (the graph is filtered
+  # by the targets in about.toml), so the committed file is compared exactly.
+  notices:
+    name: third-party notices
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      # Caches ~/.cargo/bin too, so cargo-about is built once.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: notices
+      - name: Install cargo-about
+        run: cargo install cargo-about --locked --version 0.9.2 --features cli
+      - name: Check THIRD_PARTY_NOTICES.md
+        run: scripts/notices.sh --check
+
+  # tsctl, the gateway, the engine and tsc-stream against real TS3 and TS6
+  # servers, including a synthetic VP8 + Opus stream through the TS6 server
+  # (scripts/it-smoke.sh).
   smoke:
     name: integration smoke (TS3 + TS6)
     runs-on: ubuntu-24.04
     needs: test
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/system-deps
@@ -138,3 +163,45 @@ jobs:
       - name: Server logs
         if: failure()
         run: docker compose -f dev/docker-compose.yml logs --no-color
+      # Client, gateway and stream logs the script keeps in dev/.state.
+      - name: Upload smoke logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-logs
+          path: dev/.state/*.log
+          if-no-files-found: ignore
+
+  # Our WebRTC peers against Chromium's (libwebrtc, as in the official TS6
+  # client); see tests/interop/README.md. Informational: a failure is
+  # reported on the job but does not fail the workflow, since it depends on
+  # a browser download and the runner's network interfaces.
+  browser-interop:
+    name: browser interop (tsc-stream, Chromium)
+    runs-on: ubuntu-24.04
+    needs: test
+    continue-on-error: true
+    timeout-minutes: 30
+    env:
+      PLAYWRIGHT_VERSION: 1.56.1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/system-deps
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ env.PLAYWRIGHT_VERSION }}-chromium
+      # Global install: the test finds Playwright through `npm root -g`.
+      - name: Install Playwright and Chromium
+        run: |
+          npm install -g "playwright@$PLAYWRIGHT_VERSION"
+          playwright install --with-deps chromium
+      - name: Browser interop test
+        run: TSC_INTEROP=1 cargo test --locked -p tsc-stream --test browser_interop -- --nocapture

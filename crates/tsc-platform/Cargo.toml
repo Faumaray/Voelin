@@ -1,7 +1,7 @@
 [package]
 name = "tsc-platform"
 version = "0.1.0"
-description = "Desktop integration: global push-to-talk hotkeys, notifications and app directories."
+description = "Desktop integration: global push-to-talk hotkeys, notifications, app directories, crash reports and third-party notices."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

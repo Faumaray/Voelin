@@ -1,0 +1,21 @@
+name: Security audit
+
+# RustSec advisories for Cargo.lock (what `cargo audit` checks), daily, so
+# new advisories show up without a push. CI's cargo-deny job checks the same
+# on every push together with licenses and sources.
+
+on:
+  schedule:
+    - cron: "41 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  advisories:
+    name: cargo-deny advisories
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+          arguments: --workspace
