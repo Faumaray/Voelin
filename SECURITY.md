@@ -4,7 +4,7 @@
 
 Please report security problems privately through GitHub: **Security >
 Report a vulnerability** on
-https://github.com/Faumaray/teamspeak_client_rs (private vulnerability
+https://github.com/Faumaray/Voelin (private vulnerability
 reporting). Do not open a public issue for them. If private reporting is not
 available, open an issue asking for a contact, without details.
 

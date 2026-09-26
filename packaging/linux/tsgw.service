@@ -5,7 +5,7 @@
 # then: systemctl enable --now tsgw. State (tsgw.db) is kept in /var/lib/tsgw.
 [Unit]
 Description=tsgw, the Voelin gateway for TeamSpeak servers
-Documentation=https://github.com/Faumaray/teamspeak_client_rs/blob/main/docs/gateway-admin.md
+Documentation=https://github.com/Faumaray/Voelin/blob/main/docs/gateway-admin.md
 After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/etc/tsgw/tsgw.toml

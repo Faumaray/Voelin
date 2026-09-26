@@ -48,7 +48,7 @@ default-members = [
 edition = "2024"
 rust-version = "1.94"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/Faumaray/teamspeak_client_rs"
+repository = "https://github.com/Faumaray/Voelin"
 publish = false
 
 [workspace.lints.rust]

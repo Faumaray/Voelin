@@ -44,7 +44,7 @@ crate_version() {
 version=$(crate_version crates/voelin-ui)
 
 app_id=io.github.faumaray.Voelin
-homepage=https://github.com/Faumaray/teamspeak_client_rs
+homepage=https://github.com/Faumaray/Voelin
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 files=()
