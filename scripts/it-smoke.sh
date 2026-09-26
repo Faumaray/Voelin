@@ -240,8 +240,8 @@ for svc in "${SERVERS[@]}"; do
 	fi
 done
 
-log "engine (tsc-core) against both servers"
-TSC_LIVE=1 cargo test --quiet -p tsc-core --test live --test stream_live 2>&1 | grep -E "test result|panicked|timed out" || fail "engine tests failed"
+log "engine (tsc-core) against both servers, media pipeline through TS6"
+TSC_LIVE=1 cargo test --quiet -p tsc-core --features media-desktop --test live --test stream_live --test media_live 2>&1 | grep -E "test result|panicked|timed out" || fail "engine tests failed"
 
 log "stream (tsc-stream) through the TeamSpeak 6 server"
 TSC_LIVE=1 cargo test --quiet -p tsc-stream --test live_ts6 2>&1 | grep -E "test result|panicked|timed out" || fail "stream test failed"
