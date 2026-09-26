@@ -148,10 +148,22 @@ impl MediaSink for StreamSink {
 	}
 }
 
+/// Which backend captures monitors and windows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum CaptureBackend {
+	/// The one for this desktop session (`capture::default_screen_capture`).
+	#[default]
+	Auto,
+	/// X11, also under Wayland through XWayland (Linux).
+	X11,
+}
+
 /// What and how to stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamerConfig {
 	pub source: SourceId,
+	/// For monitors and windows.
+	pub backend: CaptureBackend,
 	/// Frames per second (1 to 60).
 	pub fps: u32,
 	/// Video bitrate in kbit/s, as in `StreamSetup::bitrate`.
@@ -172,6 +184,7 @@ impl Default for StreamerConfig {
 	fn default() -> Self {
 		Self {
 			source: SourceId::Monitor(0),
+			backend: CaptureBackend::Auto,
 			fps: 30,
 			bitrate_kbps: 4608,
 			codec: Codec::Vp8,
@@ -266,7 +279,19 @@ impl Streamer {
 				(Box::new(portal), frames)
 			}
 			source => {
-				let mut screen = capture::default_screen_capture()?;
+				let mut screen = match config.backend {
+					CaptureBackend::Auto => capture::default_screen_capture()?,
+					#[cfg(target_os = "linux")]
+					CaptureBackend::X11 => Box::new(tsc_media::capture::x11::X11Capture::new()),
+					#[cfg(not(target_os = "linux"))]
+					CaptureBackend::X11 => {
+						return Err(tsc_media::Error::CaptureUnavailable {
+							backend: "x11",
+							reason: "X11 capture is only built on Linux".into(),
+						}
+						.into());
+					}
+				};
 				let frames = screen.start(source, &options).await?;
 				(screen, frames)
 			}
