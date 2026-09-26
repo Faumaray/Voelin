@@ -60,7 +60,8 @@ pub async fn notify(n: &Notification) -> Result<()> {
 	}
 }
 
-#[cfg(test)]
+// On Windows a toast would really show, so Linux only.
+#[cfg(all(test, unix, not(target_os = "macos")))]
 mod tests {
 	use super::*;
 
