@@ -8,7 +8,8 @@
 //! independent part is [`Pipeline`]; the thread loop only moves samples
 //! between it and the devices, reopening devices that go away.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -17,9 +18,10 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use tsc_audio::pcm::{self, FRAME_SAMPLES};
 use tsc_audio::settings::TransmitMode;
+use tsc_audio::vad::SILENCE_DB;
 use tsc_audio::{AudioSettings, Framer, Mixer, Processor, Vad, VoiceCodec, VoiceEncoder};
 use tsclientlib::ClientId;
-use tsproto_packets::packets::{AudioData, InAudioBuf, OutPacket};
+use tsproto_packets::packets::{AudioData, CodecType, Direction, InAudioBuf, OutAudio, OutPacket};
 
 pub(crate) enum AudioIn {
 	Packet(InAudioBuf),
@@ -27,24 +29,46 @@ pub(crate) enum AudioIn {
 	InputMuted(bool),
 	OutputMuted(bool),
 	/// Devices, processing, voice activation and transmit mode.
-	#[allow(dead_code, reason = "sent once the session exposes audio settings")]
 	Settings(Box<AudioSettings>),
 	/// Playback volume of one client, linear (1 = unchanged, up to 4).
-	#[allow(dead_code, reason = "sent once the session exposes client volumes")]
 	ClientVolume {
 		client: ClientId,
 		volume: f32,
 	},
-	#[allow(dead_code, reason = "sent once the session exposes client volumes")]
 	ClientMuted {
 		client: ClientId,
 		muted: bool,
 	},
 	/// The client left; client ids are reused, so forget its volume.
-	#[allow(dead_code, reason = "sent once the session exposes client volumes")]
 	ClientLeft(ClientId),
+	/// An Opus frame (48 kHz) of a watched stream; `time` is its RTP time
+	/// on the 48 kHz clock.
+	StreamAudio {
+		stream: String,
+		time: u64,
+		data: Arc<[u8]>,
+	},
+	/// Playback volume of a watched stream, linear like client volumes.
+	StreamVolume {
+		stream: String,
+		volume: f32,
+	},
+	/// We stopped watching the stream: forget its queue and volume.
+	StreamEnded(String),
 }
 
+/// What the audio thread reports.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum AudioEvent {
+	/// A problem, e.g. a missing device.
+	Error(String),
+	/// Loudest microphone level (dBFS, after processing) since the last
+	/// report, and whether voice is being sent. About every
+	/// [`LEVEL_INTERVAL`] while the microphone delivers audio.
+	Level { db: f32, sending: bool },
+}
+
+#[derive(Clone)]
 pub(crate) struct AudioHandle {
 	tx: std_mpsc::Sender<AudioIn>,
 }
@@ -52,6 +76,13 @@ pub(crate) struct AudioHandle {
 impl AudioHandle {
 	pub fn send(&self, msg: AudioIn) {
 		let _ = self.tx.send(msg);
+	}
+
+	/// A handle without a thread, to see what would reach it.
+	#[cfg(test)]
+	pub fn channel() -> (Self, std_mpsc::Receiver<AudioIn>) {
+		let (tx, rx) = std_mpsc::channel();
+		(Self { tx }, rx)
 	}
 }
 
@@ -68,23 +99,31 @@ const PLAYBACK_CAPACITY_MS: u32 = 200;
 const DEVICE_LATENCY_MS: u32 = 20;
 /// How long the loop sleeps between rounds.
 const TICK: Duration = Duration::from_millis(5);
+/// How often the microphone level is reported (for a meter).
+pub(crate) const LEVEL_INTERVAL: Duration = Duration::from_millis(100);
+/// Samples of one 20 ms Opus frame at 48 kHz: the unit of stream packet ids.
+const OPUS_FRAME: u64 = 960;
 
 /// Start the audio thread. Encoded packets go to `outgoing`; problems (e.g.
-/// no device) are reported through `errors`.
+/// no device) and the microphone level are reported through `events`.
 pub(crate) fn spawn(
 	outgoing: mpsc::UnboundedSender<OutPacket>,
-	errors: mpsc::UnboundedSender<String>,
-	voice_activation: bool,
+	events: mpsc::UnboundedSender<AudioEvent>,
+	settings: AudioSettings,
 ) -> AudioHandle {
-	let transmit =
-		if voice_activation { TransmitMode::VoiceActivation } else { TransmitMode::PushToTalk };
-	let settings = AudioSettings { transmit, ..Default::default() };
 	let (tx, rx) = std_mpsc::channel();
 	thread::Builder::new()
 		.name("tsc-audio".into())
-		.spawn(move || run(rx, outgoing, errors, settings))
+		.spawn(move || run(rx, outgoing, events, settings))
 		.expect("spawn audio thread");
 	AudioHandle { tx }
+}
+
+/// Audio of a watched stream in the mixer, under a made-up client id.
+struct StreamAudio {
+	client: ClientId,
+	/// RTP time and packet id of the last packet.
+	last: Option<(u64, u64)>,
 }
 
 /// Everything between the devices and the connection.
@@ -101,6 +140,11 @@ struct Pipeline {
 	input_muted: bool,
 	output_muted: bool,
 	was_sending: bool,
+	/// Loudest level since the last report; `None` without microphone audio.
+	level_peak: Option<f32>,
+	/// Watched streams whose audio plays through the mixer.
+	streams: HashMap<String, StreamAudio>,
+	stream_volumes: HashMap<String, f32>,
 	/// Processed microphone audio, for tests.
 	#[cfg(test)]
 	tap: Vec<f32>,
@@ -121,6 +165,9 @@ impl Pipeline {
 			input_muted: false,
 			output_muted: false,
 			was_sending: false,
+			level_peak: None,
+			streams: HashMap::new(),
+			stream_volumes: HashMap::new(),
 			settings,
 			#[cfg(test)]
 			tap: Vec::new(),
@@ -154,7 +201,71 @@ impl Pipeline {
 			AudioIn::ClientVolume { client, volume } => self.mixer.set_volume(client, volume),
 			AudioIn::ClientMuted { client, muted } => self.mixer.set_muted(client, muted),
 			AudioIn::ClientLeft(client) => self.mixer.forget(client),
+			AudioIn::StreamAudio { stream, time, data } => self.stream_packet(stream, time, &data),
+			AudioIn::StreamVolume { stream, volume } => {
+				if let Some(s) = self.streams.get(&stream) {
+					self.mixer.set_volume(s.client, volume);
+				}
+				self.stream_volumes.insert(stream, volume);
+			}
+			AudioIn::StreamEnded(stream) => {
+				if let Some(s) = self.streams.remove(&stream) {
+					self.mixer.forget(s.client);
+				}
+				self.stream_volumes.remove(&stream);
+			}
 		}
+	}
+
+	/// Queue an Opus frame of a stream in the mixer, as if a client with a
+	/// made-up id (counting down from `u16::MAX`, where real ids are rare)
+	/// talked. The jitter buffer orders packets by id: one id per 20 ms of
+	/// RTP time, at least one per packet (shorter frames).
+	fn stream_packet(&mut self, stream: String, time: u64, data: &[u8]) {
+		let client = match self.streams.get(&stream) {
+			Some(s) => s.client,
+			None => {
+				let used: Vec<ClientId> = self.streams.values().map(|s| s.client).collect();
+				let Some(client) = (0..=u16::MAX).rev().map(ClientId).find(|c| !used.contains(c))
+				else {
+					return;
+				};
+				self.mixer.forget(client);
+				let volume = self.stream_volumes.get(&stream).copied().unwrap_or(1.0);
+				self.mixer.set_volume(client, volume);
+				self.streams.insert(stream.clone(), StreamAudio { client, last: None });
+				client
+			}
+		};
+		let entry = self.streams.get_mut(&stream).expect("inserted above");
+		let id = match entry.last {
+			None => time / OPUS_FRAME,
+			// Duplicate or reordered: the depacketizer delivers in order.
+			Some((last_time, _)) if time <= last_time => return,
+			Some((last_time, last_id)) => {
+				last_id + ((time - last_time + OPUS_FRAME / 2) / OPUS_FRAME).max(1)
+			}
+		};
+		entry.last = Some((time, id));
+		let packet = OutAudio::new(&AudioData::S2C {
+			id: id as u16,
+			codec: CodecType::OpusMusic,
+			from: client.0,
+			data,
+		});
+		match InAudioBuf::try_new(Direction::S2C, packet.into_vec()) {
+			Ok(packet) => {
+				if let Err(error) = self.mixer.handle_packet(client, packet) {
+					debug!(%error, "dropped stream audio packet");
+				}
+			}
+			Err(error) => debug!(?error, "stream audio packet"),
+		}
+	}
+
+	/// The loudest microphone level since the last call, if any audio came in.
+	fn take_level(&mut self) -> Option<f32> {
+		self.level_peak.take()
 	}
 
 	/// Microphone audio in (mono, 48 kHz, any length); voice packets out.
@@ -175,6 +286,8 @@ impl Pipeline {
 	fn transmit(&mut self, frame: Vec<f32>, send: &mut impl FnMut(OutPacket)) {
 		// Always analysed, so the detector's state is current when needed.
 		let voice = self.vad.process(&frame);
+		let level = self.vad.level_db().max(SILENCE_DB);
+		self.level_peak = Some(self.level_peak.map_or(level, |peak| peak.max(level)));
 		let wanted = match self.settings.transmit {
 			TransmitMode::PushToTalk => self.ptt,
 			TransmitMode::VoiceActivation => voice,
@@ -232,18 +345,21 @@ fn sanitize(mut settings: AudioSettings) -> AudioSettings {
 fn run(
 	rx: std_mpsc::Receiver<AudioIn>,
 	outgoing: mpsc::UnboundedSender<OutPacket>,
-	errors: mpsc::UnboundedSender<String>,
+	events: mpsc::UnboundedSender<AudioEvent>,
 	settings: AudioSettings,
 ) {
+	let error = |message: String| {
+		let _ = events.send(AudioEvent::Error(message));
+	};
 	#[cfg(feature = "audio-device")]
 	let mut devices = devices::Devices::new(&settings);
 	#[cfg(not(feature = "audio-device"))]
-	let _ = errors.send("built without audio device support".to_string());
+	error("built without audio device support".to_string());
 
 	let mut pipeline = match Pipeline::new(settings) {
 		Ok(p) => p,
 		Err(e) => {
-			let _ = errors.send(e.to_string());
+			error(e.to_string());
 			return;
 		}
 	};
@@ -253,6 +369,7 @@ fn run(
 	// Without speakers the mixer is drained at real time, so queues do not
 	// fill up and talkers still end.
 	let mut idle_clock = Instant::now();
+	let mut level_clock = Instant::now();
 
 	loop {
 		// Control messages and incoming voice.
@@ -271,7 +388,7 @@ fn run(
 		}
 
 		#[cfg(feature = "audio-device")]
-		let playing = devices.step(&mut pipeline, &mut send, &errors);
+		let playing = devices.step(&mut pipeline, &mut send, &error);
 		#[cfg(not(feature = "audio-device"))]
 		let playing = {
 			// No microphone: nothing to process, but keep the path alive.
@@ -289,13 +406,19 @@ fn run(
 			}
 		}
 
+		if level_clock.elapsed() >= LEVEL_INTERVAL {
+			level_clock = Instant::now();
+			if let Some(db) = pipeline.take_level() {
+				let _ = events.send(AudioEvent::Level { db, sending: pipeline.was_sending });
+			}
+		}
+
 		thread::sleep(TICK);
 	}
 }
 
 #[cfg(feature = "audio-device")]
 mod devices {
-	use tokio::sync::mpsc;
 	use tracing::debug;
 	use tsc_audio::AudioSettings;
 	use tsc_audio::device::{Capture, DeviceEvent, Managed, Playback};
@@ -324,7 +447,7 @@ mod devices {
 		&mut slot.as_mut().expect("just set").1
 	}
 
-	fn report(errors: &mpsc::UnboundedSender<String>, what: &str, event: DeviceEvent) {
+	fn report(error: &impl Fn(String), what: &str, event: DeviceEvent) {
 		let message = match event {
 			DeviceEvent::Opened { name, fallback: false } => {
 				debug!(%name, "{what} opened");
@@ -336,7 +459,7 @@ mod devices {
 			DeviceEvent::Lost { name } => format!("{what} disconnected: {name}"),
 			DeviceEvent::Unavailable(e) => format!("no {what}: {e}"),
 		};
-		let _ = errors.send(message);
+		error(message);
 	}
 
 	impl Devices {
@@ -362,13 +485,13 @@ mod devices {
 			&mut self,
 			pipeline: &mut Pipeline,
 			send: &mut impl FnMut(OutPacket),
-			errors: &mpsc::UnboundedSender<String>,
+			error: &impl Fn(String),
 		) -> bool {
 			if let Some(event) = self.playback.poll() {
-				report(errors, "speakers", event);
+				report(error, "speakers", event);
 			}
 			if let Some(event) = self.capture.poll() {
-				report(errors, "microphone", event);
+				report(error, "microphone", event);
 			}
 
 			// Mixer → speakers, keeping the configured amount queued.
@@ -410,7 +533,6 @@ mod devices {
 mod tests {
 	use tsc_audio::pcm::{SAMPLE_RATE, energy, sine, white_noise};
 	use tsc_audio::{ProcessingSettings, VadSettings};
-	use tsproto_packets::packets::{CodecType, Direction, OutAudio};
 
 	use super::*;
 
@@ -527,6 +649,52 @@ mod tests {
 		let attenuation = 10.0 * (before / after).log10();
 		assert!(before > 1e-3, "the echo must be audible");
 		assert!(attenuation >= 10.0, "echo attenuated by {attenuation:.1} dB");
+	}
+
+	/// Stream audio (stereo Opus with RTP times) plays through the mixer at
+	/// its own volume and is forgotten when the stream ends.
+	#[test]
+	fn stream_audio_with_volume() {
+		let mut p = pipeline(TransmitMode::PushToTalk);
+		let mut encoder = VoiceEncoder::new(VoiceCodec::Music).unwrap();
+		let tone = pcm::from_mono(&sine(600.0, 1.0, 0.4), 2);
+		// A random RTP start, as WebRTC senders use.
+		let start = 7_777_000u64;
+		let mut play = |p: &mut Pipeline, stream: &str| -> f32 {
+			let mut out = Vec::new();
+			for (i, frame) in tone.chunks_exact(FRAME_SAMPLES * 2).enumerate() {
+				let data: Arc<[u8]> = encoder.encode_to_bytes(frame).unwrap().into();
+				let time = start + i as u64 * OPUS_FRAME;
+				p.handle(AudioIn::StreamAudio { stream: stream.into(), time, data: data.clone() });
+				// A duplicate is ignored.
+				p.handle(AudioIn::StreamAudio { stream: stream.into(), time, data });
+				out.extend(p.playback_frame());
+			}
+			energy(&out[out.len() / 2..])
+		};
+		let full = play(&mut p, "a");
+		assert!(full > 1e-3, "stream audio must be audible");
+		p.handle(AudioIn::StreamVolume { stream: "b".into(), volume: 0.5 });
+		let half = play(&mut p, "b");
+		let ratio_db = 10.0 * (half / full).log10();
+		assert!((ratio_db + 6.0).abs() < 1.0, "volume 0.5 gave {ratio_db} dB");
+		let mut clients: Vec<u16> = p.streams.values().map(|s| s.client.0).collect();
+		clients.sort_unstable();
+		assert_eq!(clients, [u16::MAX - 1, u16::MAX]);
+		p.handle(AudioIn::StreamEnded("b".into()));
+		assert_eq!(p.streams.len(), 1);
+		assert!(!p.stream_volumes.contains_key("b"));
+	}
+
+	#[test]
+	fn level_is_reported() {
+		let mut p = pipeline(TransmitMode::PushToTalk);
+		assert_eq!(p.take_level(), None, "no microphone audio yet");
+		// A sine of amplitude 0.3 has an RMS level of about -13.5 dBFS.
+		capture(&mut p, &sine(440.0, 0.1, 0.3));
+		let level = p.take_level().unwrap();
+		assert!((level + 13.5).abs() < 1.0, "{level}");
+		assert_eq!(p.take_level(), None);
 	}
 
 	#[test]

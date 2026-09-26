@@ -13,10 +13,15 @@
 //!
 //! On TeamSpeak 6 servers the voice connection also carries streams (screen
 //! sharing): see the `*Stream*` commands and events, and
-//! [`Engine::subscribe_frames`] for the frames of watched streams.
+//! [`Engine::subscribe_frames`] for the frames of watched streams. The audio
+//! of watched streams plays through the session's speakers by itself
+//! ([`Command::SetStreamVolume`]); capture, encoding and decoding of video
+//! are in [`media`] (feature `media`).
 
 mod audio;
 mod gateway;
+#[cfg(feature = "media")]
+pub mod media;
 mod query;
 mod route;
 mod session;
@@ -27,8 +32,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::{broadcast, mpsc};
+pub use tsc_audio::settings::TransmitMode;
+pub use tsc_audio::{AudioSettings, ProcessingSettings, VadSettings};
 use tsc_model::{Capabilities, ChannelId, ChatMessage, ChatTarget, Presence, ServerFlavor};
 
+use crate::audio::{AudioEvent, AudioHandle, AudioIn};
 pub use route::{ChatRoute, Dedup, route_chat};
 pub use stream::{StreamFrame, StreamSink, StreamState, WatchState};
 use tsc_stream::{EncodedFrame, StreamInfo, StreamSetup, ViewerInfo};
@@ -86,9 +94,31 @@ pub enum Command {
 		session: SessionId,
 		muted: bool,
 	},
-	/// Push-to-talk state (or "always transmit" when voice activation is off).
+	/// Push-to-talk key or button held (only counts with
+	/// [`TransmitMode::PushToTalk`]).
 	SetTransmitting {
 		session: SessionId,
+		on: bool,
+	},
+	/// Audio settings of all sessions (devices, processing, transmit mode),
+	/// also used by sessions started later.
+	SetAudioSettings(Box<AudioSettings>),
+	/// Playback volume of one client, linear (1 = unchanged, up to 4).
+	/// Local only; forgotten when the client leaves.
+	SetClientVolume {
+		session: SessionId,
+		client: u16,
+		volume: f32,
+	},
+	/// Do not play one client (local only).
+	SetClientMuted {
+		session: SessionId,
+		client: u16,
+		muted: bool,
+	},
+	/// Open the microphone without a session to show its level
+	/// ([`Event::InputLevel`] with `session: None`), e.g. in the settings.
+	TestMicrophone {
 		on: bool,
 	},
 	/// Start streaming in our channel (TeamSpeak 6 only). Progress comes as
@@ -133,6 +163,13 @@ pub enum Command {
 	RequestStreamKeyframe {
 		session: SessionId,
 		stream_id: String,
+	},
+	/// Playback volume of a watched stream's audio, linear (1 = unchanged,
+	/// up to 4).
+	SetStreamVolume {
+		session: SessionId,
+		stream_id: String,
+		volume: f32,
 	},
 	/// Close everything of a session.
 	CloseSession {
@@ -205,6 +242,20 @@ pub enum Event {
 		client: u16,
 		talking: bool,
 	},
+	/// Microphone level for a meter, about ten times a second while the
+	/// microphone is open: of a voice session, or of
+	/// [`Command::TestMicrophone`] (`session: None`). `level_db` is the
+	/// loudest 10 ms (dBFS, after processing) since the last report;
+	/// `sending` whether voice is transmitted.
+	InputLevel {
+		session: Option<SessionId>,
+		level_db: f32,
+		sending: bool,
+	},
+	/// A problem with the microphone test (e.g. no device).
+	MicrophoneTestError {
+		message: String,
+	},
 	Error {
 		session: SessionId,
 		message: String,
@@ -248,6 +299,7 @@ pub struct Engine {
 	commands: mpsc::UnboundedSender<Command>,
 	events: broadcast::Sender<Event>,
 	frames: broadcast::Sender<StreamFrame>,
+	runtime: tokio::runtime::Handle,
 }
 
 impl Engine {
@@ -258,7 +310,13 @@ impl Engine {
 		// About a minute of one watched stream.
 		let (frames, _) = broadcast::channel(4096);
 		tokio::spawn(run(rx, events.clone(), frames.clone()));
-		Self { commands, events, frames }
+		Self { commands, events, frames, runtime: tokio::runtime::Handle::current() }
+	}
+
+	/// The runtime the engine runs on, for helpers started from other
+	/// threads (e.g. `media::Viewer` from a UI thread).
+	pub fn runtime(&self) -> &tokio::runtime::Handle {
+		&self.runtime
 	}
 
 	pub fn send(&self, command: Command) {
@@ -281,8 +339,26 @@ async fn run(
 	frames: broadcast::Sender<StreamFrame>,
 ) {
 	let mut sessions: HashMap<SessionId, session::SessionHandle> = HashMap::new();
+	let mut settings = AudioSettings::default();
+	let mut mic_test: Option<AudioHandle> = None;
 	while let Some(command) = commands.recv().await {
-		let id = command_session(&command);
+		let id = match command {
+			Command::SetAudioSettings(new) => {
+				settings = (*new).clone();
+				for s in sessions.values() {
+					s.send(Command::SetAudioSettings(new.clone()));
+				}
+				if let Some(test) = &mic_test {
+					test.send(AudioIn::Settings(new));
+				}
+				continue;
+			}
+			Command::TestMicrophone { on } => {
+				mic_test = on.then(|| test_microphone(&settings, &events));
+				continue;
+			}
+			ref command => command_session(command),
+		};
 		if matches!(command, Command::CloseSession { .. }) {
 			if let Some(s) = sessions.remove(&id) {
 				s.send(command);
@@ -291,11 +367,33 @@ async fn run(
 		}
 		sessions
 			.entry(id)
-			.or_insert_with(|| session::SessionHandle::spawn(id, events.clone(), frames.clone()))
+			.or_insert_with(|| {
+				session::SessionHandle::spawn(id, events.clone(), frames.clone(), settings.clone())
+			})
 			.send(command);
 	}
 }
 
+/// An audio thread whose packets go nowhere, for its level.
+fn test_microphone(settings: &AudioSettings, events: &broadcast::Sender<Event>) -> AudioHandle {
+	let (packets, _) = mpsc::unbounded_channel();
+	let (audio_tx, mut audio_rx) = mpsc::unbounded_channel();
+	let handle = audio::spawn(packets, audio_tx, settings.clone());
+	let events = events.clone();
+	tokio::spawn(async move {
+		while let Some(event) = audio_rx.recv().await {
+			let _ = events.send(match event {
+				AudioEvent::Level { db, sending } => {
+					Event::InputLevel { session: None, level_db: db, sending }
+				}
+				AudioEvent::Error(message) => Event::MicrophoneTestError { message },
+			});
+		}
+	});
+	handle
+}
+
+/// The session a command is for (engine-wide commands are handled before).
 fn command_session(command: &Command) -> SessionId {
 	match command {
 		Command::ConnectVoice { session, .. }
@@ -318,6 +416,12 @@ fn command_session(command: &Command) -> SessionId {
 		| Command::WatchStream { session, .. }
 		| Command::LeaveStream { session, .. }
 		| Command::RequestStreamKeyframe { session, .. }
+		| Command::SetStreamVolume { session, .. }
+		| Command::SetClientVolume { session, .. }
+		| Command::SetClientMuted { session, .. }
 		| Command::CloseSession { session } => *session,
+		Command::SetAudioSettings(_) | Command::TestMicrophone { .. } => {
+			unreachable!("engine-wide commands have no session")
+		}
 	}
 }

@@ -22,6 +22,7 @@ use tsc_stream::{
 };
 use tsclientlib::ClientId;
 
+use crate::audio::{AudioHandle, AudioIn};
 use crate::voice::VoiceCmd;
 use crate::{Event, SessionId};
 
@@ -138,6 +139,7 @@ impl StreamHandle {
 		voice: mpsc::UnboundedSender<VoiceCmd>,
 		events: broadcast::Sender<Event>,
 		frames: broadcast::Sender<StreamFrame>,
+		audio: Option<AudioHandle>,
 	) -> Self {
 		let (tx, rx) = mpsc::unbounded_channel();
 		let task = StreamTask {
@@ -146,6 +148,7 @@ impl StreamHandle {
 			voice,
 			events,
 			frames,
+			audio,
 			tx: tx.clone(),
 			sink: None,
 			clients: BTreeMap::new(),
@@ -165,6 +168,8 @@ struct StreamTask {
 	voice: mpsc::UnboundedSender<VoiceCmd>,
 	events: broadcast::Sender<Event>,
 	frames: broadcast::Sender<StreamFrame>,
+	/// Where the audio of watched streams plays, if the session has audio.
+	audio: Option<AudioHandle>,
 	/// For the sinks handed out.
 	tx: mpsc::UnboundedSender<StreamInput>,
 	/// The sink of our live stream.
@@ -299,8 +304,20 @@ impl StreamTask {
 				let state = match event {
 					WatchEvent::Accepted => WatchState::Connecting,
 					WatchEvent::Connected => WatchState::Connected,
-					WatchEvent::Ended(reason) => WatchState::Ended(reason),
+					WatchEvent::Ended(reason) => {
+						if let Some(audio) = &self.audio {
+							audio.send(AudioIn::StreamEnded(id.clone()));
+						}
+						WatchState::Ended(reason)
+					}
 					WatchEvent::Frame(frame) => {
+						if let (MediaKind::Audio, Some(audio)) = (frame.kind, &self.audio) {
+							audio.send(AudioIn::StreamAudio {
+								stream: id.clone(),
+								time: frame.time.rebase(Frequency::FORTY_EIGHT_KHZ).numer(),
+								data: frame.data.clone(),
+							});
+						}
 						let _ = self.frames.send(StreamFrame { session, stream_id: id, frame });
 						return;
 					}
@@ -322,6 +339,9 @@ impl StreamTask {
 		}
 		for watched in self.streams.watching() {
 			let stream_id = watched.id().to_owned();
+			if let Some(audio) = &self.audio {
+				audio.send(AudioIn::StreamEnded(stream_id.clone()));
+			}
 			self.emit(Event::WatchState { session, stream_id, state: WatchState::Ended(ended()) });
 		}
 		if self.streams.directory().iter().next().is_some() {
@@ -416,13 +436,18 @@ mod tests {
 		.expect("timed out")
 	}
 
-	/// Two stream tasks (sessions 1 and 2) whose commands go through a fake server.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn stream_tasks_through_fake_server() {
-		let (events, mut rx) = broadcast::channel(4096);
-		let (frames, mut frames_rx) = broadcast::channel(4096);
+	type Handles = Arc<Vec<StreamHandle>>;
+
+	/// Two stream tasks (sessions 1 and 2) whose commands go through a fake
+	/// server; `audio` is the viewer's audio thread.
+	fn pair(
+		audio: Option<AudioHandle>,
+	) -> (Handles, broadcast::Receiver<Event>, broadcast::Receiver<StreamFrame>) {
+		let (events, rx) = broadcast::channel(4096);
+		let (frames, frames_rx) = broadcast::channel(4096);
 		let mut voices = Vec::new();
 		let mut handles = Vec::new();
+		let mut audio = audio;
 		for (i, clid) in CLIENTS.into_iter().enumerate() {
 			let (voice, voice_rx) = mpsc::unbounded_channel();
 			let config = PeerConfig::loopback();
@@ -434,6 +459,7 @@ mod tests {
 				voice,
 				events.clone(),
 				frames.clone(),
+				if session == 2 { audio.take() } else { None },
 			));
 			voices.push(voice_rx);
 		}
@@ -452,12 +478,20 @@ mod tests {
 				}
 			});
 		}
+		(handles, rx, frames_rx)
+	}
 
+	/// Session 1 streams (auto-accepting), session 2 watches; returns the sink
+	/// once the viewer is connected.
+	async fn live_and_watching(
+		handles: &Handles,
+		rx: &mut broadcast::Receiver<Event>,
+	) -> StreamSink {
 		let setup = StreamSetup { name: "t".into(), ..Default::default() };
 		handles[0].send(StreamInput::Start { setup, auto_accept: true });
 		// Live for the streamer and listed for the viewer, in either order.
 		let (mut sink, mut listed) = (None, false);
-		wait(&mut rx, |e| {
+		wait(rx, |e| {
 			match e {
 				Event::StreamState { session: 1, state: StreamState::Live { sink: s, .. } } => {
 					sink = Some(s);
@@ -468,13 +502,21 @@ mod tests {
 			(sink.is_some() && listed).then_some(())
 		})
 		.await;
-		let sink = sink.unwrap();
 		handles[1].send(StreamInput::Watch { stream_id: "s-1".into() });
-		wait(&mut rx, |e| match e {
+		wait(rx, |e| match e {
 			Event::WatchState { session: 2, state: WatchState::Connected, .. } => Some(()),
 			_ => None,
 		})
 		.await;
+		sink.unwrap()
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn stream_tasks_through_fake_server() {
+		// The viewer's audio thread.
+		let (audio, audio_rx) = AudioHandle::channel();
+		let (handles, mut rx, mut frames_rx) = pair(Some(audio));
+		let sink = live_and_watching(&handles, &mut rx).await;
 
 		// Frames from the sink reach the viewer's frame bus.
 		let feeder = tokio::spawn({
@@ -518,6 +560,20 @@ mod tests {
 		assert!(!sink.is_live());
 		feeder.await.unwrap();
 
+		// Stream audio went to the viewer's audio thread, in 20 ms steps,
+		// and the ended stream was forgotten there.
+		let received: Vec<AudioIn> = audio_rx.try_iter().collect();
+		let times: Vec<u64> = received
+			.iter()
+			.filter_map(|m| match m {
+				AudioIn::StreamAudio { stream, time, .. } if stream == "s-1" => Some(*time),
+				_ => None,
+			})
+			.collect();
+		assert!(times.len() >= 10, "{} audio frames", times.len());
+		assert!(times.windows(2).all(|w| w[1] > w[0] && (w[1] - w[0]) % 960 == 0), "{times:?}");
+		assert!(matches!(received.last(), Some(AudioIn::StreamEnded(id)) if id == "s-1"));
+
 		// Errors surface as events.
 		handles[1].send(StreamInput::Leave { stream_id: "s-1".into() });
 		wait(&mut rx, |e| match e {
@@ -526,5 +582,78 @@ mod tests {
 		})
 		.await;
 		handles[1].send(StreamInput::Shutdown("bye".into()));
+	}
+
+	/// The whole path: test pattern → VP8 → stream task → str0m peers on
+	/// loopback → the viewer's frame bus → decoder. The pictures show the
+	/// moving rectangle.
+	#[cfg(feature = "media")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn test_pattern_through_stream_tasks() {
+		use std::sync::mpsc as std_mpsc;
+
+		use tsc_media::capture::SourceId;
+		use tsc_media::{Codec, Codecs};
+
+		use crate::media::{Streamer, StreamerConfig, VideoPipeline, rectangle_span};
+
+		let (handles, mut rx, mut frames_rx) = pair(None);
+		let sink = live_and_watching(&handles, &mut rx).await;
+		let codecs = Arc::new(Codecs::new());
+		let config = StreamerConfig {
+			source: SourceId::Synthetic,
+			synthetic_size: (320, 240),
+			bitrate_kbps: 1500,
+			..StreamerConfig::default()
+		};
+		let streamer = Streamer::start(&codecs, config).await.unwrap();
+		streamer.attach(Arc::new(sink.clone()));
+
+		let (tx, pictures) = std_mpsc::channel();
+		let pipeline = VideoPipeline::new(
+			codecs,
+			move |picture| {
+				let _ = tx.send(picture);
+			},
+			{
+				let handles = handles.clone();
+				move || handles[1].send(StreamInput::RequestKeyframe { stream_id: "s-1".into() })
+			},
+		);
+		let input = pipeline.input();
+		let forward = tokio::spawn(async move {
+			while let Ok(f) = frames_rx.recv().await {
+				input.push(f.frame);
+			}
+		});
+		let spans = tokio::task::spawn_blocking(move || {
+			let mut spans = Vec::new();
+			while spans.len() < 15 {
+				let picture = pictures.recv_timeout(Duration::from_secs(10)).expect("no picture");
+				assert_eq!((picture.width, picture.height), (320, 240));
+				spans.push(rectangle_span(&picture));
+			}
+			spans
+		})
+		.await
+		.unwrap();
+		for (a, b) in &spans {
+			assert!((60..=68).contains(&(b - a + 1)), "{spans:?}");
+		}
+		assert_ne!(spans.first(), spans.last(), "the rectangle moves");
+		let stats = pipeline.stats();
+		assert_eq!(stats.codec, Some(Codec::Vp8));
+		assert!(stats.error.is_none(), "{stats:?}");
+		let sent = streamer.stats();
+		assert!(sent.video_frames >= 15 && sent.audio_frames > 0, "{sent:?}");
+
+		handles[0].send(StreamInput::Stop);
+		wait(&mut rx, |e| match e {
+			Event::WatchState { session: 2, state: WatchState::Ended(_), .. } => Some(()),
+			_ => None,
+		})
+		.await;
+		forward.abort();
+		drop(streamer);
 	}
 }
