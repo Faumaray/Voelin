@@ -79,6 +79,20 @@ impl StreamSink {
 		self.keyframe.swap(false, Ordering::Relaxed)
 	}
 
+	/// Adds to `layers` the simulcast layers viewers asked a keyframe for
+	/// since the last call.
+	pub fn take_layer_keyframes(&self, layers: &mut voelin_stream::LayerSet) {
+		if self.take_keyframe_request() {
+			layers.insert(0);
+		}
+	}
+
+	/// Bitrate (bit/s) the bandwidth estimates of `layer`'s viewers allow.
+	pub fn layer_bitrate(&self, layer: voelin_stream::LayerId) -> Option<u64> {
+		let _ = layer;
+		None
+	}
+
 	pub fn is_live(&self) -> bool {
 		self.live.load(Ordering::Relaxed)
 	}

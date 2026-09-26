@@ -21,6 +21,9 @@ pub struct EncodedFrame {
 	/// The simulcast layer of a video frame (0 without simulcast, and for
 	/// audio).
 	pub layer: LayerId,
+	/// A video keyframe: viewers can start decoding (or switch to this layer)
+	/// here.
+	pub keyframe: bool,
 }
 
 /// Produces encoded frames in real time.
@@ -106,6 +109,7 @@ impl FrameSource for SyntheticSource {
 				time: MediaTime::from_90khz(n * 90_000 / u64::from(self.fps)),
 				data: Self::video_frame(n, self.video_size).into(),
 				layer: 0,
+				keyframe: true,
 			});
 			self.video_frames += 1;
 		}
@@ -115,7 +119,13 @@ impl FrameSource for SyntheticSource {
 				let time =
 					MediaTime::new(self.audio_frames * OPUS_FRAME, Frequency::FORTY_EIGHT_KHZ);
 				let data = Arc::from(&OPUS_SILENCE[..]);
-				out.push(EncodedFrame { kind: MediaKind::Audio, time, data, layer: 0 });
+				out.push(EncodedFrame {
+					kind: MediaKind::Audio,
+					time,
+					data,
+					layer: 0,
+					keyframe: false,
+				});
 				self.audio_frames += 1;
 			}
 		}

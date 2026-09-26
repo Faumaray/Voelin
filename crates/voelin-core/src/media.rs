@@ -165,6 +165,14 @@ impl MediaSink for StreamSink {
 	fn take_keyframe_request(&self) -> bool {
 		StreamSink::take_keyframe_request(self)
 	}
+
+	fn take_layer_keyframes(&self, layers: &mut LayerSet) {
+		StreamSink::take_layer_keyframes(self, layers);
+	}
+
+	fn layer_bitrate(&self, layer: LayerId) -> Option<u64> {
+		StreamSink::layer_bitrate(self, layer)
+	}
 }
 
 /// Which backend captures monitors and windows.
@@ -458,6 +466,7 @@ fn video_loop(
 						time: MediaTime::from_90khz(f.pts_90khz),
 						data: f.data.into(),
 						layer: 0,
+						keyframe: f.keyframe,
 					};
 					if sink.send(frame) {
 						shared.video_frames.fetch_add(1, Ordering::Relaxed);
@@ -522,7 +531,13 @@ fn audio_loop(shared: &Shared, mut buffers: FrameReceiver<AudioBuffer>, mut enco
 			pending.drain(..OPUS_FRAME * 2);
 			if let Some(data) = data {
 				let time = MediaTime::new(frames * OPUS_FRAME as u64, Frequency::FORTY_EIGHT_KHZ);
-				if sink.send(EncodedFrame { kind: MediaKind::Audio, time, data, layer: 0 }) {
+				if sink.send(EncodedFrame {
+					kind: MediaKind::Audio,
+					time,
+					data,
+					layer: 0,
+					keyframe: false,
+				}) {
 					shared.audio_frames.fetch_add(1, Ordering::Relaxed);
 				}
 			}
