@@ -7,6 +7,7 @@
 //!   through `cros-libva`. TODO.
 //! - Windows: Media Foundation H.264 encoder MFT (NVENC / QuickSync / AMF
 //!   behind it). TODO.
+//! - Android: MediaCodec ([`super::mediacodec`]).
 
 use crate::Result;
 use crate::codec::{Codec, EncoderConfig, VideoEncoder};
@@ -31,6 +32,10 @@ pub fn probe() -> Vec<Box<dyn HardwareEncoderFactory>> {
 	}
 	#[cfg(windows)]
 	if let Some(f) = media_foundation::probe() {
+		found.push(Box::new(f));
+	}
+	#[cfg(target_os = "android")]
+	if let Some(f) = super::mediacodec::probe() {
 		found.push(Box::new(f));
 	}
 	found

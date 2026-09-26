@@ -8672,6 +8672,7 @@ dependencies = [
 name = "tsc-android"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "jni 0.22.4",
  "rustls-platform-verifier",
  "slint",
@@ -8776,6 +8777,7 @@ dependencies = [
  "dav1d",
  "libvpx-native-sys",
  "memmap2",
+ "ndk 0.9.0",
  "openh264",
  "pipewire",
  "reqwest",

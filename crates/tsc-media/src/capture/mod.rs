@@ -9,6 +9,7 @@
 //! | `x11` (Linux, feature `x11`) | MIT-SHM / GetImage, XFixes cursor | |
 //! | `portal` / `pipewire_audio` (Linux, feature `pipewire`) | ScreenCast portal + PipeWire | default sink monitor |
 //! | `windows` | Windows Graphics Capture | WASAPI process loopback |
+//! | [`external`] | platform code (Android MediaProjection) | same |
 
 use std::future::Future;
 use std::pin::Pin;
@@ -27,6 +28,7 @@ pub mod pipewire_audio;
 pub mod portal;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 mod pw;
+pub mod external;
 pub mod synthetic;
 #[cfg(windows)]
 pub mod windows;
@@ -106,9 +108,13 @@ pub trait AudioCapture: Send {
 	fn stop(&mut self);
 }
 
-/// The screen capture backend for this session: the ScreenCast portal on
+/// The screen capture backend for this session: a registered
+/// [`external::ScreenProvider`] (Android), else the ScreenCast portal on
 /// Wayland, X11 otherwise on Linux, Windows Graphics Capture on Windows.
 pub fn default_screen_capture() -> Result<Box<dyn ScreenCapture>> {
+	if let Some(provider) = external::screen_provider() {
+		return Ok(Box::new(external::ExternalScreenCapture::new(provider)));
+	}
 	#[cfg(target_os = "linux")]
 	{
 		let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
@@ -132,8 +138,12 @@ pub fn default_screen_capture() -> Result<Box<dyn ScreenCapture>> {
 	})
 }
 
-/// The system-audio backend: PipeWire on Linux, WASAPI loopback on Windows.
+/// The system-audio backend: a registered [`external::AudioProvider`]
+/// (Android), else PipeWire on Linux, WASAPI loopback on Windows.
 pub fn default_audio_capture() -> Result<Box<dyn AudioCapture>> {
+	if let Some(provider) = external::audio_provider() {
+		return Ok(Box::new(external::ExternalAudioCapture::new(provider)));
+	}
 	#[cfg(all(target_os = "linux", feature = "pipewire"))]
 	return Ok(Box::new(pipewire_audio::PipeWireAudioCapture::new()));
 	#[cfg(windows)]

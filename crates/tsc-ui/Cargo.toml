@@ -21,7 +21,6 @@ anyhow = "1.0.104"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 dirs = "6"
 png = "0.18"
-slint = { version = "1.18", features = ["renderer-software"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -31,10 +30,14 @@ tsc-query = { path = "../tsc-query" }
 tsc-store = { path = "../tsc-store" }
 tsclientlib = { path = "../proto/tsclientlib" }
 
-# The keyring crate has no Android backend; the Android app passes its own
-# `Secrets` (Android Keystore) to `run_with_engine`.
+# Android (tsc-android): no keyring backend (the app passes Keystore-backed
+# secrets) and no winit/femtovg (the app picks Slint's Android backend).
 [target.'cfg(not(target_os = "android"))'.dependencies]
+slint = { version = "1.18", features = ["renderer-software"] }
 tsc-store = { path = "../tsc-store", features = ["keyring"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "renderer-software"] }
 
 [build-dependencies]
 slint-build = "1.18"

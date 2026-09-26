@@ -19,11 +19,25 @@ slint::include_modules!();
 
 /// Secrets in the OS keyring, or in memory when there is none (headless
 /// Linux without a Secret Service).
+#[cfg(not(target_os = "android"))]
 struct FallbackSecrets {
 	keyring: tsc_store::KeyringSecrets,
 	memory: MemorySecrets,
 }
 
+/// The secrets store when [`RunOptions::secrets`] is not given: the OS
+/// keyring on desktop, memory elsewhere.
+fn default_secrets() -> Box<dyn Secrets> {
+	#[cfg(not(target_os = "android"))]
+	return Box::new(FallbackSecrets {
+		keyring: tsc_store::KeyringSecrets::new("tsc-client"),
+		memory: MemorySecrets::default(),
+	});
+	#[cfg(target_os = "android")]
+	return Box::new(MemorySecrets::default());
+}
+
+#[cfg(not(target_os = "android"))]
 impl Secrets for FallbackSecrets {
 	fn get(&self, key: &str) -> tsc_store::Result<Option<String>> {
 		match self.memory.get(key)? {
@@ -105,18 +119,76 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 }
 
 /// Start options for [`run`].
-#[derive(Clone, Debug, Default)]
+#[derive(Default)]
 pub struct RunOptions {
 	/// Where the client database lives. Default: `TSC_DATA_DIR`, else
 	/// `<data dir>/tsc`. Mobile platforms pass their app storage directory.
 	pub data_dir: Option<std::path::PathBuf>,
+	/// Where passwords are kept. Default: the OS keyring, in memory when it
+	/// is unavailable.
+	pub secrets: Option<Box<dyn Secrets>>,
+	/// An engine the caller keeps running across windows (Android: voice
+	/// goes on in a service while the activity is recreated). Default: an
+	/// engine that stops with the window.
+	pub engine: Option<HostedEngine>,
+}
+
+impl std::fmt::Debug for RunOptions {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("RunOptions")
+			.field("data_dir", &self.data_dir)
+			.field("secrets", &self.secrets.is_some())
+			.field("engine", &self.engine.is_some())
+			.finish()
+	}
+}
+
+/// An engine owned by the caller of [`run`].
+pub struct HostedEngine {
+	pub engine: Engine,
+	/// The runtime the engine runs on; the window's tasks run there too.
+	pub runtime: tokio::runtime::Handle,
+	/// The engine's events for this window: first events that rebuild the
+	/// current state of every session, then new ones. The window stops
+	/// reading when it closes.
+	pub events: tokio::sync::mpsc::UnboundedReceiver<Event>,
+}
+
+impl HostedEngine {
+	/// A new engine on `runtime`, all of whose events go to the window.
+	fn start(runtime: &Runtime) -> Self {
+		let engine = runtime.block_on(async { Engine::start() });
+		let (tx, events) = tokio::sync::mpsc::unbounded_channel();
+		let mut rx = engine.subscribe();
+		runtime.spawn(async move {
+			loop {
+				match rx.recv().await {
+					Ok(event) => {
+						if tx.send(event).is_err() {
+							break;
+						}
+					}
+					Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+					Err(_) => break,
+				}
+			}
+		});
+		Self { engine, runtime: runtime.handle().clone(), events }
+	}
 }
 
 /// Run the app on the current thread until the window closes. The Slint
 /// platform must be set up before (the default backend on desktop).
 pub fn run(options: RunOptions) -> Result<()> {
-	let runtime = Runtime::new()?;
-	let engine = runtime.block_on(async { Engine::start() });
+	let (own_runtime, hosted) = match options.engine {
+		Some(hosted) => (None, hosted),
+		None => {
+			let runtime = Runtime::new()?;
+			let hosted = HostedEngine::start(&runtime);
+			(Some(runtime), hosted)
+		}
+	};
+	let HostedEngine { engine, runtime, mut events } = hosted;
 
 	// Development switches: TSC_DATA_DIR isolates the database,
 	// TSC_AUTOCONNECT=voice|observe connects the first bookmark on start,
@@ -143,10 +215,7 @@ pub fn run(options: RunOptions) -> Result<()> {
 	let app = App {
 		ui: ui.as_weak(),
 		store,
-		secrets: Box::new(FallbackSecrets {
-			keyring: tsc_store::KeyringSecrets::new("tsc-client"),
-			memory: MemorySecrets::default(),
-		}),
+		secrets: options.secrets.unwrap_or_else(default_secrets),
 		engine: engine.clone(),
 		identity,
 		current: bookmarks.first().map(|b| b.id),
@@ -158,18 +227,14 @@ pub fn run(options: RunOptions) -> Result<()> {
 	wire_callbacks(&ui);
 	with_app(|app| app.refresh_all());
 
-	// Engine events -> UI thread.
-	let mut events = engine.subscribe();
+	// Engine events -> UI thread, until the event loop is gone.
 	runtime.spawn(async move {
-		loop {
-			match events.recv().await {
-				Ok(event) => {
-					let _ = slint::invoke_from_event_loop(move || {
-						with_app(|app| app.handle_event(event));
-					});
-				}
-				Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-				Err(_) => break,
+		while let Some(event) = events.recv().await {
+			let posted = slint::invoke_from_event_loop(move || {
+				with_app(|app| app.handle_event(event));
+			});
+			if posted.is_err() {
+				break;
 			}
 		}
 	});
@@ -205,7 +270,9 @@ pub fn run(options: RunOptions) -> Result<()> {
 
 	ui.run()?;
 	APP.with(|a| a.borrow_mut().take());
-	runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+	if let Some(runtime) = own_runtime {
+		runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+	}
 	Ok(())
 }
 
