@@ -20,16 +20,23 @@ class VoiceService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_DISCONNECT) {
-            Native.onDisconnectVoice()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_DISCONNECT -> {
+                Native.onDisconnectVoice()
+                return START_NOT_STICKY
+            }
+            ACTION_TOGGLE_MUTE -> {
+                Native.onToggleMute()
+                return START_NOT_STICKY
+            }
         }
         val text = intent?.getStringExtra(EXTRA_TEXT) ?: getString(R.string.voice_connected)
+        val muted = intent?.getBooleanExtra(EXTRA_MUTED, false) ?: false
         try {
             if (Build.VERSION.SDK_INT >= 30) {
-                startForeground(ID, notification(this, text), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                startForeground(ID, notification(this, text, muted), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
             } else {
-                startForeground(ID, notification(this, text))
+                startForeground(ID, notification(this, text, muted))
             }
             running = this
         } catch (e: RuntimeException) {
@@ -50,38 +57,44 @@ class VoiceService : Service() {
         private const val TAG = "VoiceService"
         private const val ID = 1
         private const val EXTRA_TEXT = "text"
+        private const val EXTRA_MUTED = "muted"
         private const val ACTION_DISCONNECT = "io.github.faumaray.tsc.DISCONNECT"
+        private const val ACTION_TOGGLE_MUTE = "io.github.faumaray.tsc.TOGGLE_MUTE"
 
         @Volatile
         private var running: VoiceService? = null
 
-        private fun notification(context: Context, text: String): Notification {
-            val disconnect = PendingIntent.getService(
+        private fun action(context: Context, action: String, request: Int): PendingIntent =
+            PendingIntent.getService(
                 context,
-                0,
-                Intent(context, VoiceService::class.java).setAction(ACTION_DISCONNECT),
+                request,
+                Intent(context, VoiceService::class.java).setAction(action),
                 PendingIntent.FLAG_IMMUTABLE,
             )
-            return Notifications.ongoing(
+
+        private fun notification(context: Context, text: String, muted: Boolean): Notification =
+            Notifications.ongoing(
                 context,
                 Notifications.CHANNEL_VOICE,
                 text,
-                context.getString(R.string.disconnect),
-                disconnect,
+                context.getString(if (muted) R.string.unmute else R.string.mute) to
+                    action(context, ACTION_TOGGLE_MUTE, 1),
+                context.getString(R.string.disconnect) to action(context, ACTION_DISCONNECT, 0),
             )
-        }
 
         /** Start the service, or update its notification when it runs. */
-        fun start(context: Context, text: String) {
+        fun start(context: Context, text: String, muted: Boolean) {
             val service = running
             if (service != null) {
                 service.getSystemService(NotificationManager::class.java)
-                    .notify(ID, notification(service, text))
+                    .notify(ID, notification(service, text, muted))
                 return
             }
             try {
                 context.startForegroundService(
-                    Intent(context, VoiceService::class.java).putExtra(EXTRA_TEXT, text),
+                    Intent(context, VoiceService::class.java)
+                        .putExtra(EXTRA_TEXT, text)
+                        .putExtra(EXTRA_MUTED, muted),
                 )
             } catch (e: RuntimeException) {
                 // Not allowed from the background (Android 12+). Voice is

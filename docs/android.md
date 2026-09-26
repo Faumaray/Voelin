@@ -80,9 +80,9 @@ capture, NDK MediaCodec format queries); targetSdk and compileSdk 36.
   do not recreate it.
 - **Voice in the background**: while any session has a voice connection,
   `VoiceService` runs as a foreground service of type `microphone` with a
-  notification ("In voice on …", Disconnect). Rust drives it from engine
-  events (`foreground.rs`, `Bridge.setVoiceNotification`). Audio itself is
-  cpal on AAudio, as on desktop.
+  notification ("In voice on …", Mute or Unmute, Disconnect). Rust drives it
+  from engine events (`foreground.rs`, `Bridge.setVoiceNotification`). Audio
+  itself is cpal on AAudio, as on desktop.
 - **Sharing the screen**: `tsc_media::capture::default_screen_capture()`
   returns the MediaProjection provider (`capture.rs`) registered at start.
   Starting shows the system consent dialog; on consent `ScreenCaptureService`
@@ -130,3 +130,6 @@ Known gaps:
 - The safe area (status and navigation bars) and the on-screen keyboard pad
   the main window; dialogs drawn over it do not account for them yet.
 - Only `arm64-v8a` and `x86_64` are built; 32-bit devices are not supported.
+- No audio focus handling yet: a phone call does not pause our audio
+  (matrix row AN4). After a network change (Wi-Fi to mobile data) only
+  tsclientlib's own reconnect applies; untested on a phone.

@@ -28,10 +28,13 @@ object Bridge {
         }
     }
 
-    /** Run the voice service with this notification text; null stops it. */
+    /**
+     * Run the voice service with this notification text (`muted`: the action
+     * offers Unmute); null stops it.
+     */
     @JvmStatic
-    fun setVoiceNotification(text: String?) {
-        if (text == null) VoiceService.stop(app) else VoiceService.start(app, text)
+    fun setVoiceNotification(text: String?, muted: Boolean) {
+        if (text == null) VoiceService.stop(app) else VoiceService.start(app, text, muted)
     }
 
     /** Ask the user to share the screen; the answer goes to Native.onScreenCaptureResult. */

@@ -15,6 +15,8 @@ use jni::refs::{Global, Reference as _};
 use jni::sys::{jboolean, jint, jlong};
 use jni::{Env, JavaVM, jni_sig, jni_str, native_method};
 
+use crate::foreground::VoiceNotice;
+
 static BRIDGE: OnceLock<Global<JClass<'static>>> = OnceLock::new();
 
 /// Look up `Bridge` (on the `android_main` thread).
@@ -57,17 +59,17 @@ pub fn request_permissions() -> Result<()> {
 }
 
 /// Show or update the voice service's notification; `None` stops the service.
-pub fn set_voice_notification(text: Option<&str>) -> Result<()> {
+pub fn set_voice_notification(notice: Option<&VoiceNotice>) -> Result<()> {
 	with_bridge(|env, class| {
-		let text = match text {
-			Some(text) => JObject::from(env.new_string(text)?),
-			None => JObject::null(),
+		let (text, muted) = match notice {
+			Some(n) => (JObject::from(env.new_string(&n.text)?), n.muted),
+			None => (JObject::null(), false),
 		};
 		env.call_static_method(
 			class,
 			jni_str!("setVoiceNotification"),
-			jni_sig!((text: java.lang.String) -> void),
-			&[JValue::Object(&text)],
+			jni_sig!((text: java.lang.String, muted: jboolean) -> void),
+			&[JValue::Object(&text), JValue::Bool(muted)],
 		)?;
 		Ok(())
 	})
@@ -256,5 +258,16 @@ const _: jni::NativeMethod = native_method! {
 /// "Disconnect" in the voice notification.
 fn on_disconnect_voice<'local>(_env: &mut Env<'local>, _class: JClass<'local>) -> Result<()> {
 	crate::app::disconnect_voice();
+	Ok(())
+}
+
+const _: jni::NativeMethod = native_method! {
+	java_type = "io.github.faumaray.tsc.Native",
+	static extern fn on_toggle_mute(),
+};
+
+/// "Mute" / "Unmute" in the voice notification.
+fn on_toggle_mute<'local>(_env: &mut Env<'local>, _class: JClass<'local>) -> Result<()> {
+	crate::app::toggle_mute();
 	Ok(())
 }

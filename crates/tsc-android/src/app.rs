@@ -111,8 +111,8 @@ fn watch_voice(host: &'static EngineHost) {
 		loop {
 			match events.recv().await {
 				Ok(event) => {
-					if let Some(text) = with_foreground(|f| f.update(&event))
-						&& let Err(e) = bridge::set_voice_notification(text.as_deref())
+					if let Some(notice) = with_foreground(|f| f.update(&event))
+						&& let Err(e) = bridge::set_voice_notification(notice.as_ref())
 					{
 						warn!("voice service: {e}");
 					}
@@ -131,5 +131,18 @@ pub fn disconnect_voice() {
 	};
 	for session in with_foreground(|f| f.voice_sessions()) {
 		host.engine().send(Command::DisconnectVoice { session });
+	}
+}
+
+/// "Mute" / "Unmute" in the voice notification: mute every voice session,
+/// or unmute them all when all are muted.
+pub fn toggle_mute() {
+	let Some(host) = HOST.get() else {
+		return;
+	};
+	let (sessions, muted) =
+		with_foreground(|f| (f.voice_sessions(), f.notice().is_some_and(|n| n.muted)));
+	for session in sessions {
+		host.engine().send(Command::SetInputMuted { session, muted: !muted });
 	}
 }

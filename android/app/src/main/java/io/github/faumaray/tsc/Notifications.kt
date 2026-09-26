@@ -38,19 +38,24 @@ object Notifications {
         PendingIntent.FLAG_IMMUTABLE,
     )
 
+    /** An ongoing notification with `actions` (title, intent). */
     fun ongoing(
         context: Context,
         channel: String,
         text: String,
-        actionTitle: String,
-        action: PendingIntent,
-    ): Notification = Notification.Builder(context, channel)
-        .setSmallIcon(R.drawable.ic_notification)
-        .setContentTitle(context.getString(R.string.app_name))
-        .setContentText(text)
-        .setContentIntent(openApp(context))
-        .setOngoing(true)
-        .setCategory(Notification.CATEGORY_CALL)
-        .addAction(Notification.Action.Builder(null, actionTitle, action).build())
-        .build()
+        vararg actions: Pair<String, PendingIntent>,
+    ): Notification {
+        val builder = Notification.Builder(context, channel)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(context.getString(R.string.app_name))
+            .setContentText(text)
+            .setContentIntent(openApp(context))
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setCategory(Notification.CATEGORY_CALL)
+        for ((title, intent) in actions) {
+            builder.addAction(Notification.Action.Builder(null, title, intent).build())
+        }
+        return builder.build()
+    }
 }

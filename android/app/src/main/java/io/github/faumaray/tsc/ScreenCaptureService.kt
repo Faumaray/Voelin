@@ -65,8 +65,7 @@ class ScreenCaptureService : Service() {
             this,
             Notifications.CHANNEL_SCREEN,
             getString(R.string.screen_sharing),
-            getString(R.string.stop_sharing),
-            stop,
+            getString(R.string.stop_sharing) to stop,
         )
         try {
             // Must be in the foreground before getMediaProjection (Android 14).

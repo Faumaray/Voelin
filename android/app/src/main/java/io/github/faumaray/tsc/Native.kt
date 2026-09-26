@@ -38,4 +38,8 @@ object Native {
     /** "Disconnect" in the voice notification. */
     @JvmStatic
     external fun onDisconnectVoice()
+
+    /** "Mute" / "Unmute" in the voice notification. */
+    @JvmStatic
+    external fun onToggleMute()
 }

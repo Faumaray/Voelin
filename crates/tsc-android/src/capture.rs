@@ -29,8 +29,9 @@ struct State {
 	/// Answer for the pending `start`.
 	pending: Option<oneshot::Sender<Result<()>>>,
 	audio: Option<FrameSender<AudioBuffer>>,
-	first_frame_ns: Option<i64>,
-	first_audio_ns: Option<i64>,
+	/// Clock origin of frame and audio timestamps (both `CLOCK_MONOTONIC`
+	/// nanoseconds: `Image.timestamp`, `System.nanoTime`), so they stay in sync.
+	origin_ns: Option<i64>,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -82,7 +83,7 @@ impl ScreenProvider for Projection {
 				let _ = previous.send(Err(Error::Cancelled));
 			}
 			s.frames = Some(frames);
-			s.first_frame_ns = None;
+			s.origin_ns = None;
 		});
 		if let Err(e) = bridge::request_screen_capture(options.fps.clamp(1, 60), MAX_SIZE) {
 			with_state(|s| {
@@ -113,7 +114,6 @@ impl AudioProvider for PlaybackAudio {
 	fn start(&self, buffers: FrameSender<AudioBuffer>) -> Result<()> {
 		with_state(|s| {
 			s.audio = Some(buffers);
-			s.first_audio_ns = None;
 		});
 		let started = bridge::start_system_audio();
 		match started {
@@ -167,7 +167,7 @@ pub fn on_frame(
 	timestamp_ns: i64,
 ) -> bool {
 	with_state(|s| {
-		let timestamp = since(&mut s.first_frame_ns, timestamp_ns);
+		let timestamp = since(&mut s.origin_ns, timestamp_ns);
 		let Some(frames) = &s.frames else {
 			return false;
 		};
@@ -203,7 +203,7 @@ pub fn wants_audio() -> bool {
 /// Captured playback audio. Returns `false` once nobody wants it.
 pub fn on_audio(samples: Vec<f32>, channels: u16, timestamp_ns: i64) -> bool {
 	with_state(|s| {
-		let timestamp = since(&mut s.first_audio_ns, timestamp_ns);
+		let timestamp = since(&mut s.origin_ns, timestamp_ns);
 		let Some(audio) = &s.audio else {
 			return false;
 		};
