@@ -217,7 +217,11 @@ impl OpenH264Encoder {
 			.rate_control_mode(RateControlMode::Bitrate)
 			.usage_type(usage)
 			.profile(profile)
-			.skip_frames(false)
+			// Rate control only holds the bitrate if it may skip frames.
+			.skip_frames(true)
+			// Not supported for screen content; OpenH264 would warn and drop them.
+			.adaptive_quantization(self.config.content == ContentHint::Motion)
+			.background_detection(self.config.content == ContentHint::Motion)
 			.intra_frame_period(IntraFramePeriod::from_num_frames(
 				self.config.keyframe_interval.unwrap_or(0),
 			))
