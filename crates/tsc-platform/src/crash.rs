@@ -101,6 +101,15 @@ pub fn install(dir: impl Into<PathBuf>, enabled: bool) {
 	});
 }
 
+/// Panic if the `TSC_TEST_CRASH` environment variable is set, so testers can
+/// check crash reports with a release build (docs/testing/manual-matrix.md).
+/// Call right after [`install`].
+pub fn test_crash_if_requested() {
+	if std::env::var_os("TSC_TEST_CRASH").is_some_and(|v| !v.is_empty()) {
+		panic!("test crash requested with TSC_TEST_CRASH");
+	}
+}
+
 /// Turn recording on or off (the settings switch). No effect before
 /// [`install`].
 pub fn set_enabled(enabled: bool) {
