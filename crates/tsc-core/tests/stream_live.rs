@@ -42,6 +42,28 @@ async fn wait_for<T>(
 	.unwrap_or_else(|_| panic!("timed out waiting for {what}"))
 }
 
+/// Wait until both `f` and `g` matched an event, in either order. Events of
+/// the two sessions race, so waiting for them one after the other can drop one.
+async fn wait_both<A, B>(
+	rx: &mut Receiver<Event>,
+	what: &str,
+	mut f: impl FnMut(&Event) -> Option<A>,
+	mut g: impl FnMut(&Event) -> Option<B>,
+) -> (A, B) {
+	let (mut a, mut b) = (None, None);
+	wait_for(rx, what, |e| {
+		if a.is_none() {
+			a = f(e);
+		}
+		if b.is_none() {
+			b = g(e);
+		}
+		(a.is_some() && b.is_some()).then_some(())
+	})
+	.await;
+	(a.unwrap(), b.unwrap())
+}
+
 async fn connect(
 	engine: &Engine,
 	events: &mut Receiver<Event>,
@@ -81,21 +103,24 @@ async fn ts6_stream_between_sessions() {
 	// Stream, asking for each viewer.
 	let setup = StreamSetup { name: format!("engine {tag}"), ..Default::default() };
 	engine.send(Command::StartStream { session: 1, setup, auto_accept: false });
-	let (id, sink) = wait_for(&mut events, "stream live", |e| match e {
-		Event::StreamState { session: 1, state: StreamState::Live { id, sink } } => {
-			Some((id.clone(), sink.clone()))
+	// The viewer's list often updates before the streamer goes live, so wait
+	// for both at once and remember the latest list.
+	let mut live = None;
+	let mut listed = Vec::new();
+	let (id, sink) = wait_for(&mut events, "stream live and in the viewer's list", |e| {
+		match e {
+			Event::StreamState { session: 1, state: StreamState::Live { id, sink } } => {
+				live = Some((id.clone(), sink.clone()));
+			}
+			Event::StreamState { session: 1, state: StreamState::Ended(reason) } => {
+				panic!("stream ended: {reason:?}")
+			}
+			Event::StreamsChanged { session: 2, streams } => {
+				listed = streams.iter().map(|s| s.id.clone()).collect();
+			}
+			_ => {}
 		}
-		Event::StreamState { session: 1, state: StreamState::Ended(reason) } => {
-			panic!("stream ended: {reason:?}")
-		}
-		_ => None,
-	})
-	.await;
-	wait_for(&mut events, "stream in the viewer's list", |e| match e {
-		Event::StreamsChanged { session: 2, streams } if streams.iter().any(|s| s.id == id) => {
-			Some(())
-		}
-		_ => None,
+		live.clone().filter(|(id, _)| listed.contains(id))
 	})
 	.await;
 
@@ -122,28 +147,31 @@ async fn ts6_stream_between_sessions() {
 	})
 	.await;
 	engine.send(Command::AcceptViewer { session: 1, viewer, accept: true });
-	wait_for(&mut events, "watching", |e| match e {
-		Event::WatchState { session: 2, stream_id, state: WatchState::Connected }
-			if *stream_id == id =>
-		{
-			Some(())
-		}
-		Event::WatchState { session: 2, state: WatchState::Ended(reason), .. } => {
-			panic!("watching ended: {reason:?}")
-		}
-		_ => None,
-	})
-	.await;
-	wait_for(&mut events, "viewer connected", |e| match e {
-		Event::StreamViewers { session: 1, viewers }
-			if viewers
-				.iter()
-				.any(|v| v.client.0 == viewer && v.state == ViewerState::Connected) =>
-		{
-			Some(())
-		}
-		_ => None,
-	})
+	wait_both(
+		&mut events,
+		"watching and viewer connected",
+		|e| match e {
+			Event::WatchState { session: 2, stream_id, state: WatchState::Connected }
+				if *stream_id == id =>
+			{
+				Some(())
+			}
+			Event::WatchState { session: 2, state: WatchState::Ended(reason), .. } => {
+				panic!("watching ended: {reason:?}")
+			}
+			_ => None,
+		},
+		|e| match e {
+			Event::StreamViewers { session: 1, viewers }
+				if viewers
+					.iter()
+					.any(|v| v.client.0 == viewer && v.state == ViewerState::Connected) =>
+			{
+				Some(())
+			}
+			_ => None,
+		},
+	)
 	.await;
 	assert!(sink.take_keyframe_request(), "a new viewer asks for a keyframe");
 
@@ -175,17 +203,22 @@ async fn ts6_stream_between_sessions() {
 	})
 	.await;
 	engine.send(Command::StopStream { session: 1 });
-	wait_for(&mut events, "stream ended", |e| match e {
-		Event::StreamState { session: 1, state: StreamState::Ended(EndReason::Local) } => Some(()),
-		_ => None,
-	})
-	.await;
-	wait_for(&mut events, "stream gone from the viewer's list", |e| match e {
-		Event::StreamsChanged { session: 2, streams } if streams.iter().all(|s| s.id != id) => {
-			Some(())
-		}
-		_ => None,
-	})
+	wait_both(
+		&mut events,
+		"stream ended and gone from the viewer's list",
+		|e| match e {
+			Event::StreamState { session: 1, state: StreamState::Ended(EndReason::Local) } => {
+				Some(())
+			}
+			_ => None,
+		},
+		|e| match e {
+			Event::StreamsChanged { session: 2, streams } if streams.iter().all(|s| s.id != id) => {
+				Some(())
+			}
+			_ => None,
+		},
+	)
 	.await;
 	assert!(!sink.send(tsc_core::stream::EncodedFrame {
 		kind: MediaKind::Audio,
