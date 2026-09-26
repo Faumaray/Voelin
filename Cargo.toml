@@ -12,6 +12,7 @@ members = [
 	"crates/tsc-core",
 	"crates/tsc-gateway",
 	"crates/tsc-gateway-proto",
+	"crates/tsc-media",
 	"crates/tsc-model",
 	"crates/tsc-observer",
 	"crates/tsc-query",
