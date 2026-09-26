@@ -1,18 +1,26 @@
 //! `tsctl connect ... stream start|list|watch`: TeamSpeak 6 streams.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use futures::prelude::*;
 use tokio::io::{AsyncBufReadExt, BufReader, Lines, Stdin};
 use tokio::time::{Instant, Interval, sleep_until};
+use tsc_core::media::tsc_media::capture::SourceId;
+use tsc_core::media::tsc_media::{Codecs, VideoFrame, convert};
+use tsc_core::media::{
+	CaptureBackend, EncodedSource, Latest, Streamer, StreamerConfig, VideoPipeline, peer_config,
+	stream_codec,
+};
 use tsc_model::ServerFlavor;
 use tsc_stream::{
 	EndReason, FrameSource, MediaKind, Output, PeerConfig, Request, StreamEvent, StreamInfo,
-	StreamNotification, StreamSetup, StreamerEvent, StreamerOptions, Streams, SyntheticSource,
-	WatchEvent,
+	StreamNotification, StreamSetup, StreamerEvent, StreamerOptions, Streams, WatchEvent,
 };
 use tsclientlib::events::{Event, PropertyId};
 use tsclientlib::prelude::*;
@@ -35,28 +43,36 @@ pub struct StreamArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum StreamCommand {
-	/// Stream in our channel. Without `--auto-accept`, answer join requests on
-	/// stdin: `accept <clid>`, `deny <clid>`, `kick <clid>`, `stop`.
+	/// Stream in our channel: the screen (VP8) and system audio (Opus).
+	/// Without `--auto-accept`, answer join requests on stdin: `accept
+	/// <clid>`, `deny <clid>`, `kick <clid>`, `stop`.
 	Start {
 		/// Stream name.
 		#[arg(long, default_value = "tsctl")]
 		name: String,
-		/// Send synthetic frames (tiny VP8 keyframes and silent Opus); needed
-		/// until capture and encoders exist.
-		#[arg(long)]
+		/// What to capture: `synthetic` (a moving test pattern and a tone),
+		/// `x11[:<monitor>]`, `screen[:<monitor>]` (this session's backend),
+		/// `window:<id>` or `portal` (the desktop's dialog).
+		#[arg(long, default_value = "screen")]
+		source: String,
+		/// Same as `--source synthetic`.
+		#[arg(long, conflicts_with = "source")]
 		synthetic: bool,
+		/// Size of the test pattern.
+		#[arg(long, default_value = "1280x720")]
+		size: String,
 		/// Accept every viewer.
 		#[arg(long)]
 		auto_accept: bool,
 		/// Stop after this many seconds [default: until Ctrl-C].
 		#[arg(long)]
 		seconds: Option<u64>,
-		/// Synthetic video frames per second.
+		/// Video frames per second.
 		#[arg(long, default_value_t = 30)]
 		fps: u32,
-		/// Size of each synthetic video frame in bytes.
-		#[arg(long, default_value_t = 4000)]
-		frame_size: usize,
+		/// Video bitrate in kbit/s (announced in `setupstream` too).
+		#[arg(long, default_value_t = 4608)]
+		bitrate: u32,
 		/// No audio track.
 		#[arg(long)]
 		no_audio: bool,
@@ -76,12 +92,15 @@ pub enum StreamCommand {
 		/// Nickname of the streamer.
 		#[arg(long)]
 		streamer_nick: Option<String>,
-		/// Exit successfully once this many video frames arrived.
+		/// Exit successfully once this many video frames were decoded.
 		#[arg(long)]
 		expect_frames: Option<u64>,
 		/// Give up after this many seconds; fails if `--expect-frames` was not reached.
 		#[arg(long)]
 		timeout: Option<u64>,
+		/// Save the last decoded picture as PNG.
+		#[arg(long)]
+		save_frame: Option<PathBuf>,
 	},
 }
 
@@ -99,47 +118,90 @@ pub async fn run(con: &mut Connection, args: &StreamArgs) -> Result<()> {
 	} else if args.no_stun {
 		config.stun_servers.clear();
 	}
+	// Offer the codec we encode, accept what we decode.
+	let codecs = Arc::new(Codecs::new());
+	let config = peer_config(&codecs, config);
+	let codec = stream_codec(&codecs, &config);
 	let mut driver = Driver { streams: Streams::new(own, config), pending: HashMap::new() };
 	let result = match &args.command {
 		StreamCommand::Start {
 			name,
+			source,
 			synthetic,
+			size,
 			auto_accept,
 			seconds,
 			fps,
-			frame_size,
+			bitrate,
 			no_audio,
 		} => {
-			let source = frame_source(*synthetic, *fps, *frame_size, !no_audio)?;
-			let setup = StreamSetup { name: name.clone(), audio: !no_audio, ..Default::default() };
+			let source = if *synthetic { "synthetic" } else { source.as_str() };
+			let (source, backend) = parse_source(source)?;
+			let Some(codec) = codec else { bail!("no video encoder in this build") };
+			let config = StreamerConfig {
+				source,
+				backend,
+				fps: *fps,
+				bitrate_kbps: *bitrate,
+				codec,
+				audio: !no_audio,
+				synthetic_size: parse_size(size)?,
+				..StreamerConfig::default()
+			};
+			let streamer = Streamer::start(&codecs, config).await.context("capture")?;
+			println!("capturing with {} ({codec})", streamer.backend());
+			if let Some(e) = streamer.audio_error() {
+				println!("no system audio: {e}");
+			}
+			let setup = StreamSetup {
+				name: name.clone(),
+				bitrate: *bitrate,
+				audio: streamer.has_audio(),
+				..Default::default()
+			};
 			let options = StreamerOptions { setup, auto_accept: *auto_accept };
+			let source = EncodedSource::new(streamer);
 			start(con, &mut driver, options, source, seconds.map(Duration::from_secs)).await
 		}
 		StreamCommand::List { settle_ms } => {
 			list(con, &mut driver, Duration::from_millis(*settle_ms)).await
 		}
-		StreamCommand::Watch { id, streamer_nick, expect_frames, timeout } => {
+		StreamCommand::Watch { id, streamer_nick, expect_frames, timeout, save_frame } => {
 			let target = Target { id: id.clone(), streamer_nick: streamer_nick.clone() };
 			let timeout = timeout.map(Duration::from_secs);
-			watch(con, &mut driver, &target, *expect_frames, timeout).await
+			let expect = *expect_frames;
+			let save = save_frame.as_deref();
+			watch(con, &mut driver, codecs, &target, expect, timeout, save).await
 		}
 	};
 	driver.finish(con).await;
 	result
 }
 
-/// Where a streamer's frames come from. Capture and encoders (`tsc-media`)
-/// plug in here.
-fn frame_source(
-	synthetic: bool,
-	fps: u32,
-	frame_size: usize,
-	audio: bool,
-) -> Result<Box<dyn FrameSource>> {
-	if !synthetic {
-		bail!("only synthetic frames are available yet: pass --synthetic");
-	}
-	Ok(Box::new(SyntheticSource::new(fps, frame_size, audio)))
+/// `synthetic`, `x11[:<monitor>]`, `screen[:<monitor>]`, `window:<id>`, `portal`.
+fn parse_source(spec: &str) -> Result<(SourceId, CaptureBackend)> {
+	let (kind, arg) = spec.split_once(':').map_or((spec, None), |(k, a)| (k, Some(a)));
+	let number = |default: u64| -> Result<u64> {
+		arg.map_or(Ok(default), |a| {
+			let a = a.trim_start_matches("0x");
+			let radix = if a.len() < arg.unwrap_or_default().len() { 16 } else { 10 };
+			u64::from_str_radix(a, radix).with_context(|| format!("bad number in {spec:?}"))
+		})
+	};
+	Ok(match kind {
+		"synthetic" => (SourceId::Synthetic, CaptureBackend::Auto),
+		"portal" => (SourceId::Portal, CaptureBackend::Auto),
+		"x11" => (SourceId::Monitor(number(0)? as u32), CaptureBackend::X11),
+		"screen" | "monitor" => (SourceId::Monitor(number(0)? as u32), CaptureBackend::Auto),
+		"window" if arg.is_some() => (SourceId::Window(number(0)?), CaptureBackend::Auto),
+		_ => bail!("unknown source {spec:?}: synthetic, x11[:N], screen[:N], window:<id>, portal"),
+	})
+}
+
+/// `<width>x<height>`.
+fn parse_size(size: &str) -> Result<(u32, u32)> {
+	let parsed = size.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
+	parsed.with_context(|| format!("bad size {size:?}, expected e.g. 1280x720"))
 }
 
 /// What woke the driver.
@@ -290,7 +352,7 @@ async fn start(
 	con: &mut Connection,
 	driver: &mut Driver,
 	options: StreamerOptions,
-	mut source: Box<dyn FrameSource>,
+	mut source: EncodedSource,
 	length: Option<Duration>,
 ) -> Result<()> {
 	let auto_accept = options.auto_accept;
@@ -357,6 +419,10 @@ async fn start(
 				StreamerEvent::KeyframeRequest => source.request_keyframe(),
 				StreamerEvent::Ended(reason) => {
 					println!("sent {video} video / {audio} audio frames to connected viewers");
+					let stats = source.streamer().stats();
+					if let Some(e) = &stats.error {
+						println!("last encoder error: {e}");
+					}
 					return match reason {
 						EndReason::Local => Ok(()),
 						other => bail!("stream ended: {}", end_text(&other)),
@@ -458,19 +524,86 @@ impl Target {
 	}
 }
 
+/// Save a picture as an RGBA PNG.
+fn save_png(picture: &VideoFrame, path: &Path) -> Result<()> {
+	let rgba = convert::to_rgba_vec(picture)?;
+	let file = std::io::BufWriter::new(std::fs::File::create(path)?);
+	let mut encoder = png::Encoder::new(file, picture.width, picture.height);
+	encoder.set_color(png::ColorType::Rgba);
+	encoder.set_depth(png::BitDepth::Eight);
+	encoder.write_header()?.write_image_data(&rgba)?;
+	Ok(())
+}
+
 async fn watch(
 	con: &mut Connection,
 	driver: &mut Driver,
+	codecs: Arc<Codecs>,
 	target: &Target,
 	expect: Option<u64>,
 	timeout: Option<Duration>,
+	save: Option<&Path>,
 ) -> Result<()> {
 	let deadline = timeout.map(|t| Instant::now() + t);
 	let mut watching: Option<String> = None;
 	let (mut video, mut audio) = (0u64, 0u64);
 	let mut codec = None;
 	let mut waiting_told = false;
+	// Decoding runs on its own thread; the loop checks its progress.
+	let latest = Arc::new(Latest::new());
+	let keyframe_wanted = Arc::new(AtomicBool::new(false));
+	let decoder = VideoPipeline::new(
+		codecs,
+		{
+			let latest = latest.clone();
+			move |picture| {
+				latest.put(picture);
+			}
+		},
+		{
+			let wanted = keyframe_wanted.clone();
+			move || wanted.store(true, Ordering::Relaxed)
+		},
+	);
+	let mut tick = tokio::time::interval(Duration::from_millis(100));
+	let mut first_picture = true;
+	let mut last_picture: Option<VideoFrame> = None;
+	let summary = |video: u64, audio: u64, decoder: &VideoPipeline| {
+		let stats = decoder.stats();
+		println!(
+			"received {video} video / {audio} audio frames, decoded {} pictures{}",
+			stats.decoded,
+			stats.error.map(|e| format!(" (last error: {e})")).unwrap_or_default()
+		);
+	};
+	let save_last = |last: &Option<VideoFrame>| -> Result<()> {
+		match (save, last) {
+			(Some(path), Some(picture)) => {
+				save_png(picture, path)?;
+				println!("saved {}", path.display());
+				Ok(())
+			}
+			(Some(_), None) => bail!("no picture to save"),
+			(None, _) => Ok(()),
+		}
+	};
 	loop {
+		if let Some(picture) = latest.take() {
+			if first_picture {
+				println!("first picture decoded ({}x{})", picture.width, picture.height);
+				first_picture = false;
+			}
+			last_picture = Some(picture);
+		}
+		if let Some(id) = &watching
+			&& keyframe_wanted.swap(false, Ordering::Relaxed)
+		{
+			driver.streams.request_keyframe(id);
+		}
+		if expect.is_some_and(|n| decoder.stats().decoded >= n) {
+			summary(video, audio, &decoder);
+			return save_last(&last_picture);
+		}
 		if watching.is_none() {
 			if let Some((id, streamer)) = target.find(con, &driver.streams) {
 				println!("watching {id} of {} (clid {})", nick(con, streamer), streamer.0);
@@ -497,29 +630,26 @@ async fn watch(
 					if f.kind == MediaKind::Video && codec.replace(f.codec).is_none() {
 						println!("first video frame ({:?}, {} bytes)", f.codec, f.data.len());
 					}
-					if expect.is_some_and(|n| video >= n) {
-						println!("received {video} video / {audio} audio frames");
-						return Ok(());
-					}
+					decoder.push(f);
 				}
 				WatchEvent::Ended(reason) => {
-					println!("received {video} video / {audio} audio frames");
+					summary(video, audio, &decoder);
 					match expect {
-						Some(n) => bail!("{} before {n} video frames arrived", end_text(&reason)),
+						Some(n) => bail!("{} before {n} pictures were decoded", end_text(&reason)),
 						None => {
 							println!("{}", end_text(&reason));
-							return Ok(());
+							return save_last(&last_picture.or_else(|| latest.take()));
 						}
 					}
 				}
 			}
 		}
-		match driver.next(con, deadline, None, None).await? {
+		match driver.next(con, deadline, Some(&mut tick), None).await? {
 			Wake::Deadline | Wake::Interrupted => {
-				println!("received {video} video / {audio} audio frames");
+				summary(video, audio, &decoder);
 				return match expect {
-					Some(n) => bail!("timed out waiting for {n} video frames"),
-					None => Ok(()),
+					Some(n) => bail!("timed out waiting for {n} decoded pictures"),
+					None => save_last(&last_picture.or_else(|| latest.take())),
 				};
 			}
 			_ => {}

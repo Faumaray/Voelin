@@ -67,10 +67,10 @@ fuzz/                cargo-fuzz targets
 | `tsc-store` | Identities, bookmarks, settings, chat cache, secrets (keyring / Android Keystore) | done |
 | `tsc-audio` | Capture/playback, Opus, echo cancellation, resampling, jitter buffer, mixer, VAD/push-to-talk | v0 (no AEC yet) |
 | `tsc-stream` | TS6 stream commands, JSON signalling, str0m peer connections, host/STUN candidates, streamer/viewer sessions, frame-source seam | sessions + transport |
-| `tsc-core` | Engine: runtime, per-server sessions, merge of voice/gateway/query sources, event bus, command API, streams on TS6 | done (streams with synthetic frames) |
-| `tsc-ui` | Slint UI and the desktop binary | done (no streams yet) |
-| `tsc-media` | Screen and system-audio capture backends (PipeWire portal, X11, Windows Graphics Capture, Android MediaProjection), video codecs | planned |
-| `tsc-platform` | Global hotkeys, notifications, paths | planned |
+| `tsc-core` | Engine: runtime, per-server sessions, merge of voice/gateway/query sources, event bus, command API, audio settings and volumes, streams on TS6; `media` module (capture → encoder → stream, stream → decoder) | done |
+| `tsc-ui` | Slint UI and the desktop binary: streams panel, viewer, share dialog, audio / hotkey / codec settings | done (desktop) |
+| `tsc-media` | Screen and system-audio capture backends (PipeWire portal, X11, Windows Graphics Capture, Android MediaProjection), video codecs | done (desktop hardware encoders planned; MediaCodec not run on a device yet) |
+| `tsc-platform` | Global hotkeys, notifications, paths, crash reports, notices | done |
 | `tsc-android` + `android/` | Android library + Gradle/Kotlin app (foreground services for voice and screen capture); see [android.md](android.md) | builds, not yet run on a device |
 
 ## Merging sources
@@ -95,9 +95,20 @@ channel. Its tests drive two instances through a fake relay server.
 In `tsc-core` a stream task per voice connection runs `Streams`; the voice task
 forwards `MessageEvent`s and sends the requests. Encoders push frames through
 the `StreamSink` of `StreamState::Live`; received frames of watched streams go
-to `Engine::subscribe_frames`, not the event bus. `tsc-stream::FrameSource` is
-the seam for capture and encoders (`tsc-media`); `SyntheticSource` stands in
-for tests and `tsctl stream start --synthetic`.
+to `Engine::subscribe_frames`, not the event bus. The audio of watched streams
+goes straight to the session's audio thread, which mixes it like a talker
+with its own volume (`Command::SetStreamVolume`).
+
+`tsc-core::media` (feature `media`) connects this to `tsc-media`:
+`Streamer` captures (screen, window, portal or the test pattern, plus system
+audio), encodes with the codec of our offer (VP8 by default; the offer carries
+only the codec we encode, since every viewer gets the same frames) and Opus,
+and feeds the `StreamSink`, honouring keyframe requests. `Viewer` decodes a
+watched stream on its own thread (skipping to the next keyframe after losses
+and asking for one) and hands pictures to the UI, which keeps only the newest
+(`Latest`). `EncodedSource` wraps a `Streamer` as a `tsc-stream::FrameSource`
+for `tsctl stream start`; `SyntheticSource` (fake VP8 bytes) remains for
+tsc-stream's own tests.
 
 ## Milestones
 

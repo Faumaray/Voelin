@@ -5,9 +5,11 @@ use std::sync::Arc;
 
 use tokio::sync::{broadcast, mpsc};
 use tracing::debug;
+use tsc_audio::AudioSettings;
 use tsc_model::{ChatMessage, ChatTarget, Presence};
+use tsclientlib::ClientId;
 
-use crate::audio::{self, AudioHandle, AudioIn};
+use crate::audio::{self, AudioEvent, AudioHandle, AudioIn};
 use crate::gateway::{self, GatewayCmd, GatewayEvent};
 use crate::query::{self, QueryCmd, QueryEvent};
 use crate::route::{ChatRoute, Dedup, route_chat};
@@ -24,9 +26,10 @@ impl SessionHandle {
 		id: SessionId,
 		events: broadcast::Sender<Event>,
 		frames: broadcast::Sender<StreamFrame>,
+		audio_settings: AudioSettings,
 	) -> Self {
 		let (tx, rx) = mpsc::unbounded_channel();
-		tokio::spawn(Session::new(id, events, frames).run(rx));
+		tokio::spawn(Session::new(id, events, frames, audio_settings).run(rx));
 		Self { tx }
 	}
 
@@ -42,7 +45,7 @@ enum SourceEvent {
 	Gateway(u64, GatewayEvent),
 	Query(u64, QueryEvent),
 	AudioOut(u64, tsproto_packets::packets::OutPacket),
-	AudioError(String),
+	Audio(u64, AudioEvent),
 }
 
 struct Session {
@@ -58,6 +61,7 @@ struct Session {
 	query: Option<(u64, mpsc::UnboundedSender<QueryCmd>)>,
 	query_presence: Option<Presence>,
 	audio: Option<AudioHandle>,
+	audio_settings: AudioSettings,
 	/// Streams of the voice connection (TeamSpeak 6 only).
 	streams: Option<StreamHandle>,
 	stream_peer: PeerConfig,
@@ -75,6 +79,7 @@ impl Session {
 		id: SessionId,
 		events: broadcast::Sender<Event>,
 		frames: broadcast::Sender<StreamFrame>,
+		audio_settings: AudioSettings,
 	) -> Self {
 		let (sources_tx, sources_rx) = mpsc::unbounded_channel();
 		Self {
@@ -90,6 +95,7 @@ impl Session {
 			query: None,
 			query_presence: None,
 			audio: None,
+			audio_settings,
 			streams: None,
 			stream_peer: PeerConfig::default(),
 			frames,
@@ -160,12 +166,13 @@ impl Session {
 				self.stream_peer = options.stream_peer.clone();
 				let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 				let (ev_tx, ev_rx) = mpsc::unbounded_channel();
+				self.audio = None;
 				if options.audio {
 					let (out_tx, out_rx) = mpsc::unbounded_channel();
-					let (err_tx, err_rx) = mpsc::unbounded_channel();
-					self.audio = Some(audio::spawn(out_tx, err_tx, false));
+					let (audio_tx, audio_rx) = mpsc::unbounded_channel();
+					self.audio = Some(audio::spawn(out_tx, audio_tx, self.audio_settings.clone()));
 					self.forward(out_rx, move |p| SourceEvent::AudioOut(generation, p));
-					self.forward(err_rx, SourceEvent::AudioError);
+					self.forward(audio_rx, move |e| SourceEvent::Audio(generation, e));
 				}
 				tokio::spawn(voice::run(*options, cmd_rx, ev_tx));
 				self.forward(ev_rx, move |e| SourceEvent::Voice(generation, e));
@@ -264,6 +271,29 @@ impl Session {
 				}
 				self.emit_state();
 			}
+			Command::SetAudioSettings(settings) => {
+				self.audio_settings = (*settings).clone();
+				if let Some(a) = &self.audio {
+					a.send(AudioIn::Settings(settings));
+				}
+			}
+			// Without audio there is nothing to adjust; the UI sends volumes
+			// again after connecting.
+			Command::SetClientVolume { client, volume, .. } => {
+				if let Some(a) = &self.audio {
+					a.send(AudioIn::ClientVolume { client: ClientId(client), volume });
+				}
+			}
+			Command::SetClientMuted { client, muted, .. } => {
+				if let Some(a) = &self.audio {
+					a.send(AudioIn::ClientMuted { client: ClientId(client), muted });
+				}
+			}
+			Command::SetStreamVolume { stream_id, volume, .. } => {
+				if let Some(a) = &self.audio {
+					a.send(AudioIn::StreamVolume { stream: stream_id, volume });
+				}
+			}
 			Command::StartStream { setup, auto_accept, .. } => {
 				self.stream_input(StreamInput::Start { setup, auto_accept });
 			}
@@ -287,7 +317,7 @@ impl Session {
 			Command::RequestStreamKeyframe { stream_id, .. } => {
 				self.stream_input(StreamInput::RequestKeyframe { stream_id });
 			}
-			Command::CloseSession { .. } => {}
+			Command::CloseSession { .. } | Command::TestMicrophone { .. } => {}
 		}
 	}
 
@@ -389,7 +419,12 @@ impl Session {
 					let _ = tx.send(VoiceCmd::Audio(packet));
 				}
 			}
-			SourceEvent::AudioError(message) => self.error(message),
+			SourceEvent::Audio(g, event) if self.is_current(Source::Voice, g) => match event {
+				AudioEvent::Error(message) => self.error(message),
+				AudioEvent::Level { db, sending } => {
+					self.emit(Event::InputLevel { session: Some(self.id), level_db: db, sending })
+				}
+			},
 			_ => debug!("event from a replaced source ignored"),
 		}
 	}
@@ -398,6 +433,7 @@ impl Session {
 		match e {
 			VoiceEvent::Connected { name, flavor, own_client } => {
 				self.state.voice = VoiceState::Connected;
+				self.state.own_client = Some(own_client);
 				self.emit_state();
 				let capabilities = flavor.capabilities();
 				if capabilities.streams
@@ -410,12 +446,19 @@ impl Session {
 						voice.clone(),
 						self.events.clone(),
 						self.frames.clone(),
+						self.audio.clone(),
 					));
 				}
 				self.emit(Event::ServerInfo { session: self.id, name, flavor, capabilities });
 				self.reopen_relayed_chats();
 			}
 			VoiceEvent::Presence(p) => {
+				// Client ids are reused: forget the volumes of those who left.
+				if let (Some(a), Some(old)) = (&self.audio, &self.voice_presence) {
+					for id in old.clients.keys().filter(|id| !p.clients.contains_key(id)) {
+						a.send(AudioIn::ClientLeft(ClientId(*id)));
+					}
+				}
 				if let Some(s) = &self.streams {
 					let clients: BTreeMap<_, _> =
 						p.clients.values().map(|c| (c.id, c.streaming)).collect();
@@ -459,6 +502,7 @@ impl Session {
 				self.audio = None;
 				self.state.voice = VoiceState::Disconnected;
 				self.state.own_channel = None;
+				self.state.own_client = None;
 				self.emit_state();
 				if let Some(reason) = reason {
 					self.error(format!("voice: {reason}"));

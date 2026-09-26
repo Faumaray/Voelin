@@ -38,6 +38,46 @@ while let Some(frame) = frames.recv().await {
 }
 ```
 
+## The pipeline in `tsc-core` (`media` module)
+
+Feature `media` of tsc-core builds the module with whatever tsc-media backends
+are enabled (on Android: MediaCodec and the app's capture source);
+`media-desktop` adds tsc-media's default backends (libvpx, OpenH264, X11,
+PipeWire). The desktop app and tsctl use `media-desktop`, the Android app
+`media`. Codecs are always chosen through `Codecs`, so each build uses its own.
+
+```
+streamer: ScreenCapture ─ VideoEncoder (codec of our offer) ─┐
+          AudioCapture ─ 20 ms stereo Opus (128 kbit/s) ─────┴─ MediaSink: StreamSink / EncodedSource
+viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder ─ picture callback ─ Latest
+          stream audio ─ session audio thread (mixer, own volume) ─ speakers
+```
+
+- `Streamer::start(&codecs, StreamerConfig)` starts capturing right away (the
+  portal asks the user then), so a cancelled dialog never starts a stream;
+  frames are encoded only after `attach(sink)`, i.e. once the stream is live.
+  The encoder runs at the setup's bitrate; a viewer's keyframe request (on
+  the sink) forces a keyframe, and is kept until the encoder produced one.
+  Audio follows the capture clock across gaps. With the test pattern
+  (`SourceId::Synthetic`) the audio is a quiet sine tone. The portal's restore
+  token is available afterwards (`restore_token()`) to store.
+- `peer_config(&codecs, config)` makes a viewer accept only what we decode
+  and a streamer offer only the codec it encodes (VP8 unless changed): all
+  viewers get the same frames, and a viewer picks from the offer.
+- `VideoPipeline` decodes on its own thread. It starts at a keyframe, and
+  after a lost frame (`contiguous == false`, a lagging frame bus, a queue
+  longer than 30 frames) or a decoder error it skips to the next keyframe,
+  asking for one at most every 500 ms. Keyframes are recognised from the
+  bitstream (VP8 frame tag, VP9 header, H.264 IDR/SPS NAL units, AV1
+  sequence header OBU).
+- `Viewer` feeds a `VideoPipeline` from the engine and sends
+  `RequestStreamKeyframe`; `LocalPreview` runs capture → encoder → decoder
+  without a server (the desktop app's `TSC_DEMO_STREAM`).
+- The audio of watched streams does not go through this module: the session
+  hands the Opus frames to its audio thread, which plays them through the
+  jitter buffer and mixer under a made-up client id, with its own volume.
+  Playback is mono like the rest of the audio path.
+
 ## Codecs
 
 Preference: a viewer accepts VP9 > VP8 > AV1 > H.264; a streamer encodes with
@@ -187,6 +227,12 @@ run on Windows yet.
 | Portal capture, PipeWire video and audio streams | – | compiles only (no portal or PipeWire daemon here) |
 | Windows Graphics Capture, WASAPI | – | type-checked for `x86_64-pc-windows-gnu` only |
 | Hardware encoders | – | stubs |
+| Test pattern → VP8 → decoder, rectangle position and colour | `tsc-core` `media::tests::local_preview_decodes_the_pattern` | tested |
+| Test pattern → two engine stream tasks → str0m peers on loopback → decoder | `tsc-core` `stream::tests::test_pattern_through_stream_tasks` | tested |
+| Stream audio (RTP time → jitter buffer ids, volume, end) | `tsc-core` `audio::tests::stream_audio_with_volume`, stream task test | tested |
+| The same through the TeamSpeak 6 server | `tsc-core/tests/media_live.rs` (`TSC_LIVE=1`), `tsctl stream start --synthetic` / `watch --expect-frames` | tested against 6.0.0-beta13.1 |
+| X11 monitor capture → VP8 → server → decoder | `tsctl stream start --source x11` under Xvfb | tested manually (debug build: about 8 fps at 1400×900) |
+| Desktop app watching and sharing | Xvfb, `TSC_AUTOWATCH` / `TSC_AUTOSHARE` against tsctl, screenshots | tested manually |
 | External capture providers (start, refusal, end of capture, default selection) | unit tests | tested |
 | MediaCodec buffer layouts (I420, NV12 with padding, `MediaImage2` NV21, crop) | unit tests (`codec::image_layout`) | tested |
 | MediaCodec encoders and decoders | – | compiles for `aarch64-linux-android` only (no device or emulator here) |

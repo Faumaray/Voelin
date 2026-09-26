@@ -173,14 +173,18 @@ cannot discover the ids of unknown streams), `updatestream` (`stream_id`,
 `stream_name`, `max_width`, `max_height`, `max_framerate`, `properties`),
 `notifystreamupdated`, `notifystreamattendees` (`return_code`, `client_id`).
 
-### Streams that started before we joined (open)
+### Streams that started before we joined (confirmed, 6.0.0-beta13.1, 2026-09-26)
 
 `initserver` and `notifycliententerview` carry `client_is_streaming`, but no
-stream id. Whether the server sends `notifystreamstarted` for running streams
-to a client that connects or enters the channel later is not confirmed yet.
-`tsctl stream list` shows such streamers as "id not announced"; `tsctl stream
-watch --id <uuid>` can still join when the streamer is known (`--streamer-nick`,
-or the only other client streaming). The smoke test starts the viewer first.
+stream id, and the server does not send `notifystreamstarted` for running
+streams to a client that connects later: a `tsctl stream list` started while
+the desktop app streamed printed only "id not announced", while one connected
+before the stream started got the id. Entering the channel later was not
+probed separately. `tsctl stream list` shows such streamers as "id not
+announced"; `tsctl stream watch --id <uuid>` can still join when the streamer
+is known (`--streamer-nick`, or the only other client streaming). The desktop
+app lists them as streaming but not watchable. The smoke test starts the
+viewer first. How the official client learns these ids is open.
 
 ### WebRTC interop with Chromium (confirmed, Chromium 141, 2026-09-26)
 
@@ -213,7 +217,8 @@ libwebrtc, the stack the official client is built on:
 - [ ] Which permission gates `setupstream` (error 2568).
 - [x] Contents of `notifystreamstarted` (see probe results).
 - [ ] Contents of `notifystreaminfo` (`requeststreaminfo id=<uuid>`).
-- [ ] Whether a client that joins later is told about running streams (see above).
+- [x] Whether a client that connects later is told about running streams: no (see above).
+- [ ] How the official client finds running streams after connecting.
 - [ ] Interop with the official TS6 client (its offer/answer details, codecs it
       actually picks, whether it trickles candidates, mDNS host candidates).
       Chromium's WebRTC stack interoperates (see above).

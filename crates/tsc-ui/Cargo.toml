@@ -21,23 +21,36 @@ anyhow = "1.0.104"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 dirs = "6"
 png = "0.18"
+serde = { version = "1", features = ["derive"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-tsc-core = { path = "../tsc-core" }
+tsc-audio = { path = "../tsc-audio" }
+tsc-core = { path = "../tsc-core", default-features = false, features = ["audio-device"] }
 tsc-model = { path = "../tsc-model" }
+# Crash reports and notices everywhere; hotkey backends on desktop (below).
+tsc-platform = { path = "../tsc-platform", default-features = false }
 tsc-query = { path = "../tsc-query" }
 tsc-store = { path = "../tsc-store" }
 tsclientlib = { path = "../proto/tsclientlib" }
 
-# Android (tsc-android): no keyring backend (the app passes Keystore-backed
-# secrets) and no winit/femtovg (the app picks Slint's Android backend).
+# Desktop: the keyring for passwords, stream media with libvpx, OpenH264, X11
+# and PipeWire, global hotkeys through the portal and X11.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 slint = { version = "1.18", features = ["renderer-software"] }
+tsc-core = { path = "../tsc-core", default-features = false, features = ["media-desktop"] }
+tsc-platform = { path = "../tsc-platform" }
 tsc-store = { path = "../tsc-store", features = ["keyring"] }
 
+# Android (tsc-android): no keyring backend (the app passes Keystore-backed
+# secrets), no winit/femtovg (the app picks Slint's Android backend), stream
+# media through MediaCodec and the app's capture source.
 [target.'cfg(target_os = "android")'.dependencies]
 slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "renderer-software"] }
+tsc-core = { path = "../tsc-core", default-features = false, features = ["media"] }
+
+[dev-dependencies]
+serde_json = "1"
 
 [build-dependencies]
 slint-build = "1.18"

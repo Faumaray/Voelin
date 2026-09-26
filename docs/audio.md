@@ -67,6 +67,30 @@ measure the end-to-end latency:
 | +200 ppm | 73 / 131 ms | 112 ms | 125 ms |
 | -200 ppm | 67 / 95 ms | 82 ms | 84 ms |
 
+## Settings, levels and volumes
+
+The engine keeps one `AudioSettings` for all sessions (`Command::SetAudioSettings`;
+each new audio thread starts with it) and applies changes live. The desktop app
+stores them under the setting `audio` and shows them on its settings page:
+devices, transmit mode (push-to-talk, voice activation, continuous), the voice
+activation threshold, echo cancellation, noise suppression and its level,
+automatic gain, microphone gain, output volume and the playback buffer.
+
+The audio thread reports the loudest 10 ms level since the last report about
+ten times a second (`Event::InputLevel`, with whether voice is sent), which the
+settings page shows as a meter with the threshold. Without a voice connection,
+`Command::TestMicrophone` opens the microphone for the meter alone.
+
+Per-client volume and mute are local (`SetClientVolume`, `SetClientMuted`); the
+app keeps them by unique id and sends them again when the client shows up. Client
+ids are reused, so the session forgets the settings of clients that left.
+Watched streams play through the same mixer under made-up client ids (counting
+down from 65535) with their own volume (`SetStreamVolume`).
+
+Push-to-talk works with the button in the window and a global hotkey
+(`tsc_platform::HotkeyManager`: the portal on Wayland, XInput2 on X11, a hook on
+Windows), configurable as e.g. `Ctrl+Shift+T`.
+
 ## Devices
 
 Devices are selected by cpal's stable id (`host:device`, e.g. `alsa:hw:1,0`);

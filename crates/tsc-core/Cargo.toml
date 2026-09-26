@@ -12,6 +12,14 @@ publish.workspace = true
 default = ["audio-device"]
 # Capture and play audio through the system's devices.
 audio-device = ["tsc-audio/device"]
+# The `media` module: capture and video codecs for streams, with whatever
+# tsc-media backends are enabled (e.g. MediaCodec and a registered capture
+# source on Android).
+media = ["dep:tsc-media"]
+# `media` with tsc-media's desktop backends: libvpx, OpenH264 loaded at
+# runtime, X11 and PipeWire on Linux. Not for Android (libvpx does not
+# cross-compile there).
+media-desktop = ["media", "tsc-media/default"]
 
 [dependencies]
 anyhow = "1"
@@ -23,6 +31,7 @@ tokio-tungstenite = "0.30"
 tracing = "0.1"
 tsc-audio = { path = "../tsc-audio", default-features = false }
 tsc-gateway-proto = { path = "../tsc-gateway-proto" }
+tsc-media = { path = "../tsc-media", default-features = false, features = ["str0m"], optional = true }
 tsc-model = { path = "../tsc-model" }
 tsc-observer = { path = "../tsc-observer" }
 tsc-query = { path = "../tsc-query" }
