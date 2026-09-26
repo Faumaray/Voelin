@@ -95,5 +95,9 @@ The vendored crates in `crates/proto/` are `MIT OR Apache-2.0` (upstream
 `LICENSE-MIT` / `LICENSE-APACHE` are kept there). New crates are declared under
 the same terms in `Cargo.toml`.
 
-Third-party notices: the UI toolkit, Slint, is used under its royalty-free license, which
-requires an attribution in the app's About page.
+Third-party notices: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), generated from
+`Cargo.lock` by `scripts/notices.sh` and shown in the app's About page. The UI toolkit,
+Slint, is used under its royalty-free license, which requires an attribution in the
+About page.
+
+Security issues: see [SECURITY.md](SECURITY.md). Releases: [docs/release.md](docs/release.md).
