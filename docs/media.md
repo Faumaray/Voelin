@@ -154,10 +154,13 @@ VP9 row-mt, tile columns from the thread count and width (tiles are at least
 256 pixels wide) and cyclic-refresh AQ, VP8 token partitions from the thread
 count. Threads: all CPUs (or the streamer's share per layer), at most one per
 320x240 pixels. `cpu-used` adapts to the measured encode time against the
-frame interval (faster above 75 %, slower below 35 %, decided every 15
-frames): VP8 starts at −10 and moves within −10..−4 (on screen content −12
-and faster were no quicker and about 3 dB worse), VP9 starts at 8 within
-5..9; `EncoderConfig::speed` fixes it instead. Frame durations for rate
+frame interval (faster at once when one frame overruns the interval or the
+mean is above 75 %; slower when the mean stayed below 35 % for 15 frames,
+waiting twice as long after each slower step that had to be undone): VP8
+starts at −10 and moves within −10..−6 (on screen content −12 and faster
+were no quicker and about 3 dB worse, −5 and slower about ten times slower
+for under 1 dB), VP9 starts at 8 within 5..9; `EncoderConfig::speed` fixes
+it instead. Frame durations for rate
 control follow the timestamps (variable frame rate), at least 3/4 of the
 nominal interval. `set_bitrate` reconfigures the running encoder
 (`vpx_codec_enc_config_set`). The C API is wrapped in

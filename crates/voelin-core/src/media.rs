@@ -2004,6 +2004,19 @@ mod tests {
 		let frames = collect(&mut source, |f| f.iter().any(|f| f.layer == 5 && f.keyframe)).await;
 		assert!(!frames.iter().any(|f| f.layer == 0 && f.keyframe), "layer 0 got a keyframe");
 
+		// A viewer's estimate lowers layer 5's encoder bitrate only.
+		source.set_layer_bitrate(5, 150_000);
+		let target = |id| {
+			let stats = source.streamer().stats();
+			stats.layers.iter().find(|l| l.id == id).map(|l| l.bitrate)
+		};
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while target(5) != Some(150_000) {
+			assert!(Instant::now() < deadline, "layer 5 at {:?}", target(5));
+			tokio::time::sleep(Duration::from_millis(20)).await;
+		}
+		assert_eq!(target(0), Some(800_000));
+
 		// VP9, layer 5 gone, a new layer 7 at a fixed size.
 		let fixed = LayerSpec { size: Some((96, 64)), ..layer(7, 1.0, None, 200_000) };
 		let update = StreamerConfigUpdate {

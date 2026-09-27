@@ -54,14 +54,19 @@ struct Levels {
 	start: i32,
 }
 
-// VP8 levels above 10 are no faster on screen content, only worse.
-const VP8_LEVELS: Levels = Levels { slowest: 4, fastest: 10, start: 10 };
+// On screen content (a probe with the desktop test pattern), VP8 levels
+// above 10 were no faster, only about 3 dB worse, and levels below 6 about
+// ten times slower for under 1 dB.
+const VP8_LEVELS: Levels = Levels { slowest: 6, fastest: 10, start: 10 };
 const VP9_LEVELS: Levels = Levels { slowest: 5, fastest: 9, start: 8 };
 
 /// Adapts the speed level to how long frames take to encode compared to
-/// the frame interval: faster above 75 % of it, slower (better quality)
-/// below 35 %, deciding every 15 frames on a running mean of the encode
-/// time (keyframes excluded: they are always slow).
+/// the frame interval (keyframes excluded: they are always slow):
+/// - faster at once when a single frame took more than the whole interval,
+///   and when the running mean is above 75 % of it;
+/// - slower (better quality) only when the mean stayed below 35 % for a
+///   while: 15 frames, doubling (up to 16x) each time a slower level had to
+///   be undone, so it does not oscillate around a level that is too slow.
 pub struct SpeedControl {
 	level: i32,
 	slowest: i32,
@@ -69,6 +74,10 @@ pub struct SpeedControl {
 	/// Mean encode time in seconds.
 	mean: f64,
 	frames: u32,
+	/// Frames the mean must stay low before going slower.
+	patience: u32,
+	/// The last change went slower.
+	slowed: bool,
 }
 
 impl SpeedControl {
@@ -83,6 +92,8 @@ impl SpeedControl {
 			fastest: levels.fastest,
 			mean: 0.0,
 			frames: 0,
+			patience: Self::WINDOW,
+			slowed: false,
 		}
 	}
 
@@ -92,16 +103,22 @@ impl SpeedControl {
 
 	/// Account one encode; returns the new level if it changed.
 	pub fn update(&mut self, took: Duration, interval: Duration) -> Option<i32> {
+		if interval.is_zero() {
+			return None;
+		}
 		let took = took.as_secs_f64();
 		self.mean = if self.frames == 0 { took } else { self.mean * 0.8 + took * 0.2 };
 		self.frames += 1;
-		if self.frames < Self::WINDOW || interval.is_zero() {
-			return None;
-		}
-		let load = self.mean / interval.as_secs_f64();
-		let level = if load > Self::TOO_SLOW {
+		let budget = interval.as_secs_f64();
+		let load = self.mean / budget;
+		let faster = took > budget || (self.frames >= Self::WINDOW && load > Self::TOO_SLOW);
+		let level = if faster {
+			if self.slowed {
+				// Going slower was a mistake: wait longer next time.
+				self.patience = (self.patience * 2).min(Self::WINDOW * 16);
+			}
 			(self.level + 1).min(self.fastest)
-		} else if load < Self::TOO_FAST {
+		} else if self.frames >= self.patience && load < Self::TOO_FAST {
 			(self.level - 1).max(self.slowest)
 		} else {
 			self.level
@@ -109,6 +126,7 @@ impl SpeedControl {
 		if level == self.level {
 			return None;
 		}
+		self.slowed = level < self.level;
 		self.level = level;
 		self.frames = 0;
 		Some(level)
@@ -401,6 +419,22 @@ mod tests {
 			control.update(Duration::from_millis(30), interval);
 		}
 		assert_eq!(control.level(), VP8_LEVELS.fastest);
+		// One frame over the budget: faster at once.
+		let mut control = SpeedControl::new(&VP9_LEVELS);
+		assert_eq!(control.update(Duration::from_millis(40), interval), Some(9));
+		// A slower level that turns out too slow makes the next try wait.
+		let mut control = SpeedControl::new(&VP8_LEVELS);
+		let mut n = 0;
+		while control.update(Duration::from_millis(2), interval).is_none() {
+			n += 1;
+		}
+		assert_eq!((n, control.level()), (14, 9));
+		assert_eq!(control.update(Duration::from_millis(40), interval), Some(10));
+		let mut n = 0;
+		while control.update(Duration::from_millis(2), interval).is_none() {
+			n += 1;
+		}
+		assert_eq!(n, 29, "patience doubled");
 		// In between: stays.
 		let level = control.level();
 		for _ in 0..100 {
