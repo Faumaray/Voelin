@@ -172,6 +172,9 @@ pub async fn run(con: &mut Connection, args: &StreamArgs) -> Result<()> {
 			simulcast: _,
 			placeholder,
 		} => {
+			let mut layers = layers.clone();
+			number_layers(&mut layers);
+			let layers = &layers;
 			for l in layers {
 				println!(
 					"layer {}: {}, {}, needs {}{}",
@@ -524,12 +527,11 @@ fn end_text(reason: &EndReason) -> String {
 async fn start(
 	con: &mut Connection,
 	driver: &mut Driver,
-	mut options: StreamerOptions,
+	options: StreamerOptions,
 	mut source: Source,
 	length: Option<Duration>,
 ) -> Result<()> {
 	let auto_accept = options.auto_accept;
-	number_layers(&mut options.layers);
 	driver.streams.start(options)?;
 	let deadline = length.map(|l| Instant::now() + l);
 	let mut tick = tokio::time::interval(source.frames().interval());
