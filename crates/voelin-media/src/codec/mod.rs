@@ -126,7 +126,8 @@ pub struct EncoderConfig {
 	/// start and on request (PLI), like WebRTC.
 	pub keyframe_interval: Option<u32>,
 	pub content: ContentHint,
-	/// Encoder threads; 0 picks a number from the resolution and CPU count.
+	/// Most encoder threads (still no more than the frame size can use); 0:
+	/// all CPUs.
 	pub threads: u32,
 	/// A fixed speed / quality trade-off in the backend's own terms (libvpx
 	/// `cpu-used`); `None` lets the encoder adapt it to how long frames take
@@ -148,13 +149,14 @@ impl Default for EncoderConfig {
 }
 
 impl EncoderConfig {
-	/// Threads for a `width` x `height` encode: all CPUs, but no more than
-	/// one per 320x240 pixels (more would idle on small frames).
+	/// Threads for a `width` x `height` encode: [`threads`](Self::threads)
+	/// (or all CPUs), but no more than one per 320x240 pixels: more would
+	/// idle on small frames and cost quality (VP8 token partitions).
 	pub fn threads_for(&self, width: u32, height: u32) -> u32 {
-		if self.threads > 0 {
-			return self.threads;
-		}
-		let cpus = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
+		let cpus = match self.threads {
+			0 => std::thread::available_parallelism().map_or(1, |n| n.get() as u32),
+			n => n,
+		};
 		let useful = (u64::from(width) * u64::from(height) / (320 * 240)).clamp(1, 64) as u32;
 		cpus.min(useful)
 	}
@@ -496,6 +498,7 @@ mod tests {
 	fn thread_heuristic() {
 		let config = EncoderConfig { threads: 3, ..EncoderConfig::default() };
 		assert_eq!(config.threads_for(1920, 1080), 3);
+		assert_eq!(config.threads_for(320, 240), 1, "capped by the frame size");
 		assert_eq!(EncoderConfig::default().threads_for(320, 240), 1);
 	}
 }
