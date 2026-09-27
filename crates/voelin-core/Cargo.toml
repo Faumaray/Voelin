@@ -30,7 +30,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"
 tokio-tungstenite = "0.30"
 tracing = "0.1"
 voelin-audio = { path = "../voelin-audio", default-features = false }
-voelin-gateway-proto = { path = "../voelin-gateway-proto" }
+voelin-gateway-proto = { path = "../voelin-gateway-proto", features = ["client"] }
 voelin-media = { path = "../voelin-media", default-features = false, features = ["str0m"], optional = true }
 voelin-model = { path = "../voelin-model" }
 voelin-observer = { path = "../voelin-observer" }
