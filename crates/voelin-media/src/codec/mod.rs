@@ -127,7 +127,7 @@ pub struct EncoderConfig {
 	pub keyframe_interval: Option<u32>,
 	pub content: ContentHint,
 	/// Most encoder threads (still no more than the frame size can use); 0:
-	/// all CPUs.
+	/// all CPUs but one ([`encoder_cpus`]).
 	pub threads: u32,
 	/// A fixed speed / quality trade-off in the backend's own terms (libvpx
 	/// `cpu-used`); `None` lets the encoder adapt it to how long frames take
@@ -148,13 +148,24 @@ impl Default for EncoderConfig {
 	}
 }
 
+/// CPUs encoders use by default: all but one (at least one). libvpx's
+/// threads wait on each other by spinning, so an encode that wants every
+/// core slows down many times over as soon as anything else runs (the
+/// capture and conversion of the next frame, another layer, the desktop);
+/// measured on a 4-core machine: 130-290 ms per 1080p frame with 4 threads
+/// under load, against 9-17 ms with 3.
+pub fn encoder_cpus() -> u32 {
+	let cpus = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
+	cpus.saturating_sub(1).max(1)
+}
+
 impl EncoderConfig {
 	/// Threads for a `width` x `height` encode: [`threads`](Self::threads)
-	/// (or all CPUs), but no more than one per 320x240 pixels: more would
-	/// idle on small frames and cost quality (VP8 token partitions).
+	/// (or [`encoder_cpus`]), but no more than one per 320x240 pixels: more
+	/// would idle on small frames and cost quality (VP8 token partitions).
 	pub fn threads_for(&self, width: u32, height: u32) -> u32 {
 		let cpus = match self.threads {
-			0 => std::thread::available_parallelism().map_or(1, |n| n.get() as u32),
+			0 => encoder_cpus(),
 			n => n,
 		};
 		let useful = (u64::from(width) * u64::from(height) / (320 * 240)).clamp(1, 64) as u32;

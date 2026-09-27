@@ -530,8 +530,10 @@ fn thread_split(layers: &[LayerSpec], cores: u32) -> Vec<u32> {
 	layers.iter().map(|l| ((f64::from(cores) * area(l) / total).round() as u32).max(1)).collect()
 }
 
+/// CPUs split between the layers' encoders (all but one, see
+/// `voelin_media::codec::encoder_cpus`).
 fn cores() -> u32 {
-	std::thread::available_parallelism().map_or(1, |n| n.get() as u32)
+	voelin_media::codec::encoder_cpus()
 }
 
 fn new_encoder(

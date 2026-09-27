@@ -18,7 +18,7 @@ MediaTime::new(frame.pts_90khz, Frequency::NINETY_KHZ), data)`), and received
 | `VideoEncoder` | `encode(&frame, force_keyframe) -> Vec<EncodedFrame>`; `encode_with(&frame, force_keyframe, &mut |EncodedChunk| ..)` hands out the encoder's own buffer (no copy); `set_bitrate(bps)` (libvpx: in place, no keyframe), `set_fps`, `speed()`, `codec()`, `backend()` |
 | `EncodedFrame { data, keyframe, pts_90khz }` | one frame for `Peer::write` |
 | `VideoDecoder` | `decode(&[u8]) -> Option<VideoFrame>` (timestamp zero; the caller knows the RTP time) |
-| `EncoderConfig { fps, bitrate_bps, keyframe_interval, content, threads, speed }` | resolution follows the frames; a size change restarts with a keyframe; `threads` is a maximum (0: all CPUs), still capped at one per 320x240 pixels; `speed: None` adapts libvpx `cpu-used` to the encode time |
+| `EncoderConfig { fps, bitrate_bps, keyframe_interval, content, threads, speed }` | resolution follows the frames; a size change restarts with a keyframe; `threads` is a maximum (0: all CPUs but one), still capped at one per 320x240 pixels; `speed: None` adapts libvpx `cpu-used` to the encode time |
 | `Codecs` | `new()`, `with_openh264(lib)`, `decoders()` (viewer order), `encoders()` / `encoder_codecs()` (streamer order), `new_decoder(codec)`, `new_encoder(codec, config)`, `pick_encoder(&accepted)` |
 | `ScreenCapture` | `sources()`, `start_sink(&SourceId, &CaptureOptions, Box<dyn FrameSink>)` (frames borrowed from the capture buffer, on the backend's thread), `start(..)` (copies into a queue), `stop()`; async: the portal asks the user |
 | `FrameSink` | `max_fps()` (may change while capturing), `wants(timestamp)` (asked before anything is mapped or copied), `frame(FrameRef) -> bool` |
@@ -152,9 +152,10 @@ unless `keyframe_interval` is set, screen content tuning
 (`VP8E_SET_SCREEN_CONTENT_MODE`, `VP9E_SET_TUNE_CONTENT`, static threshold),
 VP9 row-mt, tile columns from the thread count and width (tiles are at least
 256 pixels wide) and cyclic-refresh AQ, VP8 token partitions from the thread
-count. Threads: all CPUs (or the streamer's share per layer), at most one per
-320x240 pixels. `cpu-used` adapts to the measured encode time against the
-frame interval (faster at once when one frame overruns the interval or the
+count. Threads: all CPUs but one (libvpx threads spin-wait on each other and
+slow down many times over when every core is taken), or the streamer's share
+of them per layer, at most one per 320x240 pixels. `cpu-used` adapts to the
+measured encode time against the frame interval (faster at once when one frame overruns the interval or the
 mean is above 75 %; slower when the mean stayed below 35 % for 15 frames,
 waiting twice as long after each slower step that had to be undone): VP8
 starts at −10 and moves within −10..−6 (on screen content −12 and faster
