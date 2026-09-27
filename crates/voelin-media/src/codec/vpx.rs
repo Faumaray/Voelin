@@ -199,19 +199,23 @@ impl VideoEncoder for VpxEncoder {
 		let FrameData::I420 { y, u, v } = &i420.data else {
 			unreachable!("to_i420 returns I420");
 		};
-		// libvpx needs strictly increasing timestamps; the duration of a
-		// frame is the time since the previous one (rate control follows a
-		// variable frame rate).
+		// libvpx needs strictly increasing timestamps. The duration of a
+		// frame, from which CBR rate control budgets its bits, is the time
+		// since the previous one (a variable frame rate), but at least 3/4
+		// of the nominal interval: a frame whose timestamp had to be bumped
+		// (e.g. after a keyframe re-sent while the screen was still) would
+		// otherwise get almost no bits and come out as a smear.
 		let interval = VIDEO_CLOCK_RATE / u64::from(self.config.fps.max(1));
 		let mut pts = i420.pts_90khz() as i64;
-		let duration = match self.last_pts {
+		let elapsed = match self.last_pts {
 			Some(last) if pts <= last => {
 				pts = last + 1;
-				1
+				0
 			}
-			Some(last) => ((pts - last) as u64).min(VIDEO_CLOCK_RATE),
+			Some(last) => (pts - last) as u64,
 			None => interval,
 		};
+		let duration = elapsed.clamp(interval * 3 / 4, VIDEO_CLOCK_RATE);
 		self.last_pts = Some(pts);
 		let image = raw::I420 {
 			width: i420.width,
