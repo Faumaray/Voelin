@@ -192,9 +192,14 @@ struct Sample {
 	cpu: Option<Duration>,
 	layers: Vec<(LayerId, LayerSnapshot)>,
 	sent: u64,
+	captured: u64,
+	/// Frames the handoffs to the encoders dropped, per layer.
+	dropped: Vec<(LayerId, u64)>,
 }
 
 fn sample(sink: &BenchSink, streamer: &Streamer) -> Sample {
+	// Stats first: reading them allocates, which must not count.
+	let stats = streamer.stats();
 	let (allocations, bytes) = alloc::counts();
 	Sample {
 		at: Instant::now(),
@@ -202,7 +207,9 @@ fn sample(sink: &BenchSink, streamer: &Streamer) -> Sample {
 		bytes,
 		cpu: cpu_time(),
 		layers: sink.snapshot(),
-		sent: streamer.stats().video_frames,
+		sent: stats.video_frames,
+		captured: stats.captured_frames,
+		dropped: stats.layers.iter().map(|l| (l.id, l.dropped)).collect(),
 	}
 }
 
@@ -262,19 +269,34 @@ fn bench(args: BenchArgs) -> Result<()> {
 	drop(streamer);
 
 	let secs = (end.at - start.at).as_secs_f64();
+	let captured = end.captured - start.captured;
+	let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+	println!(
+		"capture: {:.1} fps; convert + scale: {:.2} ms per frame on {} threads",
+		captured as f64 / secs,
+		ms(stats.convert_time),
+		stats.convert_threads,
+	);
 	let mut output_frames = 0;
 	for ((id, a), (_, b)) in start.layers.iter().zip(&end.layers) {
 		let frames = b.frames - a.frames;
 		output_frames += frames;
 		let spec = layers.iter().find(|l| l.id == *id);
 		let size = spec.map_or((width, height), |l| l.output_size(width, height));
+		let dropped = |s: &Sample| s.dropped.iter().find(|d| d.0 == *id).map_or(0, |d| d.1);
+		let layer = stats.layers.iter().find(|l| l.id == *id);
 		println!(
-			"layer {id}: {}x{}  {:.1} fps  {:.0} kbit/s  {} keyframes",
+			"layer {id}: {}x{}  {:.1} fps  {:.0} kbit/s  {} keyframes  {} dropped  encode {:.2} ms \
+			 ({} threads, speed {})",
 			size.0,
 			size.1,
 			frames as f64 / secs,
 			(b.bytes - a.bytes) as f64 * 8.0 / secs / 1000.0,
 			b.keyframes - a.keyframes,
+			dropped(&end) - dropped(&start),
+			layer.map_or(0.0, |l| ms(l.encode_time)),
+			layer.map_or(0, |l| l.threads),
+			layer.and_then(|l| l.speed).map_or("-".into(), |s| s.to_string()),
 		);
 	}
 	if let Some(e) = &stats.error {
@@ -287,7 +309,9 @@ fn bench(args: BenchArgs) -> Result<()> {
 	let bytes = end.bytes - start.bytes;
 	let sent = (end.sent - start.sent).max(1);
 	println!(
-		"heap: {allocations} allocations ({:.1} per sent frame, {:.0} bytes per sent frame)",
+		"heap: {allocations} allocations: {:.2} per captured frame, {:.2} per encoded frame \
+		 ({:.0} bytes per encoded frame)",
+		allocations as f64 / captured.max(1) as f64,
 		allocations as f64 / sent as f64,
 		bytes as f64 / sent as f64,
 	);
