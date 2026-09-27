@@ -127,13 +127,13 @@ impl Session {
 				info!(uid = %user.uid, nickname = %user.nickname, "user logged in");
 				let uid = user.uid.clone();
 				self.user = Some(user);
-				Ok(vec![ServerMsg::AuthOk { uid, token, token_expires }])
+				Ok(vec![ServerMsg::AuthOk { uid, token, token_expires, capabilities: Vec::new() }])
 			}
 			ClientMsg::Resume { token, .. } => {
 				let (user, token, token_expires) = self.hub.resume(&token).await?;
 				let uid = user.uid.clone();
 				self.user = Some(user);
-				Ok(vec![ServerMsg::AuthOk { uid, token, token_expires }])
+				Ok(vec![ServerMsg::AuthOk { uid, token, token_expires, capabilities: Vec::new() }])
 			}
 			ClientMsg::SubscribePresence => {
 				self.user()?;
@@ -204,7 +204,7 @@ impl Session {
 					.history(&target, before, limit.min(200))
 					.map_err(|e| Denied(ErrorCode::Internal, e.to_string()))?
 					.into_iter()
-					.map(|(id, message)| HistoryEntry { id, message })
+					.map(|(id, message)| HistoryEntry::new(id, message))
 					.collect();
 				Ok(vec![ServerMsg::History { messages }])
 			}

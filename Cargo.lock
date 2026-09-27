@@ -9143,11 +9143,14 @@ name = "voelin-gateway-proto"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "futures-util",
  "serde",
  "serde_json",
  "sha-1",
  "sha2 0.10.9",
  "thiserror 2.0.21",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
  "tsproto",
  "tsproto-types",
  "voelin-model",
