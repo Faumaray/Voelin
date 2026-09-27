@@ -287,6 +287,29 @@ capture fps, convert time and threads, per layer fps, kbit/s, keyframes,
 frames dropped by the handoff, encode time, threads and `cpu-used`, CPU use
 and allocations per captured and per encoded frame.
 
+Measured with the old pipeline (single thread, allocating) and the new one,
+release builds (fat LTO), VP8, desktop pattern, one layer, 8 s, on a shared
+4-core VM, runs interleaved. fps sent / CPU cores / heap allocations per
+encoded frame:
+
+| | quiet (load 1-3): before | after | busy (load 6-12): before | after |
+|---|---|---|---|---|
+| 720p30 | 29.4 / 0.48 / 7.1 | 30.0 / 0.40 / 1.05 | 7.9 / 1.71 / 10.0 | 6.6 / 1.24 / 1.25 |
+| 720p60 | 14.7 / 2.37 / 10.2 | 60.0 / 0.69 / 1.03 | 4.6 / 1.23 / 19.1 | 6.4 / 1.28 / 1.25 |
+| 1080p30 | 29.6 / 0.83 / 7.1 | 30.0 / 0.75 / 1.05 | 2.7 / 1.30 / 17.4 | 6.9 / 1.27 / 1.24 |
+| 1080p60 | 57.2 / 1.47 / 7.1 | 53.7 / 1.42 / 1.03 | 2.4 / 1.33 / 31.4 | 5.7 / 1.40 / 1.28 |
+| 1440p30 | 8.4 / 2.26 / 9.7 | 22.7 / 1.71 / 1.07 | 1.9 / 1.31 / 22.6 | 5.5 / 1.26 / 1.30 |
+| 1440p60 | 52.5 / 2.24 / 7.2 | 3.2 / 2.02 / 1.50 * | 1.5 / 1.22 / 36.9 | 3.6 / 1.30 / 1.45 |
+
+\* libvpx with one thread per core collapsed (290 ms per frame) when the
+conversion competed for a core; encoders now use all CPUs but one. The busy
+column is with that change; a quiet re-run was not possible. Bytes
+allocated per encoded frame fell from 5-450 MB (a full RGBA and I420 copy
+per frame, more when frames queue up) to 10-130 KB (the encoded frame).
+Conversion and scaling take 0.3 ms (720p) to 3-5 ms (1440p, busy) per frame
+on 4 threads. With three layers (1440p30 at 6 Mbit/s, 720p30, 360p15) the
+quiet machine kept every layer at its rate with 1.6-1.7 cores.
+
 Build profiles: the dev profile builds the media hot path (yuv,
 voelin-media, str0m, x11rb-protocol, pipewire, wayland-client, ...) with
 `opt-level = 3`; release builds use fat LTO with one codegen unit.
