@@ -14,6 +14,7 @@ use anyhow::{Context, Result};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use tokio::runtime::Runtime;
 use tracing::warn;
+use voelin_core::settings::{AUDIO, CRASH_REPORTS, Settings};
 use voelin_core::stream::StreamInfo;
 use voelin_core::{
 	AudioSettings, Command, Engine, Event, ObserveState, SessionState, Source, VoiceOptions,
@@ -27,13 +28,39 @@ use voelin_store::{Bookmark, MemorySecrets, QueryConfig, QueryTransport, Secrets
 
 use crate::hotkey::GlobalPtt;
 use crate::settings::{
-	self, AUDIO_KEY, CLIENT_PLAYBACK_KEY, ClientPlayback, ClientPlaybackMap, DeviceChoices, UI_KEY,
-	UiSettings,
+	self, CLIENT_PLAYBACK, ClientPlayback, ClientPlaybackMap, DeviceChoices, UI, UiSettings,
 };
 use crate::streams::{Share, Watch};
 use crate::video::Video;
 
 slint::include_modules!();
+
+/// The settings service on the client database: the UI's keys registered,
+/// then a config file (`VOELIN_CONFIG`, else `<data dir>/config.toml` if it
+/// exists), `VOELIN_SETTING_*` variables and `overrides` below the stored
+/// values. Without the database the settings live in memory.
+fn open_settings(dir: &Path, overrides: &[String]) -> Settings {
+	let prefs = Settings::open(&dir.join("client.db")).unwrap_or_else(|e| {
+		warn!(%e, "settings are not stored this time");
+		Settings::in_memory()
+	});
+	prefs.register(&UI);
+	prefs.register(&CLIENT_PLAYBACK);
+	let config = std::env::var_os("VOELIN_CONFIG")
+		.map(PathBuf::from)
+		.or_else(|| Some(dir.join("config.toml")).filter(|p| p.exists()));
+	let mut errors = match config.map(|path| prefs.load_config_file(&path)) {
+		Some(Ok(errors)) => errors,
+		Some(Err(e)) => vec![e],
+		None => Vec::new(),
+	};
+	errors.extend(prefs.apply_env(std::env::vars()));
+	errors.extend(prefs.apply_overrides(overrides.iter().map(String::as_str)));
+	for e in errors {
+		warn!(%e, "setting ignored");
+	}
+	prefs
+}
 
 /// Secrets in the OS keyring, or in memory when there is none (headless
 /// Linux without a Secret Service).
@@ -149,6 +176,9 @@ pub(crate) struct App {
 	pub current: Option<i64>,
 	pub sessions: HashMap<i64, SessionView>,
 	status: String,
+	/// The settings service (shared with the engine); `settings`, `audio`
+	/// and `playback` are working copies of its keys.
+	pub prefs: Settings,
 	pub settings: UiSettings,
 	audio: AudioSettings,
 	/// Audio settings changed since they were last stored.
@@ -208,6 +238,9 @@ pub struct RunOptions {
 	/// goes on in a service while the activity is recreated). Default: an
 	/// engine that stops with the window.
 	pub engine: Option<HostedEngine>,
+	/// Setting overrides as `key=value` (e.g. `--set` on the command line);
+	/// values set in the app take precedence.
+	pub setting_overrides: Vec<String>,
 }
 
 impl std::fmt::Debug for RunOptions {
@@ -216,6 +249,7 @@ impl std::fmt::Debug for RunOptions {
 			.field("data_dir", &self.data_dir)
 			.field("secrets", &self.secrets.is_some())
 			.field("engine", &self.engine.is_some())
+			.field("setting_overrides", &self.setting_overrides)
 			.finish()
 	}
 }
@@ -294,12 +328,14 @@ pub fn run(options: RunOptions) -> Result<()> {
 			identity
 		}
 	};
-	let settings: UiSettings = store.setting(UI_KEY).ok().flatten().unwrap_or_default();
+	let prefs = open_settings(&dir, &options.setting_overrides);
+	engine.send(Command::AttachSettings(prefs.clone()));
+	let mut settings: UiSettings = (*prefs.get_arc(&UI)).clone();
+	settings.crash_reports = prefs.get(&CRASH_REPORTS);
 	crash::set_enabled(settings.crash_reports);
 	crash::test_crash_if_requested();
-	let audio: AudioSettings = store.setting(AUDIO_KEY).ok().flatten().unwrap_or_default();
-	let playback: ClientPlaybackMap =
-		store.setting(CLIENT_PLAYBACK_KEY).ok().flatten().unwrap_or_default();
+	let audio: AudioSettings = prefs.get(&AUDIO);
+	let playback: ClientPlaybackMap = prefs.get(&CLIENT_PLAYBACK);
 	engine.send(Command::SetAudioSettings(Box::new(audio.clone())));
 
 	let ui = MainWindow::new()?;
@@ -331,6 +367,7 @@ pub fn run(options: RunOptions) -> Result<()> {
 		bookmarks,
 		sessions: HashMap::new(),
 		status: "Ready".into(),
+		prefs,
 		settings,
 		audio,
 		audio_dirty: false,
@@ -424,6 +461,9 @@ pub fn run(options: RunOptions) -> Result<()> {
 	let own = own_runtime.is_some();
 	let open = with_app(|app| {
 		app.save_audio();
+		if let Err(e) = app.prefs.flush() {
+			warn!(%e, "could not store settings");
+		}
 		app.watch = None;
 		app.share = None;
 		if own {
@@ -672,8 +712,26 @@ impl App {
 	}
 
 	pub fn store_settings(&self) {
-		if let Err(e) = self.store.set_setting(UI_KEY, &self.settings) {
+		if let Err(e) = self.prefs.set(&UI, self.settings.clone()) {
 			warn!(%e, "could not store settings");
+		}
+	}
+
+	/// A setting changed, maybe elsewhere (a command, another window): take
+	/// the values the window keeps copies of. The engine applies audio
+	/// settings itself.
+	fn setting_changed(&mut self, key: &str) {
+		if key == AUDIO.name() && !self.audio_dirty {
+			self.audio = self.prefs.get(&AUDIO);
+		} else if key == CRASH_REPORTS.name() {
+			let enabled = self.prefs.get(&CRASH_REPORTS);
+			if enabled != self.settings.crash_reports {
+				self.settings.crash_reports = enabled;
+				crash::set_enabled(enabled);
+				self.refresh_settings_flags();
+			}
+		} else if key == CLIENT_PLAYBACK.name() {
+			self.playback = self.prefs.get(&CLIENT_PLAYBACK);
 		}
 	}
 
@@ -980,6 +1038,10 @@ impl App {
 			}
 			Event::Chat { session, message } => self.add_message(session as i64, message),
 			Event::Error { message, .. } => self.set_status(message),
+			Event::SettingChanged { key } => self.setting_changed(&key),
+			Event::SettingRejected { key, message } => {
+				self.set_status(format!("Setting {key}: {message}"));
+			}
 			event => self.stream_event(event),
 		}
 	}
@@ -1230,7 +1292,7 @@ impl App {
 			return;
 		}
 		self.audio_dirty = false;
-		if let Err(e) = self.store.set_setting(AUDIO_KEY, &self.audio) {
+		if let Err(e) = self.prefs.set(&AUDIO, self.audio.clone()) {
 			warn!(%e, "could not store audio settings");
 		}
 	}
@@ -1304,7 +1366,11 @@ impl App {
 
 	fn set_crash_reports(&mut self, enabled: bool) {
 		self.settings.crash_reports = enabled;
+		// Also in the blob, for older versions.
 		self.store_settings();
+		if let Err(e) = self.prefs.set(&CRASH_REPORTS, enabled) {
+			warn!(%e, "could not store the crash report setting");
+		}
 		crash::set_enabled(enabled);
 	}
 
@@ -1372,7 +1438,7 @@ impl App {
 			} else {
 				self.playback.insert(uid, playback);
 			}
-			if let Err(e) = self.store.set_setting(CLIENT_PLAYBACK_KEY, &self.playback) {
+			if let Err(e) = self.prefs.set(&CLIENT_PLAYBACK, self.playback.clone()) {
 				warn!(%e, "could not store client volumes");
 			}
 		}

@@ -16,8 +16,9 @@ use crate::foreground::Foreground;
 use crate::host::EngineHost;
 use crate::{bridge, capture, egl, secrets};
 
-/// Store setting (`bool`): the user's opt-in to local crash reports.
-pub const CRASH_REPORTS_SETTING: &str = "crash_reports";
+/// Store setting (`bool`): the user's opt-in to local crash reports (read
+/// before the settings service starts, straight from the database).
+pub const CRASH_REPORTS_SETTING: &str = voelin_core::settings::CRASH_REPORTS_KEY;
 
 static HOST: OnceLock<EngineHost> = OnceLock::new();
 static FOREGROUND: Mutex<Option<Foreground>> = Mutex::new(None);
@@ -92,6 +93,7 @@ fn run(app: AndroidApp) -> anyhow::Result<()> {
 			runtime: attached.runtime,
 			events: attached.events,
 		}),
+		setting_overrides: Vec::new(),
 	})
 }
 

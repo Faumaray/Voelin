@@ -1,22 +1,46 @@
-//! Settings kept in the store (besides bookmarks and identities), and their
-//! conversion to and from the forms of the settings page.
+//! The UI's settings keys (besides the engine's, in
+//! `voelin_core::settings`), and their conversion to and from the forms of
+//! the settings page.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use voelin_audio::process::NoiseLevel;
+use voelin_core::settings::{Key, Kind};
 use voelin_core::{AudioSettings, TransmitMode};
 
 use crate::app::AudioForm;
 
-/// Store keys.
-pub const AUDIO_KEY: &str = "audio";
-pub const UI_KEY: &str = "ui";
-pub const CLIENT_PLAYBACK_KEY: &str = "client_playback";
+/// The window's settings, one value (the `ui` blob of earlier versions).
+pub static UI: Key<UiSettings> = Key::new(
+	"ui",
+	Kind::Json,
+	"The window's settings: push-to-talk key, H.264, the share dialog's choices.",
+	UiSettings::default,
+);
 
-/// Frame rates and bitrates (kbit/s) of the share dialog.
+/// Volume and mute of clients, by unique id.
+pub static CLIENT_PLAYBACK: Key<ClientPlaybackMap> = Key::new(
+	"client_playback",
+	Kind::Json,
+	"Volume and mute of clients, by unique id.",
+	ClientPlaybackMap::new,
+);
+
+/// Frame rates and bitrates (kbit/s) the share dialog offers; any other
+/// value can be typed in.
 pub const FPS_CHOICES: [u32; 3] = [15, 30, 60];
 pub const BITRATE_CHOICES: [u32; 4] = [2500, 4608, 8000, 10_000];
+
+/// The index of the choice closest to `value`.
+pub fn nearest_choice(choices: &[u32], value: u32) -> usize {
+	(0..choices.len()).min_by_key(|&i| choices[i].abs_diff(value)).unwrap_or(0)
+}
+
+/// A whole number above 0 typed into a form field.
+pub fn parse_positive(text: &str) -> Option<u32> {
+	text.trim().parse().ok().filter(|v| *v > 0)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -47,7 +71,9 @@ impl Default for UiSettings {
 	}
 }
 
-/// The last choices in the share dialog.
+/// The last choices in the share dialog. Frame rate and bitrate are the
+/// settings `stream.fps` and `stream.bitrate_kbps`; the indices of the
+/// closest choices are kept for older versions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShareDefaults {
@@ -247,6 +273,17 @@ mod tests {
 		assert_eq!(changed.transmit, TransmitMode::Continuous);
 		assert!(!changed.processing.echo_cancellation);
 		assert_eq!(changed.playback_buffer_ms, 180);
+	}
+
+	#[test]
+	fn free_values() {
+		assert_eq!(nearest_choice(&FPS_CHOICES, 60), 2);
+		assert_eq!(nearest_choice(&FPS_CHOICES, 144), 2);
+		assert_eq!(nearest_choice(&BITRATE_CHOICES, 3000), 0);
+		assert_eq!(nearest_choice(&BITRATE_CHOICES, 50_000), 3);
+		assert_eq!(parse_positive(" 144 "), Some(144));
+		assert_eq!(parse_positive("0"), None);
+		assert_eq!(parse_positive("fast"), None);
 	}
 
 	#[test]

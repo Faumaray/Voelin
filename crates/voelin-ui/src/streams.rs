@@ -3,11 +3,15 @@
 //! encodes and decodes.
 
 use slint::{ComponentHandle, Model};
+use tracing::warn;
+use voelin_core::settings::{STREAM_BITRATE_KBPS, STREAM_FPS};
 use voelin_core::stream::{EndReason, LeaveReason, StreamSetup, ViewerInfo, ViewerState};
 use voelin_core::{Command, Event, StreamState, WatchState};
 
 use crate::app::{App, Bridge, ShareForm, SourceItem, StreamItem, ViewerItem, later, model};
-use crate::settings::{BITRATE_CHOICES, FPS_CHOICES, ShareDefaults};
+use crate::settings::{
+	BITRATE_CHOICES, FPS_CHOICES, ShareDefaults, nearest_choice, parse_positive,
+};
 use crate::video::{self, Capture, CaptureRequest, Decoder};
 
 /// Our stream.
@@ -333,14 +337,17 @@ impl App {
 		self.refresh_streams();
 		let defaults = &self.settings.share;
 		let nickname = self.current.and_then(|id| self.bookmark(id)).map(|b| b.nickname.clone());
+		let (fps, bitrate) = (self.prefs.get(&STREAM_FPS), self.prefs.get(&STREAM_BITRATE_KBPS));
 		ShareForm {
 			source: 0,
 			name: match nickname {
 				Some(nick) if !nick.is_empty() => format!("{nick}'s screen").into(),
 				_ => "Screen".into(),
 			},
-			fps_index: defaults.fps_index.min(FPS_CHOICES.len() - 1) as i32,
-			bitrate_index: defaults.bitrate_index.min(BITRATE_CHOICES.len() - 1) as i32,
+			fps_index: nearest_choice(&FPS_CHOICES, fps) as i32,
+			fps: fps.to_string().into(),
+			bitrate_index: nearest_choice(&BITRATE_CHOICES, bitrate) as i32,
+			bitrate: bitrate.to_string().into(),
 			audio: defaults.audio,
 			auto_accept: defaults.auto_accept,
 		}
@@ -368,20 +375,33 @@ impl App {
 		if self.share_busy || self.share.is_some() {
 			return;
 		}
-		let index = |i: i32, len: usize| usize::try_from(i).unwrap_or(0).min(len - 1);
+		// Typed values (no maximum), else the chosen presets.
+		let choice = |i: i32, choices: &[u32]| {
+			choices[usize::try_from(i).unwrap_or(0).min(choices.len() - 1)]
+		};
+		let fps = parse_positive(&form.fps).unwrap_or_else(|| choice(form.fps_index, &FPS_CHOICES));
+		let bitrate = parse_positive(&form.bitrate)
+			.unwrap_or_else(|| choice(form.bitrate_index, &BITRATE_CHOICES));
+		// The next share starts from these.
+		for result in
+			[self.prefs.set(&STREAM_FPS, fps), self.prefs.set(&STREAM_BITRATE_KBPS, bitrate)]
+		{
+			if let Err(e) = result {
+				warn!(%e, "could not store the share settings");
+			}
+		}
 		let defaults = ShareDefaults {
-			fps_index: index(form.fps_index, FPS_CHOICES.len()),
-			bitrate_index: index(form.bitrate_index, BITRATE_CHOICES.len()),
+			fps_index: nearest_choice(&FPS_CHOICES, fps),
+			bitrate_index: nearest_choice(&BITRATE_CHOICES, bitrate),
 			audio: form.audio,
 			auto_accept: form.auto_accept,
 		};
 		let request = CaptureRequest {
-			fps: FPS_CHOICES[defaults.fps_index],
-			bitrate_kbps: BITRATE_CHOICES[defaults.bitrate_index],
+			fps,
+			bitrate_kbps: bitrate,
 			audio: form.audio,
 			restore_token: self.settings.portal_restore_token.clone(),
 		};
-		let bitrate = request.bitrate_kbps;
 		self.settings.share = defaults;
 		self.store_settings();
 		self.share_busy = true;
