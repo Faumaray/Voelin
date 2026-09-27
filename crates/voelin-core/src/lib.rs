@@ -17,6 +17,12 @@
 //! of watched streams plays through the session's speakers by itself
 //! ([`Command::SetStreamVolume`]); capture, encoding and decoding of video
 //! are in [`media`] (feature `media`).
+//!
+//! Settings are a [`settings::Settings`] service: typed keys, runtime
+//! values stored in the client database ahead of command line, config file
+//! and defaults. The engine reads its own keys from it (e.g. who may watch
+//! our stream), takes [`Command::SetSetting`] / [`Command::ResetSetting`],
+//! and reports every change as [`Event::SettingChanged`].
 
 mod audio;
 mod gateway;
@@ -25,6 +31,7 @@ pub mod media;
 mod query;
 mod route;
 mod session;
+pub mod settings;
 pub mod stream;
 mod voice;
 
@@ -38,6 +45,7 @@ use voelin_model::{Capabilities, ChannelId, ChatMessage, ChatTarget, Presence, S
 
 use crate::audio::{AudioEvent, AudioHandle, AudioIn};
 pub use route::{ChatRoute, Dedup, route_chat};
+use settings::{SettingChange, Settings, SharedSettings};
 pub use stream::{StreamFrame, StreamSink, StreamState, WatchState};
 use voelin_stream::{EncodedFrame, StreamInfo, StreamSetup, ViewerInfo};
 pub use voice::VoiceOptions;
@@ -175,6 +183,20 @@ pub enum Command {
 	CloseSession {
 		session: SessionId,
 	},
+	/// Set a setting's runtime value (see [`settings`]); invalid values are
+	/// reported as [`Event::SettingRejected`].
+	SetSetting {
+		key: String,
+		value: serde_json::Value,
+	},
+	/// Remove a setting's runtime value: the command line, config file or
+	/// default applies again.
+	ResetSetting {
+		key: String,
+	},
+	/// Use these settings from now on (e.g. the ones of the client database,
+	/// for an engine started without).
+	AttachSettings(Settings),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -293,6 +315,16 @@ pub enum Event {
 		stream_id: String,
 		state: WatchState,
 	},
+	/// A setting was set or reset (by anyone: a command, the UI through
+	/// [`Engine::settings`], …). Read the new value from the settings.
+	SettingChanged {
+		key: String,
+	},
+	/// A [`Command::SetSetting`] / [`Command::ResetSetting`] was refused.
+	SettingRejected {
+		key: String,
+		message: String,
+	},
 }
 
 /// Handle to the engine. Cheap to clone; all methods are non-blocking.
@@ -302,17 +334,31 @@ pub struct Engine {
 	events: broadcast::Sender<Event>,
 	frames: broadcast::Sender<StreamFrame>,
 	runtime: tokio::runtime::Handle,
+	settings: SharedSettings,
 }
 
 impl Engine {
-	/// Start the engine on the current tokio runtime.
+	/// Start the engine on the current tokio runtime, with settings that are
+	/// not stored (see [`Command::AttachSettings`]).
 	pub fn start() -> Self {
+		Self::start_with_settings(Settings::in_memory())
+	}
+
+	/// Start the engine on the current tokio runtime with `settings`.
+	pub fn start_with_settings(settings: Settings) -> Self {
 		let (commands, rx) = mpsc::unbounded_channel();
 		let (events, _) = broadcast::channel(4096);
 		// About a minute of one watched stream.
 		let (frames, _) = broadcast::channel(4096);
-		tokio::spawn(run(rx, events.clone(), frames.clone()));
-		Self { commands, events, frames, runtime: tokio::runtime::Handle::current() }
+		let settings = SharedSettings::new(settings);
+		tokio::spawn(run(rx, events.clone(), frames.clone(), settings.clone()));
+		Self { commands, events, frames, runtime: tokio::runtime::Handle::current(), settings }
+	}
+
+	/// The settings the engine uses (read, watch or change them directly;
+	/// changes are reported as [`Event::SettingChanged`] all the same).
+	pub fn settings(&self) -> Settings {
+		self.settings.current()
 	}
 
 	/// The runtime the engine runs on, for helpers started from other
@@ -335,15 +381,60 @@ impl Engine {
 	}
 }
 
+/// What woke the engine's loop.
+enum Input {
+	Command(Command),
+	Setting(SettingChange),
+	/// Changes were missed: the engine re-reads what it uses.
+	SettingsLagged,
+}
+
+/// A command that applies the stored audio settings if they differ from
+/// what runs (e.g. set through [`Command::SetSetting`]).
+fn stored_audio(settings: &Settings, running: &AudioSettings) -> Option<Command> {
+	let stored = settings.get_arc(&settings::AUDIO);
+	(*stored != *running).then(|| Command::SetAudioSettings(Box::new((*stored).clone())))
+}
+
 async fn run(
 	mut commands: mpsc::UnboundedReceiver<Command>,
 	events: broadcast::Sender<Event>,
 	frames: broadcast::Sender<StreamFrame>,
+	shared: SharedSettings,
 ) {
 	let mut sessions: HashMap<SessionId, session::SessionHandle> = HashMap::new();
+	let mut current = shared.current();
+	let mut changes = current.subscribe();
 	let mut settings = AudioSettings::default();
 	let mut mic_test: Option<AudioHandle> = None;
-	while let Some(command) = commands.recv().await {
+	loop {
+		let input = tokio::select! {
+			command = commands.recv() => match command {
+				Some(command) => Input::Command(command),
+				None => break,
+			},
+			change = changes.recv() => match change {
+				Ok(change) => Input::Setting(change),
+				Err(broadcast::error::RecvError::Lagged(_)) => Input::SettingsLagged,
+				// Not while `current` holds the settings.
+				Err(broadcast::error::RecvError::Closed) => continue,
+			},
+		};
+		let command = match input {
+			Input::Command(command) => command,
+			Input::Setting(change) => {
+				let audio = change.key == settings::AUDIO.name();
+				let _ = events.send(Event::SettingChanged { key: change.key });
+				match audio.then(|| stored_audio(&current, &settings)).flatten() {
+					Some(command) => command,
+					None => continue,
+				}
+			}
+			Input::SettingsLagged => match stored_audio(&current, &settings) {
+				Some(command) => command,
+				None => continue,
+			},
+		};
 		let id = match command {
 			Command::SetAudioSettings(new) => {
 				settings = (*new).clone();
@@ -359,6 +450,24 @@ async fn run(
 				mic_test = on.then(|| test_microphone(&settings, &events));
 				continue;
 			}
+			Command::SetSetting { key, value } => {
+				if let Err(e) = current.set_json(&key, value) {
+					let _ = events.send(Event::SettingRejected { key, message: e.to_string() });
+				}
+				continue;
+			}
+			Command::ResetSetting { key } => {
+				if let Err(e) = current.reset(&key) {
+					let _ = events.send(Event::SettingRejected { key, message: e.to_string() });
+				}
+				continue;
+			}
+			Command::AttachSettings(new) => {
+				shared.replace(new.clone());
+				changes = new.subscribe();
+				current = new;
+				continue;
+			}
 			ref command => command_session(command),
 		};
 		if matches!(command, Command::CloseSession { .. }) {
@@ -370,7 +479,13 @@ async fn run(
 		sessions
 			.entry(id)
 			.or_insert_with(|| {
-				session::SessionHandle::spawn(id, events.clone(), frames.clone(), settings.clone())
+				session::SessionHandle::spawn(
+					id,
+					events.clone(),
+					frames.clone(),
+					settings.clone(),
+					shared.clone(),
+				)
 			})
 			.send(command);
 	}
@@ -422,7 +537,11 @@ fn command_session(command: &Command) -> SessionId {
 		| Command::SetClientVolume { session, .. }
 		| Command::SetClientMuted { session, .. }
 		| Command::CloseSession { session } => *session,
-		Command::SetAudioSettings(_) | Command::TestMicrophone { .. } => {
+		Command::SetAudioSettings(_)
+		| Command::TestMicrophone { .. }
+		| Command::SetSetting { .. }
+		| Command::ResetSetting { .. }
+		| Command::AttachSettings(_) => {
 			unreachable!("engine-wide commands have no session")
 		}
 	}

@@ -14,6 +14,7 @@ use crate::audio::{self, AudioEvent, AudioHandle, AudioIn};
 use crate::gateway::{self, GatewayCmd, GatewayEvent};
 use crate::query::{self, QueryCmd, QueryEvent};
 use crate::route::{ChatRoute, Dedup, route_chat};
+use crate::settings::SharedSettings;
 use crate::stream::{PeerConfig, StreamFrame, StreamHandle, StreamInput};
 use crate::voice::{self, VoiceCmd, VoiceEvent};
 use crate::{Command, Event, ObserveState, SessionId, SessionState, Source, VoiceState};
@@ -28,9 +29,10 @@ impl SessionHandle {
 		events: broadcast::Sender<Event>,
 		frames: broadcast::Sender<StreamFrame>,
 		audio_settings: AudioSettings,
+		settings: SharedSettings,
 	) -> Self {
 		let (tx, rx) = mpsc::unbounded_channel();
-		tokio::spawn(Session::new(id, events, frames, audio_settings).run(rx));
+		tokio::spawn(Session::new(id, events, frames, audio_settings, settings).run(rx));
 		Self { tx }
 	}
 
@@ -63,6 +65,7 @@ struct Session {
 	query_presence: Option<Presence>,
 	audio: Option<AudioHandle>,
 	audio_settings: AudioSettings,
+	settings: SharedSettings,
 	/// Streams of the voice connection (TeamSpeak 6 only).
 	streams: Option<StreamHandle>,
 	stream_peer: PeerConfig,
@@ -82,6 +85,7 @@ impl Session {
 		events: broadcast::Sender<Event>,
 		frames: broadcast::Sender<StreamFrame>,
 		audio_settings: AudioSettings,
+		settings: SharedSettings,
 	) -> Self {
 		let (sources_tx, sources_rx) = mpsc::unbounded_channel();
 		Self {
@@ -98,6 +102,7 @@ impl Session {
 			query_presence: None,
 			audio: None,
 			audio_settings,
+			settings,
 			streams: None,
 			stream_peer: PeerConfig::default(),
 			frames,
@@ -319,7 +324,12 @@ impl Session {
 			Command::RequestStreamKeyframe { stream_id, .. } => {
 				self.stream_input(StreamInput::RequestKeyframe { stream_id });
 			}
-			Command::CloseSession { .. } | Command::TestMicrophone { .. } => {}
+			// Engine-wide.
+			Command::CloseSession { .. }
+			| Command::TestMicrophone { .. }
+			| Command::SetSetting { .. }
+			| Command::ResetSetting { .. }
+			| Command::AttachSettings(_) => {}
 		}
 	}
 
@@ -449,6 +459,7 @@ impl Session {
 						self.events.clone(),
 						self.frames.clone(),
 						self.audio.clone(),
+						self.settings.clone(),
 					));
 				}
 				self.emit(Event::ServerInfo { session: self.id, name, flavor, capabilities });

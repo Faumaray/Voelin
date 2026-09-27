@@ -113,6 +113,11 @@ impl Discovery {
 		self.clients.get(&self.own.0).map(|c| c.channel)
 	}
 
+	/// The channel of a client, as of the last update.
+	pub fn channel_of(&self, client: ClientId) -> Option<u64> {
+		self.clients.get(&client.0).map(|c| c.channel)
+	}
+
 	/// Whether a stream of `streamer` belongs in the directory: it is in our
 	/// channel (or the clients are not known yet).
 	pub fn in_our_channel(&self, streamer: ClientId) -> bool {

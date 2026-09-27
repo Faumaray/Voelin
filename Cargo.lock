@@ -9098,10 +9098,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures",
+ "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite 0.30.0",
+ "toml",
  "tracing",
  "tsclientlib",
  "tsproto-packets",
@@ -9111,6 +9113,7 @@ dependencies = [
  "voelin-model",
  "voelin-observer",
  "voelin-query",
+ "voelin-store",
  "voelin-stream",
 ]
 

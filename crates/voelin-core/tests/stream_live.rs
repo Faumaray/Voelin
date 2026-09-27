@@ -100,7 +100,9 @@ async fn ts6_stream_between_sessions() {
 	connect(&engine, &mut events, 1, "127.0.0.1:9988", &format!("e-streamer-{tag}")).await;
 	connect(&engine, &mut events, 2, "127.0.0.1:9988", &format!("e-viewer-{tag}")).await;
 
-	// Stream, asking for each viewer.
+	// Stream, asking for each viewer ("friends" asks everyone until there
+	// are contacts; the default, "channel", accepts the viewer by itself).
+	engine.send(Command::SetSetting { key: "stream.permissions".into(), value: "friends".into() });
 	let setup = StreamSetup { name: format!("engine {tag}"), ..Default::default() };
 	engine.send(Command::StartStream { session: 1, setup, auto_accept: false });
 	// The viewer's list often updates before the streamer goes live, so wait

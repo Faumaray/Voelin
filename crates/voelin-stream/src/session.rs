@@ -914,6 +914,11 @@ impl Streams {
 		&self.directory
 	}
 
+	/// The clients' channels as of [`Self::update_clients`].
+	pub fn discovery(&self) -> &Discovery {
+		&self.discovery
+	}
+
 	/// Our stream, while it has not ended.
 	pub fn streamer(&self) -> Option<&StreamerSession> {
 		self.streamer.as_ref().filter(|s| !s.is_ended())
