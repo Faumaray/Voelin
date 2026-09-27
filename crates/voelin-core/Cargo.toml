@@ -32,7 +32,7 @@ tokio-tungstenite = "0.30"
 toml = "1.1.6"
 tracing = "0.1"
 voelin-audio = { path = "../voelin-audio", default-features = false }
-voelin-gateway-proto = { path = "../voelin-gateway-proto" }
+voelin-gateway-proto = { path = "../voelin-gateway-proto", features = ["client"] }
 voelin-media = { path = "../voelin-media", default-features = false, features = ["str0m"], optional = true }
 voelin-model = { path = "../voelin-model" }
 voelin-observer = { path = "../voelin-observer" }

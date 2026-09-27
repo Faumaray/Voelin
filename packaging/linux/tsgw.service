@@ -12,6 +12,8 @@ ConditionPathExists=/etc/tsgw/tsgw.toml
 
 [Service]
 ExecStart=/usr/bin/tsgw --config /etc/tsgw/tsgw.toml
+# Re-reads tsgw.toml; values set at runtime keep winning.
+ExecReload=/bin/kill -HUP $MAINPID
 # Read by systemd before dropping privileges, so it can stay root-only.
 EnvironmentFile=-/etc/tsgw/tsgw.env
 DynamicUser=yes
