@@ -193,8 +193,44 @@ pub enum CaptureBackend {
 	/// the ScreenCast portal on Wayland, X11, Windows Graphics Capture).
 	#[default]
 	Auto,
+	/// The xdg-desktop-portal ScreenCast dialog (Wayland; also X11 desktops
+	/// that run the portal). Monitor and window ids are ignored: the
+	/// dialog picks.
+	Portal,
 	/// X11, also under Wayland through XWayland (Linux).
 	X11,
+	/// wlroots compositors (Sway, Hyprland, river, ...) directly, without
+	/// the portal: `ext-image-copy-capture-v1`, or `wlr-screencopy-unstable-v1`
+	/// where that is missing (Linux).
+	Wlroots,
+}
+
+impl CaptureBackend {
+	/// Names as in settings: `auto`, `portal`, `x11`, `wlroots`.
+	pub fn name(&self) -> &'static str {
+		match self {
+			CaptureBackend::Auto => "auto",
+			CaptureBackend::Portal => "portal",
+			CaptureBackend::X11 => "x11",
+			CaptureBackend::Wlroots => "wlroots",
+		}
+	}
+}
+
+impl std::str::FromStr for CaptureBackend {
+	type Err = MediaError;
+
+	fn from_str(s: &str) -> Result<Self, MediaError> {
+		match s.trim().to_ascii_lowercase().as_str() {
+			"auto" | "" => Ok(CaptureBackend::Auto),
+			"portal" => Ok(CaptureBackend::Portal),
+			"x11" => Ok(CaptureBackend::X11),
+			"wlroots" | "wlr" => Ok(CaptureBackend::Wlroots),
+			other => Err(MediaError::Config(format!(
+				"unknown capture backend {other:?}: auto, portal, x11 or wlroots"
+			))),
+		}
+	}
 }
 
 /// What and how to stream.
@@ -588,7 +624,7 @@ impl Streamer {
 				(Box::new(screen), None)
 			}
 			#[cfg(all(target_os = "linux", feature = "media-desktop"))]
-			SourceId::Portal => {
+			_ if config.source == SourceId::Portal || config.backend == CaptureBackend::Portal => {
 				use voelin_media::capture::portal::PortalCapture;
 				let mut portal = PortalCapture::with_restore_token(config.restore_token.clone());
 				portal.start_sink(&SourceId::Portal, &options, ingest).await?;
@@ -858,6 +894,19 @@ fn screen_backend(backend: &CaptureBackend) -> Result<Box<dyn ScreenCapture>, Me
 		#[cfg(not(all(target_os = "linux", feature = "media-desktop")))]
 		CaptureBackend::X11 => {
 			return Err(unavailable("x11", "X11 capture is only in Linux desktop builds"));
+		}
+		#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+		CaptureBackend::Wlroots => Box::new(voelin_media::capture::wlroots::WlrootsCapture::new()),
+		#[cfg(not(all(target_os = "linux", feature = "media-desktop")))]
+		CaptureBackend::Wlroots => {
+			return Err(unavailable("wlroots", "wlroots capture is only in Linux desktop builds"));
+		}
+		// Only reached where the portal is not built in.
+		CaptureBackend::Portal => {
+			return Err(unavailable(
+				"portal",
+				"the ScreenCast portal is only in Linux desktop builds",
+			));
 		}
 	})
 }
@@ -1271,6 +1320,8 @@ struct ChannelSink {
 	keyframe: AtomicBool,
 	/// Layers a keyframe was asked for.
 	layers: Mutex<LayerSet>,
+	/// What the viewers' bandwidth estimates allow, per layer.
+	bitrates: Mutex<Vec<(LayerId, u64)>>,
 	shared: Arc<Shared>,
 }
 
@@ -1293,6 +1344,10 @@ impl MediaSink for ChannelSink {
 		layers.union_with(&requested);
 		requested.clear();
 	}
+
+	fn layer_bitrate(&self, layer: LayerId) -> Option<u64> {
+		lock(&self.bitrates).iter().find(|(id, _)| *id == layer).map(|(_, bps)| *bps)
+	}
 }
 
 /// A [`Streamer`] as a [`FrameSource`], for code that runs
@@ -1310,6 +1365,7 @@ impl EncodedSource {
 			tx,
 			keyframe: AtomicBool::new(true),
 			layers: Mutex::new(LayerSet::new()),
+			bitrates: Mutex::new(Vec::new()),
 			shared: streamer.shared.clone(),
 		});
 		streamer.attach(sink.clone());
@@ -1332,6 +1388,14 @@ impl FrameSource for EncodedSource {
 
 	fn request_layer_keyframe(&mut self, layer: LayerId) {
 		lock(&self.sink.layers).insert(layer);
+	}
+
+	fn set_layer_bitrate(&mut self, layer: LayerId, bitrate: u64) {
+		let mut bitrates = lock(&self.sink.bitrates);
+		match bitrates.iter_mut().find(|(id, _)| *id == layer) {
+			Some(entry) => entry.1 = bitrate,
+			None => bitrates.push((layer, bitrate)),
+		}
 	}
 }
 

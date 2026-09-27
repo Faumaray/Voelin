@@ -39,6 +39,8 @@ mod pw;
 pub mod synthetic;
 #[cfg(windows)]
 pub mod windows;
+#[cfg(all(target_os = "linux", feature = "wlroots"))]
+pub mod wlroots;
 #[cfg(all(target_os = "linux", feature = "x11"))]
 pub mod x11;
 
