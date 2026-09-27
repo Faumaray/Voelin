@@ -174,8 +174,10 @@ impl App {
 					own: view.state.own_client == Some(s.streamer.0),
 				});
 			}
-			// Streams that started before we joined are only known by the
-			// streaming flag: the server does not tell their ids.
+			// Streams that started before we joined: the server did not
+			// announce them, and the engine is looking them up (they arrive
+			// in `StreamsChanged` like the others). Until then only the
+			// streaming flag is known.
 			let channel = view.state.own_channel;
 			for c in view.presence.clients.values() {
 				let announced = view.streams.iter().any(|s| s.streamer.0 == c.id);

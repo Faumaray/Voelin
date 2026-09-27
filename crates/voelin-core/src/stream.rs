@@ -12,14 +12,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{broadcast, mpsc};
 use tracing::debug;
 use tsclientlib::ClientId;
+use voelin_stream::{
+	ClientState, Output, Request, StreamEvent, StreamNotification, StreamerEvent, StreamerOptions,
+	Streams, WatchEvent,
+};
 pub use voelin_stream::{
 	Codec, EncodedFrame, EndReason, FrameSource, Frequency, LeaveReason, MediaFrame, MediaKind,
 	MediaTime, PeerConfig, StreamInfo, StreamKind, StreamSetup, SyntheticSource, VideoCodec,
 	ViewerInfo, ViewerState,
-};
-use voelin_stream::{
-	Output, Request, StreamEvent, StreamNotification, StreamerEvent, StreamerOptions, Streams,
-	WatchEvent,
 };
 
 use crate::audio::{AudioHandle, AudioIn};
@@ -135,8 +135,8 @@ pub(crate) enum StreamInput {
 	Frame(EncodedFrame),
 	Notification(StreamNotification),
 	RequestFailed(Request, String),
-	/// Clients on the server with their `client_is_streaming`.
-	Clients(BTreeMap<u16, Option<bool>>),
+	/// Clients on the server: channel and `client_is_streaming`.
+	Clients(BTreeMap<u16, ClientState>),
 	/// The voice connection is gone.
 	Shutdown(String),
 }
@@ -165,7 +165,6 @@ impl StreamHandle {
 			audio,
 			tx: tx.clone(),
 			sink: None,
-			clients: BTreeMap::new(),
 		};
 		tokio::spawn(task.run(rx));
 		Self { tx }
@@ -188,8 +187,6 @@ struct StreamTask {
 	tx: mpsc::UnboundedSender<StreamInput>,
 	/// The sink of our live stream.
 	sink: Option<StreamSink>,
-	/// Clients on the server and their `client_is_streaming`.
-	clients: BTreeMap<u16, Option<bool>>,
 }
 
 impl StreamTask {
@@ -250,19 +247,9 @@ impl StreamTask {
 				Ok(())
 			}
 			StreamInput::Clients(clients) => {
-				// Streams of clients that left or stopped streaming are gone.
-				// Only changes count: a snapshot may predate the streaming flag
-				// of a stream that was just announced.
-				for (client, streaming) in &clients {
-					let was = self.clients.get(client).copied().flatten();
-					if let (Some(was), Some(now)) = (was, *streaming)
-						&& was != now
-					{
-						self.streams.set_client_streaming(ClientId(*client), now);
-					}
-				}
-				self.streams.retain_streamers(|c| clients.contains_key(&c.0));
-				self.clients = clients;
+				// Streams of clients that left, stopped streaming or are not
+				// in our channel are gone; unannounced ones are looked up.
+				self.streams.update_clients(clients);
 				Ok(())
 			}
 			StreamInput::Shutdown(_) => Ok(()),
@@ -433,6 +420,7 @@ mod tests {
 			Request::RemoveViewer { id, viewer, reason } => {
 				both(StreamNotification::ViewerLeft { id, viewer, reason: Some(reason) })
 			}
+			Request::StreamInfo { .. } => Vec::new(),
 		}
 	}
 

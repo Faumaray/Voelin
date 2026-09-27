@@ -9,6 +9,7 @@
 //! streams in our channel, our own stream with a peer per viewer, and the
 //! streams we watch. [`FrameSource`] is where a streamer's encoded frames come from.
 
+pub mod discovery;
 pub mod layer;
 pub mod peer;
 pub mod proto;
@@ -17,6 +18,7 @@ pub mod signal;
 pub mod source;
 pub mod stun;
 
+pub use discovery::{ClientState, StreamLookup};
 pub use layer::{LayerId, LayerSet, LayerSpec};
 pub use peer::{MediaFrame, Peer, PeerConfig, PeerError, PeerEvent, VideoCodec};
 pub use proto::{LeaveReason, StreamInfo, StreamKind, StreamNotification, StreamSetup};

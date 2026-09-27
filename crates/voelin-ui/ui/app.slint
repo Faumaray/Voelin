@@ -57,8 +57,8 @@ export struct BookmarkForm {
     query-password: string,
 }
 
-// A stream in our channel. An empty id: a client that streams, but the
-// server did not announce the stream to us (it started before we joined).
+// A stream in our channel. An empty id: a client that streams, but whose
+// stream is still being looked up (it started before we joined).
 export struct StreamItem {
     id: string,
     name: string,
@@ -566,7 +566,7 @@ component StreamsPanel inherits Rectangle {
                     overflow: elide;
                 }
                 Text {
-                    text: stream.id == "" ? @tr("Started before you joined; the server did not announce it.") : stream.own ? @tr("your stream") : stream.audio ? @tr("by {} · with sound", stream.streamer) : @tr("by {}", stream.streamer);
+                    text: stream.id == "" ? @tr("Started before you joined; looking it up…") : stream.own ? @tr("your stream") : stream.audio ? @tr("by {} · with sound", stream.streamer) : @tr("by {}", stream.streamer);
                     font-size: 11px;
                     color: #8b949e;
                     overflow: elide;

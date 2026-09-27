@@ -8,6 +8,7 @@ use tracing::debug;
 use tsclientlib::ClientId;
 use voelin_audio::AudioSettings;
 use voelin_model::{ChatMessage, ChatTarget, Presence};
+use voelin_stream::ClientState;
 
 use crate::audio::{self, AudioEvent, AudioHandle, AudioIn};
 use crate::gateway::{self, GatewayCmd, GatewayEvent};
@@ -66,8 +67,9 @@ struct Session {
 	streams: Option<StreamHandle>,
 	stream_peer: PeerConfig,
 	frames: broadcast::Sender<StreamFrame>,
-	/// `client_is_streaming` of the voice presence, as last told to the streams.
-	streaming_clients: BTreeMap<u16, Option<bool>>,
+	/// Channel and `client_is_streaming` of the voice presence, as last told
+	/// to the streams.
+	streaming_clients: BTreeMap<u16, ClientState>,
 	open_chats: HashSet<ChatTarget>,
 	dedup: Dedup,
 	sources_tx: mpsc::UnboundedSender<SourceEvent>,
@@ -460,8 +462,11 @@ impl Session {
 					}
 				}
 				if let Some(s) = &self.streams {
-					let clients: BTreeMap<_, _> =
-						p.clients.values().map(|c| (c.id, c.streaming)).collect();
+					let clients: BTreeMap<_, _> = p
+						.clients
+						.values()
+						.map(|c| (c.id, ClientState { channel: c.channel, streaming: c.streaming }))
+						.collect();
 					if clients != self.streaming_clients {
 						self.streaming_clients = clients.clone();
 						s.send(StreamInput::Clients(clients));

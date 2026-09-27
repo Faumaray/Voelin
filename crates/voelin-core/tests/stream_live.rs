@@ -257,3 +257,107 @@ async fn ts3_has_no_streams() {
 	engine.send(Command::CloseSession { session: 1 });
 	tokio::time::sleep(Duration::from_millis(500)).await;
 }
+
+/// A session that connects after a stream started finds it and watches it:
+/// the server does not announce running streams to newcomers, the engine
+/// looks them up (`requeststreaminfo`).
+#[tokio::test(flavor = "multi_thread")]
+async fn ts6_late_viewer_finds_running_stream() {
+	if !live() {
+		return;
+	}
+	let engine = Engine::start();
+	let mut events = engine.subscribe();
+	let mut frames = engine.subscribe_frames();
+	let tag = std::process::id() % 10_000;
+	connect(&engine, &mut events, 1, "127.0.0.1:9988", &format!("e-early-{tag}")).await;
+	let setup = StreamSetup { name: format!("early {tag}"), ..Default::default() };
+	engine.send(Command::StartStream { session: 1, setup, auto_accept: true });
+	let (id, sink) = wait_for(&mut events, "stream live", |e| match e {
+		Event::StreamState { session: 1, state: StreamState::Live { id, sink } } => {
+			Some((id.clone(), sink.clone()))
+		}
+		Event::StreamState { session: 1, state: StreamState::Ended(reason) } => {
+			panic!("stream ended: {reason:?}")
+		}
+		_ => None,
+	})
+	.await;
+	let feeder = tokio::spawn({
+		let sink = sink.clone();
+		async move {
+			let mut source = SyntheticSource::new(30, 3000, true);
+			let mut out = Vec::new();
+			while sink.is_live() {
+				source.poll_frames(Instant::now(), &mut out);
+				for frame in out.drain(..) {
+					sink.send(frame);
+				}
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		}
+	});
+
+	// The late viewer: connected, and the running stream in its list.
+	let mut options = VoiceOptions::new("127.0.0.1:9988", format!("e-late-{tag}"));
+	options.stream_peer = PeerConfig::loopback();
+	engine.send(Command::ConnectVoice { session: 2, options: Box::new(options) });
+	wait_both(
+		&mut events,
+		"late viewer connected, with the running stream",
+		|e| match e {
+			Event::State { session: 2, state } if state.voice == VoiceState::Connected => Some(()),
+			_ => None,
+		},
+		|e| match e {
+			Event::StreamsChanged { session: 2, streams } if streams.iter().any(|s| s.id == id) => {
+				Some(())
+			}
+			_ => None,
+		},
+	)
+	.await;
+
+	engine.send(Command::WatchStream { session: 2, stream_id: id.clone() });
+	wait_for(&mut events, "late viewer watching", |e| match e {
+		Event::WatchState { session: 2, stream_id, state: WatchState::Connected }
+			if *stream_id == id =>
+		{
+			Some(())
+		}
+		Event::WatchState { session: 2, state: WatchState::Ended(reason), .. } => {
+			panic!("watching ended: {reason:?}")
+		}
+		_ => None,
+	})
+	.await;
+	let mut video = 0;
+	let _ = timeout(Duration::from_secs(10), async {
+		while video < 30 {
+			match frames.recv().await {
+				Ok(f)
+					if f.session == 2 && f.stream_id == id && f.frame.kind == MediaKind::Video =>
+				{
+					video += 1;
+				}
+				Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+				Err(_) => break,
+			}
+		}
+	})
+	.await;
+	assert!(video >= 30, "late viewer got {video} video frames");
+
+	engine.send(Command::StopStream { session: 1 });
+	wait_for(&mut events, "stream gone from the late viewer's list", |e| match e {
+		Event::StreamsChanged { session: 2, streams } if streams.iter().all(|s| s.id != id) => {
+			Some(())
+		}
+		_ => None,
+	})
+	.await;
+	feeder.await.unwrap();
+	engine.send(Command::CloseSession { session: 1 });
+	engine.send(Command::CloseSession { session: 2 });
+	tokio::time::sleep(Duration::from_millis(500)).await;
+}
