@@ -3,6 +3,7 @@
 mod gateway;
 mod identity;
 mod observe;
+mod probe;
 mod query;
 mod session;
 mod stream;
@@ -46,6 +47,9 @@ enum Command {
 	Relay(observe::RelayArgs),
 	/// Use a tsgw gateway as a user: presence, chat, history.
 	Gateway(gateway::GatewayArgs),
+	/// TeamSpeak 6: probe how a client that arrives after a stream started
+	/// can learn about it; prints every command both clients exchange.
+	ProbeStream(probe::ProbeStreamArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -208,6 +212,7 @@ fn main() -> Result<()> {
 		Command::Observe(args) => tokio::runtime::Runtime::new()?.block_on(observe::observe(args)),
 		Command::Relay(args) => tokio::runtime::Runtime::new()?.block_on(observe::relay(args)),
 		Command::Gateway(args) => tokio::runtime::Runtime::new()?.block_on(gateway::run(args)),
+		Command::ProbeStream(args) => tokio::runtime::Runtime::new()?.block_on(probe::run(args)),
 	}
 }
 

@@ -9299,6 +9299,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tsclientlib",
+ "tsproto",
  "tsproto-packets",
  "voelin-audio",
  "voelin-core",

@@ -113,7 +113,7 @@ pub(crate) async fn pump(
 	}
 }
 
-async fn wait_connected(con: &mut Connection, deadline: Instant) -> Result<()> {
+pub(crate) async fn wait_connected(con: &mut Connection, deadline: Instant) -> Result<()> {
 	let end = pump(con, Some(deadline), |_, item| {
 		Ok(match item {
 			StreamItem::BookEvents(_) => Flow::Stop,
