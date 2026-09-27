@@ -342,12 +342,11 @@ impl Hub {
 	}
 
 	/// Rebuild the relay pool, e.g. for a new nickname; open relays move over.
-	pub(crate) async fn rebuild_relays(&self, nickname: &str) {
+	pub(crate) async fn rebuild_relays(self: &Arc<Self>, nickname: &str) {
 		let _guard = self.relay_rebuild.lock().await;
-		let old = std::mem::replace(
-			&mut *self.relays.write().unwrap(),
-			new_relay_pool(&self.connect, nickname),
-		);
+		let pool = new_relay_pool(&self.connect, nickname);
+		tokio::spawn(crate::tasks::pump_relays(self.clone(), pool.subscribe()));
+		let old = std::mem::replace(&mut *self.relays.write().unwrap(), pool);
 		let channels = old.channels().await;
 		old.close_all().await;
 		drop(old);

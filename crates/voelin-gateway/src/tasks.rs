@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use serde_json::json;
+use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{info, warn};
 use voelin_gateway_proto::activity_kind;
@@ -16,7 +17,7 @@ use crate::hub::{Feature, Hub, HubEvent, now_ms, now_secs};
 
 pub fn spawn_all(hub: &Arc<Hub>) {
 	tokio::spawn(pump_observer(hub.clone()));
-	tokio::spawn(pump_relays(hub.clone()));
+	tokio::spawn(pump_relays(hub.clone(), hub.relays().subscribe()));
 	tokio::spawn(teardown_idle_relays(hub.clone()));
 	tokio::spawn(prune(hub.clone()));
 	tokio::spawn(reminders(hub.clone()));
@@ -70,26 +71,22 @@ async fn check_streams(hub: Arc<Hub>) {
 	}
 }
 
-/// Channel chat seen by relays. Follows the pool when it is rebuilt.
-async fn pump_relays(hub: Arc<Hub>) {
+/// Channel chat seen by one relay pool; subscribed before the pool opens
+/// any relay, so nothing is missed when the pool is rebuilt. Ends with the pool.
+pub async fn pump_relays(hub: Arc<Hub>, mut events: broadcast::Receiver<RelayEvent>) {
 	loop {
-		let mut events = hub.relays().subscribe();
-		loop {
-			match events.recv().await {
-				Ok(RelayEvent::Message(msg)) => {
-					if !msg.author_id.is_some_and(|id| hub.is_own_client(id)) {
-						hub.publish_incoming(msg);
-					}
+		match events.recv().await {
+			Ok(RelayEvent::Message(msg)) => {
+				if !msg.author_id.is_some_and(|id| hub.is_own_client(id)) {
+					hub.publish_incoming(msg);
 				}
-				Ok(RelayEvent::Closed { channel, reason }) => {
-					warn!(channel, %reason, "relay closed");
-				}
-				Err(RecvError::Lagged(_)) => {}
-				// The pool was replaced; subscribe to the new one.
-				Err(RecvError::Closed) => break,
 			}
+			Ok(RelayEvent::Closed { channel, reason }) => {
+				warn!(channel, %reason, "relay closed");
+			}
+			Err(RecvError::Lagged(_)) => {}
+			Err(RecvError::Closed) => return,
 		}
-		tokio::time::sleep(Duration::from_millis(100)).await;
 	}
 }
 
