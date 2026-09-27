@@ -9244,6 +9244,7 @@ name = "voelin-stream"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dimpl",
  "futures",
  "serde",
  "serde_json",

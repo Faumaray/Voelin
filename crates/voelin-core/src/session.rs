@@ -13,7 +13,7 @@ use crate::audio::{self, AudioEvent, AudioHandle, AudioIn};
 use crate::gateway::{self, GatewayCmd, GatewayEvent};
 use crate::query::{self, QueryCmd, QueryEvent};
 use crate::route::{ChatRoute, Dedup, route_chat};
-use crate::stream::{PeerConfig, StreamFrame, StreamHandle, StreamInput};
+use crate::stream::{LayerSpec, PeerConfig, SrtpProfile, StreamFrame, StreamHandle, StreamInput};
 use crate::voice::{self, VoiceCmd, VoiceEvent};
 use crate::{Command, Event, ObserveState, SessionId, SessionState, Source, VoiceState};
 
@@ -65,6 +65,11 @@ struct Session {
 	/// Streams of the voice connection (TeamSpeak 6 only).
 	streams: Option<StreamHandle>,
 	stream_peer: PeerConfig,
+	/// Simulcast layers of our stream, for the stream task.
+	stream_layers: Vec<LayerSpec>,
+	/// The SRTP profile setting (`Command::SetSrtpProfiles`), over the voice
+	/// options' `stream_peer`.
+	srtp_profiles: Option<Vec<SrtpProfile>>,
 	frames: broadcast::Sender<StreamFrame>,
 	/// `client_is_streaming` of the voice presence, as last told to the streams.
 	streaming_clients: BTreeMap<u16, Option<bool>>,
@@ -98,6 +103,8 @@ impl Session {
 			audio_settings,
 			streams: None,
 			stream_peer: PeerConfig::default(),
+			stream_layers: Vec::new(),
+			srtp_profiles: None,
 			frames,
 			streaming_clients: BTreeMap::new(),
 			open_chats: HashSet::new(),
@@ -164,6 +171,9 @@ impl Session {
 				let generation = self.next_generation();
 				self.nickname = options.nickname.clone();
 				self.stream_peer = options.stream_peer.clone();
+				if let Some(profiles) = &self.srtp_profiles {
+					self.stream_peer.srtp_profiles = profiles.clone();
+				}
 				let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 				let (ev_tx, ev_rx) = mpsc::unbounded_channel();
 				self.audio = None;
@@ -317,6 +327,20 @@ impl Session {
 			Command::RequestStreamKeyframe { stream_id, .. } => {
 				self.stream_input(StreamInput::RequestKeyframe { stream_id });
 			}
+			// Kept for streams started later, also without a connection.
+			Command::SetStreamLayers { layers, .. } => {
+				self.stream_layers = layers.clone();
+				if let Some(s) = &self.streams {
+					s.send(StreamInput::Layers(layers));
+				}
+			}
+			Command::SetSrtpProfiles(profiles) => {
+				self.stream_peer.srtp_profiles = profiles.clone();
+				self.srtp_profiles = Some(profiles.clone());
+				if let Some(s) = &self.streams {
+					s.send(StreamInput::SrtpProfiles(profiles));
+				}
+			}
 			Command::CloseSession { .. } | Command::TestMicrophone { .. } => {}
 		}
 	}
@@ -439,7 +463,7 @@ impl Session {
 				if capabilities.streams
 					&& let Some((_, voice)) = &self.voice
 				{
-					self.streams = Some(StreamHandle::spawn(
+					let streams = StreamHandle::spawn(
 						self.id,
 						own_client,
 						self.stream_peer.clone(),
@@ -447,7 +471,11 @@ impl Session {
 						self.events.clone(),
 						self.frames.clone(),
 						self.audio.clone(),
-					));
+					);
+					if !self.stream_layers.is_empty() {
+						streams.send(StreamInput::Layers(self.stream_layers.clone()));
+					}
+					self.streams = Some(streams);
 				}
 				self.emit(Event::ServerInfo { session: self.id, name, flavor, capabilities });
 				self.reopen_relayed_chats();

@@ -39,7 +39,9 @@ use voelin_model::{Capabilities, ChannelId, ChatMessage, ChatTarget, Presence, S
 use crate::audio::{AudioEvent, AudioHandle, AudioIn};
 pub use route::{ChatRoute, Dedup, route_chat};
 pub use stream::{StreamFrame, StreamSink, StreamState, WatchState};
-use voelin_stream::{EncodedFrame, StreamInfo, StreamSetup, ViewerInfo};
+use voelin_stream::{
+	EncodedFrame, LayerId, LayerSpec, SrtpProfile, StreamInfo, StreamSetup, ViewerInfo,
+};
 pub use voice::VoiceOptions;
 
 pub type SessionId = u64;
@@ -149,6 +151,20 @@ pub enum Command {
 		session: SessionId,
 		frame: EncodedFrame,
 	},
+	/// The simulcast layers of our stream (empty: one layer at the setup's
+	/// bitrate). Applies to the live stream at once (viewers move to the
+	/// layers their bandwidth allows, keyframes are requested) and to streams
+	/// started later; the encoder must produce the same layers
+	/// (`media::StreamerConfig::layers`).
+	SetStreamLayers {
+		session: SessionId,
+		layers: Vec<LayerSpec>,
+	},
+	/// SRTP protection profiles for stream connections, in order of
+	/// preference (a user setting; empty: the default,
+	/// `SrtpProfile::DEFAULT_ORDER`). Applies to connections made from now
+	/// on, in all sessions and those started later.
+	SetSrtpProfiles(Vec<SrtpProfile>),
 	/// Watch a stream from [`Event::StreamsChanged`]. Frames arrive through
 	/// [`Engine::subscribe_frames`].
 	WatchStream {
@@ -283,9 +299,18 @@ pub enum Event {
 		session: SessionId,
 		viewers: Vec<ViewerInfo>,
 	},
-	/// A viewer needs a keyframe (also flagged on the [`StreamSink`]).
+	/// A viewer of simulcast layer `layer` (0 without simulcast) needs a
+	/// keyframe (also flagged on the [`StreamSink`]).
 	StreamKeyframeRequest {
 		session: SessionId,
+		layer: LayerId,
+	},
+	/// The bitrate target of a layer of our stream changed: the lowest
+	/// bandwidth estimate of its viewers (bit/s; also on the [`StreamSink`]).
+	StreamLayerBitrate {
+		session: SessionId,
+		layer: LayerId,
+		bitrate: u64,
 	},
 	/// A stream we watch.
 	WatchState {
@@ -342,6 +367,7 @@ async fn run(
 ) {
 	let mut sessions: HashMap<SessionId, session::SessionHandle> = HashMap::new();
 	let mut settings = AudioSettings::default();
+	let mut srtp_profiles: Option<Vec<SrtpProfile>> = None;
 	let mut mic_test: Option<AudioHandle> = None;
 	while let Some(command) = commands.recv().await {
 		let id = match command {
@@ -359,6 +385,13 @@ async fn run(
 				mic_test = on.then(|| test_microphone(&settings, &events));
 				continue;
 			}
+			Command::SetSrtpProfiles(profiles) => {
+				for s in sessions.values() {
+					s.send(Command::SetSrtpProfiles(profiles.clone()));
+				}
+				srtp_profiles = Some(profiles);
+				continue;
+			}
 			ref command => command_session(command),
 		};
 		if matches!(command, Command::CloseSession { .. }) {
@@ -370,7 +403,16 @@ async fn run(
 		sessions
 			.entry(id)
 			.or_insert_with(|| {
-				session::SessionHandle::spawn(id, events.clone(), frames.clone(), settings.clone())
+				let s = session::SessionHandle::spawn(
+					id,
+					events.clone(),
+					frames.clone(),
+					settings.clone(),
+				);
+				if let Some(profiles) = &srtp_profiles {
+					s.send(Command::SetSrtpProfiles(profiles.clone()));
+				}
+				s
 			})
 			.send(command);
 	}
@@ -415,6 +457,7 @@ fn command_session(command: &Command) -> SessionId {
 		| Command::AcceptViewer { session, .. }
 		| Command::KickViewer { session, .. }
 		| Command::SendStreamFrame { session, .. }
+		| Command::SetStreamLayers { session, .. }
 		| Command::WatchStream { session, .. }
 		| Command::LeaveStream { session, .. }
 		| Command::RequestStreamKeyframe { session, .. }
@@ -422,7 +465,9 @@ fn command_session(command: &Command) -> SessionId {
 		| Command::SetClientVolume { session, .. }
 		| Command::SetClientMuted { session, .. }
 		| Command::CloseSession { session } => *session,
-		Command::SetAudioSettings(_) | Command::TestMicrophone { .. } => {
+		Command::SetAudioSettings(_)
+		| Command::SetSrtpProfiles(_)
+		| Command::TestMicrophone { .. } => {
 			unreachable!("engine-wide commands have no session")
 		}
 	}

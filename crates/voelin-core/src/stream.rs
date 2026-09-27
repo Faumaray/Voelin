@@ -13,13 +13,13 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::debug;
 use tsclientlib::ClientId;
 pub use voelin_stream::{
-	Codec, EncodedFrame, EndReason, FrameSource, Frequency, LeaveReason, MediaFrame, MediaKind,
-	MediaTime, PeerConfig, StreamInfo, StreamKind, StreamSetup, SyntheticSource, VideoCodec,
-	ViewerInfo, ViewerState,
+	Codec, EncodedFrame, EndReason, FrameSource, Frequency, LayerId, LayerSet, LayerSpec,
+	LeaveReason, MediaFrame, MediaKind, MediaTime, PeerConfig, SrtpProfile, StreamInfo, StreamKind,
+	StreamSetup, SyntheticSource, VideoCodec, ViewerInfo, ViewerState,
 };
 use voelin_stream::{
-	Output, Request, StreamEvent, StreamNotification, StreamerEvent, StreamerOptions, Streams,
-	WatchEvent,
+	LayerFeedback, Output, Request, StreamEvent, StreamNotification, StreamerEvent,
+	StreamerOptions, Streams, WatchEvent,
 };
 
 use crate::audio::{AudioHandle, AudioIn};
@@ -60,12 +60,14 @@ pub struct StreamFrame {
 	pub frame: MediaFrame,
 }
 
-/// Hands encoded frames of our stream to the engine, e.g. from an encoder thread.
+/// Hands encoded frames of our stream to the engine, e.g. from an encoder
+/// thread, and tells the encoders what the viewers need per simulcast layer:
+/// keyframes and bitrates. Those are read lock-free from the stream session.
 #[derive(Clone)]
 pub struct StreamSink {
 	tx: mpsc::UnboundedSender<StreamInput>,
 	live: Arc<AtomicBool>,
-	keyframe: Arc<AtomicBool>,
+	feedback: Arc<LayerFeedback>,
 }
 
 impl StreamSink {
@@ -74,23 +76,24 @@ impl StreamSink {
 		self.live.load(Ordering::Relaxed) && self.tx.send(StreamInput::Frame(frame)).is_ok()
 	}
 
-	/// Whether a viewer asked for a keyframe since the last call.
+	/// Whether a viewer asked for a keyframe of any layer since the last
+	/// call (or [`take_layer_keyframes`](Self::take_layer_keyframes)).
 	pub fn take_keyframe_request(&self) -> bool {
-		self.keyframe.swap(false, Ordering::Relaxed)
+		self.feedback.take_any_keyframe()
 	}
 
 	/// Adds to `layers` the simulcast layers viewers asked a keyframe for
-	/// since the last call.
-	pub fn take_layer_keyframes(&self, layers: &mut voelin_stream::LayerSet) {
-		if self.take_keyframe_request() {
-			layers.insert(0);
-		}
+	/// since the last call. Every layer is asked for when the stream goes live.
+	pub fn take_layer_keyframes(&self, layers: &mut LayerSet) {
+		self.feedback.take_keyframes(layers);
 	}
 
-	/// Bitrate (bit/s) the bandwidth estimates of `layer`'s viewers allow.
-	pub fn layer_bitrate(&self, layer: voelin_stream::LayerId) -> Option<u64> {
-		let _ = layer;
-		None
+	/// Bitrate (bit/s) the bandwidth estimates of `layer`'s viewers allow:
+	/// the lowest estimate of its viewers, at least
+	/// [`voelin_stream::session::MIN_VIDEO_BITRATE`], at most the layer's
+	/// `max_bitrate`. `None` while no viewer of the layer has an estimate.
+	pub fn layer_bitrate(&self, layer: LayerId) -> Option<u64> {
+		self.feedback.bitrate(layer)
 	}
 
 	pub fn is_live(&self) -> bool {
@@ -132,6 +135,10 @@ pub(crate) enum StreamInput {
 	RequestKeyframe {
 		stream_id: String,
 	},
+	/// Simulcast layers of our stream (now and for streams started later).
+	Layers(Vec<LayerSpec>),
+	/// SRTP profile order of new connections.
+	SrtpProfiles(Vec<SrtpProfile>),
 	Frame(EncodedFrame),
 	Notification(StreamNotification),
 	RequestFailed(Request, String),
@@ -166,6 +173,7 @@ impl StreamHandle {
 			tx: tx.clone(),
 			sink: None,
 			clients: BTreeMap::new(),
+			layers: Vec::new(),
 		};
 		tokio::spawn(task.run(rx));
 		Self { tx }
@@ -190,6 +198,8 @@ struct StreamTask {
 	sink: Option<StreamSink>,
 	/// Clients on the server and their `client_is_streaming`.
 	clients: BTreeMap<u16, Option<bool>>,
+	/// Simulcast layers of our stream (empty: one layer).
+	layers: Vec<LayerSpec>,
 }
 
 impl StreamTask {
@@ -218,12 +228,13 @@ impl StreamTask {
 	async fn input(&mut self, input: StreamInput) {
 		let session = self.session;
 		let result = match input {
-			StreamInput::Start { setup, auto_accept } => self
-				.streams
-				.start(StreamerOptions { setup, auto_accept, ..Default::default() })
-				.map(|()| {
+			StreamInput::Start { setup, auto_accept } => {
+				let layers = self.layers.clone();
+				let options = StreamerOptions { setup, auto_accept, layers, ..Default::default() };
+				self.streams.start(options).map(|()| {
 					self.emit(Event::StreamState { session, state: StreamState::Starting });
-				}),
+				})
+			}
 			StreamInput::Stop => self.streams.stop(),
 			StreamInput::Respond { viewer, accept } => {
 				self.streams.respond(ClientId(viewer), accept).await
@@ -235,6 +246,19 @@ impl StreamTask {
 			StreamInput::Leave { stream_id } => self.streams.leave(&stream_id),
 			StreamInput::RequestKeyframe { stream_id } => {
 				self.streams.request_keyframe(&stream_id);
+				Ok(())
+			}
+			StreamInput::Layers(layers) => {
+				self.layers = layers.clone();
+				// Without a stream they are used for the next one.
+				if self.streams.streamer().is_some() {
+					self.streams.set_layers(layers)
+				} else {
+					Ok(())
+				}
+			}
+			StreamInput::SrtpProfiles(profiles) => {
+				self.streams.set_srtp_profiles(profiles);
 				Ok(())
 			}
 			StreamInput::Frame(frame) => {
@@ -289,10 +313,14 @@ impl StreamTask {
 		match event {
 			StreamEvent::Streams(streams) => self.emit(Event::StreamsChanged { session, streams }),
 			StreamEvent::Streamer(StreamerEvent::Live { id }) => {
+				let feedback = match self.streams.streamer() {
+					Some(s) => s.layer_feedback().clone(),
+					None => Arc::new(LayerFeedback::new()),
+				};
 				let sink = StreamSink {
 					tx: self.tx.clone(),
 					live: Arc::new(AtomicBool::new(true)),
-					keyframe: Arc::new(AtomicBool::new(true)),
+					feedback,
 				};
 				self.sink = Some(sink.clone());
 				self.emit(Event::StreamState { session, state: StreamState::Live { id, sink } });
@@ -303,11 +331,12 @@ impl StreamTask {
 			StreamEvent::Streamer(StreamerEvent::Viewers(viewers)) => {
 				self.emit(Event::StreamViewers { session, viewers });
 			}
-			StreamEvent::Streamer(StreamerEvent::KeyframeRequest) => {
-				if let Some(sink) = &self.sink {
-					sink.keyframe.store(true, Ordering::Relaxed);
-				}
-				self.emit(Event::StreamKeyframeRequest { session });
+			// The sink already has it (layer feedback).
+			StreamEvent::Streamer(StreamerEvent::KeyframeRequest { layer }) => {
+				self.emit(Event::StreamKeyframeRequest { session, layer });
+			}
+			StreamEvent::Streamer(StreamerEvent::LayerBitrate { layer, bitrate }) => {
+				self.emit(Event::StreamLayerBitrate { session, layer, bitrate });
 			}
 			StreamEvent::Streamer(StreamerEvent::Ended(reason)) => {
 				if let Some(sink) = self.sink.take() {
@@ -597,6 +626,79 @@ mod tests {
 		})
 		.await;
 		handles[1].send(StreamInput::Shutdown("bye".into()));
+	}
+
+	/// Simulcast layers and the SRTP setting through the stream tasks: the
+	/// viewer gets the top layer only, the sink carries keyframe requests and
+	/// the bitrate target per layer.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn layers_through_stream_tasks() {
+		let (handles, mut rx, mut frames_rx) = pair(None);
+		let layers = vec![
+			LayerSpec { id: 0, min_bitrate: 800_000, ..LayerSpec::single(2_000_000) },
+			LayerSpec { id: 1, scale: 0.5, ..LayerSpec::single(500_000) },
+		];
+		// Set before the stream starts: kept for it.
+		handles[0].send(StreamInput::Layers(layers.clone()));
+		// The viewer is the DTLS server: its order decides.
+		handles[1].send(StreamInput::SrtpProfiles(vec![SrtpProfile::AeadAes128Gcm]));
+		let sink = live_and_watching(&handles, &mut rx).await;
+		let mut keyframes = LayerSet::new();
+		sink.take_layer_keyframes(&mut keyframes);
+		assert!(keyframes.contains(0), "{keyframes:?}");
+
+		let feeder = tokio::spawn({
+			let sink = sink.clone();
+			async move {
+				let mut source = SyntheticSource::with_layers(30, 0, true, &layers);
+				let mut out = Vec::new();
+				while sink.is_live() {
+					source.poll_frames(Instant::now(), &mut out);
+					for f in out.drain(..) {
+						sink.send(f);
+					}
+					tokio::time::sleep(Duration::from_millis(10)).await;
+				}
+			}
+		});
+		let mut video = 0;
+		timeout(Duration::from_secs(10), async {
+			while video < 20 {
+				let f = frames_rx.recv().await.unwrap();
+				if f.frame.kind == MediaKind::Video {
+					assert_eq!(SyntheticSource::frame_layer(&f.frame.data), Some(0));
+					video += 1;
+				}
+			}
+		})
+		.await
+		.expect("no frames");
+		// Bandwidth estimates reach the viewer list and the layer's target.
+		let (mut info, mut bitrate) = (None, None);
+		wait(&mut rx, |e| {
+			match e {
+				Event::StreamViewers { session: 1, viewers } if viewers[0].estimate.is_some() => {
+					info = Some(viewers[0].clone());
+				}
+				Event::StreamLayerBitrate { session: 1, layer: 0, bitrate: b } => bitrate = Some(b),
+				_ => {}
+			}
+			(info.is_some() && bitrate.is_some()).then_some(())
+		})
+		.await;
+		let info = info.unwrap();
+		assert_eq!(info.layer, Some(0));
+		assert_eq!(info.srtp_profile, Some(SrtpProfile::AeadAes128Gcm));
+		assert!(sink.layer_bitrate(0).is_some_and(|b| b > 0));
+		assert_eq!(sink.layer_bitrate(1), None, "no viewer on layer 1");
+
+		handles[0].send(StreamInput::Stop);
+		wait(&mut rx, |e| match e {
+			Event::WatchState { session: 2, state: WatchState::Ended(_), .. } => Some(()),
+			_ => None,
+		})
+		.await;
+		feeder.await.unwrap();
 	}
 
 	/// The whole path: test pattern → VP8 → stream task → str0m peers on

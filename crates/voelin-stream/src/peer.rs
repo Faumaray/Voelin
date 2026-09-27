@@ -4,6 +4,12 @@
 //! viewer and sends its offer through the server; the viewer answers. Host
 //! candidates go into the SDP; server-reflexive candidates found through STUN
 //! are reported later as [`PeerEvent::LocalCandidate`] for trickling.
+//!
+//! DTLS negotiates the SRTP profile in the order of
+//! [`PeerConfig::srtp_profiles`] (see [`crate::dtls`]). A streamer's peer
+//! estimates the bandwidth to its viewer and paces its packets
+//! ([`PeerConfig::bandwidth_estimation`], [`PeerEvent::BitrateEstimate`]),
+//! and can offer RID simulcast ([`PeerConfig::simulcast`]).
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, RandomState};
@@ -12,16 +18,26 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::format::Codec;
-use str0m::media::{Direction, KeyframeRequestKind, MediaKind, MediaTime, Mid, Pt};
+use str0m::media::{
+	Direction, KeyframeRequestKind, MediaKind, MediaTime, Mid, Pt, Rid, Rids, Simulcast,
+	SimulcastLayer,
+};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig, RtcError};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, trace, warn};
 
+use crate::dtls::{self, NegotiatedProfile, SrtpProfile};
+use crate::layer::LayerSpec;
 use crate::stun;
+
+/// Initial bandwidth estimate of a streamer's peer without
+/// [`OfferOptions::start_bitrate`].
+pub const DEFAULT_START_BITRATE: u64 = 1_000_000;
 
 /// Video codecs a peer can negotiate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +90,23 @@ pub struct PeerConfig {
 	pub accept_video_codecs: Vec<VideoCodec>,
 	pub video: bool,
 	pub audio: bool,
+	/// SRTP protection profiles in order of preference. As DTLS server (our
+	/// role with official TeamSpeak clients and browsers, both as streamer
+	/// and as viewer) we pick the first of them the other side offers; as
+	/// DTLS client we offer them in this order. Empty: the default,
+	/// [`SrtpProfile::DEFAULT_ORDER`]. Applies to connections created after
+	/// a change.
+	pub srtp_profiles: Vec<SrtpProfile>,
+	/// A streamer's peers estimate the bandwidth to their viewer (transport-cc
+	/// feedback), report it ([`PeerEvent::BitrateEstimate`]) and pace their
+	/// packets to it.
+	pub bandwidth_estimation: bool,
+	/// A streamer offers RID simulcast (`a=simulcast`, one `a=rid` per layer
+	/// with a [`LayerSpec::rid`]) when it has at least two such layers. Only
+	/// for peers that support it (SFUs, WHIP servers): an answer without
+	/// simulcast leaves the peer unable to send video. Official TeamSpeak
+	/// viewers get a plain offer and one layer at a time.
+	pub simulcast: bool,
 }
 
 impl Default for PeerConfig {
@@ -85,6 +118,9 @@ impl Default for PeerConfig {
 			accept_video_codecs: VideoCodec::ALL.to_vec(),
 			video: true,
 			audio: true,
+			srtp_profiles: SrtpProfile::DEFAULT_ORDER.to_vec(),
+			bandwidth_estimation: true,
+			simulcast: false,
 		}
 	}
 }
@@ -116,6 +152,20 @@ pub enum PeerError {
 	Closed,
 }
 
+/// How a streamer's peer starts ([`Peer::offer_with`]).
+#[derive(Clone, Debug, Default)]
+pub struct OfferOptions<'a> {
+	/// Initial bandwidth estimate in bit/s (with
+	/// [`PeerConfig::bandwidth_estimation`]); the pacer starts at twice it.
+	/// `None`: [`DEFAULT_START_BITRATE`].
+	pub start_bitrate: Option<u64>,
+	/// Bitrate the estimation probes up to, see
+	/// [`Peer::set_desired_bitrate`]. `None`: the start bitrate.
+	pub desired_bitrate: Option<u64>,
+	/// The stream's layers, for RID simulcast ([`PeerConfig::simulcast`]).
+	pub layers: &'a [LayerSpec],
+}
+
 /// Something that happened on the connection.
 #[derive(Clone, Debug)]
 pub enum PeerEvent {
@@ -127,8 +177,19 @@ pub enum PeerEvent {
 	LocalCandidate { candidate: String, mid: Option<String> },
 	/// A received frame (depacketized).
 	Media(MediaFrame),
+	/// A received frame of a RID simulcast layer.
+	LayerMedia { rid: Rid, frame: MediaFrame },
 	/// The viewer asks for a keyframe.
 	KeyframeRequest,
+	/// The viewer asks for a keyframe of a RID simulcast layer.
+	LayerKeyframeRequest(Rid),
+	/// The bandwidth estimate to the viewer changed (bit/s; streamer side,
+	/// with [`PeerConfig::bandwidth_estimation`]; from transport-cc
+	/// feedback, or REMB from a viewer that sends no transport-cc).
+	BitrateEstimate(u64),
+	/// The answer accepted RID simulcast: video goes out per layer with
+	/// these RIDs ([`Peer::write_rid`]).
+	Simulcast(Vec<Rid>),
 	/// The connection is gone.
 	Closed,
 }
@@ -148,8 +209,9 @@ pub struct MediaFrame {
 enum Cmd {
 	Answer(String, oneshot::Sender<Result<(), PeerError>>),
 	RemoteCandidate(String),
-	Write { kind: MediaKind, time: MediaTime, data: Arc<[u8]> },
+	Write { kind: MediaKind, time: MediaTime, data: Arc<[u8]>, rid: Option<Rid> },
 	RequestKeyframe,
+	DesiredBitrate(u64),
 	Close,
 }
 
@@ -157,20 +219,38 @@ enum Cmd {
 pub struct Peer {
 	cmd: mpsc::UnboundedSender<Cmd>,
 	events: mpsc::UnboundedReceiver<PeerEvent>,
+	srtp_profile: NegotiatedProfile,
 }
 
 impl Peer {
 	/// Streamer side: create a connection that sends our media; returns the SDP
 	/// offer for `respondjoinstreamrequest`.
 	pub async fn offer(config: &PeerConfig, stream_id: &str) -> Result<(Self, String), PeerError> {
-		let mut rtc = build_rtc(config, &config.video_codecs);
+		Self::offer_with(config, stream_id, &OfferOptions::default()).await
+	}
+
+	/// [`offer`](Self::offer) with a start estimate for the bandwidth
+	/// estimation and the stream's layers (for RID simulcast).
+	pub async fn offer_with(
+		config: &PeerConfig,
+		stream_id: &str,
+		options: &OfferOptions<'_>,
+	) -> Result<(Self, String), PeerError> {
+		let start = options.start_bitrate.unwrap_or(DEFAULT_START_BITRATE).max(1);
+		let bwe = config.bandwidth_estimation.then_some(start);
+		let (mut rtc, srtp_profile) = build_rtc(config, &config.video_codecs, bwe);
+		if bwe.is_some() {
+			let desired = options.desired_bitrate.unwrap_or(start);
+			rtc.bwe().set_desired_bitrate(Bitrate::bps(desired));
+		}
 		let net = Net::bind(config, &mut rtc).await?;
 		let mut api = rtc.sdp_api();
 		let msid = Some(stream_id.to_owned());
 		let mut mids = Vec::new();
 		if config.video {
+			let simulcast = config.simulcast.then(|| simulcast_offer(options.layers)).flatten();
 			let mid =
-				api.add_media(MediaKind::Video, Direction::SendOnly, msid.clone(), None, None);
+				api.add_media(MediaKind::Video, Direction::SendOnly, msid.clone(), None, simulcast);
 			mids.push((mid, MediaKind::Video));
 		}
 		if config.audio {
@@ -179,7 +259,7 @@ impl Peer {
 		}
 		let (offer, pending) = api.apply().ok_or(PeerError::Sdp("nothing to offer".into()))?;
 		let sdp = offer.to_sdp_string();
-		Ok((Self::spawn(rtc, net, config, Some(pending), mids), sdp))
+		Ok((Self::spawn(rtc, net, config, Some(pending), mids, srtp_profile), sdp))
 	}
 
 	/// Viewer side: accept the streamer's offer; returns our SDP answer.
@@ -195,10 +275,11 @@ impl Peer {
 			}
 		}
 		let offer = SdpOffer::from_sdp_string(offer).map_err(|e| PeerError::Sdp(e.to_string()))?;
-		let mut rtc = build_rtc(config, &codecs);
+		let (mut rtc, srtp_profile) = build_rtc(config, &codecs, None);
 		let net = Net::bind(config, &mut rtc).await?;
 		let answer = rtc.sdp_api().accept_offer(offer)?;
-		Ok((Self::spawn(rtc, net, config, None, Vec::new()), answer.to_sdp_string()))
+		let peer = Self::spawn(rtc, net, config, None, Vec::new(), srtp_profile);
+		Ok((peer, answer.to_sdp_string()))
 	}
 
 	fn spawn(
@@ -207,6 +288,7 @@ impl Peer {
 		config: &PeerConfig,
 		pending: Option<SdpPendingOffer>,
 		mids: Vec<(Mid, MediaKind)>,
+		srtp_profile: NegotiatedProfile,
 	) -> Self {
 		let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 		let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -219,9 +301,10 @@ impl Peer {
 			mids,
 			writers: HashMap::new(),
 			stun: Vec::new(),
+			twcc: false,
 		};
 		tokio::spawn(task.run(config.stun_servers.clone()));
-		Self { cmd: cmd_tx, events: event_rx }
+		Self { cmd: cmd_tx, events: event_rx, srtp_profile }
 	}
 
 	/// Streamer side: apply the viewer's answer.
@@ -238,12 +321,29 @@ impl Peer {
 
 	/// Send one encoded frame (streamer). Dropped until connected.
 	pub fn write(&self, kind: MediaKind, time: MediaTime, data: impl Into<Arc<[u8]>>) {
-		let _ = self.cmd.send(Cmd::Write { kind, time, data: data.into() });
+		let _ = self.cmd.send(Cmd::Write { kind, time, data: data.into(), rid: None });
+	}
+
+	/// Send one video frame of the RID simulcast layer `rid`
+	/// ([`PeerEvent::Simulcast`]); `None` as [`write`](Self::write).
+	pub fn write_rid(&self, kind: MediaKind, time: MediaTime, data: Arc<[u8]>, rid: Option<Rid>) {
+		let _ = self.cmd.send(Cmd::Write { kind, time, data, rid });
 	}
 
 	/// Ask the streamer for a keyframe (viewer).
 	pub fn request_keyframe(&self) {
 		let _ = self.cmd.send(Cmd::RequestKeyframe);
+	}
+
+	/// The bitrate (bit/s) the bandwidth estimation probes up to: what we
+	/// would send if the path allowed it.
+	pub fn set_desired_bitrate(&self, bitrate: u64) {
+		let _ = self.cmd.send(Cmd::DesiredBitrate(bitrate));
+	}
+
+	/// The SRTP profile DTLS negotiated, once it has.
+	pub fn srtp_profile(&self) -> Option<SrtpProfile> {
+		self.srtp_profile.get()
 	}
 
 	pub fn close(&self) {
@@ -275,12 +375,43 @@ impl Drop for Peer {
 /// TeamSpeak client decodes; str0m's defaults lack it.
 const H264_CONSTRAINED_HIGH: u32 = 0x640c1f;
 
-/// An RTC with Opus and `video` codecs, in this order of preference.
-fn build_rtc(config: &PeerConfig, video: &[VideoCodec]) -> Rtc {
-	let mut rtc_config = RtcConfig::new()
-		.set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
-		.clear_codecs()
-		.enable_opus(config.audio);
+/// The send simulcast of an offer: the layers with a RID, if at least two.
+fn simulcast_offer(layers: &[LayerSpec]) -> Option<Simulcast> {
+	let mut simulcast = Simulcast::new();
+	for layer in layers {
+		let Some(rid) = layer.rid.as_deref() else { continue };
+		let id = Rid::from(rid);
+		if *id != *rid {
+			warn!(rid, sent = &*id, "RIDs are up to 8 letters, digits or _; the RID was changed");
+		}
+		if simulcast.send.iter().any(|l| l.rid == id) {
+			warn!(rid, "duplicate RID, layer not offered");
+			continue;
+		}
+		let mut builder = SimulcastLayer::new_with_attributes(&id);
+		if let Some((w, h)) = layer.size {
+			builder = builder.max_width(w).max_height(h);
+		}
+		if let Some(fps) = layer.max_fps {
+			builder = builder.max_fps(fps);
+		}
+		if let Some(max) = layer.max_bitrate {
+			builder = builder.max_br(u32::try_from(max).unwrap_or(u32::MAX));
+		}
+		simulcast.add_send_layer(builder.build());
+	}
+	(simulcast.send.len() >= 2).then_some(simulcast)
+}
+
+/// An RTC with Opus and `video` codecs, in this order of preference, our
+/// DTLS, and bandwidth estimation starting at `bwe` bit/s if given.
+fn build_rtc(
+	config: &PeerConfig,
+	video: &[VideoCodec],
+	bwe: Option<u64>,
+) -> (Rtc, NegotiatedProfile) {
+	let mut rtc_config =
+		RtcConfig::new().clear_codecs().enable_opus(config.audio).enable_bwe(bwe.map(Bitrate::bps));
 	for codec in video {
 		rtc_config = match codec {
 			VideoCodec::Vp8 => rtc_config.enable_vp8(true),
@@ -298,7 +429,7 @@ fn build_rtc(config: &PeerConfig, video: &[VideoCodec]) -> Rtc {
 			VideoCodec::Av1 => rtc_config.enable_av1(true),
 		};
 	}
-	rtc_config.build(Instant::now())
+	dtls::build_rtc(rtc_config, &config.srtp_profiles)
 }
 
 /// The video codecs of the first video media line of `sdp`, in offered order.
@@ -423,6 +554,8 @@ struct Task {
 	/// Negotiated (mid, pt) for sending each media kind.
 	writers: HashMap<MediaKind, (Mid, Pt)>,
 	stun: Vec<PendingStun>,
+	/// A transport-cc estimate arrived: REMB is ignored from then on.
+	twcc: bool,
 }
 
 fn transaction_id() -> stun::TransactionId {
@@ -585,17 +718,37 @@ impl Task {
 				} else {
 					MediaKind::Video
 				};
-				let _ = self.events.send(PeerEvent::Media(MediaFrame {
+				let frame = MediaFrame {
 					kind,
 					codec: d.params.spec().codec,
 					time: d.time,
 					network_time: d.network_time,
 					contiguous: d.contiguous,
 					data: d.data,
-				}));
+				};
+				let _ = self.events.send(match d.rid {
+					Some(rid) => PeerEvent::LayerMedia { rid, frame },
+					None => PeerEvent::Media(frame),
+				});
 			}
-			Event::KeyframeRequest(_) => {
-				let _ = self.events.send(PeerEvent::KeyframeRequest);
+			Event::KeyframeRequest(r) => {
+				let _ = self.events.send(match r.rid {
+					Some(rid) => PeerEvent::LayerKeyframeRequest(rid),
+					None => PeerEvent::KeyframeRequest,
+				});
+			}
+			Event::EgressBitrateEstimate(estimate) => {
+				let bitrate = match estimate {
+					BweKind::Twcc(b) => {
+						self.twcc = true;
+						Some(b)
+					}
+					BweKind::Remb(_, b) if !self.twcc => Some(b),
+					_ => None,
+				};
+				if let Some(b) = bitrate {
+					let _ = self.events.send(PeerEvent::BitrateEstimate(b.as_u64()));
+				}
 			}
 			_ => {}
 		}
@@ -616,13 +769,16 @@ impl Task {
 					Err(e) => debug!("ignoring remote candidate {line:?}: {e}"),
 				}
 			}
-			Cmd::Write { kind, time, data } => self.write(kind, time, data)?,
+			Cmd::Write { kind, time, data, rid } => self.write(kind, time, data, rid),
 			Cmd::RequestKeyframe => {
 				for &(mid, _) in &self.mids {
 					if let Some(mut w) = self.rtc.writer(mid) {
 						let _ = w.request_keyframe(None, KeyframeRequestKind::Pli);
 					}
 				}
+			}
+			Cmd::DesiredBitrate(bitrate) => {
+				self.rtc.bwe().set_desired_bitrate(Bitrate::bps(bitrate));
 			}
 			Cmd::Close => return Ok(false),
 		}
@@ -633,27 +789,37 @@ impl Task {
 		let pending = self.pending.take().ok_or(PeerError::NotOffering)?;
 		let answer = SdpAnswer::from_sdp_string(sdp).map_err(|e| PeerError::Sdp(e.to_string()))?;
 		self.rtc.sdp_api().accept_answer(pending, answer)?;
+		// RID simulcast: the answer lists the layers it takes.
+		for &(mid, kind) in &self.mids {
+			if kind == MediaKind::Video
+				&& let Some(Rids::Specific(rids)) = self.rtc.media(mid).map(|m| m.rids_tx())
+				&& !rids.is_empty()
+			{
+				let _ = self.events.send(PeerEvent::Simulcast(rids.clone()));
+			}
+		}
 		Ok(())
 	}
 
-	fn write(
-		&mut self,
-		kind: MediaKind,
-		time: MediaTime,
-		data: Arc<[u8]>,
-	) -> Result<(), PeerError> {
+	/// A frame that cannot be sent (e.g. a RID the answer did not take) is
+	/// dropped; the connection stays.
+	fn write(&mut self, kind: MediaKind, time: MediaTime, data: Arc<[u8]>, rid: Option<Rid>) {
 		if !self.writers.contains_key(&kind) {
 			let Some((mid, pt)) = self.find_writer(kind) else {
 				trace!(?kind, "no negotiated media to write to");
-				return Ok(());
+				return;
 			};
 			self.writers.insert(kind, (mid, pt));
 		}
 		let (mid, pt) = self.writers[&kind];
-		if let Some(writer) = self.rtc.writer(mid) {
-			writer.write(pt, Instant::now(), time, data)?;
+		if let Some(mut writer) = self.rtc.writer(mid) {
+			if let Some(rid) = rid {
+				writer = writer.rid(rid);
+			}
+			if let Err(e) = writer.write(pt, Instant::now(), time, data) {
+				debug!(?kind, ?rid, "frame not sent: {e}");
+			}
 		}
-		Ok(())
 	}
 
 	fn find_writer(&mut self, kind: MediaKind) -> Option<(Mid, Pt)> {
@@ -704,5 +870,61 @@ mod tests {
 			PeerConfig { accept_video_codecs: vec![VideoCodec::Vp8], ..PeerConfig::loopback() };
 		let (_peer, answer) = Peer::answer(&vp8_only, &offer).await.unwrap();
 		assert_eq!(offered_video_codecs(&answer), [VideoCodec::Vp8], "{answer}");
+	}
+
+	/// The SDP lines that make up the media description (not the random ids,
+	/// ports, credentials and fingerprints).
+	fn media_lines(sdp: &str) -> Vec<&str> {
+		const KEPT: [&str; 8] = [
+			"m=",
+			"a=setup",
+			"a=extmap",
+			"a=rtcp-fb",
+			"a=rtpmap",
+			"a=fmtp",
+			"a=simulcast",
+			"a=rid",
+		];
+		sdp.lines().filter(|l| KEPT.iter().any(|k| l.starts_with(k))).collect()
+	}
+
+	/// Bandwidth estimation changes nothing in the offer official viewers get
+	/// (str0m always offers transport-cc and abs-send-time).
+	#[tokio::test]
+	async fn offer_with_bandwidth_estimation_is_unchanged() {
+		let without = PeerConfig { bandwidth_estimation: false, ..PeerConfig::loopback() };
+		let (_a, plain) = Peer::offer(&without, "s").await.unwrap();
+		let (_b, bwe) = Peer::offer(&PeerConfig::loopback(), "s").await.unwrap();
+		assert_eq!(media_lines(&plain), media_lines(&bwe));
+		assert!(bwe.contains("transport-wide-cc") && bwe.contains("transport-cc"), "{bwe}");
+		assert!(!bwe.contains("a=simulcast"), "{bwe}");
+		// Layers without the simulcast flag: still the plain offer.
+		let layers = [
+			LayerSpec { rid: Some("h".into()), ..LayerSpec::single(2_000_000) },
+			LayerSpec {
+				id: 1,
+				size: Some((640, 360)),
+				max_fps: Some(15),
+				max_bitrate: Some(500_000),
+				rid: Some("l".into()),
+				..LayerSpec::single(400_000)
+			},
+		];
+		let options = OfferOptions { layers: &layers, ..OfferOptions::default() };
+		let (_c, layered) = Peer::offer_with(&PeerConfig::loopback(), "s", &options).await.unwrap();
+		assert_eq!(media_lines(&plain), media_lines(&layered));
+		// With it: RID simulcast with the layers' limits.
+		let simulcast = PeerConfig { simulcast: true, ..PeerConfig::loopback() };
+		let (_d, sdp) = Peer::offer_with(&simulcast, "s", &options).await.unwrap();
+		assert!(sdp.contains("a=simulcast:send h;l"), "{sdp}");
+		assert!(sdp.contains("a=rid:h send\r\n"), "{sdp}");
+		assert!(
+			sdp.contains("a=rid:l send max-width=640;max-height=360;max-fps=15;max-br=500000"),
+			"{sdp}"
+		);
+		// One layer with a RID is not simulcast.
+		let options = OfferOptions { layers: &layers[..1], ..OfferOptions::default() };
+		let (_e, sdp) = Peer::offer_with(&simulcast, "s", &options).await.unwrap();
+		assert!(!sdp.contains("a=simulcast"), "{sdp}");
 	}
 }
