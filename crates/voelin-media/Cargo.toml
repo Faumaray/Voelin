@@ -61,7 +61,12 @@ wasapi = "0.24.0"
 windows-capture = "2.0.1"
 
 [dev-dependencies]
+criterion = "0.8"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+
+[[bench]]
+name = "convert"
+harness = false
 
 [lints]
 workspace = true

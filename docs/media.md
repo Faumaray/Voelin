@@ -11,15 +11,21 @@ MediaTime::new(frame.pts_90khz, Frequency::NINETY_KHZ), data)`), and received
 | Item | What it is |
 |---|---|
 | `VideoFrame { width, height, timestamp, data: FrameData }` | `FrameData::I420 { y, u, v }`, `Nv12 { y, uv }`, `Bgra(Plane)`, `Rgba(Plane)`; `Plane { data, stride }` |
+| `FrameRef { width, height, timestamp, pixels: PixelsRef }` | the same with borrowed planes (`PlaneRef { data: &[u8], stride }`), e.g. a mapped capture buffer; `VideoFrame::view()`, `FrameRef::to_frame()` |
 | `AudioBuffer { samples, channels, timestamp }` | interleaved `f32`, 48 kHz |
 | `convert::to_rgba(&frame, out, stride)`, `to_rgba_vec`, `to_i420`, `psnr` | BT.601 limited range (the WebRTC default). `to_rgba` writes straight into a Slint `SharedPixelBuffer<Rgba8Pixel>` (`make_mut_bytes()`, stride `width * 4`) |
 | `Codec` | `Vp8`, `Vp9`, `H264`, `Av1`; `FromStr` for SDP/MIME names; `From`/`TryFrom` `str0m::format::Codec` with feature `str0m` |
-| `VideoEncoder` | `encode(&frame, force_keyframe) -> Vec<EncodedFrame>`, `set_bitrate(bps)`, `codec()`, `backend()` |
+| `VideoEncoder` | `encode(&frame, force_keyframe) -> Vec<EncodedFrame>`; `encode_with(&frame, force_keyframe, &mut |EncodedChunk| ..)` hands out the encoder's own buffer (no copy); `set_bitrate(bps)` (libvpx: in place, no keyframe), `set_fps`, `speed()`, `codec()`, `backend()` |
 | `EncodedFrame { data, keyframe, pts_90khz }` | one frame for `Peer::write` |
 | `VideoDecoder` | `decode(&[u8]) -> Option<VideoFrame>` (timestamp zero; the caller knows the RTP time) |
-| `EncoderConfig { fps, bitrate_bps, keyframe_interval, content, threads }` | resolution follows the frames; a size change restarts with a keyframe |
+| `EncoderConfig { fps, bitrate_bps, keyframe_interval, content, threads, speed }` | resolution follows the frames; a size change restarts with a keyframe; `threads` is a maximum (0: all CPUs), still capped at one per 320x240 pixels; `speed: None` adapts libvpx `cpu-used` to the encode time |
 | `Codecs` | `new()`, `with_openh264(lib)`, `decoders()` (viewer order), `encoders()` / `encoder_codecs()` (streamer order), `new_decoder(codec)`, `new_encoder(codec, config)`, `pick_encoder(&accepted)` |
-| `ScreenCapture` | `sources()`, `start(&SourceId, &CaptureOptions)` (async: the portal asks the user), `stop()` |
+| `ScreenCapture` | `sources()`, `start_sink(&SourceId, &CaptureOptions, Box<dyn FrameSink>)` (frames borrowed from the capture buffer, on the backend's thread), `start(..)` (copies into a queue), `stop()`; async: the portal asks the user |
+| `FrameSink` | `max_fps()` (may change while capturing), `wants(timestamp)` (asked before anything is mapped or copied), `frame(FrameRef) -> bool` |
+| `FramePacer` | frame-rate cap by timestamps, evenly spaced |
+| `convert::Converter` | `to_i420_into(&FrameRef, &mut VideoFrame)`: any stride, BGRx/BGRA/RGBx/RGBA/I420/NV12, row bands on all cores, no allocation |
+| `scale::{PlaneScaler, Pyramid, scale_i420}` | area-average downscaling (bilinear up), 2x2 box fast path; `Pyramid::process(&FrameRef, sizes, due, out)` converts once and derives every size from the nearest larger one |
+| `pool::FramePool`, `handoff::Handoff`, `workers::Workers` | recycled `Arc<VideoFrame>`s; one-slot latest-wins handoff between threads (counts replaced items); fork-join pool without per-job allocation |
 | `AudioCapture` | `start() -> FrameReceiver<AudioBuffer>`, `stop()` |
 | `FrameReceiver<T>` | bounded queue that drops the oldest item; `recv().await`, `try_recv()`, `recv_timeout()` |
 | `capture::default_screen_capture()`, `default_audio_capture()` | the backend for this session |
@@ -47,20 +53,58 @@ PipeWire). The desktop app and voelinctl use `media-desktop`, the Android app
 `media`. Codecs are always chosen through `Codecs`, so each build uses its own.
 
 ```
-streamer: ScreenCapture ─ VideoEncoder (codec of our offer) ─┐
-          AudioCapture ─ 20 ms stereo Opus (128 kbit/s) ─────┴─ MediaSink: StreamSink / EncodedSource
+streamer: capture thread ── FrameSink: pace, convert + scale (Pyramid on all cores)
+            │ one Handoff per layer (newest frame wins)
+            ├─ encoder thread, layer 0 ─┐
+            ├─ encoder thread, layer 1 ─┤
+            └─ ...                      ├─ MediaSink: StreamSink / EncodedSource
+          AudioCapture ─ 20 ms stereo Opus (128 kbit/s) ─┘
 viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder ─ picture callback ─ Latest
           stream audio ─ session audio thread (mixer, own volume) ─ speakers
 ```
 
 - `Streamer::start(&codecs, StreamerConfig)` starts capturing right away (the
   portal asks the user then), so a cancelled dialog never starts a stream;
-  frames are encoded only after `attach(sink)`, i.e. once the stream is live.
-  The encoder runs at the setup's bitrate; a viewer's keyframe request (on
-  the sink) forces a keyframe, and is kept until the encoder produced one.
-  Audio follows the capture clock across gaps. With the test pattern
-  (`SourceId::Synthetic`) the audio is a quiet sine tone. The portal's restore
-  token is available afterwards (`restore_token()`) to store.
+  frames are converted and encoded only after `attach(sink)`, i.e. once the
+  stream is live. Audio follows the capture clock across gaps. With the test
+  pattern (`SourceId::Synthetic`, `synthetic_pattern`) the audio is a quiet
+  sine tone. The portal's restore token is available afterwards
+  (`restore_token()`) to store.
+- Threads: the capture backend calls the streamer's `FrameSink` on its own
+  thread with the frame still in its capture buffer. Frames over the
+  frame-rate cap (`StreamerConfig::fps`, any value >= 1) are skipped before
+  anything is read. The rest is converted to I420 once, on all cores, and
+  scaled for every layer that is due (`Pyramid`, recycled frames). Each
+  layer's newest frame goes through a one-slot handoff to that layer's
+  encoder thread; a frame the encoder was too busy for is replaced and
+  counted, never queued, so latency stays one frame.
+- Simulcast: `StreamerConfig::layers` (`voelin_stream::LayerSpec`; empty:
+  one layer 0 at `bitrate_kbps`) are all encoded, each with its own encoder
+  at `output_size()` of the source, its own frame-rate cap (`max_fps`,
+  paced by timestamps) and its share of the CPUs. Frames carry `layer` and
+  `keyframe`. `MediaSink::take_layer_keyframes` is polled by the encoder
+  threads; exactly the requested layers encode a keyframe, kept due until
+  one is produced; a still screen sends no frames, so a request is answered
+  by encoding the last picture again. Each layer follows
+  `MediaSink::layer_bitrate(id)` when the sink knows it (capped by
+  `max_bitrate`), else its configured bitrate; libvpx changes it in place
+  without a keyframe.
+- `Streamer::reconfigure(&codecs, StreamerConfigUpdate { fps, bitrate_kbps,
+  codec, layers })` applies from the next frame without restarting the
+  capture: encoders are created first (an error changes nothing), layers
+  keep their encoder when their id stays, new ids get threads, removed ones
+  stop, a new codec swaps every encoder (first frame a keyframe), and the
+  frame-rate cap reaches the capture backend (X11 and the test pattern
+  retime, the portal renegotiates the rate with the compositor).
+- `stats()`: `StreamerStats` with capture fps, convert time and threads,
+  dropped frames, codec, and per layer (`LayerStats`) size, frames,
+  keyframes, dropped, fps, kbit/s, encode time, target bitrate, threads
+  and encoder speed. Counters are atomics; rates are computed once a
+  second, and a one-line summary is logged every 5 s at debug level
+  (`RUST_LOG=voelin_core::media=debug`).
+- `CaptureBackend`: `Auto` (the session default: portal on Wayland, X11,
+  WGC), `Portal`, `X11`, `Wlroots`; `name()` / `FromStr` use the settings
+  spellings `auto`, `portal`, `x11`, `wlroots`.
 - `peer_config(&codecs, config)` makes a viewer accept only what we decode
   and a streamer offer only the codec it encodes (VP8 unless changed): all
   viewers get the same frames, and a viewer picks from the offer.
@@ -103,14 +147,27 @@ encoders (H.264, VP9, VP8), then Google's software VP8 and H.264. Decoders
 return the newest finished picture per `decode` call (NV12 or I420).
 
 libvpx settings follow libwebrtc's realtime setup: one pass CBR, no lag,
-`VPX_DL_REALTIME`, error resilient, `cpu-used` 8 (VP8: fixed speed −8), keyframes
-only at start and on request unless `keyframe_interval` is set, screen content
-tuning (`VP8E_SET_SCREEN_CONTENT_MODE`, `VP9E_SET_TUNE_CONTENT`, static
-threshold), VP9 row-mt, tiles and cyclic-refresh AQ. `set_bitrate` reconfigures
-the running encoder (`vpx_codec_enc_config_set`). The C API is wrapped in
-`codec/vpx/raw.rs`, one of three modules with `unsafe` code (with the X11 SHM
-mapping and the `Send` wrapper in `codec/mediacodec.rs`); existing safe
-wrappers either encode only or cannot change the bitrate at runtime.
+`VPX_DL_REALTIME`, error resilient, keyframes only at start and on request
+unless `keyframe_interval` is set, screen content tuning
+(`VP8E_SET_SCREEN_CONTENT_MODE`, `VP9E_SET_TUNE_CONTENT`, static threshold),
+VP9 row-mt, tile columns from the thread count and width (tiles are at least
+256 pixels wide) and cyclic-refresh AQ, VP8 token partitions from the thread
+count. Threads: all CPUs (or the streamer's share per layer), at most one per
+320x240 pixels. `cpu-used` adapts to the measured encode time against the
+frame interval (faster above 75 %, slower below 35 %, decided every 15
+frames): VP8 starts at −10 and moves within −10..−4 (on screen content −12
+and faster were no quicker and about 3 dB worse), VP9 starts at 8 within
+5..9; `EncoderConfig::speed` fixes it instead. Frame durations for rate
+control follow the timestamps (variable frame rate), at least 3/4 of the
+nominal interval. `set_bitrate` reconfigures the running encoder
+(`vpx_codec_enc_config_set`). The C API is wrapped in
+`codec/vpx/raw.rs`; existing safe wrappers either encode only or cannot
+change the bitrate at runtime. The other modules with `unsafe` code, each
+with SAFETY comments: the X11 and wlroots shared-memory mappings
+(`capture/x11/shm.rs`, `capture/wlroots.rs`), the DMA-BUF mapping and sync
+ioctl (`capture/dmabuf.rs`), the lifetime-erased job of the worker pool
+(`workers.rs`), the `Arc` raw pointers of the handoff (`handoff.rs`), and
+the `Send` wrapper in `codec/mediacodec.rs`.
 
 The OpenH264 encoder has no safe runtime bitrate change in the `openh264`
 crate, so `set_bitrate` recreates it (the next frame is an IDR). It enables
@@ -148,7 +205,8 @@ found at ...").
 |---|---|---|
 | any | `SyntheticScreen` | `SineSource` |
 | Linux X11 (`x11`, default) | `X11Capture`: MIT-SHM 1.2 (memfd passed to the server) or GetImage; RandR 1.5 monitors; windows from `_NET_CLIENT_LIST` (root children without a WM); XFixes cursor blended in | |
-| Linux Wayland (`pipewire`, default) | `PortalCapture`: xdg-desktop-portal ScreenCast via `ashpd`, frames from a PipeWire video stream | `PipeWireAudioCapture`: default sink monitor (`stream.capture.sink = true`) |
+| Linux Wayland (`pipewire`, default) | `PortalCapture`: xdg-desktop-portal ScreenCast via `ashpd`, frames from a PipeWire video stream (LINEAR DMA-BUF or shared memory) | `PipeWireAudioCapture`: default sink monitor (`stream.capture.sink = true`) |
+| Linux wlroots (`wlroots`, default) | `WlrootsCapture`: `ext-image-copy-capture-v1`, else `wlr-screencopy-unstable-v1`, outputs only, shared memory | |
 | Windows | `WindowsCapture`: Windows Graphics Capture (`windows-capture`), monitors and windows | `WasapiLoopback`: process loopback excluding our own process tree, falling back to plain loopback |
 | Android | `ExternalScreenCapture` fed by the app (MediaProjection → `ImageReader`, RGBA; see [android.md](android.md)) | `ExternalAudioCapture` fed by the app (`AudioPlaybackCapture`, 48 kHz float) |
 
@@ -169,10 +227,26 @@ Notes:
   desktop's picker. Choices persist with `PersistMode::ExplicitlyRevoked`: store
   `PortalCapture::restore_token()` (e.g. in `voelin-store` settings) and pass it to
   `PortalCapture::with_restore_token` next time. The cursor is embedded when
-  the portal supports it. Only shared-memory buffers (BGRx/BGRA/RGBx/RGBA) are
-  negotiated; DMA-BUF import is a TODO. Without a session bus or portal,
-  `start` returns `Error::CaptureUnavailable`; a cancelled dialog returns
-  `Error::Cancelled`.
+  the portal supports it. Buffers: LINEAR DMA-BUFs are offered first (a
+  mandatory modifier property we fixate; mapped once per buffer, read
+  between `DMA_BUF_IOCTL_SYNC` start and end), shared memory
+  (BGRx/BGRA/RGBx/RGBA) second. If reading DMA-BUFs is slower than 6 ns per
+  pixel over the first 30 frames (uncached VRAM), the stream renegotiates to
+  shared memory; `VOELIN_PORTAL_DMABUF=0` or `with_dmabuf(false)` skips them.
+  Tiled modifiers would need a GPU import (a later step). The frame rate
+  asked of the compositor is the sink's cap, renegotiated when it changes;
+  compositors send frames only when the screen changes. Without a session
+  bus or portal, `start` returns `Error::CaptureUnavailable`; a cancelled
+  dialog returns `Error::Cancelled`.
+- wlroots: `WlrootsCapture::new()` (`$WAYLAND_DISPLAY`) or `with_display`;
+  sources are the outputs (`SourceId::Monitor(i)`). The compositor copies
+  into shared-memory buffers allocated once per size; frames complete only
+  when the screen changed (`copy_with_damage` / image-copy sessions). The
+  cursor is painted by the compositor when asked. No window capture
+  (`ext-foreign-toplevel-list`) and no DMA-BUF capture yet.
+- X11 reads through the shared-memory segment in place (cursor blended into
+  it); the monitor or window geometry is looked up once a second rather than
+  per frame. x11rb still allocates a small reply buffer per request.
 - PipeWire system audio captures everything the default sink plays, including
   our own playback (TeamSpeak voices): PipeWire has no "all but this process"
   monitor. Excluding our nodes needs a private null sink with links from every
@@ -180,6 +254,38 @@ Notes:
   on another sink or accept that viewers hear them. Without a PipeWire daemon,
   `start` returns `Error::CaptureUnavailable`.
 - Windows process loopback needs Windows 10 2004 or later.
+
+## Performance and benchmarks
+
+Per frame, in steady state, nothing is allocated between the capture buffer
+and the encoder input (verified with `voelinctl stream bench`, which counts
+heap allocations with a counting global allocator): the synthetic source
+renders into one buffer, conversion and scaling write into recycled frames,
+handoffs are atomic pointer swaps, and libvpx output is borrowed. The one
+allocation per encoded frame is the `Arc<[u8]>` of `EncodedFrame`, whose size
+varies per frame and so cannot be recycled. Backends outside our control add
+their own (x11rb reply buffers; the Android provider hands owned frames).
+
+```sh
+# The real pipeline on the test pattern, no server:
+voelinctl stream bench --res 1920x1080 --fps 60 --codec vp8 --seconds 10
+voelinctl stream bench --res 2560x1440 --fps 30 \
+    --layer scale=1,bitrate=6M --layer scale=0.5,bitrate=1500k,fps=30 \
+    --layer size=640x360,bitrate=400k,fps=15
+# Conversion and scaling alone:
+cargo bench -p voelin-media --bench convert
+```
+
+`--pattern desktop` (default) is a code-editor-like picture whose document
+scrolls three pixels per frame, about as costly to encode as real screen
+content; `--pattern simple` is the flat test pattern. The bench prints
+capture fps, convert time and threads, per layer fps, kbit/s, keyframes,
+frames dropped by the handoff, encode time, threads and `cpu-used`, CPU use
+and allocations per captured and per encoded frame.
+
+Build profiles: the dev profile builds the media hot path (yuv,
+voelin-media, str0m, x11rb-protocol, pipewire, wayland-client, ...) with
+`opt-level = 3`; release builds use fat LTO with one codegen unit.
 
 ## Build requirements
 
@@ -208,6 +314,8 @@ run on Windows yet.
 | Cisco OpenH264 binary | BSD-2-Clause + Cisco's royalty coverage | downloaded by the user, see above |
 | `dav1d` crate / libdav1d | MIT / BSD-2-Clause | optional, system library |
 | `x11rb`, `memmap2`, `rustix` | MIT OR Apache-2.0 (rustix also Apache-2.0 WITH LLVM-exception) | |
+| `wayland-client`, `wayland-protocols`, `wayland-protocols-wlr` | MIT | wlroots capture |
+| `criterion` | Apache-2.0 OR MIT | benchmarks only (dev-dependency) |
 | `ashpd`, `pipewire`, `libspa` / libpipewire | MIT | libpipewire is dynamic |
 | `windows-capture`, `wasapi`, `windows` | MIT (`windows`: MIT OR Apache-2.0) | Windows only |
 | `bzip2` / `libbz2-rs-sys` | MIT OR Apache-2.0 / bzip2-1.0.6 | unpacks the OpenH264 download; `bzip2-1.0.6` is allowed in `deny.toml` |
@@ -223,8 +331,12 @@ run on Windows yet.
 | H.264 library missing / unknown file | unit + integration tests | tested |
 | AV1 decoder construction, garbage input | unit test (`--features av1`) | tested; no AV1 stream decoded (no encoder available) |
 | X11 capture (MIT-SHM and GetImage), sources, window capture → VP8 → decode, cursor | `tests/x11_capture.rs` under Xvfb | tested |
+| wlroots capture (wlr-screencopy v3): outputs, pixels, a change arriving as a new frame, queue API | `tests/wlroots_capture.rs` against headless sway 1.9 (`VOELIN_WLROOTS_TEST_DISPLAY`) | tested; the ext-image-copy-capture path is untested (sway 1.9 predates it) |
+| Converter (strides, unpadded last row, odd sizes, RGBA/I420/NV12), scaler (flat, area average, half), pyramid (sharing, recycling, steady-state pools) | unit tests | tested |
+| Simulcast layers (sizes, fps caps, per-layer keyframes), reconfigure (codec, layers, fps) | `voelin-core` `media::tests::simulcast_layers_and_reconfigure` | tested |
+| Portal DMA-BUF negotiation | unit test of the offered formats | compiles and formats parse; no compositor with the portal here |
 | Portal / PipeWire error paths (no bus, bus without portal, no daemon) | unit tests, manual probe | tested |
-| Portal capture, PipeWire video and audio streams | – | compiles only (no portal or PipeWire daemon here) |
+| Portal capture (shared memory and DMA-BUF), PipeWire video and audio streams | – | compiles only (no portal or PipeWire daemon here) |
 | Windows Graphics Capture, WASAPI | – | type-checked for `x86_64-pc-windows-gnu` only |
 | Hardware encoders | – | stubs |
 | Test pattern → VP8 → decoder, rectangle position and colour | `voelin-core` `media::tests::local_preview_decodes_the_pattern` | tested |

@@ -9161,6 +9161,7 @@ version = "0.1.0"
 dependencies = [
  "ashpd",
  "bzip2",
+ "criterion",
  "dav1d",
  "libvpx-native-sys",
  "memmap2",
