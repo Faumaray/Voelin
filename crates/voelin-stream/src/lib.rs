@@ -9,6 +9,7 @@
 //! streams in our channel, our own stream with a peer per viewer, and the
 //! streams we watch. [`FrameSource`] is where a streamer's encoded frames come from.
 
+pub mod discovery;
 pub mod dtls;
 pub mod feedback;
 pub mod layer;
@@ -19,6 +20,7 @@ pub mod signal;
 pub mod source;
 pub mod stun;
 
+pub use discovery::{ClientState, StreamLookup};
 pub use dtls::SrtpProfile;
 pub use feedback::LayerFeedback;
 pub use layer::{LayerId, LayerSet, LayerSpec};

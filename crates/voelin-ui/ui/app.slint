@@ -57,8 +57,8 @@ export struct BookmarkForm {
     query-password: string,
 }
 
-// A stream in our channel. An empty id: a client that streams, but the
-// server did not announce the stream to us (it started before we joined).
+// A stream in our channel. An empty id: a client that streams, but whose
+// stream is still being looked up (it started before we joined).
 export struct StreamItem {
     id: string,
     name: string,
@@ -89,8 +89,12 @@ export struct ShareForm {
     name: string,
     // Index into the frame rate choices (15, 30, 60).
     fps-index: int,
+    // Frames per second as typed; a choice fills it in. Any number above 0.
+    fps: string,
     // Index into the bitrate choices (2.5, 4.6, 8, 10 Mbit/s).
     bitrate-index: int,
+    // Video bitrate in kbit/s as typed; a choice fills it in.
+    bitrate: string,
     audio: bool,
     auto-accept: bool,
 }
@@ -566,7 +570,7 @@ component StreamsPanel inherits Rectangle {
                     overflow: elide;
                 }
                 Text {
-                    text: stream.id == "" ? @tr("Started before you joined; the server did not announce it.") : stream.own ? @tr("your stream") : stream.audio ? @tr("by {} · with sound", stream.streamer) : @tr("by {}", stream.streamer);
+                    text: stream.id == "" ? @tr("Started before you joined; looking it up…") : stream.own ? @tr("your stream") : stream.audio ? @tr("by {} · with sound", stream.streamer) : @tr("by {}", stream.streamer);
                     font-size: 11px;
                     color: #8b949e;
                     overflow: elide;
@@ -935,7 +939,15 @@ component ShareDialog inherits Dialog {
                 ComboBox {
                     model: [@tr("15 fps"), @tr("30 fps"), @tr("60 fps")];
                     current-index <=> form.fps-index;
+                    selected => { form.fps = [15, 30, 60][self.current-index]; }
                     accessible-label: @tr("Frame rate");
+                }
+                LineEdit {
+                    text <=> form.fps;
+                    input-type: number;
+                    placeholder-text: @tr("fps");
+                    width: 90px;
+                    accessible-label: @tr("Frames per second");
                 }
             }
             HorizontalLayout {
@@ -948,7 +960,15 @@ component ShareDialog inherits Dialog {
                 ComboBox {
                     model: [@tr("Low (2.5 Mbit/s)"), @tr("Standard (4.6 Mbit/s)"), @tr("High (8 Mbit/s)"), @tr("Best (10 Mbit/s)")];
                     current-index <=> form.bitrate-index;
+                    selected => { form.bitrate = [2500, 4608, 8000, 10000][self.current-index]; }
                     accessible-label: @tr("Quality");
+                }
+                LineEdit {
+                    text <=> form.bitrate;
+                    input-type: number;
+                    placeholder-text: @tr("kbit/s");
+                    width: 90px;
+                    accessible-label: @tr("Bitrate in kbit/s");
                 }
             }
             CheckBox {

@@ -143,6 +143,26 @@ for `voelinctl stream start`; `SyntheticSource` (fake VP8 bytes, one frame per
 layer) remains for voelin-stream's own tests and `voelinctl stream start
 --placeholder`.
 
+The server announces a stream only to the clients in the streamer's channel
+at its start. `voelin-stream::discovery` follows the clients' channels and
+streaming flags (`Streams::update_clients`), and looks up streams nobody
+announced to us with `requeststreaminfo clid=<streamer>`
+([research/ts6-late-join.md](research/ts6-late-join.md)). The lookup is a
+`StreamLookup` trait, so another directory (a gateway's) can be added.
+
+## Settings
+
+`voelin-core::settings::Settings` is the settings service. Keys are typed
+statics (`Key<T>`: name, default, validation, a `Kind` for a settings page);
+the effective value is the runtime value stored in the client database, else
+a command line or environment override, else a config file, else the
+default. Reads come from memory (`get`, `get_arc`, or a `SettingWatch` per
+key); writes notify subscribers and go to SQLite on a writer thread. The
+engine holds one (`Engine::settings`, `Command::AttachSettings`), takes
+`Command::SetSetting` / `ResetSetting` and reports `Event::SettingChanged`.
+The UI opens it on its database and registers its own keys (`ui`,
+`client_playback`); the stream keys (`stream.*`) are defined in the core.
+
 ## Milestones
 
 | | Scope | Exit criteria |

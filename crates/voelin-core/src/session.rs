@@ -8,11 +8,13 @@ use tracing::debug;
 use tsclientlib::ClientId;
 use voelin_audio::AudioSettings;
 use voelin_model::{ChatMessage, ChatTarget, Presence};
+use voelin_stream::ClientState;
 
 use crate::audio::{self, AudioEvent, AudioHandle, AudioIn};
 use crate::gateway::{self, GatewayCmd, GatewayEvent};
 use crate::query::{self, QueryCmd, QueryEvent};
 use crate::route::{ChatRoute, Dedup, route_chat};
+use crate::settings::SharedSettings;
 use crate::stream::{LayerSpec, PeerConfig, SrtpProfile, StreamFrame, StreamHandle, StreamInput};
 use crate::voice::{self, VoiceCmd, VoiceEvent};
 use crate::{Command, Event, ObserveState, SessionId, SessionState, Source, VoiceState};
@@ -27,9 +29,10 @@ impl SessionHandle {
 		events: broadcast::Sender<Event>,
 		frames: broadcast::Sender<StreamFrame>,
 		audio_settings: AudioSettings,
+		settings: SharedSettings,
 	) -> Self {
 		let (tx, rx) = mpsc::unbounded_channel();
-		tokio::spawn(Session::new(id, events, frames, audio_settings).run(rx));
+		tokio::spawn(Session::new(id, events, frames, audio_settings, settings).run(rx));
 		Self { tx }
 	}
 
@@ -62,6 +65,7 @@ struct Session {
 	query_presence: Option<Presence>,
 	audio: Option<AudioHandle>,
 	audio_settings: AudioSettings,
+	settings: SharedSettings,
 	/// Streams of the voice connection (TeamSpeak 6 only).
 	streams: Option<StreamHandle>,
 	stream_peer: PeerConfig,
@@ -71,8 +75,9 @@ struct Session {
 	/// options' `stream_peer`.
 	srtp_profiles: Option<Vec<SrtpProfile>>,
 	frames: broadcast::Sender<StreamFrame>,
-	/// `client_is_streaming` of the voice presence, as last told to the streams.
-	streaming_clients: BTreeMap<u16, Option<bool>>,
+	/// Channel and `client_is_streaming` of the voice presence, as last told
+	/// to the streams.
+	streaming_clients: BTreeMap<u16, ClientState>,
 	open_chats: HashSet<ChatTarget>,
 	dedup: Dedup,
 	sources_tx: mpsc::UnboundedSender<SourceEvent>,
@@ -85,6 +90,7 @@ impl Session {
 		events: broadcast::Sender<Event>,
 		frames: broadcast::Sender<StreamFrame>,
 		audio_settings: AudioSettings,
+		settings: SharedSettings,
 	) -> Self {
 		let (sources_tx, sources_rx) = mpsc::unbounded_channel();
 		Self {
@@ -101,6 +107,7 @@ impl Session {
 			query_presence: None,
 			audio: None,
 			audio_settings,
+			settings,
 			streams: None,
 			stream_peer: PeerConfig::default(),
 			stream_layers: Vec::new(),
@@ -341,7 +348,12 @@ impl Session {
 					s.send(StreamInput::SrtpProfiles(profiles));
 				}
 			}
-			Command::CloseSession { .. } | Command::TestMicrophone { .. } => {}
+			// Engine-wide.
+			Command::CloseSession { .. }
+			| Command::TestMicrophone { .. }
+			| Command::SetSetting { .. }
+			| Command::ResetSetting { .. }
+			| Command::AttachSettings(_) => {}
 		}
 	}
 
@@ -471,6 +483,7 @@ impl Session {
 						self.events.clone(),
 						self.frames.clone(),
 						self.audio.clone(),
+						self.settings.clone(),
 					);
 					if !self.stream_layers.is_empty() {
 						streams.send(StreamInput::Layers(self.stream_layers.clone()));
@@ -488,8 +501,11 @@ impl Session {
 					}
 				}
 				if let Some(s) = &self.streams {
-					let clients: BTreeMap<_, _> =
-						p.clients.values().map(|c| (c.id, c.streaming)).collect();
+					let clients: BTreeMap<_, _> = p
+						.clients
+						.values()
+						.map(|c| (c.id, ClientState { channel: c.channel, streaming: c.streaming }))
+						.collect();
 					if clients != self.streaming_clients {
 						self.streaming_clients = clients.clone();
 						s.send(StreamInput::Clients(clients));

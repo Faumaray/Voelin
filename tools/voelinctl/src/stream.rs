@@ -11,7 +11,6 @@ use clap::{Args, Subcommand};
 use futures::prelude::*;
 use tokio::io::{AsyncBufReadExt, BufReader, Lines, Stdin};
 use tokio::time::{Instant, Interval, sleep_until};
-use tsclientlib::events::{Event, PropertyId};
 use tsclientlib::prelude::*;
 use tsclientlib::{ClientId, Connection, MessageHandle, StreamItem};
 use voelin_core::media::voelin_media::capture::SourceId;
@@ -22,8 +21,8 @@ use voelin_core::media::{
 };
 use voelin_model::ServerFlavor;
 use voelin_stream::{
-	EndReason, FrameSource, LayerId, LayerSpec, MediaKind, Output, PeerConfig, Request,
-	SrtpProfile, StreamEvent, StreamInfo, StreamNotification, StreamSetup, StreamerEvent,
+	ClientState, EndReason, FrameSource, LayerId, LayerSpec, MediaKind, Output, PeerConfig,
+	Request, SrtpProfile, StreamEvent, StreamInfo, StreamNotification, StreamSetup, StreamerEvent,
 	StreamerOptions, Streams, SyntheticSource, VideoCodec, ViewerInfo, WatchEvent,
 };
 
@@ -157,6 +156,7 @@ pub async fn run(con: &mut Connection, args: &StreamArgs) -> Result<()> {
 	};
 	let codec = stream_codec(&codecs, &config);
 	let mut driver = Driver { streams: Streams::new(own, config), pending: HashMap::new() };
+	driver.sync_clients(con)?;
 	let result = match &args.command {
 		StreamCommand::Start {
 			name,
@@ -454,21 +454,23 @@ impl Driver {
 					self.streams.request_failed(&request, &e.to_string());
 				}
 			}
-			StreamItem::BookEvents(events) => {
-				let state = con.get_state()?;
-				for e in &events {
-					if let Event::PropertyChanged {
-						id: PropertyId::ClientIsStreaming(clid), ..
-					} = e && let Some(streaming) =
-						state.clients.get(clid).and_then(|c| c.is_streaming)
-					{
-						self.streams.set_client_streaming(*clid, streaming);
-					}
-				}
-				self.streams.retain_streamers(|c| state.clients.contains_key(&c));
-			}
+			StreamItem::BookEvents(_) => self.sync_clients(con)?,
 			_ => {}
 		}
+		Ok(())
+	}
+
+	/// Tell the sessions the clients on the server: streams of clients that
+	/// left, stopped or are not in our channel are dropped; streams that
+	/// started before we came are looked up.
+	fn sync_clients(&mut self, con: &Connection) -> Result<()> {
+		let state = con.get_state()?;
+		let clients = state
+			.clients
+			.values()
+			.map(|c| (c.id.0, ClientState { channel: c.channel.0, streaming: c.is_streaming }))
+			.collect();
+		self.streams.update_clients(clients);
 		Ok(())
 	}
 
@@ -649,12 +651,17 @@ async fn list(con: &mut Connection, driver: &mut Driver, settle: Duration) -> Re
 			if s.audio { ", audio" } else { "" }
 		);
 	}
-	// Streams that started before we connected are only known by the flag.
+	// Streamers in our channel known only by the flag: the lookup failed or
+	// did not answer in time.
 	let state = con.get_state()?;
+	let channel = state.clients.get(&state.own_client).map(|c| c.channel);
 	let mut unannounced = 0;
 	for c in state.clients.values() {
-		if c.is_streaming == Some(true) && !streams.iter().any(|s| s.streamer == c.id) {
-			println!("?  {} (clid {}) is streaming; id not announced to us", c.name, c.id.0);
+		if c.is_streaming == Some(true)
+			&& Some(c.channel) == channel
+			&& !streams.iter().any(|s| s.streamer == c.id)
+		{
+			println!("?  {} (clid {}) is streaming; id not known", c.name, c.id.0);
 			unannounced += 1;
 		}
 	}

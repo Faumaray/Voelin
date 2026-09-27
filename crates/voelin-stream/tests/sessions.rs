@@ -2,15 +2,15 @@
 //! commands like the TeamSpeak 6 server does (see
 //! `docs/protocol-notes/ts6-streaming.md`), with real peers on loopback.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 use tokio::time::timeout;
 use tsclientlib::ClientId;
 use voelin_stream::{
-	EndReason, FrameSource, LeaveReason, MediaKind, Output, PeerConfig, Request, StreamEvent,
-	StreamInfo, StreamKind, StreamNotification, StreamSetup, StreamerEvent, StreamerOptions,
-	Streams, SyntheticSource, ViewerState, WatchEvent,
+	ClientState, EndReason, FrameSource, LeaveReason, MediaKind, Output, PeerConfig, Request,
+	StreamEvent, StreamInfo, StreamKind, StreamNotification, StreamSetup, StreamerEvent,
+	StreamerOptions, Streams, SyntheticSource, ViewerState, WatchEvent,
 };
 
 const STREAMER: usize = 0;
@@ -20,8 +20,11 @@ const IDS: [ClientId; 2] = [ClientId(5), ClientId(6)];
 /// Relays requests to notifications, as observed on a TS6 server.
 #[derive(Default)]
 struct FakeServer {
-	streams: HashMap<String, ClientId>,
+	streams: HashMap<String, StreamInfo>,
 	next: u32,
+	/// A client that is not in the channel yet: streams that start are not
+	/// announced to it.
+	absent: Option<usize>,
 }
 
 impl FakeServer {
@@ -32,7 +35,6 @@ impl FakeServer {
 			Request::Setup(setup) => {
 				self.next += 1;
 				let id = format!("stream-{}", self.next);
-				self.streams.insert(id.clone(), from);
 				let info = StreamInfo {
 					id,
 					streamer: from,
@@ -42,7 +44,9 @@ impl FakeServer {
 					viewer_limit: setup.viewer_limit,
 					audio: setup.audio,
 				};
+				self.streams.insert(info.id.clone(), info.clone());
 				(0..2)
+					.filter(|i| self.absent != Some(*i))
 					.map(|i| {
 						let own = IDS[i] == from;
 						let return_code = own.then(|| "1".to_owned());
@@ -86,6 +90,12 @@ impl FakeServer {
 				everyone(StreamNotification::ViewerLeft { id, viewer, reason: Some(reason) })
 					.collect()
 			}
+			Request::StreamInfo { streamer } => self
+				.streams
+				.values()
+				.filter(|s| s.streamer == streamer)
+				.map(|s| (to(from), StreamNotification::Info(s.clone())))
+				.collect(),
 		}
 	}
 }
@@ -279,4 +289,48 @@ async fn stream_between_sessions() {
 	})
 	.await;
 	assert!(net.clients[STREAMER].streamer().is_none());
+}
+
+/// The viewer arrives after the stream started: the server did not announce
+/// it, the viewer looks it up (`requeststreaminfo`) and watches.
+#[tokio::test(flavor = "multi_thread")]
+async fn late_viewer_finds_the_stream() {
+	let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
+	let mut net = Net::new();
+	net.server.absent = Some(VIEWER);
+	let setup = StreamSetup { name: "early".into(), ..Default::default() };
+	net.clients[STREAMER]
+		.start(StreamerOptions { setup, auto_accept: true, ..Default::default() })
+		.unwrap();
+	net.until("live", |i, e| {
+		i == STREAMER && matches!(e, StreamEvent::Streamer(StreamerEvent::Live { .. }))
+	})
+	.await;
+	net.flush().await;
+	assert!(net.clients[VIEWER].directory().iter().next().is_none(), "not announced");
+
+	// The viewer's first client list: the streamer streams in its channel.
+	net.server.absent = None;
+	let clients: BTreeMap<u16, ClientState> = IDS
+		.iter()
+		.map(|c| (c.0, ClientState { channel: 1, streaming: Some(c == &IDS[STREAMER]) }))
+		.collect();
+	net.clients[VIEWER].update_clients(clients);
+	net.until("looked up stream in the viewer's list", |i, e| {
+		i == VIEWER && matches!(e, StreamEvent::Streams(l) if l.len() == 1)
+	})
+	.await;
+	let id = net.clients[VIEWER].directory().by_streamer(IDS[STREAMER]).unwrap().id.clone();
+	net.clients[VIEWER].watch(&id, "").unwrap();
+	net.until("viewer connected", |i, e| {
+		i == VIEWER && watch_event(e, |e| matches!(e, WatchEvent::Connected))
+	})
+	.await;
+	net.source = Some(SyntheticSource::new(30, 4000, true));
+	net.frames(10).await;
+	net.clients[STREAMER].stop().unwrap();
+	net.until("stream gone", |i, e| {
+		i == VIEWER && matches!(e, StreamEvent::Streams(l) if l.is_empty())
+	})
+	.await;
 }

@@ -12,6 +12,8 @@
 #   7. gateway (tsgw): login with a TeamSpeak identity, presence, channel chat
 #      both ways, refusal of an identity the server does not know
 #   8. stream (TeamSpeak 6 only): a viewer watches a synthetic VP8 + Opus stream
+#   9. late stream (TeamSpeak 6 only): a viewer that connects after the stream
+#      started finds it (requeststreaminfo) and watches it
 #
 # Usage: scripts/it-smoke.sh [ts3|ts6]...   (default: both)
 # Env:   VOELINCTL=path/to/voelinctl (default: builds target/debug/voelinctl)
@@ -130,6 +132,27 @@ stream_check() {
 	grep -E "first video frame|received" "$out"
 }
 
+# TeamSpeak 6: the stream is live before the viewer connects. The server does
+# not announce running streams to newcomers; the viewer looks it up.
+stream_late_check() {
+	local addr=$1 out="$STATE_DIR/stream-late-watch.log" streamer_out="$STATE_DIR/stream-late-start.log"
+	local streamer="early-$$-$RANDOM"
+	"$VOELINCTL" connect "$addr" --nick "$streamer" stream --loopback start --synthetic \
+		--auto-accept --seconds 30 >"$streamer_out" 2>&1 &
+	local streamer_pid=$!
+	for _ in $(seq 1 60); do grep -q "is live" "$streamer_out" 2>/dev/null && break; sleep 0.25; done
+	grep -q "is live" "$streamer_out" || { cat "$streamer_out"; fail "late-join streamer did not go live"; }
+	if ! "$VOELINCTL" connect "$addr" --nick "late-$$" stream --loopback watch --streamer-nick "$streamer" \
+		--expect-frames 60 --timeout 25 >"$out" 2>&1; then
+		cat "$out" "$streamer_out"
+		fail "late viewer did not receive the running stream"
+	fi
+	# SIGINT: the streamer stops its stream properly.
+	kill -INT "$streamer_pid" 2>/dev/null || true
+	wait "$streamer_pid" 2>/dev/null || true
+	grep -E "watching|received" "$out"
+}
+
 # An observer over ServerQuery must see a voice client join.
 presence_check() {
 	local addr=$1 query=$2 out="$STATE_DIR/observe.log"
@@ -237,6 +260,7 @@ for svc in "${SERVERS[@]}"; do
 	gateway_check "$svc" "$addr"
 	if [[ $svc == ts6 ]]; then
 		stream_check "$addr"
+		stream_late_check "$addr"
 	fi
 done
 

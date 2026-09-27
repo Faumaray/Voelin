@@ -155,7 +155,11 @@ impl Store {
 			use std::os::unix::fs::PermissionsExt;
 			std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
 		}
+		// WAL: readers do not block the writer (the settings service writes
+		// from its own connection). NORMAL is durable with WAL except for
+		// the last transactions on a power loss, and avoids an fsync per write.
 		db.pragma_update(None, "journal_mode", "WAL")?;
+		db.pragma_update(None, "synchronous", "NORMAL")?;
 		Self::init(db)
 	}
 
@@ -164,6 +168,8 @@ impl Store {
 	}
 
 	fn init(db: Connection) -> Result<Self> {
+		// Statements run through `prepare_cached` are parsed once per connection.
+		db.set_prepared_statement_cache_capacity(64);
 		db.pragma_update(None, "foreign_keys", true)?;
 		let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
 		for (i, migration) in MIGRATIONS.iter().enumerate().skip(version as usize) {
@@ -267,17 +273,60 @@ impl Store {
 	pub fn setting<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
 		let value: Option<String> = self
 			.db
-			.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0))
+			.prepare_cached("SELECT value FROM settings WHERE key = ?1")?
+			.query_row([key], |r| r.get(0))
 			.optional()?;
 		value.map(|v| serde_json::from_str(&v).map_err(Error::from)).transpose()
 	}
 
 	pub fn set_setting<T: Serialize>(&self, key: &str, value: &T) -> Result<()> {
-		self.db.execute(
-			"INSERT INTO settings (key, value) VALUES (?1, ?2)
-			 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-			params![key, serde_json::to_string(value)?],
-		)?;
+		self.set_setting_json(key, &serde_json::to_string(value)?)
+	}
+
+	/// Store a setting that is already JSON text.
+	pub fn set_setting_json(&self, key: &str, json: &str) -> Result<()> {
+		self.db
+			.prepare_cached(
+				"INSERT INTO settings (key, value) VALUES (?1, ?2)
+				 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+			)?
+			.execute(params![key, json])?;
+		Ok(())
+	}
+
+	/// Remove a setting; `true` if it was there.
+	pub fn delete_setting(&self, key: &str) -> Result<bool> {
+		Ok(self.db.prepare_cached("DELETE FROM settings WHERE key = ?1")?.execute([key])? > 0)
+	}
+
+	/// All settings as `(key, JSON text)`, ordered by key.
+	pub fn settings_json(&self) -> Result<Vec<(String, String)>> {
+		let mut stmt = self.db.prepare_cached("SELECT key, value FROM settings ORDER BY key")?;
+		let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+		Ok(rows.collect::<rusqlite::Result<_>>()?)
+	}
+
+	/// Store (`Some(JSON text)`) or remove (`None`) several settings in one
+	/// transaction.
+	pub fn write_settings<'a>(
+		&mut self,
+		changes: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+	) -> Result<()> {
+		let tx = self.db.transaction()?;
+		{
+			let mut put = tx.prepare_cached(
+				"INSERT INTO settings (key, value) VALUES (?1, ?2)
+				 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+			)?;
+			let mut delete = tx.prepare_cached("DELETE FROM settings WHERE key = ?1")?;
+			for (key, json) in changes {
+				match json {
+					Some(json) => put.execute(params![key, json])?,
+					None => delete.execute([key])?,
+				};
+			}
+		}
+		tx.commit()?;
 		Ok(())
 	}
 
@@ -396,11 +445,16 @@ mod tests {
 
 	#[test]
 	fn settings() {
-		let store = Store::open_in_memory().unwrap();
+		let mut store = Store::open_in_memory().unwrap();
 		assert_eq!(store.setting::<u32>("volume").unwrap(), None);
 		store.set_setting("volume", &80u32).unwrap();
 		store.set_setting("volume", &90u32).unwrap();
 		assert_eq!(store.setting::<u32>("volume").unwrap(), Some(90));
+		store.write_settings([("a", Some("1")), ("volume", None), ("b", Some("\"x\""))]).unwrap();
+		let all = store.settings_json().unwrap();
+		assert_eq!(all, [("a".to_owned(), "1".to_owned()), ("b".to_owned(), "\"x\"".to_owned())]);
+		assert!(store.delete_setting("a").unwrap());
+		assert!(!store.delete_setting("a").unwrap());
 	}
 
 	#[test]

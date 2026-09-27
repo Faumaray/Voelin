@@ -19,7 +19,9 @@ serde_json = "1"
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-thread", "signal", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tsclientlib = { path = "../../crates/proto/tsclientlib" }
+# `unstable`: the raw connection, for the command log of `probe-stream`.
+tsclientlib = { path = "../../crates/proto/tsclientlib", features = ["unstable"] }
+tsproto = { path = "../../crates/proto/tsproto" }
 tsproto-packets = { path = "../../crates/proto/tsproto-packets" }
 voelin-model = { path = "../../crates/voelin-model" }
 voelin-query = { path = "../../crates/voelin-query" }

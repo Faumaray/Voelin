@@ -36,6 +36,7 @@ use tracing::{debug, warn};
 use tsclientlib::ClientId;
 use tsproto_packets::packets::OutCommand;
 
+use crate::discovery::{ClientState, Discovery, StreamLookup};
 use crate::dtls::SrtpProfile;
 use crate::feedback::LayerFeedback;
 use crate::layer::{LayerId, LayerSet, LayerSpec};
@@ -83,6 +84,8 @@ pub enum Request {
 	Signal { id: String, peer: ClientId, signal: Signal },
 	/// `removeclientfromstream`
 	RemoveViewer { id: String, viewer: ClientId, reason: LeaveReason },
+	/// `requeststreaminfo`: the streams of a client (see [`crate::discovery`]).
+	StreamInfo { streamer: ClientId },
 }
 
 impl Request {
@@ -99,6 +102,7 @@ impl Request {
 			}
 			Self::Signal { id, peer, signal } => proto::signaling(id, *peer, &signal.to_json()),
 			Self::RemoveViewer { id, viewer, reason } => proto::remove_viewer(id, *viewer, *reason),
+			Self::StreamInfo { streamer } => proto::stream_info(*streamer),
 		}
 	}
 }
@@ -263,6 +267,18 @@ impl StreamDirectory {
 			StreamNotification::Started { info, .. } | StreamNotification::Info(info) => {
 				self.streaming.insert(info.streamer.0);
 				self.streams.insert(info.id.clone(), info.clone()).as_ref() != Some(info)
+			}
+			StreamNotification::Updated {
+				id, name, kind, bitrate, viewer_limit, audio, ..
+			} => {
+				let Some(info) = self.streams.get_mut(id) else { return false };
+				let before = info.clone();
+				info.name = name.clone().unwrap_or(before.name.clone());
+				info.kind = kind.unwrap_or(before.kind);
+				info.bitrate = bitrate.unwrap_or(before.bitrate);
+				info.viewer_limit = viewer_limit.unwrap_or(before.viewer_limit);
+				info.audio = audio.unwrap_or(before.audio);
+				*info != before
 			}
 			StreamNotification::Stopped { id, .. } => self.streams.remove(id).is_some(),
 			_ => false,
@@ -1421,6 +1437,7 @@ pub struct Streams {
 	own: ClientId,
 	config: PeerConfig,
 	directory: StreamDirectory,
+	discovery: Discovery,
 	streamer: Option<StreamerSession>,
 	viewers: BTreeMap<String, ViewerSession>,
 	out: Outbox,
@@ -1433,6 +1450,7 @@ impl Streams {
 			own,
 			config,
 			directory: StreamDirectory::default(),
+			discovery: Discovery::new(own),
 			streamer: None,
 			viewers: BTreeMap::new(),
 			out: Outbox::default(),
@@ -1445,6 +1463,11 @@ impl Streams {
 
 	pub fn directory(&self) -> &StreamDirectory {
 		&self.directory
+	}
+
+	/// The clients' channels as of [`Self::update_clients`].
+	pub fn discovery(&self) -> &Discovery {
+		&self.discovery
 	}
 
 	/// Our stream, while it has not ended.
@@ -1607,7 +1630,10 @@ impl Streams {
 
 	/// Feed a stream notification from the connection.
 	pub async fn handle_notification(&mut self, n: StreamNotification) {
-		if self.directory.apply(&n) {
+		// Looked up streams of clients that have left our channel since.
+		let elsewhere = matches!(&n, StreamNotification::Info(info)
+			if !self.discovery.in_our_channel(info.streamer));
+		if !elsewhere && self.directory.apply(&n) {
 			self.emit_streams();
 		}
 		if let Some(s) = &mut self.streamer
@@ -1637,11 +1663,39 @@ impl Streams {
 		}
 	}
 
+	/// The clients on the server changed (full list, with ourselves): keeps
+	/// the directory to the streams in our channel and looks up the streams
+	/// the server did not announce to us (see [`crate::discovery`]). Covers
+	/// [`Self::set_client_streaming`] and [`Self::retain_streamers`].
+	pub fn update_clients(&mut self, clients: BTreeMap<u16, ClientState>) {
+		if self.discovery.update(clients, &mut self.directory, &mut self.out) {
+			self.emit_streams();
+		}
+	}
+
+	/// A stream found by another [`StreamLookup`] (e.g. a gateway's directory).
+	pub fn discovered(&mut self, info: StreamInfo) {
+		if self.discovery.in_our_channel(info.streamer)
+			&& self.directory.apply(&StreamNotification::Info(info))
+		{
+			self.emit_streams();
+		}
+	}
+
+	/// Another place to look up unannounced streams, after the server.
+	pub fn add_lookup(&mut self, lookup: Box<dyn StreamLookup>) {
+		self.discovery.add_lookup(lookup);
+	}
+
 	/// A request from [`Output::Request`] failed on the server.
 	pub fn request_failed(&mut self, request: &Request, error: &str) {
 		let watched = match request {
 			Request::Join { id, .. } | Request::Leave { id, .. } | Request::Signal { id, .. } => {
 				self.viewers.get_mut(id)
+			}
+			Request::StreamInfo { .. } => {
+				self.discovery.failed(request, error);
+				return;
 			}
 			_ => None,
 		};

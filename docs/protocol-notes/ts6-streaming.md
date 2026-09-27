@@ -167,24 +167,33 @@ property for the planned SFU mode.
 Errors: `setupstream` refused with error 2568 ("insufficient client
 permissions") has been seen; no stream permission names are documented.
 
-More text commands and notifications named in the server binary (not probed
-yet): `requeststreaminfo` (its protobuf request only has `stream_id`, so it
-cannot discover the ids of unknown streams), `updatestream` (`stream_id`,
-`stream_name`, `max_width`, `max_height`, `max_framerate`, `properties`),
-`notifystreamupdated`, `notifystreamattendees` (`return_code`, `client_id`).
+More text commands and notifications named in the server binary:
+`requeststreaminfo`, `updatestream` and `notifystreamupdated` (probed, see
+below), and `notifystreamattendees` (`return_code`, `client_id`; never seen).
+The protobuf `RequestStreamInfoRequest` only has `stream_id`, but the text
+command takes `clid` instead.
 
 ### Streams that started before we joined (confirmed, 6.0.0-beta13.1, 2026-09-26)
 
 `initserver` and `notifycliententerview` carry `client_is_streaming`, but no
-stream id, and the server does not send `notifystreamstarted` for running
-streams to a client that connects later: a `voelinctl stream list` started while
-the desktop app streamed printed only "id not announced", while one connected
-before the stream started got the id. Entering the channel later was not
-probed separately. `voelinctl stream list` shows such streamers as "id not
-announced"; `voelinctl stream watch --id <uuid>` can still join when the streamer
-is known (`--streamer-nick`, or the only other client streaming). The desktop
-app lists them as streaming but not watchable. The smoke test starts the
-viewer first. How the official client learns these ids is open.
+stream id. The server sends `notifystreamstarted` only to the clients in the
+streamer's channel when the stream starts. A client that connects later, or
+enters the channel later, gets nothing about running streams.
+
+`requeststreaminfo clid=<streamer>` fills the gap. It answers with
+`notifystreaminfo` (the command's `return_code`, then one part per stream of
+the client: `clid id name type accessibility mode viewer bitrate viewer_limit
+audio`), from any channel. For a client without streams, or an unknown
+client, the answer has no stream parts.
+
+`updatestream id=<id> [name type access mode bitrate viewer_limit audio]`
+notifies the channel with `notifystreamupdated clid id <changed fields>`. It
+sends nothing when nothing changed.
+
+Full transcript, all the variants tried, and what Voelin does with them:
+[docs/research/ts6-late-join.md](../research/ts6-late-join.md). Voelin
+looks up unannounced streams in its channel with `requeststreaminfo`
+(`voelin_stream::discovery`).
 
 ### WebRTC interop with Chromium (confirmed, Chromium 141, 2026-09-26)
 
@@ -229,9 +238,10 @@ libwebrtc, the stack the official client is built on:
 - [x] Parameters of `stopstream` and `removeclientfromstream` (`reason` is required).
 - [ ] Which permission gates `setupstream` (error 2568).
 - [x] Contents of `notifystreamstarted` (see probe results).
-- [ ] Contents of `notifystreaminfo` (`requeststreaminfo id=<uuid>`).
+- [x] Contents of `notifystreaminfo` (`requeststreaminfo clid=<streamer>`, see above).
 - [x] Whether a client that connects later is told about running streams: no (see above).
-- [ ] How the official client finds running streams after connecting.
+- [x] How a client finds running streams after connecting: `requeststreaminfo`
+      (presumably what the official client does too; not captured from it).
 - [ ] Interop with the official TS6 client (its offer/answer details, codecs it
       actually picks, whether it trickles candidates, mDNS host candidates).
       Chromium's WebRTC stack interoperates (see above).

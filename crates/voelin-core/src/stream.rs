@@ -12,17 +12,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{broadcast, mpsc};
 use tracing::debug;
 use tsclientlib::ClientId;
+use voelin_stream::{
+	ClientState, LayerFeedback, Output, Request, StreamEvent, StreamNotification, StreamerEvent,
+	StreamerOptions, Streams, WatchEvent,
+};
 pub use voelin_stream::{
 	Codec, EncodedFrame, EndReason, FrameSource, Frequency, LayerId, LayerSet, LayerSpec,
 	LeaveReason, MediaFrame, MediaKind, MediaTime, PeerConfig, SrtpProfile, StreamInfo, StreamKind,
 	StreamSetup, SyntheticSource, VideoCodec, ViewerInfo, ViewerState,
 };
-use voelin_stream::{
-	LayerFeedback, Output, Request, StreamEvent, StreamNotification, StreamerEvent,
-	StreamerOptions, Streams, WatchEvent,
-};
 
 use crate::audio::{AudioHandle, AudioIn};
+use crate::settings::{STREAM_PERMISSIONS, SharedSettings, StreamPermissions};
 use crate::voice::VoiceCmd;
 use crate::{Event, SessionId};
 
@@ -142,8 +143,8 @@ pub(crate) enum StreamInput {
 	Frame(EncodedFrame),
 	Notification(StreamNotification),
 	RequestFailed(Request, String),
-	/// Clients on the server with their `client_is_streaming`.
-	Clients(BTreeMap<u16, Option<bool>>),
+	/// Clients on the server: channel and `client_is_streaming`.
+	Clients(BTreeMap<u16, ClientState>),
 	/// The voice connection is gone.
 	Shutdown(String),
 }
@@ -153,6 +154,7 @@ pub(crate) struct StreamHandle {
 }
 
 impl StreamHandle {
+	#[allow(clippy::too_many_arguments)] // the parts of the session the task uses
 	pub fn spawn(
 		session: SessionId,
 		own_client: u16,
@@ -161,6 +163,7 @@ impl StreamHandle {
 		events: broadcast::Sender<Event>,
 		frames: broadcast::Sender<StreamFrame>,
 		audio: Option<AudioHandle>,
+		settings: SharedSettings,
 	) -> Self {
 		let (tx, rx) = mpsc::unbounded_channel();
 		let task = StreamTask {
@@ -172,8 +175,8 @@ impl StreamHandle {
 			audio,
 			tx: tx.clone(),
 			sink: None,
-			clients: BTreeMap::new(),
 			layers: Vec::new(),
+			settings,
 		};
 		tokio::spawn(task.run(rx));
 		Self { tx }
@@ -196,10 +199,10 @@ struct StreamTask {
 	tx: mpsc::UnboundedSender<StreamInput>,
 	/// The sink of our live stream.
 	sink: Option<StreamSink>,
-	/// Clients on the server and their `client_is_streaming`.
-	clients: BTreeMap<u16, Option<bool>>,
 	/// Simulcast layers of our stream (empty: one layer).
 	layers: Vec<LayerSpec>,
+	/// `stream.permissions` decides join requests.
+	settings: SharedSettings,
 }
 
 impl StreamTask {
@@ -274,19 +277,9 @@ impl StreamTask {
 				Ok(())
 			}
 			StreamInput::Clients(clients) => {
-				// Streams of clients that left or stopped streaming are gone.
-				// Only changes count: a snapshot may predate the streaming flag
-				// of a stream that was just announced.
-				for (client, streaming) in &clients {
-					let was = self.clients.get(client).copied().flatten();
-					if let (Some(was), Some(now)) = (was, *streaming)
-						&& was != now
-					{
-						self.streams.set_client_streaming(ClientId(*client), now);
-					}
-				}
-				self.streams.retain_streamers(|c| clients.contains_key(&c.0));
-				self.clients = clients;
+				// Streams of clients that left, stopped streaming or are not
+				// in our channel are gone; unannounced ones are looked up.
+				self.streams.update_clients(clients);
 				Ok(())
 			}
 			StreamInput::Shutdown(_) => Ok(()),
@@ -326,7 +319,23 @@ impl StreamTask {
 				self.emit(Event::StreamState { session, state: StreamState::Live { id, sink } });
 			}
 			StreamEvent::Streamer(StreamerEvent::Request { viewer, message }) => {
-				self.emit(Event::StreamViewerRequest { session, viewer: viewer.0, message });
+				match self.join_decision(viewer) {
+					// Answered through the input queue, as the user would.
+					Some(accept) => {
+						debug!(
+							viewer = viewer.0,
+							accept, "join request answered by stream.permissions"
+						);
+						let _ = self.tx.send(StreamInput::Respond { viewer: viewer.0, accept });
+					}
+					None => {
+						self.emit(Event::StreamViewerRequest {
+							session,
+							viewer: viewer.0,
+							message,
+						});
+					}
+				}
 			}
 			StreamEvent::Streamer(StreamerEvent::Viewers(viewers)) => {
 				self.emit(Event::StreamViewers { session, viewers });
@@ -371,6 +380,21 @@ impl StreamTask {
 		}
 	}
 
+	/// The answer `stream.permissions` gives to a join request; `None`: ask.
+	fn join_decision(&self, viewer: ClientId) -> Option<bool> {
+		match *self.settings.current().get_arc(&STREAM_PERMISSIONS) {
+			StreamPermissions::Everyone => Some(true),
+			StreamPermissions::Nobody => Some(false),
+			// No contacts yet: ask for everyone.
+			StreamPermissions::Friends => None,
+			StreamPermissions::Channel => {
+				let discovery = self.streams.discovery();
+				let own = discovery.own_channel();
+				Some(own.is_some() && discovery.channel_of(viewer) == own)
+			}
+		}
+	}
+
 	/// The connection is gone: report our stream and watched streams as ended.
 	fn shutdown(&mut self, reason: String) {
 		let session = self.session;
@@ -402,6 +426,7 @@ mod tests {
 	use voelin_stream::{FrameSource, SyntheticSource};
 
 	use super::*;
+	use crate::settings::Settings;
 
 	const CLIENTS: [u16; 2] = [5, 6];
 
@@ -462,6 +487,7 @@ mod tests {
 			Request::RemoveViewer { id, viewer, reason } => {
 				both(StreamNotification::ViewerLeft { id, viewer, reason: Some(reason) })
 			}
+			Request::StreamInfo { .. } => Vec::new(),
 		}
 	}
 
@@ -487,6 +513,14 @@ mod tests {
 	fn pair(
 		audio: Option<AudioHandle>,
 	) -> (Handles, broadcast::Receiver<Event>, broadcast::Receiver<StreamFrame>) {
+		pair_with(audio, &Settings::in_memory())
+	}
+
+	/// [`pair`] with `settings` for both tasks.
+	fn pair_with(
+		audio: Option<AudioHandle>,
+		settings: &Settings,
+	) -> (Handles, broadcast::Receiver<Event>, broadcast::Receiver<StreamFrame>) {
 		let (events, rx) = broadcast::channel(4096);
 		let (frames, frames_rx) = broadcast::channel(4096);
 		let mut voices = Vec::new();
@@ -504,6 +538,7 @@ mod tests {
 				events.clone(),
 				frames.clone(),
 				if session == 2 { audio.take() } else { None },
+				SharedSettings::new(settings.clone()),
 			));
 			voices.push(voice_rx);
 		}
@@ -699,6 +734,63 @@ mod tests {
 		})
 		.await;
 		feeder.await.unwrap();
+	}
+
+	/// `stream.permissions` answers join requests unless it is `friends`.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn permissions_answer_join_requests() {
+		let in_channels = |streamer: u64, viewer: u64| {
+			StreamInput::Clients(BTreeMap::from([
+				(CLIENTS[0], ClientState { channel: streamer, streaming: Some(false) }),
+				(CLIENTS[1], ClientState { channel: viewer, streaming: Some(false) }),
+			]))
+		};
+		for (permissions, viewer_channel, expected) in [
+			(StreamPermissions::Everyone, 2, Some(true)),
+			(StreamPermissions::Channel, 1, Some(true)),
+			(StreamPermissions::Channel, 2, Some(false)),
+			(StreamPermissions::Nobody, 1, Some(false)),
+			(StreamPermissions::Friends, 1, None),
+		] {
+			let settings = Settings::in_memory();
+			settings.set(&STREAM_PERMISSIONS, permissions).unwrap();
+			let (handles, mut rx, _frames) = pair_with(None, &settings);
+			for h in handles.iter() {
+				h.send(in_channels(1, viewer_channel));
+			}
+			let setup = StreamSetup { name: "p".into(), ..Default::default() };
+			handles[0].send(StreamInput::Start { setup, auto_accept: false });
+			let (mut live, mut listed) = (false, false);
+			wait(&mut rx, |e| {
+				match e {
+					Event::StreamState { session: 1, state: StreamState::Live { .. } } => {
+						live = true
+					}
+					Event::StreamsChanged { session: 2, streams } => listed = !streams.is_empty(),
+					_ => {}
+				}
+				(live && listed).then_some(())
+			})
+			.await;
+			handles[1].send(StreamInput::Watch { stream_id: "s-1".into() });
+			let answer = wait(&mut rx, |e| match e {
+				Event::WatchState { session: 2, state: WatchState::Connected, .. } => {
+					Some(Some(true))
+				}
+				Event::WatchState {
+					session: 2,
+					state: WatchState::Ended(EndReason::Denied),
+					..
+				} => Some(Some(false)),
+				Event::StreamViewerRequest { session: 1, .. } => Some(None),
+				_ => None,
+			})
+			.await;
+			assert_eq!(answer, expected, "{permissions:?}, viewer in channel {viewer_channel}");
+			for h in handles.iter() {
+				h.send(StreamInput::Shutdown("done".into()));
+			}
+		}
 	}
 
 	/// The whole path: test pattern → VP8 → stream task → str0m peers on
