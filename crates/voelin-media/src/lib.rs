@@ -14,6 +14,11 @@
 //!   PipeWire system audio (feature `pipewire`), and Windows Graphics Capture
 //!   plus WASAPI loopback on Windows
 //! - [`queue`]: the bounded, drop-oldest channel capture backends deliver on
+//! - the streaming path: [`workers`] (a fork-join pool that allocates
+//!   nothing per job), [`pool`] (recycled I420 frames), [`handoff`]
+//!   (one-slot latest-wins handoff between threads), [`scale`] (plane
+//!   scaling and the [`scale::Pyramid`] of simulcast sizes), and
+//!   [`convert::Converter`] (borrowed capture buffers straight to I420)
 //!
 //! Encoded frames go to `voelin_stream::Peer::write` with an RTP time of
 //! [`EncodedFrame::pts_90khz`] (90 kHz clock); received `MediaFrame`s go to
@@ -23,14 +28,20 @@ pub mod capture;
 pub mod codec;
 pub mod convert;
 pub mod frame;
+pub mod handoff;
+pub mod pool;
 pub mod queue;
+pub mod scale;
+pub mod workers;
 
 pub use capture::{AudioCapture, CaptureOptions, CaptureSource, ScreenCapture, SourceId};
 pub use codec::{
-	Codec, Codecs, ContentHint, EncodedFrame, EncoderBackend, EncoderConfig, VideoDecoder,
-	VideoEncoder,
+	Codec, Codecs, ContentHint, EncodedChunk, EncodedFrame, EncoderBackend, EncoderConfig,
+	VideoDecoder, VideoEncoder,
 };
-pub use frame::{AudioBuffer, FrameData, PixelFormat, Plane, VideoFrame};
+pub use frame::{
+	AudioBuffer, FrameData, FrameRef, PixelFormat, PixelsRef, Plane, PlaneRef, VideoFrame,
+};
 pub use queue::{FrameReceiver, FrameSender, frame_channel};
 
 /// Errors of this crate.

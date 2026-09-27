@@ -12,7 +12,7 @@ mod shm;
 
 use std::fmt::Display;
 use std::os::fd::OwnedFd;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use memmap2::MmapMut;
 use tracing::{debug, warn};
@@ -26,13 +26,16 @@ use x11rb::protocol::xproto::{
 use x11rb::rust_connection::RustConnection;
 
 use crate::capture::{
-	BoxFuture, CaptureOptions, CaptureSource, ScreenCapture, SourceId, Ticker, Worker,
+	BoxFuture, CaptureOptions, CaptureSource, FrameSink, QueueSink, ScreenCapture, SourceId,
+	Ticker, Worker,
 };
-use crate::frame::VideoFrame;
-use crate::queue::{FrameReceiver, frame_channel};
+use crate::frame::{FrameRef, PixelsRef, PlaneRef, VideoFrame};
+use crate::queue::FrameReceiver;
 use crate::{Error, Result};
 
 const BACKEND: &str = "x11";
+/// How often the monitor or window position is looked up again.
+const REGION_REFRESH: Duration = Duration::from_secs(1);
 
 fn unavailable(e: impl Display) -> Error {
 	Error::CaptureUnavailable { backend: BACKEND, reason: e.to_string() }
@@ -102,39 +105,88 @@ impl ScreenCapture for X11Capture {
 		source: &SourceId,
 		options: &CaptureOptions,
 	) -> BoxFuture<'_, Result<FrameReceiver<VideoFrame>>> {
+		let (sink, rx) = QueueSink::new(options);
+		let started = self.start_sink(source, options, Box::new(sink));
+		Box::pin(async move {
+			started.await?;
+			Ok(rx)
+		})
+	}
+
+	/// The sink reads the MIT-SHM segment itself (or the GetImage reply);
+	/// the cursor is blended into it first.
+	fn start_sink(
+		&mut self,
+		source: &SourceId,
+		options: &CaptureOptions,
+		mut sink: Box<dyn FrameSink>,
+	) -> BoxFuture<'_, Result<()>> {
 		let source = source.clone();
 		let options = options.clone();
 		Box::pin(async move {
 			self.stop();
 			let x = Display11::connect(self.display.as_deref())?;
 			// Fail here, not in the thread, if the source does not exist.
-			x.region(&source)?;
-			let (tx, rx) = frame_channel(options.queue);
+			let mut region = x.region(&source)?;
 			let use_shm = self.use_shm;
 			self.worker = Some(Worker::spawn("voelin-x11-capture", move |stop| {
 				let mut grabber = Grabber::new(&x, use_shm);
 				let cursor = options.cursor && x.xfixes;
 				let started = Instant::now();
-				let mut ticker = Ticker::new(options.fps);
+				let mut fps = sink.max_fps();
+				let mut ticker = Ticker::new(fps);
+				let mut region_at = Instant::now();
 				loop {
-					match capture(&x, &source, &mut grabber, cursor) {
-						Ok(frame) => {
-							if !tx.send(frame.with_timestamp(started.elapsed())) {
-								break;
+					let timestamp = started.elapsed();
+					if sink.wants(timestamp) {
+						// Monitors and windows move rarely: look them up once a
+						// second, and again when a grab fails (e.g. a window
+						// shrank).
+						if region_at.elapsed() >= REGION_REFRESH {
+							region_at = Instant::now();
+							match x.region(&source) {
+								Ok(r) => region = r,
+								Err(e) => {
+									warn!("X11 capture stopped: {e}");
+									break;
+								}
 							}
 						}
-						Err(e) => {
+						let mut result = capture(&x, &region, &mut grabber, cursor);
+						if result.is_err() {
+							region_at = Instant::now();
+							if let Ok(r) = x.region(&source) {
+								region = r;
+								result = capture(&x, &region, &mut grabber, cursor);
+							}
+						}
+						if let Err(e) = result {
 							// E.g. the window was closed: end the stream.
 							warn!("X11 capture stopped: {e}");
 							break;
 						}
+						let (width, height) = (region.rect.width, region.rect.height);
+						let plane = PlaneRef::new(grabber.pixels(), usize::from(width) * 4);
+						let frame = FrameRef {
+							width: width.into(),
+							height: height.into(),
+							timestamp,
+							pixels: PixelsRef::Bgra(plane),
+						};
+						if !sink.frame(frame) {
+							break;
+						}
+					}
+					if sink.max_fps() != fps {
+						fps = sink.max_fps();
+						ticker.set_fps(fps);
 					}
 					if !ticker.wait(&stop) {
 						break;
 					}
 				}
 			})?);
-			Ok(rx)
+			Ok(())
 		})
 	}
 
@@ -408,19 +460,28 @@ struct Segment {
 struct Grabber {
 	shm: bool,
 	segment: Option<Segment>,
+	/// The last GetImage reply.
+	image: Vec<u8>,
+	/// Where the last grab is: the segment (`true`) or `image`, and its
+	/// length.
+	last: (bool, usize),
 }
 
 impl Grabber {
 	fn new(x: &Display11, want_shm: bool) -> Self {
-		Self { shm: want_shm && x.shm, segment: None }
+		Self { shm: want_shm && x.shm, segment: None, image: Vec::new(), last: (false, 0) }
 	}
 
-	/// Tightly packed BGRx pixels of the region.
-	fn grab(&mut self, x: &Display11, r: &Region) -> Result<Vec<u8>> {
+	/// Read the region's pixels (tightly packed BGRx) into the shared memory
+	/// segment, or with GetImage; [`Grabber::pixels`] has them.
+	fn grab(&mut self, x: &Display11, r: &Region) -> Result<()> {
 		let size = usize::from(r.rect.width) * usize::from(r.rect.height) * 4;
 		if self.shm {
 			match self.grab_shm(x, r, size) {
-				Ok(pixels) => return Ok(pixels),
+				Ok(()) => {
+					self.last = (true, size);
+					return Ok(());
+				}
 				Err(e) => {
 					debug!("MIT-SHM capture failed, using GetImage: {e}");
 					self.shm = false;
@@ -442,15 +503,29 @@ impl Grabber {
 			.map_err(failed)?
 			.reply()
 			.map_err(failed)?;
-		let mut data = reply.data;
-		if data.len() < size {
-			return Err(failed(format!("GetImage returned {} bytes, expected {size}", data.len())));
+		self.image = reply.data;
+		if self.image.len() < size {
+			return Err(failed(format!(
+				"GetImage returned {} bytes, expected {size}",
+				self.image.len()
+			)));
 		}
-		data.truncate(size);
-		Ok(data)
+		self.last = (false, size);
+		Ok(())
 	}
 
-	fn grab_shm(&mut self, x: &Display11, r: &Region, size: usize) -> Result<Vec<u8>> {
+	/// The pixels of the last grab.
+	fn pixels(&mut self) -> &mut [u8] {
+		match (self.last, &mut self.segment) {
+			((true, size), Some(segment)) => &mut segment.map[..size],
+			((_, size), _) => {
+				let len = size.min(self.image.len());
+				&mut self.image[..len]
+			}
+		}
+	}
+
+	fn grab_shm(&mut self, x: &Display11, r: &Region, size: usize) -> Result<()> {
 		if self.segment.as_ref().is_none_or(|s| s.map.len() < size) {
 			self.release(x);
 			self.segment = Some(Self::attach(x, size)?);
@@ -471,7 +546,7 @@ impl Grabber {
 			.map_err(failed)?
 			.reply()
 			.map_err(failed)?;
-		Ok(segment.map[..size].to_vec())
+		Ok(())
 	}
 
 	fn attach(x: &Display11, size: usize) -> Result<Segment> {
@@ -533,14 +608,10 @@ fn blend_cursor(bgrx: &mut [u8], width: usize, height: usize, cursor: &Cursor<'_
 	}
 }
 
-fn capture(
-	x: &Display11,
-	source: &SourceId,
-	grabber: &mut Grabber,
-	cursor: bool,
-) -> Result<VideoFrame> {
-	let region = x.region(source)?;
-	let mut pixels = grabber.grab(x, &region)?;
+/// Grab the region and blend the cursor into it; the pixels are then in
+/// [`Grabber::pixels`].
+fn capture(x: &Display11, region: &Region, grabber: &mut Grabber, cursor: bool) -> Result<()> {
+	grabber.grab(x, region)?;
 	let (w, h) = (usize::from(region.rect.width), usize::from(region.rect.height));
 	if cursor && let Ok(image) = x.conn.xfixes_get_cursor_image().map_err(failed)?.reply() {
 		let cursor = Cursor {
@@ -551,10 +622,10 @@ fn capture(
 			argb: &image.cursor_image,
 		};
 		if cursor.argb.len() >= cursor.width * cursor.height {
-			blend_cursor(&mut pixels, w, h, &cursor);
+			blend_cursor(grabber.pixels(), w, h, &cursor);
 		}
 	}
-	VideoFrame::from_bgra(region.rect.width.into(), region.rect.height.into(), w * 4, pixels)
+	Ok(())
 }
 
 #[cfg(test)]

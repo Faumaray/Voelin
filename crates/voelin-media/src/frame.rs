@@ -46,6 +46,29 @@ impl Plane {
 		&self.data[y * self.stride..y * self.stride + width]
 	}
 
+	/// The plane borrowed.
+	pub fn view(&self) -> PlaneRef<'_> {
+		PlaneRef { data: &self.data, stride: self.stride }
+	}
+}
+
+/// A borrowed image plane: `stride` bytes per row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlaneRef<'a> {
+	pub data: &'a [u8],
+	pub stride: usize,
+}
+
+impl<'a> PlaneRef<'a> {
+	pub fn new(data: &'a [u8], stride: usize) -> Self {
+		Self { data, stride }
+	}
+
+	/// Row `y`, `width` bytes long.
+	pub fn row(&self, y: usize, width: usize) -> &'a [u8] {
+		&self.data[y * self.stride..y * self.stride + width]
+	}
+
 	fn check(&self, name: &str, width: usize, rows: usize) -> Result<()> {
 		if self.stride < width {
 			return Err(Error::InvalidFrame(format!(
@@ -62,6 +85,99 @@ impl Plane {
 			)));
 		}
 		Ok(())
+	}
+
+	/// A tightly packed copy of `width` x `rows` bytes.
+	fn to_plane(self, width: usize, rows: usize) -> Plane {
+		let mut data = Vec::with_capacity(width * rows);
+		for y in 0..rows {
+			data.extend_from_slice(self.row(y, width));
+		}
+		Plane::new(data, width)
+	}
+}
+
+/// The pixels of a [`FrameRef`], borrowed (e.g. from a mapped capture
+/// buffer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PixelsRef<'a> {
+	I420 {
+		y: PlaneRef<'a>,
+		u: PlaneRef<'a>,
+		v: PlaneRef<'a>,
+	},
+	Nv12 {
+		y: PlaneRef<'a>,
+		uv: PlaneRef<'a>,
+	},
+	/// BGRA or BGRx.
+	Bgra(PlaneRef<'a>),
+	/// RGBA or RGBx.
+	Rgba(PlaneRef<'a>),
+}
+
+/// A video frame whose pixels are borrowed, e.g. a capture buffer that is
+/// mapped only while a callback runs. Capture backends hand these to a
+/// [`FrameSink`](crate::capture::FrameSink), which converts straight from
+/// them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameRef<'a> {
+	pub width: u32,
+	pub height: u32,
+	/// As [`VideoFrame::timestamp`].
+	pub timestamp: Duration,
+	pub pixels: PixelsRef<'a>,
+}
+
+impl FrameRef<'_> {
+	pub fn format(&self) -> PixelFormat {
+		match self.pixels {
+			PixelsRef::I420 { .. } => PixelFormat::I420,
+			PixelsRef::Nv12 { .. } => PixelFormat::Nv12,
+			PixelsRef::Bgra(_) => PixelFormat::Bgra,
+			PixelsRef::Rgba(_) => PixelFormat::Rgba,
+		}
+	}
+
+	/// Check that the planes are large enough for the frame size.
+	pub fn validate(&self) -> Result<()> {
+		if self.width == 0 || self.height == 0 {
+			return Err(Error::InvalidFrame(format!("empty frame {}x{}", self.width, self.height)));
+		}
+		let (w, h) = (self.width as usize, self.height as usize);
+		let (cw, ch) = chroma_size(self.width, self.height);
+		match &self.pixels {
+			PixelsRef::I420 { y, u, v } => {
+				y.check("Y", w, h)?;
+				u.check("U", cw, ch)?;
+				v.check("V", cw, ch)
+			}
+			PixelsRef::Nv12 { y, uv } => {
+				y.check("Y", w, h)?;
+				uv.check("UV", cw * 2, ch)
+			}
+			PixelsRef::Bgra(p) => p.check("BGRA", w * 4, h),
+			PixelsRef::Rgba(p) => p.check("RGBA", w * 4, h),
+		}
+	}
+
+	/// An owned copy with tightly packed planes.
+	pub fn to_frame(&self) -> VideoFrame {
+		let (w, h) = (self.width as usize, self.height as usize);
+		let (cw, ch) = chroma_size(self.width, self.height);
+		let data = match self.pixels {
+			PixelsRef::I420 { y, u, v } => FrameData::I420 {
+				y: y.to_plane(w, h),
+				u: u.to_plane(cw, ch),
+				v: v.to_plane(cw, ch),
+			},
+			PixelsRef::Nv12 { y, uv } => {
+				FrameData::Nv12 { y: y.to_plane(w, h), uv: uv.to_plane(cw * 2, ch) }
+			}
+			PixelsRef::Bgra(p) => FrameData::Bgra(p.to_plane(w * 4, h)),
+			PixelsRef::Rgba(p) => FrameData::Rgba(p.to_plane(w * 4, h)),
+		};
+		VideoFrame { width: self.width, height: self.height, timestamp: self.timestamp, data }
 	}
 }
 
@@ -144,6 +260,19 @@ impl VideoFrame {
 		}
 	}
 
+	/// The frame with its pixels borrowed.
+	pub fn view(&self) -> FrameRef<'_> {
+		let pixels = match &self.data {
+			FrameData::I420 { y, u, v } => {
+				PixelsRef::I420 { y: y.view(), u: u.view(), v: v.view() }
+			}
+			FrameData::Nv12 { y, uv } => PixelsRef::Nv12 { y: y.view(), uv: uv.view() },
+			FrameData::Bgra(p) => PixelsRef::Bgra(p.view()),
+			FrameData::Rgba(p) => PixelsRef::Rgba(p.view()),
+		};
+		FrameRef { width: self.width, height: self.height, timestamp: self.timestamp, pixels }
+	}
+
 	/// The timestamp on the 90 kHz RTP video clock.
 	pub fn pts_90khz(&self) -> u64 {
 		(self.timestamp.as_micros() * u128::from(VIDEO_CLOCK_RATE) / 1_000_000) as u64
@@ -151,24 +280,7 @@ impl VideoFrame {
 
 	/// Check that the planes are large enough for the frame size.
 	pub fn validate(&self) -> Result<()> {
-		if self.width == 0 || self.height == 0 {
-			return Err(Error::InvalidFrame(format!("empty frame {}x{}", self.width, self.height)));
-		}
-		let (w, h) = (self.width as usize, self.height as usize);
-		let (cw, ch) = chroma_size(self.width, self.height);
-		match &self.data {
-			FrameData::I420 { y, u, v } => {
-				y.check("Y", w, h)?;
-				u.check("U", cw, ch)?;
-				v.check("V", cw, ch)
-			}
-			FrameData::Nv12 { y, uv } => {
-				y.check("Y", w, h)?;
-				uv.check("UV", cw * 2, ch)
-			}
-			FrameData::Bgra(p) => p.check("BGRA", w * 4, h),
-			FrameData::Rgba(p) => p.check("RGBA", w * 4, h),
-		}
+		self.view().validate()
 	}
 }
 
@@ -217,5 +329,29 @@ mod tests {
 		let audio = AudioBuffer { samples: vec![0.0; 960], channels: 2, timestamp: Duration::ZERO };
 		assert_eq!(audio.frames(), 480);
 		assert_eq!(audio.duration(), Duration::from_millis(10));
+	}
+
+	#[test]
+	fn borrowed_frames() {
+		// 3x2 BGRA with 4 bytes of padding per row, last row unpadded.
+		let data: Vec<u8> = (0..16 + 12).collect();
+		let frame = FrameRef {
+			width: 3,
+			height: 2,
+			timestamp: Duration::from_millis(5),
+			pixels: PixelsRef::Bgra(PlaneRef::new(&data, 16)),
+		};
+		frame.validate().unwrap();
+		assert_eq!(frame.format(), PixelFormat::Bgra);
+		let owned = frame.to_frame();
+		let FrameData::Bgra(p) = &owned.data else { panic!("not BGRA") };
+		assert_eq!(p.stride, 12);
+		assert_eq!(p.data[..12], data[..12]);
+		assert_eq!(p.data[12..], data[16..]);
+		assert_eq!(owned.timestamp, Duration::from_millis(5));
+		assert_eq!(owned.view().to_frame(), owned);
+		let short = FrameRef { pixels: PixelsRef::Bgra(PlaneRef::new(&data[..27], 16)), ..frame };
+		assert!(short.validate().is_err());
+		assert_eq!(VideoFrame::black_i420(5, 3).view().format(), PixelFormat::I420);
 	}
 }

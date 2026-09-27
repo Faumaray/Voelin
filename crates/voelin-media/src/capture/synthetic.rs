@@ -3,12 +3,13 @@
 //! a desktop-like picture, plus a frame counter) and a sine tone.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::capture::{
-	AudioCapture, BoxFuture, CaptureOptions, CaptureSource, ScreenCapture, SourceId, Ticker, Worker,
+	AudioCapture, BoxFuture, CaptureOptions, CaptureSource, FrameSink, QueueSink, ScreenCapture,
+	SourceId, Ticker, Worker,
 };
-use crate::frame::{AUDIO_SAMPLE_RATE, AudioBuffer, VideoFrame};
+use crate::frame::{AUDIO_SAMPLE_RATE, AudioBuffer, FrameRef, PixelsRef, PlaneRef, VideoFrame};
 use crate::queue::{FrameReceiver, frame_channel};
 use crate::{Error, Result};
 
@@ -321,24 +322,58 @@ impl ScreenCapture for SyntheticScreen {
 		source: &SourceId,
 		options: &CaptureOptions,
 	) -> BoxFuture<'_, Result<FrameReceiver<VideoFrame>>> {
+		let (sink, rx) = QueueSink::new(options);
+		let started = self.start_sink(source, options, Box::new(sink));
+		Box::pin(async move {
+			started.await?;
+			Ok(rx)
+		})
+	}
+
+	/// Draws frame after frame into one buffer, at [`FrameSink::max_fps`];
+	/// timestamps are the time since the start.
+	fn start_sink(
+		&mut self,
+		source: &SourceId,
+		_options: &CaptureOptions,
+		mut sink: Box<dyn FrameSink>,
+	) -> BoxFuture<'_, Result<()>> {
 		let source = source.clone();
-		let options = options.clone();
 		Box::pin(async move {
 			if source != SourceId::Synthetic {
 				return Err(Error::SourceNotFound(source));
 			}
 			self.stop();
-			let (tx, rx) = frame_channel(options.queue);
 			let pattern = self.same_pattern();
-			let fps = options.fps;
 			self.worker = Some(Worker::spawn("voelin-synthetic-video", move |stop| {
+				let (width, height) = (pattern.width, pattern.height);
+				let mut fps = sink.max_fps();
 				let mut ticker = Ticker::new(fps);
+				let mut buffer = Vec::new();
+				let started = Instant::now();
 				let mut n = 0;
-				while tx.send(pattern.frame(n, fps)) && ticker.wait(&stop) {
-					n += 1;
+				loop {
+					let timestamp = started.elapsed();
+					if sink.wants(timestamp) {
+						pattern.render(n, &mut buffer);
+						let plane = PlaneRef::new(&buffer, width as usize * 4);
+						let frame =
+							FrameRef { width, height, timestamp, pixels: PixelsRef::Bgra(plane) };
+						if !sink.frame(frame) {
+							break;
+						}
+						n += 1;
+					}
+					if sink.max_fps() != fps {
+						fps = sink.max_fps();
+						ticker.set_fps(fps);
+					}
+					if !ticker.wait(&stop) {
+						break;
+					}
 				}
 			})?);
-			Ok(rx)
+			Ok(())
 		})
 	}
 

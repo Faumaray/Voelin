@@ -4,24 +4,40 @@
 //!
 //! The portal can remember the user's choice: pass the token from
 //! [`PortalCapture::restore_token`] to [`PortalCapture::with_restore_token`]
-//! next time (it persists until the user revokes it). Only shared-memory
-//! buffers (`BGRx` / `RGBx` family) are negotiated; DMA-BUF import is a TODO.
+//! next time (it persists until the user revokes it).
+//!
+//! Buffers: LINEAR DMA-BUFs (mapped and read by the CPU, with
+//! `DMA_BUF_IOCTL_SYNC` around each read) are offered first, shared memory
+//! (`BGRx` / `BGRA` / `RGBx` / `RGBA`) second, so compositors without
+//! DMA-BUF support use shared memory. When reading DMA-BUFs turns out slow
+//! (buffers in memory the CPU reads uncached, e.g. a discrete GPU's VRAM),
+//! the stream switches to shared memory. Tiled DMA-BUFs would need a GPU
+//! import and are not offered. Frames go to the [`FrameSink`] while the
+//! buffer is dequeued; nothing is copied before conversion. The frame rate
+//! follows the sink's cap: the compositor is asked for up to that rate and
+//! sends frames when the screen changes.
 
 use std::time::{Duration, Instant};
 
 use ashpd::desktop::PersistMode;
 use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType};
 use pipewire as pw;
+use pw::spa::buffer::DataType;
 use pw::spa::param::format::{FormatProperties, MediaSubtype, MediaType};
 use pw::spa::param::video::{VideoFormat, VideoInfoRaw};
-use pw::spa::pod::{Value, object, property};
-use pw::spa::utils::{Fraction, Rectangle, SpaTypes};
+use pw::spa::pod::{
+	ChoiceValue, Object, Pod, PodPropFlags, Property, PropertyFlags, Value, property,
+};
+use pw::spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Fraction, Id, Rectangle, SpaTypes};
 use tracing::{debug, warn};
 
+use crate::capture::dmabuf::DmaBufMap;
 use crate::capture::pw::{PwThread, pod, serialize};
-use crate::capture::{BoxFuture, CaptureOptions, CaptureSource, ScreenCapture, SourceId};
-use crate::frame::VideoFrame;
-use crate::queue::{FrameReceiver, FrameSender, frame_channel};
+use crate::capture::{
+	BoxFuture, CaptureOptions, CaptureSource, FrameSink, QueueSink, ScreenCapture, SourceId,
+};
+use crate::frame::{FrameRef, PixelsRef, PlaneRef, VideoFrame};
+use crate::queue::FrameReceiver;
 use crate::{Error, Result};
 
 const BACKEND: &str = "portal";
@@ -49,11 +65,19 @@ struct Session {
 
 /// ScreenCast portal + PipeWire backend (Wayland, also works on X11 desktops
 /// that run xdg-desktop-portal).
-#[derive(Default)]
 pub struct PortalCapture {
 	restore_token: Option<String>,
+	dmabuf: bool,
 	session: Option<Session>,
 	thread: Option<PwThread>,
+}
+
+impl Default for PortalCapture {
+	fn default() -> Self {
+		// VOELIN_PORTAL_DMABUF=0 offers shared memory only.
+		let dmabuf = std::env::var("VOELIN_PORTAL_DMABUF").map_or(true, |v| v != "0");
+		Self { restore_token: None, dmabuf, session: None, thread: None }
+	}
 }
 
 impl PortalCapture {
@@ -64,7 +88,16 @@ impl PortalCapture {
 	/// Reuse an earlier choice without asking (a token from
 	/// [`PortalCapture::restore_token`]).
 	pub fn with_restore_token(token: Option<String>) -> Self {
-		Self { restore_token: token, session: None, thread: None }
+		let mut capture = Self::default();
+		capture.restore_token = token;
+		capture
+	}
+
+	/// Offer LINEAR DMA-BUFs (default, unless `VOELIN_PORTAL_DMABUF=0`), or
+	/// shared memory only.
+	pub fn with_dmabuf(mut self, enabled: bool) -> Self {
+		self.dmabuf = enabled;
+		self
 	}
 
 	/// Token to persist after a successful start; `None` before that or if
@@ -149,6 +182,22 @@ impl ScreenCapture for PortalCapture {
 		source: &SourceId,
 		options: &CaptureOptions,
 	) -> BoxFuture<'_, Result<FrameReceiver<VideoFrame>>> {
+		let (sink, rx) = QueueSink::new(options);
+		let started = self.start_sink(source, options, Box::new(sink));
+		Box::pin(async move {
+			started.await?;
+			Ok(rx)
+		})
+	}
+
+	/// The sink reads the PipeWire buffer itself (shared memory, or a
+	/// LINEAR DMA-BUF mapped for reading) while the buffer is dequeued.
+	fn start_sink(
+		&mut self,
+		source: &SourceId,
+		options: &CaptureOptions,
+		sink: Box<dyn FrameSink>,
+	) -> BoxFuture<'_, Result<()>> {
 		let source = source.clone();
 		let options = options.clone();
 		Box::pin(async move {
@@ -157,15 +206,14 @@ impl ScreenCapture for PortalCapture {
 			}
 			self.stop();
 			let (fd, node) = self.open(&options).await?;
-			let (tx, rx) = frame_channel(options.queue);
-			let fps = options.fps.max(1);
+			let dmabuf = self.dmabuf;
 			let thread =
 				PwThread::spawn("voelin-portal-capture", Some(fd), move |core, mainloop| {
-					video_stream(core, mainloop, node, fps, tx)
+					video_stream(core, mainloop, node, dmabuf, sink)
 				})
 				.map_err(|e| Error::Capture { backend: BACKEND, message: e })?;
 			self.thread = Some(thread);
-			Ok(rx)
+			Ok(())
 		})
 	}
 
@@ -190,12 +238,43 @@ impl Drop for PortalCapture {
 	}
 }
 
+/// Pixel formats we take, in order of preference (all 4 bytes per pixel;
+/// `x` and `A` are ignored).
+const FORMATS: [VideoFormat; 4] =
+	[VideoFormat::BGRx, VideoFormat::BGRA, VideoFormat::RGBx, VideoFormat::RGBA];
+/// DRM_FORMAT_MOD_LINEAR: rows of pixels, readable by the CPU once mapped.
+const MODIFIER_LINEAR: i64 = 0;
+/// Reading DMA-BUFs slower than this (per pixel, conversion included) means
+/// the buffers live in memory the CPU reads uncached (e.g. a discrete GPU's
+/// VRAM); shared memory is faster then.
+const SLOW_DMABUF_NS_PER_PIXEL: f64 = 6.0;
+/// DMA-BUF frames timed before deciding.
+const DMABUF_PROBE_FRAMES: u32 = 30;
+
+/// What was negotiated.
+#[derive(Clone, Copy, Debug)]
+struct Negotiated {
+	format: VideoFormat,
+	width: u32,
+	height: u32,
+	/// DMA-BUF modifier; `None`: shared memory.
+	modifier: Option<i64>,
+}
+
 struct VideoState {
-	tx: FrameSender<VideoFrame>,
-	format: Option<(VideoFormat, u32, u32)>,
+	sink: Box<dyn FrameSink>,
+	format: Option<Negotiated>,
 	started: Instant,
-	interval: Duration,
-	last: Option<Instant>,
+	/// Frame rate the offered formats ask for.
+	fps: u32,
+	/// Offer DMA-BUFs.
+	dmabuf: bool,
+	/// Mappings of the DMA-BUFs PipeWire cycles through.
+	maps: Vec<DmaBufMap>,
+	/// Time spent handing DMA-BUF frames to the sink, and how many.
+	dmabuf_time: Duration,
+	dmabuf_frames: u32,
+	logged: Option<bool>,
 	mainloop: pw::main_loop::MainLoopWeak,
 }
 
@@ -203,8 +282,8 @@ fn video_stream(
 	core: &pw::core::CoreRc,
 	mainloop: &pw::main_loop::MainLoopRc,
 	node: u32,
-	fps: u32,
-	tx: FrameSender<VideoFrame>,
+	dmabuf: bool,
+	sink: Box<dyn FrameSink>,
 ) -> std::result::Result<(pw::stream::StreamRc, pw::stream::StreamListener<VideoState>), String> {
 	let props = pw::properties::properties! {
 		*pw::keys::MEDIA_TYPE => "Video",
@@ -213,13 +292,17 @@ fn video_stream(
 	};
 	let stream = pw::stream::StreamRc::new(core.clone(), "voelin-screen-capture", props)
 		.map_err(|e| format!("PipeWire stream: {e}"))?;
+	let fps = sink.max_fps().max(1);
 	let state = VideoState {
-		tx,
+		sink,
 		format: None,
 		started: Instant::now(),
-		// Accept frames slightly early so rounding does not halve the rate.
-		interval: Duration::from_secs(1) / fps * 9 / 10,
-		last: None,
+		fps,
+		dmabuf,
+		maps: Vec::new(),
+		dmabuf_time: Duration::ZERO,
+		dmabuf_frames: 0,
+		logged: None,
 		mainloop: mainloop.downgrade(),
 	};
 	let listener = stream
@@ -236,125 +319,319 @@ fn video_stream(
 				mainloop.quit();
 			}
 		})
-		.param_changed(|_, state, id, param| {
+		.param_changed(|stream, state, id, param| {
 			let Some(param) = param else { return };
 			if id != pw::spa::param::ParamType::Format.as_raw() {
 				return;
 			}
-			let Ok((MediaType::Video, MediaSubtype::Raw)) =
-				pw::spa::param::format_utils::parse_format(param)
-			else {
-				return;
-			};
-			let mut info = VideoInfoRaw::new();
-			if info.parse(param).is_ok() {
-				let size = info.size();
-				debug!(format = ?info.format(), size.width, size.height, "screen capture format");
-				state.format = Some((info.format(), size.width, size.height));
+			if let Err(e) = format_changed(stream, state, param) {
+				warn!("screen capture format: {e}");
 			}
 		})
-		.process(|stream, state| {
-			let Some(mut buffer) = stream.dequeue_buffer() else { return };
-			let Some((format, width, height)) = state.format else { return };
-			let now = Instant::now();
-			if state.last.is_some_and(|last| now - last < state.interval) {
-				return;
-			}
-			let Some(data) = buffer.datas_mut().first_mut() else { return };
-			let Some(frame) = copy_frame(data, format, width, height) else { return };
-			state.last = Some(now);
-			if !state.tx.send(frame.with_timestamp(now - state.started))
-				&& let Some(mainloop) = state.mainloop.upgrade()
-			{
-				// Nobody receives frames anymore.
-				mainloop.quit();
-			}
+		.remove_buffer(|_, state, _| {
+			// PipeWire is replacing its buffers: map the new ones.
+			state.maps.clear();
 		})
+		.process(process)
 		.register()
 		.map_err(|e| format!("PipeWire listener: {e}"))?;
 
-	let format = serialize(Value::Object(object!(
-		SpaTypes::ObjectParamFormat,
-		pw::spa::param::ParamType::EnumFormat,
-		property!(FormatProperties::MediaType, Id, MediaType::Video),
-		property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
-		property!(
-			FormatProperties::VideoFormat,
-			Choice,
-			Enum,
-			Id,
-			VideoFormat::BGRx,
-			VideoFormat::BGRx,
-			VideoFormat::BGRA,
-			VideoFormat::RGBx,
-			VideoFormat::RGBA
-		),
-		property!(
-			FormatProperties::VideoSize,
-			Choice,
-			Range,
-			Rectangle,
-			Rectangle { width: 1920, height: 1080 },
-			Rectangle { width: 1, height: 1 },
-			Rectangle { width: 8192, height: 8192 }
-		),
-		property!(
-			FormatProperties::VideoFramerate,
-			Choice,
-			Range,
-			Fraction,
-			Fraction { num: fps, denom: 1 },
-			Fraction { num: 0, denom: 1 },
-			Fraction { num: fps, denom: 1 }
-		),
-	)))?;
+	let formats = enum_formats(fps, dmabuf)?;
+	let mut pods = formats.iter().map(|f| pod(f)).collect::<std::result::Result<Vec<_>, _>>()?;
 	stream
 		.connect(
 			pw::spa::utils::Direction::Input,
 			Some(node),
 			pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
-			&mut [pod(&format)?],
+			&mut pods,
 		)
 		.map_err(|e| format!("cannot connect to the screen cast node {node}: {e}"))?;
 	Ok((stream, listener))
 }
 
-/// Copy one shared-memory buffer into a frame. `None` for buffers without
-/// mapped data (DMA-BUF), empty or corrupted chunks, and unknown formats.
-fn copy_frame(
-	data: &mut pw::spa::buffer::Data,
-	format: VideoFormat,
-	width: u32,
-	height: u32,
-) -> Option<VideoFrame> {
-	let bgra = match format {
+fn size_range() -> Property {
+	property!(
+		FormatProperties::VideoSize,
+		Choice,
+		Range,
+		Rectangle,
+		Rectangle { width: 1920, height: 1080 },
+		Rectangle { width: 1, height: 1 },
+		Rectangle { width: 16384, height: 16384 }
+	)
+}
+
+/// Up to `fps`, as the compositor can (it sends frames on damage only).
+fn framerate_range(fps: u32) -> Property {
+	property!(
+		FormatProperties::VideoFramerate,
+		Choice,
+		Range,
+		Fraction,
+		Fraction { num: fps, denom: 1 },
+		Fraction { num: 0, denom: 1 },
+		Fraction { num: fps, denom: 1 }
+	)
+}
+
+fn modifier_property(fixed: bool) -> Property {
+	let flags = pw::spa::sys::SPA_POD_PROP_FLAG_MANDATORY
+		| if fixed { 0 } else { pw::spa::sys::SPA_POD_PROP_FLAG_DONT_FIXATE };
+	let value = if fixed {
+		Value::Long(MODIFIER_LINEAR)
+	} else {
+		Value::Choice(ChoiceValue::Long(Choice(
+			ChoiceFlags::empty(),
+			ChoiceEnum::Enum { default: MODIFIER_LINEAR, alternatives: vec![MODIFIER_LINEAR] },
+		)))
+	};
+	Property {
+		key: FormatProperties::VideoModifier.as_raw(),
+		flags: PropertyFlags::from_bits_retain(flags),
+		value,
+	}
+}
+
+fn format_object(properties: Vec<Property>) -> Value {
+	Value::Object(Object {
+		type_: SpaTypes::ObjectParamFormat.as_raw(),
+		id: pw::spa::param::ParamType::EnumFormat.as_raw(),
+		properties,
+	})
+}
+
+/// The formats we offer: each pixel format as a LINEAR DMA-BUF (if
+/// `dmabuf`), then all of them in shared memory.
+fn enum_formats(fps: u32, dmabuf: bool) -> std::result::Result<Vec<Vec<u8>>, String> {
+	let mut formats = Vec::new();
+	let base = || {
+		vec![
+			property!(FormatProperties::MediaType, Id, MediaType::Video),
+			property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
+		]
+	};
+	if dmabuf {
+		for format in FORMATS {
+			let mut properties = base();
+			properties.push(property!(FormatProperties::VideoFormat, Id, format));
+			properties.push(modifier_property(false));
+			properties.push(size_range());
+			properties.push(framerate_range(fps));
+			formats.push(serialize(format_object(properties))?);
+		}
+	}
+	let mut properties = base();
+	properties.push(property!(
+		FormatProperties::VideoFormat,
+		Choice,
+		Enum,
+		Id,
+		FORMATS[0],
+		FORMATS[0],
+		FORMATS[1],
+		FORMATS[2],
+		FORMATS[3]
+	));
+	properties.push(size_range());
+	properties.push(framerate_range(fps));
+	formats.push(serialize(format_object(properties))?);
+	Ok(formats)
+}
+
+/// Offer formats again (another frame rate, or no DMA-BUFs); PipeWire
+/// renegotiates.
+fn renegotiate(stream: &pw::stream::Stream, fps: u32, dmabuf: bool) {
+	let result = enum_formats(fps, dmabuf).and_then(|formats| {
+		let mut pods =
+			formats.iter().map(|f| pod(f)).collect::<std::result::Result<Vec<_>, _>>()?;
+		stream.update_params(&mut pods).map_err(|e| e.to_string())
+	});
+	if let Err(e) = result {
+		warn!("cannot renegotiate the screen capture format: {e}");
+	}
+}
+
+fn format_changed(
+	stream: &pw::stream::Stream,
+	state: &mut VideoState,
+	param: &Pod,
+) -> std::result::Result<(), String> {
+	let Ok((MediaType::Video, MediaSubtype::Raw)) =
+		pw::spa::param::format_utils::parse_format(param)
+	else {
+		return Ok(());
+	};
+	let mut info = VideoInfoRaw::new();
+	info.parse(param).map_err(|e| format!("cannot parse the video format: {e}"))?;
+	let size = info.size();
+	state.maps.clear();
+	let modifier = param
+		.as_object()
+		.ok()
+		.and_then(|o| o.find_prop(Id(FormatProperties::VideoModifier.as_raw())));
+	let modifier = match modifier {
+		Some(prop) if prop.flags().contains(PodPropFlags::DONT_FIXATE) => {
+			// The producer left the choice to us; we only take LINEAR.
+			let mut properties = vec![
+				property!(FormatProperties::MediaType, Id, MediaType::Video),
+				property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
+				property!(FormatProperties::VideoFormat, Id, info.format()),
+				modifier_property(true),
+				property!(
+					FormatProperties::VideoSize,
+					Rectangle,
+					Rectangle { width: size.width, height: size.height }
+				),
+			];
+			properties.push(framerate_range(state.fps));
+			let fixed = serialize(format_object(properties))?;
+			stream.update_params(&mut [pod(&fixed)?]).map_err(|e| e.to_string())?;
+			return Ok(());
+		}
+		Some(prop) => Some(prop.value().get_long().unwrap_or(MODIFIER_LINEAR)),
+		None => None,
+	};
+	debug!(format = ?info.format(), size.width, size.height, ?modifier, "screen capture format");
+	state.format = Some(Negotiated {
+		format: info.format(),
+		width: size.width,
+		height: size.height,
+		modifier,
+	});
+	let types = if modifier.is_some() {
+		1 << pw::spa::sys::SPA_DATA_DmaBuf
+	} else {
+		(1 << pw::spa::sys::SPA_DATA_MemPtr) | (1 << pw::spa::sys::SPA_DATA_MemFd)
+	};
+	let buffers = serialize(Value::Object(Object {
+		type_: SpaTypes::ObjectParamBuffers.as_raw(),
+		id: pw::spa::param::ParamType::Buffers.as_raw(),
+		properties: vec![Property {
+			key: pw::spa::sys::SPA_PARAM_BUFFERS_dataType,
+			flags: PropertyFlags::empty(),
+			value: Value::Int(types as i32),
+		}],
+	}))?;
+	stream.update_params(&mut [pod(&buffers)?]).map_err(|e| e.to_string())
+}
+
+fn process(stream: &pw::stream::Stream, state: &mut VideoState) {
+	// Follow the sink's frame rate: ask the compositor for another rate.
+	let fps = state.sink.max_fps().max(1);
+	if fps != state.fps {
+		state.fps = fps;
+		renegotiate(stream, fps, state.dmabuf);
+	}
+	let Some(mut buffer) = stream.dequeue_buffer() else { return };
+	let Some(format) = state.format else { return };
+	if format.modifier.is_some_and(|m| m != MODIFIER_LINEAR) {
+		// Tiled: the CPU cannot read it (we never offer that).
+		return;
+	}
+	let timestamp = state.started.elapsed();
+	if !state.sink.wants(timestamp) {
+		// Dropping the buffer queues it back.
+		return;
+	}
+	let Some(data) = buffer.datas_mut().first_mut() else { return };
+	let bgra = match format.format {
 		VideoFormat::BGRx | VideoFormat::BGRA => true,
 		VideoFormat::RGBx | VideoFormat::RGBA => false,
-		_ => return None,
+		_ => return,
 	};
 	let chunk = data.chunk();
 	if chunk.size() == 0 || chunk.flags().contains(pw::spa::buffer::ChunkFlags::CORRUPTED) {
-		return None;
+		return;
 	}
 	let offset = chunk.offset() as usize;
-	let row = width as usize * 4;
+	let row = format.width as usize * 4;
 	let stride = usize::try_from(chunk.stride()).ok().filter(|&s| s >= row).unwrap_or(row);
-	let bytes = data.data()?;
-	let bytes = bytes.get(offset..)?;
-	let needed = stride * (height as usize).checked_sub(1)? + row;
-	if bytes.len() < needed {
-		return None;
+	let needed = offset + stride * (format.height as usize).saturating_sub(1) + row;
+	fn view(
+		bytes: &[u8],
+		at: (usize, usize, bool),
+		format: Negotiated,
+		t: Duration,
+	) -> Option<FrameRef<'_>> {
+		let (offset, stride, bgra) = at;
+		let plane = PlaneRef::new(bytes.get(offset..)?, stride);
+		let pixels = if bgra { PixelsRef::Bgra(plane) } else { PixelsRef::Rgba(plane) };
+		Some(FrameRef { width: format.width, height: format.height, timestamp: t, pixels })
 	}
-	let mut pixels = Vec::with_capacity(row * height as usize);
-	for y in 0..height as usize {
-		pixels.extend_from_slice(&bytes[y * stride..y * stride + row]);
+	let at = (offset, stride, bgra);
+	let is_dmabuf = data.type_() == DataType::DmaBuf;
+	if state.logged != Some(is_dmabuf) {
+		state.logged = Some(is_dmabuf);
+		debug!(dmabuf = is_dmabuf, "screen capture buffers");
 	}
-	let frame = if bgra {
-		VideoFrame::from_bgra(width, height, row, pixels)
+	let started = Instant::now();
+	let more = if is_dmabuf {
+		let raw = data.as_raw();
+		let len = (raw.mapoffset + raw.maxsize) as usize;
+		let fd = data.fd();
+		if !state.maps.iter().any(|m| m.fd() == fd && m.len() >= len) {
+			state.maps.retain(|m| m.fd() != fd);
+			match DmaBufMap::new(fd, len) {
+				Ok(map) => state.maps.push(map),
+				Err(e) => {
+					warn!("cannot map a screen capture DMA-BUF: {e}");
+					return;
+				}
+			}
+		}
+		let map = state.maps.iter().find(|m| m.fd() == fd).expect("mapped above");
+		let base = raw.mapoffset as usize;
+		map.read(|bytes| {
+			match bytes
+				.get(base..)
+				.filter(|b| b.len() >= needed)
+				.and_then(|b| view(b, at, format, timestamp))
+			{
+				Some(frame) => state.sink.frame(frame),
+				None => true,
+			}
+		})
 	} else {
-		VideoFrame::from_rgba(width, height, row, pixels)
+		match data.data().filter(|b| b.len() >= needed).and_then(|b| view(b, at, format, timestamp))
+		{
+			Some(frame) => state.sink.frame(frame),
+			None => true,
+		}
 	};
-	frame.ok()
+	if is_dmabuf && state.dmabuf {
+		probe_dmabuf(stream, state, started.elapsed(), format);
+	}
+	if !more && let Some(mainloop) = state.mainloop.upgrade() {
+		// Nobody takes frames any more.
+		mainloop.quit();
+	}
+}
+
+/// Time the first DMA-BUF frames; if reading them is slow, offer shared
+/// memory only.
+fn probe_dmabuf(
+	stream: &pw::stream::Stream,
+	state: &mut VideoState,
+	took: Duration,
+	format: Negotiated,
+) {
+	if state.dmabuf_frames >= DMABUF_PROBE_FRAMES {
+		return;
+	}
+	state.dmabuf_frames += 1;
+	state.dmabuf_time += took;
+	if state.dmabuf_frames < DMABUF_PROBE_FRAMES {
+		return;
+	}
+	let pixels = f64::from(format.width) * f64::from(format.height);
+	let per_pixel = state.dmabuf_time.as_secs_f64() * 1e9 / f64::from(DMABUF_PROBE_FRAMES) / pixels;
+	if per_pixel > SLOW_DMABUF_NS_PER_PIXEL {
+		tracing::info!(
+			"reading DMA-BUFs takes {per_pixel:.1} ns per pixel; switching screen capture to shared memory"
+		);
+		state.dmabuf = false;
+		renegotiate(stream, state.fps, false);
+	}
 }
 
 #[cfg(test)]
@@ -377,5 +654,29 @@ mod tests {
 		assert!(matches!(err, Error::CaptureUnavailable { backend: "portal", .. }), "{err}");
 		assert!(!PortalCapture::is_available().await);
 		assert!(capture.restore_token().is_none());
+	}
+
+	/// The offered formats parse back: DMA-BUF (mandatory LINEAR modifier,
+	/// left to us to fixate) per pixel format, then shared memory.
+	#[test]
+	fn offered_formats() {
+		let formats = enum_formats(60, true).unwrap();
+		assert_eq!(formats.len(), FORMATS.len() + 1);
+		for (i, bytes) in formats.iter().enumerate() {
+			let object = pod(bytes).unwrap().as_object().unwrap();
+			let modifier = object.find_prop(Id(FormatProperties::VideoModifier.as_raw()));
+			if i < FORMATS.len() {
+				let flags = modifier.expect("a modifier").flags();
+				assert!(flags.contains(PodPropFlags::MANDATORY | PodPropFlags::DONT_FIXATE));
+			} else {
+				assert!(modifier.is_none(), "shared memory has no modifier");
+			}
+		}
+		assert_eq!(enum_formats(30, false).unwrap().len(), 1);
+		let fixed = serialize(format_object(vec![modifier_property(true)])).unwrap();
+		let object = pod(&fixed).unwrap().as_object().unwrap();
+		let prop = object.find_prop(Id(FormatProperties::VideoModifier.as_raw())).unwrap();
+		assert_eq!(prop.value().get_long().unwrap(), MODIFIER_LINEAR);
+		assert!(!prop.flags().contains(PodPropFlags::DONT_FIXATE));
 	}
 }

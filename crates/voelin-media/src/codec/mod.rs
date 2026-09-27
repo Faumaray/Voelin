@@ -128,6 +128,10 @@ pub struct EncoderConfig {
 	pub content: ContentHint,
 	/// Encoder threads; 0 picks a number from the resolution and CPU count.
 	pub threads: u32,
+	/// A fixed speed / quality trade-off in the backend's own terms (libvpx
+	/// `cpu-used`); `None` lets the encoder adapt it to how long frames take
+	/// to encode compared to the frame interval.
+	pub speed: Option<i32>,
 }
 
 impl Default for EncoderConfig {
@@ -138,28 +142,32 @@ impl Default for EncoderConfig {
 			keyframe_interval: None,
 			content: ContentHint::Screen,
 			threads: 0,
+			speed: None,
 		}
 	}
 }
 
 impl EncoderConfig {
-	/// Threads for a `width` x `height` encode (libwebrtc's heuristic).
+	/// Threads for a `width` x `height` encode: all CPUs, but no more than
+	/// one per 320x240 pixels (more would idle on small frames).
 	pub fn threads_for(&self, width: u32, height: u32) -> u32 {
 		if self.threads > 0 {
 			return self.threads;
 		}
 		let cpus = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
-		let pixels = width * height;
-		if pixels >= 1920 * 1080 && cpus > 8 {
-			8
-		} else if pixels >= 1280 * 720 && cpus > 3 {
-			4
-		} else if pixels >= 640 * 480 && cpus > 2 {
-			2
-		} else {
-			1
-		}
+		let useful = (u64::from(width) * u64::from(height) / (320 * 240)).clamp(1, 64) as u32;
+		cpus.min(useful)
 	}
+}
+
+/// An encoded frame borrowed from the encoder (see
+/// [`VideoEncoder::encode_with`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EncodedChunk<'a> {
+	pub data: &'a [u8],
+	pub keyframe: bool,
+	/// Presentation time on the 90 kHz RTP clock.
+	pub pts_90khz: u64,
 }
 
 /// One encoded frame, ready for `voelin_stream::Peer::write`.
@@ -183,8 +191,35 @@ pub trait VideoEncoder: Send {
 	/// encoder skipped it (rate control), usually one.
 	fn encode(&mut self, frame: &VideoFrame, force_keyframe: bool) -> Result<Vec<EncodedFrame>>;
 
+	/// Like [`encode`](Self::encode), but hands each encoded frame to `out`
+	/// borrowed from the encoder's own buffer, so nothing is allocated or
+	/// copied here (libvpx does this; the default goes through `encode`).
+	fn encode_with(
+		&mut self,
+		frame: &VideoFrame,
+		force_keyframe: bool,
+		out: &mut dyn FnMut(EncodedChunk<'_>),
+	) -> Result<()> {
+		for f in self.encode(frame, force_keyframe)? {
+			out(EncodedChunk { data: &f.data, keyframe: f.keyframe, pts_90khz: f.pts_90khz });
+		}
+		Ok(())
+	}
+
 	/// Change the target bitrate (bits per second).
 	fn set_bitrate(&mut self, bps: u32) -> Result<()>;
+
+	/// Change the expected frame rate (rate control and speed decisions);
+	/// ignored by encoders that follow the frame timestamps anyway.
+	fn set_fps(&mut self, fps: u32) -> Result<()> {
+		let _ = fps;
+		Ok(())
+	}
+
+	/// The current speed setting, for statistics (libvpx `cpu-used`).
+	fn speed(&self) -> Option<i32> {
+		None
+	}
 }
 
 /// A video decoder.

@@ -21,9 +21,9 @@ openh264-download = ["openh264", "dep:reqwest", "dep:bzip2", "dep:sha2"]
 av1 = ["dep:dav1d"]
 # X11 screen capture (Linux).
 x11 = ["dep:x11rb", "dep:memmap2", "dep:rustix"]
-# Wayland screen capture (ScreenCast portal + PipeWire) and PipeWire system
-# audio (Linux).
-pipewire = ["dep:ashpd", "dep:pipewire"]
+# Wayland screen capture (ScreenCast portal + PipeWire, shared memory or
+# LINEAR DMA-BUFs) and PipeWire system audio (Linux).
+pipewire = ["dep:ashpd", "dep:pipewire", "dep:memmap2", "dep:rustix"]
 # Conversion between `Codec` and `str0m::format::Codec`.
 str0m = ["dep:str0m"]
 

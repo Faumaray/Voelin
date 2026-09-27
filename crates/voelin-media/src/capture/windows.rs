@@ -10,7 +10,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tracing::warn;
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
@@ -24,9 +24,10 @@ use windows_capture::settings::{
 use windows_capture::window::Window;
 
 use crate::capture::{
-	AudioCapture, BoxFuture, CaptureOptions, CaptureSource, ScreenCapture, SourceId, Worker,
+	AudioCapture, BoxFuture, CaptureOptions, CaptureSource, FrameSink, QueueSink, ScreenCapture,
+	SourceId, Worker,
 };
-use crate::frame::{AUDIO_SAMPLE_RATE, AudioBuffer, VideoFrame};
+use crate::frame::{AUDIO_SAMPLE_RATE, AudioBuffer, FrameRef, PixelsRef, PlaneRef, VideoFrame};
 use crate::queue::{FrameReceiver, FrameSender, frame_channel};
 use crate::{Error, Result};
 
@@ -36,20 +37,20 @@ fn failed(e: impl std::fmt::Display) -> Error {
 	Error::Capture { backend: BACKEND, message: e.to_string() }
 }
 
-/// Receives frames on the capture thread.
+/// Receives frames on the capture thread and hands the mapped staging
+/// texture (with its row pitch) to the sink.
 struct Handler {
-	tx: FrameSender<VideoFrame>,
+	sink: Box<dyn FrameSink>,
 	started: Instant,
-	scratch: Vec<u8>,
 }
 
 impl GraphicsCaptureApiHandler for Handler {
-	type Flags = (FrameSender<VideoFrame>, Instant);
+	type Flags = (Box<dyn FrameSink>, Instant);
 	type Error = String;
 
 	fn new(ctx: Context<Self::Flags>) -> std::result::Result<Self, Self::Error> {
-		let (tx, started) = ctx.flags;
-		Ok(Self { tx, started, scratch: Vec::new() })
+		let (sink, started) = ctx.flags;
+		Ok(Self { sink, started })
 	}
 
 	fn on_frame_arrived(
@@ -57,12 +58,18 @@ impl GraphicsCaptureApiHandler for Handler {
 		frame: &mut Frame,
 		control: InternalCaptureControl,
 	) -> std::result::Result<(), Self::Error> {
-		let buffer = frame.buffer().map_err(|e| e.to_string())?;
-		let (w, h) = (buffer.width(), buffer.height());
-		let pixels = buffer.as_nopadding_buffer(&mut self.scratch).to_vec();
-		let frame =
-			VideoFrame::from_bgra(w, h, w as usize * 4, pixels).map_err(|e| e.to_string())?;
-		if !self.tx.send(frame.with_timestamp(self.started.elapsed())) {
+		let timestamp = self.started.elapsed();
+		// Frames come as the screen changes, up to its refresh rate; the
+		// sink's cap decides before anything is copied off the GPU.
+		if !self.sink.wants(timestamp) {
+			return Ok(());
+		}
+		let mut buffer = frame.buffer().map_err(|e| e.to_string())?;
+		let (width, height) = (buffer.width(), buffer.height());
+		let pitch = buffer.row_pitch() as usize;
+		let plane = PlaneRef::new(buffer.as_raw_buffer(), pitch);
+		let frame = FrameRef { width, height, timestamp, pixels: PixelsRef::Bgra(plane) };
+		if !self.sink.frame(frame) {
 			control.stop();
 		}
 		Ok(())
@@ -84,11 +91,11 @@ impl WindowsCapture {
 fn start_item<T>(
 	item: T,
 	options: &CaptureOptions,
-) -> Result<(CaptureControl<Handler, String>, FrameReceiver<VideoFrame>)>
+	sink: Box<dyn FrameSink>,
+) -> Result<CaptureControl<Handler, String>>
 where
 	T: TryInto<GraphicsCaptureItemType> + Send + 'static,
 {
-	let (tx, rx) = frame_channel(options.queue);
 	let cursor = if options.cursor {
 		CursorCaptureSettings::WithCursor
 	} else {
@@ -99,13 +106,13 @@ where
 		cursor,
 		DrawBorderSettings::WithoutBorder,
 		SecondaryWindowSettings::Default,
-		MinimumUpdateIntervalSettings::Custom(Duration::from_secs(1) / options.fps.max(1)),
+		// No minimum: the frame rate can change while capturing.
+		MinimumUpdateIntervalSettings::Default,
 		DirtyRegionSettings::Default,
 		ColorFormat::Bgra8,
-		(tx, Instant::now()),
+		(sink, Instant::now()),
 	);
-	let control = Handler::start_free_threaded(settings).map_err(failed)?;
-	Ok((control, rx))
+	Handler::start_free_threaded(settings).map_err(failed)
 }
 
 impl ScreenCapture for WindowsCapture {
@@ -147,27 +154,41 @@ impl ScreenCapture for WindowsCapture {
 		source: &SourceId,
 		options: &CaptureOptions,
 	) -> BoxFuture<'_, Result<FrameReceiver<VideoFrame>>> {
+		let (sink, rx) = QueueSink::new(options);
+		let started = self.start_sink(source, options, Box::new(sink));
+		Box::pin(async move {
+			started.await?;
+			Ok(rx)
+		})
+	}
+
+	fn start_sink(
+		&mut self,
+		source: &SourceId,
+		options: &CaptureOptions,
+		sink: Box<dyn FrameSink>,
+	) -> BoxFuture<'_, Result<()>> {
 		let source = source.clone();
 		let options = options.clone();
 		Box::pin(async move {
 			self.stop();
 			let not_found = || Error::SourceNotFound(source.clone());
-			let (control, rx) = match source {
+			let control = match source {
 				SourceId::Monitor(index) => {
 					let monitor = Monitor::from_index(index as usize).map_err(|_| not_found())?;
-					start_item(monitor, &options)?
+					start_item(monitor, &options, sink)?
 				}
 				SourceId::Window(hwnd) => {
 					let window = Window::from_raw_hwnd(hwnd as usize as *mut std::ffi::c_void);
 					if !window.is_valid() {
 						return Err(not_found());
 					}
-					start_item(window, &options)?
+					start_item(window, &options, sink)?
 				}
 				_ => return Err(not_found()),
 			};
 			self.control = Some(control);
-			Ok(rx)
+			Ok(())
 		})
 	}
 
