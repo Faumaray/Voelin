@@ -208,6 +208,19 @@ libwebrtc, the stack the official client is built on:
   resolver (or its server-reflexive candidates) on our side.
 - str0m answers in its own codec order and the offerer sends the answer's
   first codec, so `Peer::answer` orders the viewer's codecs like the offer.
+- SRTP profile: libwebrtc answers our `setup:actpass` offer as DTLS client
+  (`setup:active`) and offers AEAD_AES_256_GCM, AEAD_AES_128_GCM and
+  AES_CM_128_HMAC_SHA1_80; the server picks. dimpl, str0m's DTLS, always
+  picked AES-256-GCM, while streams between official clients are reported to
+  use AES_CM_128_HMAC_SHA1_80 (and official clients failed with ours). Our
+  peers now pick in the order of `PeerConfig::srtp_profiles`, by default
+  AES_CM_128_HMAC_SHA1_80 first; Chromium's `getStats()` confirms
+  `srtpCipher: AES_CM_128_HMAC_SHA1_80` (DTLS 1.2,
+  `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256`). Whether this was what broke the
+  official client is still to be confirmed with it.
+- With bandwidth estimation on our streamer peer, Chromium's transport-cc
+  feedback gives estimates; the offer is the same as without (str0m always
+  offers transport-cc and abs-send-time).
 
 ## Open questions
 

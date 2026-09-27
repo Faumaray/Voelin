@@ -11,7 +11,8 @@
 //   accept {sdp}          apply the answer to our offer
 //   candidate {candidate, sdpMid, sdpMLineIndex}   add a remote candidate
 //   stats                 connection state, inbound/outbound RTP counters,
-//                         frames shown by a <video> element
+//                         frames shown by a <video> element, the DTLS/SRTP
+//                         parameters of the transport
 //   quit
 'use strict';
 
@@ -134,10 +135,12 @@ window.peer = {
 		const codecs = {};
 		const inbound = {};
 		const outbound = {};
+		let transport = {};
 		report.forEach((s) => {
 			if (s.type === 'codec') codecs[s.id] = s.mimeType;
 			if (s.type === 'inbound-rtp') inbound[s.kind] = s;
 			if (s.type === 'outbound-rtp') outbound[s.kind] = s;
+			if (s.type === 'transport') transport = s;
 		});
 		const pick = (s, keys) => {
 			const o = { codec: codecs[s.codecId] };
@@ -145,6 +148,8 @@ window.peer = {
 			return o;
 		};
 		const out = { connectionState: this.pc.connectionState, shownFrames: this.shownFrames, inbound: {}, outbound: {} };
+		out.transport = {};
+		['dtlsState', 'dtlsRole', 'tlsVersion', 'dtlsCipher', 'srtpCipher'].forEach((k) => (out.transport[k] = transport[k]));
 		for (const k in inbound) {
 			out.inbound[k] = pick(inbound[k], ['packetsReceived', 'bytesReceived', 'packetsLost', 'framesReceived', 'framesDecoded', 'keyFramesDecoded', 'pliCount', 'totalSamplesReceived']);
 		}

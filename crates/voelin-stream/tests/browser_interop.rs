@@ -13,7 +13,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::time::timeout;
 use voelin_stream::{
-	Codec, FrameSource, MediaKind, Peer, PeerConfig, PeerEvent, Signal, SyntheticSource,
+	Codec, FrameSource, MediaKind, Peer, PeerConfig, PeerEvent, Signal, SrtpProfile,
+	SyntheticSource,
 };
 
 fn enabled() -> bool {
@@ -95,7 +96,9 @@ async fn wait_connected(peer: &mut Peer) {
 	.expect("no connection with the browser");
 }
 
-/// Our streamer peer (as in a TeamSpeak stream) sends VP8 + Opus to Chromium.
+/// Our streamer peer (as in a TeamSpeak stream) sends VP8 + Opus to Chromium,
+/// which answers as DTLS client: our SRTP order gives AES_CM_128_HMAC_SHA1_80,
+/// and its transport-cc feedback drives our bandwidth estimation and pacer.
 #[tokio::test(flavor = "multi_thread")]
 async fn rust_streams_to_browser() {
 	if !enabled() {
@@ -116,6 +119,7 @@ async fn rust_streams_to_browser() {
 	let mut source = SyntheticSource::new(30, 3000, true);
 	let mut frames = Vec::new();
 	let mut keyframe_requests = 0;
+	let mut estimates = Vec::new();
 	let end = Instant::now() + Duration::from_secs(3);
 	while Instant::now() < end {
 		source.poll_frames(Instant::now(), &mut frames);
@@ -123,15 +127,21 @@ async fn rust_streams_to_browser() {
 			peer.write(f.kind, f.time, f.data);
 		}
 		while let Some(event) = peer.try_next_event() {
-			if let PeerEvent::KeyframeRequest = event {
-				keyframe_requests += 1;
+			match event {
+				PeerEvent::KeyframeRequest => keyframe_requests += 1,
+				PeerEvent::BitrateEstimate(bitrate) => estimates.push(bitrate),
+				_ => {}
 			}
 		}
 		tokio::time::sleep(Duration::from_millis(10)).await;
 	}
 	let stats = browser.call(json!({ "op": "stats" })).await;
 	eprintln!("browser stats: {stats:#}\nkeyframe requests from the browser: {keyframe_requests}");
+	eprintln!("bandwidth estimates (bit/s): {estimates:?}");
 	assert_eq!(stats["connectionState"], "connected");
+	assert_eq!(stats["transport"]["srtpCipher"], "AES_CM_128_HMAC_SHA1_80", "{stats:#}");
+	assert_eq!(peer.srtp_profile(), Some(SrtpProfile::Aes128CmSha1_80));
+	assert!(!estimates.is_empty(), "no bandwidth estimate from the browser's feedback");
 	let video = &stats["inbound"]["video"];
 	let audio = &stats["inbound"]["audio"];
 	assert_eq!(video["codec"], "video/VP8");
@@ -299,6 +309,8 @@ async fn browser_streams_to_rust() {
 			}
 		}
 		wait_connected(&mut peer).await;
+		// We are the DTLS server here too: our order picks the profile.
+		assert_eq!(peer.srtp_profile(), Some(SrtpProfile::Aes128CmSha1_80), "{name}");
 		let received = receive(&mut peer, Duration::from_secs(8), 60).await;
 		eprintln!(
 			"{name}: video {:?}, audio {:?}, VP8 keyframes {}",
@@ -316,5 +328,7 @@ async fn browser_streams_to_rust() {
 		tested.push(name);
 	}
 	assert!(tested.contains(&"VP8") && tested.contains(&"VP9"), "tested {tested:?}");
+	let stats = browser.call(json!({ "op": "stats" })).await;
+	assert_eq!(stats["transport"]["srtpCipher"], "AES_CM_128_HMAC_SHA1_80", "{stats:#}");
 	browser.quit().await;
 }

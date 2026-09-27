@@ -8,8 +8,8 @@ on stdin/stdout. No TeamSpeak server is involved.
 
 | Test | What it checks |
 |---|---|
-| `rust_streams_to_browser` | Our streamer offer (`PeerConfig::loopback()`, VP8 + Opus) answered by an `RTCPeerConnection`; `SyntheticSource` media for 3 s; `inbound-rtp` stats: VP8 packets and bytes, decoded frames (the synthetic frames are real 1x1 VP8 keyframes), Opus packets |
-| `browser_streams_to_rust` | Chromium offers a canvas `captureStream` and an oscillator with VP8, VP9, H264 and AV1 preferred in turn (codecs the browser cannot send are skipped); our viewer `Peer::answer` must receive frames of that codec and Opus. VP8 also uses trickled browser candidates and checks that a PLI brings a keyframe |
+| `rust_streams_to_browser` | Our streamer offer (`PeerConfig::loopback()`, VP8 + Opus) answered by an `RTCPeerConnection`; `SyntheticSource` media for 3 s; `inbound-rtp` stats: VP8 packets and bytes, decoded frames (the synthetic frames are real 1x1 VP8 keyframes), Opus packets; the `transport` stats' `srtpCipher` is `AES_CM_128_HMAC_SHA1_80` (our SRTP order, we are the DTLS server); our bandwidth estimation gets estimates from Chromium's transport-cc feedback |
+| `browser_streams_to_rust` | Chromium offers a canvas `captureStream` and an oscillator with VP8, VP9, H264 and AV1 preferred in turn (codecs the browser cannot send are skipped); our viewer `Peer::answer` must receive frames of that codec and Opus, over `AES_CM_128_HMAC_SHA1_80`. VP8 also uses trickled browser candidates and checks that a PLI brings a keyframe |
 | `trickled_candidates_reach_browser` | A server-reflexive candidate (from a fake STUN server) as our sessions trickle it (`iceCandidate` signal with the peer's mid) is accepted by `addIceCandidate` |
 
 ## Running
@@ -44,3 +44,12 @@ may do the same; see `docs/protocol-notes/ts6-streaming.md`.
 - str0m mids are random strings (`a=mid:fhs`), not `0`/`1`; trickled
   candidates must carry the real mid, or browsers reject them.
 - Playwright's Chromium build sends VP8, VP9 and AV1, not H.264.
+- Chromium 141 offers AEAD_AES_256_GCM, AEAD_AES_128_GCM and
+  AES_CM_128_HMAC_SHA1_80 as DTLS client; with our default order
+  (`PeerConfig::srtp_profiles`) the connection uses AES_CM_128_HMAC_SHA1_80
+  (`getStats()` transport: `srtpCipher`, DTLS 1.2 `FEFD`,
+  `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256`). Before, dimpl picked AES-256-GCM.
+- With str0m's bandwidth estimation and pacer on our streamer peer, Chromium's
+  transport-cc feedback yields estimates within the first second (about
+  640 kbit/s rising towards the desired bitrate with the 720 kbit/s synthetic
+  stream).

@@ -82,6 +82,9 @@ cargo run -p voelinctl -- connect 127.0.0.1:9988 --nick ear voice record out.wav
 # Streams (TeamSpeak 6): share the test pattern (or --source x11), watch and decode it
 cargo run -p voelinctl -- connect 127.0.0.1:9988 --nick eye stream watch --save-frame shot.png &
 cargo run -p voelinctl -- connect 127.0.0.1:9988 --nick me stream start --synthetic --auto-accept
+# Simulcast layers without an encoder; prints each viewer's layer, estimate and SRTP profile
+cargo run -p voelinctl -- connect 127.0.0.1:9988 --nick me stream start --placeholder --auto-accept \
+  --layer 1.0:6000k --layer 0.5:1500k:min=800k
 
 # ServerQuery (dev password voelin-dev-admin): invisible presence and relay chat
 cargo run -p voelinctl -- observe ssh 127.0.0.1:10022 --secret voelin-dev-admin --allowlisted

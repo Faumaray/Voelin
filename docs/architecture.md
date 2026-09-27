@@ -92,6 +92,38 @@ offer in `respondjoinstreamrequest`), `ViewerSession` one watched stream
 (answer through `streamsignaling`), and `StreamDirectory` the streams of our
 channel. Its tests drive two instances through a fake relay server.
 
+Transport details of our stream (`voelin-stream`):
+
+- **SRTP profile**: DTLS negotiates the profile in the order of
+  `PeerConfig::srtp_profiles`, by default AES_CM_128_HMAC_SHA1_80 (what
+  official TS6 streams use), then AEAD_AES_128_GCM and AEAD_AES_256_GCM for
+  peers without it. Our peer is the DTLS server with official clients and
+  browsers, so our order decides. `dtls::VoelinDtlsProvider` wraps str0m's
+  dimpl DTLS with that order; dimpl is vendored in `third_party/dimpl` with a
+  patch for it (`VOELIN-PATCH.md`). The order is a setting
+  (`Streams::set_srtp_profiles`, `Command::SetSrtpProfiles`) and applies to
+  new connections.
+- **Bandwidth estimation and pacing**: each viewer connection of our stream
+  runs str0m's send-side estimation (transport-cc feedback; REMB if a viewer
+  sends only that) and paces packets to it. Estimates are per viewer
+  (`ViewerInfo::estimate`). The offer is unchanged by it: str0m always offers
+  the transport-cc and abs-send-time extensions.
+- **Simulcast**: `StreamerOptions::layers` lists the encodings (`LayerSpec`).
+  A viewer gets the highest layer whose `min_bitrate` its estimate reaches:
+  down at once, up after the estimate exceeded the next layer's minimum by 20%
+  for 2 s. A switch asks for a keyframe of the new layer and waits for it
+  before the viewer's frames change layer; the RTP timestamps come from one
+  capture clock, so the viewer's single video track continues. Keyframe
+  requests (PLI/FIR) go to the viewer's layer only. Each layer's bitrate
+  target is the lowest estimate of its viewers, at least 30 kbit/s, at most
+  its `max_bitrate`; the encoders read targets and keyframe requests through
+  `LayerFeedback` (lock-free, via `StreamSink::layer_bitrate` and
+  `take_layer_keyframes`), and events report them. Peers that negotiate RID
+  simulcast (`PeerConfig::simulcast`, off for TeamSpeak; for SFUs or WHIP) get
+  every layer with its RID. The layer list can change while live
+  (`Streams::set_layers`, `Command::SetStreamLayers`). Without layers the
+  stream has one layer 0 at the setup's bitrate and every viewer gets it.
+
 In `voelin-core` a stream task per voice connection runs `Streams`; the voice task
 forwards `MessageEvent`s and sends the requests. Encoders push frames through
 the `StreamSink` of `StreamState::Live`; received frames of watched streams go
@@ -107,8 +139,9 @@ and feeds the `StreamSink`, honouring keyframe requests. `Viewer` decodes a
 watched stream on its own thread (skipping to the next keyframe after losses
 and asking for one) and hands pictures to the UI, which keeps only the newest
 (`Latest`). `EncodedSource` wraps a `Streamer` as a `voelin-stream::FrameSource`
-for `voelinctl stream start`; `SyntheticSource` (fake VP8 bytes) remains for
-voelin-stream's own tests.
+for `voelinctl stream start`; `SyntheticSource` (fake VP8 bytes, one frame per
+layer) remains for voelin-stream's own tests and `voelinctl stream start
+--placeholder`.
 
 ## Milestones
 
