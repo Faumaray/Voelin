@@ -1,0 +1,86 @@
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Icon } from "icon.slint";
+
+// Presence shown in the avatar's status dot.
+export enum Status {
+    none,
+    online,
+    idle,
+    dnd,
+    offline,
+    // A blue dot: observed invisibly, streaming...
+    info,
+}
+
+// A round avatar: a picture, or initials on a colour; a status dot, a crown
+// badge, and a green ring while speaking.
+export component Avatar inherits Rectangle {
+    in property <image> image;
+    in property <string> initials;
+    in property <color> tint: Theme.accent-soft;
+    in property <length> size: 36px;
+    in property <Status> status: Status.none;
+    in property <bool> speaking;
+    in property <bool> crown;
+    // Squircle instead of a circle (server icons).
+    in property <bool> square;
+    in property <string> label;
+
+    width: size;
+    height: size;
+    accessible-role: AccessibleRole.image;
+    accessible-label: label;
+
+    // Speaking ring (outside the picture).
+    if speaking: Rectangle {
+        x: -3px;
+        y: -3px;
+        width: root.size + 6px;
+        height: root.size + 6px;
+        border-radius: root.square ? Theme.radius-lg + 3px : self.width / 2;
+        border-width: 2px;
+        border-color: Theme.success;
+    }
+    face := Rectangle {
+        border-radius: root.square ? Theme.radius-lg : root.size / 2;
+        background: root.image.width > 0 ? Theme.surface-3 : root.tint;
+        clip: true;
+        if root.image.width > 0: Image {
+            width: 100%;
+            height: 100%;
+            source: root.image;
+            image-fit: cover;
+        }
+        if root.image.width == 0: Text {
+            text: root.initials;
+            color: #ffffff;
+            font-size: root.size * 0.38;
+            font-weight: Theme.weight-semibold;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    if root.status != Status.none: Rectangle {
+        property <length> dot: max(10px, root.size * 0.3);
+        x: root.size - dot + 1px;
+        y: root.size - dot + 1px;
+        width: dot;
+        height: dot;
+        border-radius: dot / 2;
+        background: root.status == Status.online ? Theme.success
+            : root.status == Status.idle ? Theme.idle
+            : root.status == Status.dnd ? Theme.dnd
+            : root.status == Status.info ? Theme.info
+            : Theme.offline;
+        border-width: 2px;
+        border-color: Theme.surface;
+    }
+    if root.crown: Icon {
+        x: root.size - self.width * 0.7;
+        y: -self.height * 0.35;
+        source: Icons.crown;
+        size: max(12px, root.size * 0.34);
+        tint: Theme.gold;
+    }
+}

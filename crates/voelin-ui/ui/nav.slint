@@ -1,0 +1,111 @@
+// Where the user is: the page, open dialogs, panel sizes. Any screen can
+// navigate through these functions; Rust sets the same properties for the
+// development switch VOELIN_OPEN (src/dev.rs).
+
+import { Bridge, BookmarkForm, ShareForm } from "bridge.slint";
+
+export enum Page {
+    // Welcome page: servers at a glance.
+    home,
+    // A server: channels, chat or the stream viewer, members and streams.
+    server,
+    settings,
+}
+
+// Sections of the settings page, in the order of its navigation.
+export enum SettingsSection {
+    voice,
+    keybinds,
+    streaming,
+    privacy,
+    appearance,
+}
+
+// Tabs of the bottom navigation in the narrow (mobile) layout.
+export enum MobileTab {
+    home,
+    servers,
+    chat,
+    activity,
+    you,
+}
+
+export global Nav {
+    in-out property <Page> page: Page.server;
+    in-out property <SettingsSection> settings-section: SettingsSection.voice;
+    in-out property <MobileTab> mobile-tab: MobileTab.chat;
+    // Narrow windows use the mobile layout; the breakpoint is the setting
+    // `ui.narrow_breakpoint`.
+    in-out property <bool> narrow: false;
+    in-out property <length> narrow-breakpoint: 800px;
+    in-out property <bool> right-panel-open: true;
+    in-out property <length> right-panel-width: 280px;
+    // Incremented to focus the search field (Ctrl+K).
+    in-out property <int> search-requests;
+
+    // Dialogs.
+    in-out property <bool> about-open;
+    in-out property <bool> share-open;
+    in-out property <bool> client-open;
+    in-out property <bool> bookmark-open;
+    // The emoji picker over the composer, and the composer's text.
+    in-out property <bool> emoji-open;
+    in-out property <string> draft;
+    in-out property <BookmarkForm> bookmark-form;
+    in-out property <ShareForm> share-form;
+
+    // Settings were opened (so leaving them tells Rust).
+    property <bool> settings-active;
+
+    public function show(p: Page) {
+        if p != Page.settings && settings-active {
+            settings-active = false;
+            Bridge.close-settings();
+        }
+        page = p;
+    }
+
+    public function open-settings(section: SettingsSection) {
+        if !settings-active {
+            settings-active = true;
+            Bridge.open-settings();
+        }
+        settings-section = section;
+        page = Page.settings;
+    }
+
+    public function close-settings() {
+        show(Page.server);
+    }
+
+    public function open-about() {
+        Bridge.open-about();
+        about-open = true;
+    }
+
+    public function open-share() {
+        share-form = Bridge.open-share();
+        share-open = true;
+    }
+
+    public function add-server() {
+        bookmark-form = Bridge.edit-bookmark(-1);
+        bookmark-open = true;
+    }
+
+    public function edit-server(id: int) {
+        bookmark-form = Bridge.edit-bookmark(id);
+        bookmark-open = true;
+    }
+
+    public function open-client(id: int) {
+        if Bridge.open-client(id) {
+            client-open = true;
+        }
+    }
+
+    public function select-server(id: int) {
+        show(Page.server);
+        Bridge.select-server(id);
+    }
+}

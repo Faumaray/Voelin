@@ -1,0 +1,150 @@
+// Emoji as images (Twemoji through Rust's image cache): chat text with
+// inline emoji, and the picker.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Images, Emoji, TextRun, EmojiCell } from "../bridge.slint";
+import { Icon } from "icon.slint";
+import { SearchBox } from "text-field.slint";
+import { ListView } from "std-widgets.slint";
+
+// Text with inline emoji: the runs flow and wrap like text (a flexbox of
+// words and emoji). Plain text needs no runs: use a Text then (faster).
+export component RichText inherits FlexboxLayout {
+    in property <[TextRun]> runs;
+    in property <length> font-size: Theme.font-body;
+    in property <color> color: Theme.text;
+    in property <length> emoji-size: font-size * 1.4;
+    spacing: 0px;
+    cross-axis-alignment: center;
+    for run in root.runs: HorizontalLayout {
+        if run.emoji == "": Text {
+            text: run.text;
+            font-size: root.font-size;
+            color: root.color;
+            accessible-role: AccessibleRole.none;
+        }
+        if run.emoji != "": Image {
+            width: root.emoji-size;
+            height: root.emoji-size;
+            source: Images.emoji(run.emoji);
+            image-fit: contain;
+            accessible-role: AccessibleRole.image;
+            accessible-label: run.text;
+        }
+    }
+}
+
+// One emoji of the picker grid.
+component EmojiButton inherits Rectangle {
+    in property <EmojiCell> cell;
+    in property <length> size: 36px;
+    callback picked(EmojiCell);
+    width: size;
+    height: size;
+    border-radius: Theme.radius-sm;
+    background: touch.has-hover ? Theme.surface-4 : transparent;
+    accessible-role: AccessibleRole.button;
+    accessible-label: cell.name;
+    accessible-action-default => { picked(cell); }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.picked(root.cell); }
+    }
+    Image {
+        width: root.size - 10px;
+        height: root.size - 10px;
+        source: Images.emoji(root.cell.key);
+        image-fit: contain;
+    }
+}
+
+// The emoji picker: search, categories, a scrolling grid (only the visible
+// rows are built). Rust fills `Emoji.rows` for the category or search.
+export component EmojiPicker inherits Rectangle {
+    callback picked(EmojiCell);
+    callback close();
+    property <[image]> category-icons: [
+        Icons.smile, Icons.hand, Icons.leaf, Icons.coffee, Icons.gamepad-2,
+        Icons.plane, Icons.lightbulb, Icons.heart, Icons.flag,
+    ];
+    property <[string]> category-names: [
+        @tr("Smileys"), @tr("People"), @tr("Nature"), @tr("Food"), @tr("Activities"),
+        @tr("Travel"), @tr("Objects"), @tr("Symbols"), @tr("Flags"),
+    ];
+    property <length> cell: 36px;
+    property <string> hovered;
+
+    init => { Emoji.load(); }
+
+    width: Emoji.columns * cell + 2 * Theme.space-3 + 14px;
+    height: 400px;
+    border-radius: Theme.radius-lg;
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: Theme.border-strong;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: @tr("Emoji");
+    FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.close();
+                return accept;
+            }
+            reject
+        }
+    }
+    VerticalLayout {
+        padding: Theme.space-3;
+        spacing: Theme.space-3;
+        search := SearchBox {
+            placeholder: @tr("Search emoji");
+            show-shortcut: false;
+            edited(text) => { Emoji.search(text); }
+        }
+        HorizontalLayout {
+            spacing: 2px;
+            for icon[i] in root.category-icons: Rectangle {
+                height: 30px;
+                horizontal-stretch: 1;
+                border-radius: Theme.radius-sm;
+                background: Emoji.category == i ? Theme.accent-soft : cat.has-hover ? Theme.surface-3 : transparent;
+                accessible-role: AccessibleRole.tab;
+                accessible-label: root.category-names[i];
+                accessible-item-selectable: true;
+                accessible-item-selected: Emoji.category == i;
+                accessible-action-default => { Emoji.show-category(i); }
+                cat := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        search.clear();
+                        Emoji.show-category(i);
+                    }
+                }
+                Icon {
+                    source: icon;
+                    size: Theme.icon-sm;
+                    tint: Emoji.category == i ? Theme.accent-text : Theme.icon;
+                }
+            }
+        }
+        Text {
+            text: Emoji.category >= 0 ? root.category-names[Emoji.category] : Emoji.rows.length == 0 ? @tr("No emoji found") : @tr("Search results");
+            font-size: Theme.font-sm;
+            color: Theme.text-muted;
+            font-weight: Theme.weight-semibold;
+        }
+        ListView {
+            vertical-stretch: 1;
+            for row in Emoji.rows: HorizontalLayout {
+                height: root.cell;
+                alignment: start;
+                for cell in row.cells: EmojiButton {
+                    cell: cell;
+                    size: root.cell;
+                    picked(c) => { root.picked(c); }
+                }
+            }
+        }
+    }
+}

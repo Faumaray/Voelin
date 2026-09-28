@@ -1,0 +1,137 @@
+import { Theme } from "../theme.slint";
+
+// Choices side by side in a rounded frame; the selected one filled
+// ("All | DMs | Groups", "Auto | 720p | 1080p").
+export component SegmentedTabs inherits Rectangle {
+    in property <[string]> model;
+    in-out property <int> current-index;
+    in property <string> label;
+    callback selected(int);
+
+    min-height: Theme.control-height;
+    max-height: Theme.control-height;
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+    border-radius: Theme.radius-md;
+    background: Theme.surface-2;
+    border-width: 1px;
+    border-color: Theme.border;
+    accessible-role: AccessibleRole.tab-list;
+    accessible-label: label;
+
+    HorizontalLayout {
+        padding: 3px;
+        spacing: 3px;
+        for item[i] in root.model: Rectangle {
+            horizontal-stretch: 1;
+            border-radius: Theme.radius-sm;
+            background: i == root.current-index ? Theme.accent-soft : seg.has-hover ? Theme.surface-3 : transparent;
+            border-width: i == root.current-index ? 1px : 0px;
+            border-color: Theme.accent;
+            accessible-role: AccessibleRole.tab;
+            accessible-label: item;
+            accessible-item-selectable: true;
+            accessible-item-selected: i == root.current-index;
+            accessible-action-default => {
+                root.current-index = i;
+                root.selected(i);
+            }
+            seg := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    root.current-index = i;
+                    root.selected(i);
+                }
+            }
+            Text {
+                text: item;
+                color: i == root.current-index ? Theme.text : Theme.text-secondary;
+                font-weight: i == root.current-index ? Theme.weight-semibold : Theme.weight-regular;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// One tab of a `TabBar`: a label with an underline when selected, and an
+// optional unread count and close button.
+export component TabItem inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    in property <int> badge;
+    in property <bool> closable;
+    callback clicked();
+    callback close();
+
+    min-width: row.preferred-width;
+    height: Theme.control-height + 4px;
+    accessible-role: AccessibleRole.tab;
+    accessible-label: text;
+    accessible-description: badge > 0 ? @tr("{} unread", badge) : "";
+    accessible-item-selectable: true;
+    accessible-item-selected: selected;
+    accessible-action-default => { clicked(); }
+
+    area := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+    Rectangle {
+        y: parent.height - 2px;
+        height: 2px;
+        border-radius: 1px;
+        background: root.selected ? Theme.accent : transparent;
+    }
+    row := HorizontalLayout {
+        padding-left: Theme.space-4;
+        padding-right: root.closable ? Theme.space-2 : Theme.space-4;
+        spacing: Theme.space-2;
+        Text {
+            text: root.text;
+            color: root.selected ? Theme.text : area.has-hover ? Theme.text : Theme.text-secondary;
+            font-weight: root.selected || root.badge > 0 ? Theme.weight-semibold : Theme.weight-regular;
+            vertical-alignment: center;
+        }
+        if root.badge > 0: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                min-width: 18px;
+                height: 18px;
+                border-radius: 9px;
+                background: Theme.live;
+                HorizontalLayout {
+                    padding-left: 5px;
+                    padding-right: 5px;
+                    Text {
+                        text: root.badge > 99 ? "99+" : root.badge;
+                        color: #ffffff;
+                        font-size: Theme.font-xs;
+                        font-weight: Theme.weight-bold;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+        if root.closable: Rectangle {
+            width: 20px;
+            border-radius: Theme.radius-xs;
+            background: close-area.has-hover ? Theme.surface-3 : transparent;
+            accessible-role: AccessibleRole.button;
+            accessible-label: @tr("Close {}", root.text);
+            accessible-action-default => { root.close(); }
+            close-area := TouchArea {
+                clicked => { root.close(); }
+            }
+            Text {
+                text: "×";
+                color: Theme.text-muted;
+                font-size: Theme.font-lg;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}

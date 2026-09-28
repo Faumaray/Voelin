@@ -1,0 +1,229 @@
+import { Theme } from "../theme.slint";
+import { Icon } from "icon.slint";
+
+export enum ButtonKind {
+    // Filled accent: the main action.
+    primary,
+    // Surface with a border.
+    secondary,
+    // Destructive: leave, end stream, delete.
+    danger,
+    // No background until hovered.
+    ghost,
+}
+
+// The focus ring shared by controls.
+export component FocusRing inherits Rectangle {
+    in property <bool> shown;
+    in property <length> radius: Theme.radius-md;
+    // The size of the ringed element.
+    in property <length> w;
+    in property <length> h;
+    x: -Theme.glow-width;
+    y: -Theme.glow-width;
+    width: w + 2 * Theme.glow-width;
+    height: h + 2 * Theme.glow-width;
+    border-radius: radius + Theme.glow-width;
+    border-width: shown ? Theme.glow-width : 0px;
+    border-color: Theme.glow;
+}
+
+// A button with a label, an icon or both.
+export component Button inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <ButtonKind> kind: ButtonKind.secondary;
+    in property <bool> enabled: true;
+    // Toggled on: drawn as selected (e.g. an open panel).
+    in property <bool> checked;
+    // Smaller height and padding.
+    in property <bool> small;
+    // Stretch the label to the full width.
+    in property <bool> centered: true;
+    callback clicked();
+
+    property <bool> active: touch.pressed || checked;
+    property <color> fill: kind == ButtonKind.primary ? (active ? Theme.accent-pressed : touch.has-hover ? Theme.accent-hover : Theme.accent)
+        : kind == ButtonKind.danger ? (active ? Theme.danger : touch.has-hover ? Theme.danger-soft.brighter(0.3) : Theme.danger-soft)
+        : kind == ButtonKind.ghost ? (active ? Theme.surface-4 : touch.has-hover ? Theme.surface-3 : transparent)
+        : (active ? Theme.surface-4 : touch.has-hover ? Theme.surface-3 : Theme.surface-2);
+    property <color> ink: kind == ButtonKind.primary ? Theme.on-accent
+        : !enabled ? Theme.text-disabled
+        : kind == ButtonKind.danger ? (active ? Theme.on-accent : Theme.danger)
+        : checked ? Theme.accent-text : Theme.text;
+
+    min-width: self.min-height;
+    min-height: small ? Theme.control-height-sm : Theme.control-height;
+    max-height: self.min-height;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    border-radius: Theme.radius-md;
+    background: fill;
+    border-width: kind == ButtonKind.secondary || kind == ButtonKind.danger || checked ? 1px : 0px;
+    border-color: checked ? Theme.accent : kind == ButtonKind.danger ? Theme.danger.transparentize(55%) : Theme.border-strong;
+    opacity: enabled ? 1.0 : 0.5;
+    animate background { duration: Theme.fast; }
+
+    accessible-role: AccessibleRole.button;
+    accessible-label: text;
+    accessible-enabled: enabled;
+    accessible-checkable: checked;
+    accessible-checked: checked;
+    accessible-action-default => { if enabled { clicked(); } }
+
+    FocusRing {
+        shown: focus.has-focus;
+        w: root.width;
+        h: root.height;
+    }
+    focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+        touch := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                focus.focus();
+                root.clicked();
+            }
+        }
+    }
+    HorizontalLayout {
+        padding-left: text == "" ? 0px : small ? Theme.space-4 : Theme.space-5;
+        padding-right: self.padding-left;
+        spacing: Theme.space-3;
+        alignment: centered ? center : start;
+        if icon.width > 0: Icon {
+            source: icon;
+            size: small ? Theme.icon-sm : Theme.icon-md;
+            tint: ink;
+            y: (parent.height - self.height) / 2;
+        }
+        if text != "": Text {
+            text: root.text;
+            color: ink;
+            font-size: small ? Theme.font-sm : Theme.font-body;
+            font-weight: Theme.weight-medium;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+// A square (or round) button with only an icon; `label` is for screen
+// readers and the tooltip-less toolbar.
+export component IconButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <bool> checked;
+    in property <bool> round;
+    // Drawn on a surface instead of transparent.
+    in property <bool> filled;
+    // Red while checked (muted microphone).
+    in property <bool> danger;
+    in property <length> size: Theme.control-height;
+    in property <length> icon-size: Theme.icon-md;
+    in property <brush> tint: checked ? (danger ? Theme.danger : Theme.accent-text) : Theme.icon;
+    // A small dot at the top right (unread, live).
+    in property <bool> dot;
+    in property <color> dot-color: Theme.live;
+    callback clicked();
+
+    width: size;
+    height: size;
+    border-radius: round ? size / 2 : Theme.radius-md;
+    background: touch.pressed ? Theme.surface-4
+        : checked ? (danger ? Theme.danger-soft : Theme.accent-soft)
+        : touch.has-hover ? Theme.surface-3
+        : filled ? Theme.surface-2 : transparent;
+    border-width: filled || checked ? 1px : 0px;
+    border-color: checked ? (danger ? Theme.danger.transparentize(50%) : Theme.accent) : Theme.border;
+    opacity: enabled ? 1.0 : 0.45;
+    animate background { duration: Theme.fast; }
+
+    accessible-role: AccessibleRole.button;
+    accessible-label: label;
+    accessible-enabled: enabled;
+    accessible-action-default => { if enabled { clicked(); } }
+
+    FocusRing {
+        shown: focus.has-focus;
+        radius: root.border-radius;
+        w: root.width;
+        h: root.height;
+    }
+    focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+        touch := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                focus.focus();
+                root.clicked();
+            }
+        }
+    }
+    Icon {
+        source: icon;
+        size: icon-size;
+        tint: root.tint;
+    }
+    if dot: Rectangle {
+        x: parent.width - self.width - root.size * 0.18;
+        y: root.size * 0.16;
+        width: 9px;
+        height: 9px;
+        border-radius: 4.5px;
+        background: dot-color;
+        border-width: 2px;
+        border-color: Theme.surface;
+    }
+}
+
+// A round control with a caption below (voice bar: Mute, Deafen, Go Live).
+export component ActionButton inherits VerticalLayout {
+    in property <image> icon;
+    in property <string> text;
+    in property <bool> checked;
+    in property <bool> danger;
+    in property <bool> enabled: true;
+    in property <length> size: 40px;
+    callback clicked();
+    spacing: Theme.space-1;
+    alignment: center;
+    HorizontalLayout {
+        alignment: center;
+        IconButton {
+            icon: root.icon;
+            label: root.text;
+            checked: root.checked;
+            danger: root.danger;
+            enabled: root.enabled;
+            round: true;
+            filled: true;
+            size: root.size;
+            clicked => { root.clicked(); }
+        }
+    }
+    Text {
+        text: root.text;
+        font-size: Theme.font-xs;
+        color: root.checked ? (root.danger ? Theme.danger : Theme.accent-text) : Theme.text-secondary;
+        horizontal-alignment: center;
+        accessible-role: AccessibleRole.none;
+    }
+}

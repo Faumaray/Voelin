@@ -1,0 +1,415 @@
+// Streams: the right panel (people in our channel, streams, requests to
+// watch ours) and the viewer.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Bridge, StreamItem, MemberItem } from "../bridge.slint";
+import { Nav } from "../nav.slint";
+import { Icon, Button, ButtonKind, IconButton, Avatar, Status, LiveBadge, Chip, SectionHeader, SpeakingBars, Slider, Spinner, ListView, ScrollView } from "../components/index.slint";
+
+// A stream card: the streamer, the title, watch / show / leave.
+component StreamCard inherits Rectangle {
+    in property <StreamItem> stream;
+    border-radius: Theme.radius-lg;
+    background: stream.watching ? Theme.accent-soft : Theme.surface-2;
+    border-width: 1px;
+    border-color: stream.watching ? Theme.accent : Theme.border;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: stream.name;
+    VerticalLayout {
+        padding: Theme.space-4;
+        spacing: Theme.space-3;
+        HorizontalLayout {
+            spacing: Theme.space-3;
+            // A picture-less preview: the live mark on a gradient.
+            Rectangle {
+                width: 64px;
+                height: 40px;
+                border-radius: Theme.radius-sm;
+                background: @linear-gradient(135deg, #2b1f6e 0%, #0f2a66 100%);
+                Icon {
+                    source: Icons.monitor-up;
+                    size: Theme.icon-md;
+                    tint: #ffffffc0;
+                }
+                if stream.id != "": LiveBadge {
+                    x: 3px;
+                    y: 3px;
+                    height: 14px;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                Text {
+                    text: stream.id == "" ? @tr("{} is streaming", stream.streamer) : stream.name == "" ? @tr("Untitled stream") : stream.name;
+                    color: Theme.text;
+                    font-weight: Theme.weight-semibold;
+                    overflow: elide;
+                }
+                Text {
+                    text: stream.id == "" ? @tr("Started before you joined; looking it up…") : stream.own ? @tr("your stream") : stream.audio ? @tr("by {} · with sound", stream.streamer) : @tr("by {}", stream.streamer);
+                    color: Theme.text-muted;
+                    font-size: Theme.font-sm;
+                    overflow: elide;
+                }
+            }
+        }
+        if stream.id != "" && !stream.own: HorizontalLayout {
+            spacing: Theme.space-2;
+            if !stream.watching: Button {
+                horizontal-stretch: 1;
+                small: true;
+                kind: ButtonKind.primary;
+                icon: Icons.eye;
+                text: @tr("Watch");
+                accessible-label: @tr("Watch {}", stream.name);
+                clicked => { Bridge.watch-stream(stream.id); }
+            }
+            if stream.watching && !Bridge.viewer-open: Button {
+                horizontal-stretch: 1;
+                small: true;
+                icon: Icons.monitor;
+                text: @tr("Show");
+                clicked => { Bridge.show-viewer(); }
+            }
+            if stream.watching: Button {
+                horizontal-stretch: 1;
+                small: true;
+                kind: ButtonKind.danger;
+                icon: Icons.log-out;
+                text: @tr("Leave");
+                clicked => { Bridge.leave-stream(); }
+            }
+        }
+        if stream.id == "": Spinner {
+            size: 16px;
+        }
+    }
+}
+
+// A person in our channel.
+component MemberRow inherits Rectangle {
+    in property <MemberItem> member;
+    height: 48px * Theme.font-scale;
+    border-radius: Theme.radius-md;
+    background: area.has-hover ? Theme.surface-3 : transparent;
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: member.name;
+    accessible-description: member.status;
+    accessible-action-default => { Nav.open-client(member.id); }
+    area := TouchArea {
+        enabled: !member.myself;
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { Nav.open-client(member.id); }
+    }
+    HorizontalLayout {
+        padding-left: Theme.space-2;
+        padding-right: Theme.space-2;
+        spacing: Theme.space-3;
+        VerticalLayout {
+            alignment: center;
+            Avatar {
+                size: 34px;
+                initials: member.initials;
+                tint: member.tint;
+                speaking: member.talking;
+                status: member.away ? Status.idle : member.sound-off ? Status.dnd : Status.online;
+                label: member.name;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                Text {
+                    text: member.name;
+                    color: member.myself ? Theme.accent-text : Theme.name-text;
+                    font-weight: Theme.weight-medium;
+                    overflow: elide;
+                }
+                if member.streaming: VerticalLayout {
+                    alignment: center;
+                    LiveBadge { }
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                Text {
+                    text: member.status;
+                    color: member.talking ? Theme.success : Theme.text-muted;
+                    font-size: Theme.font-sm;
+                    overflow: elide;
+                }
+                if member.talking: SpeakingBars {
+                    width: 12px;
+                    height: 12px;
+                    y: (parent.height - self.height) / 2;
+                }
+            }
+        }
+        if member.muted: Icon {
+            source: Icons.mic-off;
+            size: 16px;
+            tint: Theme.danger;
+            y: (parent.height - self.height) / 2;
+        }
+        if member.sound-off: Icon {
+            source: Icons.headphone-off;
+            size: 16px;
+            tint: Theme.danger;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+}
+
+// The right panel of a server: who is in our channel, the streams there,
+// and requests to watch ours.
+export component StreamsPanel inherits VerticalLayout {
+    padding: Theme.space-4;
+    spacing: Theme.space-3;
+    HorizontalLayout {
+        Text {
+            text: Bridge.own-channel != "" ? @tr("In voice — {} ({})", Bridge.own-channel, Bridge.members.length) : @tr("Members");
+            font-size: Theme.font-lg;
+            font-weight: Theme.weight-semibold;
+            color: Theme.text;
+            horizontal-stretch: 1;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        IconButton {
+            icon: Icons.x;
+            label: @tr("Close the panel");
+            size: 28px;
+            icon-size: Theme.icon-sm;
+            clicked => { Nav.right-panel-open = false; }
+        }
+    }
+    if Bridge.members.length == 0: Text {
+        text: @tr("Join a channel with voice to see who is there.");
+        color: Theme.text-muted;
+        font-size: Theme.font-sm;
+        wrap: word-wrap;
+    }
+    sv := ScrollView {
+        vertical-stretch: 1;
+        VerticalLayout {
+            width: sv.visible-width;
+            spacing: Theme.space-2;
+            alignment: start;
+            for member in Bridge.members: MemberRow {
+                member: member;
+            }
+            if Bridge.streams-available: VerticalLayout {
+                padding-top: Theme.space-4;
+                spacing: Theme.space-3;
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    SectionHeader {
+                        text: @tr("Streams");
+                        icon: Icons.radio;
+                        count: Bridge.streams.length;
+                        small: true;
+                    }
+                    if Bridge.share-state == "live": VerticalLayout {
+                        alignment: center;
+                        LiveBadge { text: @tr("YOU ARE LIVE"); }
+                    }
+                }
+                if Bridge.streams.length == 0: Text {
+                    text: @tr("No streams in your channel.");
+                    color: Theme.text-muted;
+                    font-size: Theme.font-sm;
+                }
+                for stream in Bridge.streams: StreamCard {
+                    stream: stream;
+                }
+                if Bridge.share-state == "live" || Bridge.share-state == "starting": Button {
+                    icon: Icons.users;
+                    text: Bridge.share-requests > 0 ? @tr("Viewers ({})", Bridge.share-requests) : @tr("Manage");
+                    kind: Bridge.share-requests > 0 ? ButtonKind.primary : ButtonKind.secondary;
+                    clicked => { Nav.open-share(); }
+                }
+                for viewer in Bridge.share-viewers: HorizontalLayout {
+                    spacing: Theme.space-2;
+                    if viewer.state == "requested": Text {
+                        text: @tr("{} wants to watch", viewer.name);
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        color: Theme.warning;
+                    }
+                    if viewer.state == "requested": Button {
+                        small: true;
+                        kind: ButtonKind.primary;
+                        text: @tr("Accept");
+                        clicked => { Bridge.respond-viewer(viewer.client, true); }
+                    }
+                    if viewer.state == "requested": Button {
+                        small: true;
+                        text: @tr("Deny");
+                        clicked => { Bridge.respond-viewer(viewer.client, false); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The stream we watch: title bar, picture, player controls.
+export component StreamViewer inherits Rectangle {
+    background: Theme.dark ? #03060f : #0b1330;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: @tr("Stream viewer");
+    VerticalLayout {
+        // Title bar.
+        Rectangle {
+            height: 64px;
+            background: Theme.surface;
+            HorizontalLayout {
+                padding-left: Theme.space-5;
+                padding-right: Theme.space-4;
+                spacing: Theme.space-4;
+                VerticalLayout {
+                    alignment: center;
+                    Avatar {
+                        size: 40px;
+                        initials: "";
+                        tint: Theme.accent-soft;
+                        label: Bridge.viewer-title;
+                        Icon {
+                            source: Icons.monitor-up;
+                            tint: #ffffff;
+                        }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: Bridge.viewer-title;
+                        color: Theme.text;
+                        font-size: Theme.font-md;
+                        font-weight: Theme.weight-semibold;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: Bridge.viewer-info;
+                        color: Theme.text-muted;
+                        font-size: Theme.font-sm;
+                        overflow: elide;
+                    }
+                }
+                if !Bridge.viewer-ended: VerticalLayout {
+                    alignment: center;
+                    LiveBadge { large: true; }
+                }
+            }
+        }
+        // Picture.
+        Rectangle {
+            vertical-stretch: 1;
+            Image {
+                width: parent.width;
+                height: parent.height;
+                source: Bridge.viewer-frame;
+                image-fit: contain;
+                visible: Bridge.viewer-has-frame;
+                accessible-role: AccessibleRole.image;
+                accessible-label: @tr("Stream picture");
+            }
+            if Bridge.viewer-status != "": Rectangle {
+                width: min(parent.width - 32px, status-text.preferred-width + 40px);
+                height: status-text.preferred-height + 24px;
+                border-radius: Theme.radius-lg;
+                background: Theme.overlay;
+                border-width: 1px;
+                border-color: Theme.border-strong;
+                status-text := Text {
+                    width: min(root.width - 72px, self.preferred-width);
+                    text: Bridge.viewer-status;
+                    color: #ffffff;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                    accessible-live-region: polite;
+                }
+            }
+        }
+        // Controls.
+        Rectangle {
+            height: 52px;
+            background: Theme.surface;
+            HorizontalLayout {
+                padding-left: Theme.space-4;
+                padding-right: Theme.space-4;
+                spacing: Theme.space-3;
+                Icon {
+                    source: Bridge.viewer-volume > 0 ? Icons.volume-2 : Icons.volume-x;
+                    tint: Theme.text-secondary;
+                    y: (parent.height - self.height) / 2;
+                }
+                Slider {
+                    width: 140px;
+                    horizontal-stretch: 0;
+                    y: (parent.height - self.height) / 2;
+                    minimum: 0;
+                    maximum: 200;
+                    step: 5;
+                    value <=> Bridge.viewer-volume;
+                    enabled: !Bridge.viewer-ended;
+                    label: @tr("Stream volume");
+                    changed(v) => { Bridge.set-stream-volume(v); }
+                }
+                Text {
+                    text: @tr("{}%", round(Bridge.viewer-volume));
+                    width: 44px;
+                    vertical-alignment: center;
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                }
+                if !Bridge.viewer-ended: HorizontalLayout {
+                    spacing: Theme.space-2;
+                    Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 4px;
+                        background: Theme.live;
+                    }
+                    Text {
+                        text: @tr("LIVE");
+                        color: Theme.text;
+                        font-size: Theme.font-sm;
+                        font-weight: Theme.weight-semibold;
+                        vertical-alignment: center;
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                IconButton {
+                    icon: Bridge.viewer-fullscreen ? Icons.minimize-2 : Icons.maximize;
+                    label: Bridge.viewer-fullscreen ? @tr("Exit full screen") : @tr("Full screen");
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Bridge.toggle-fullscreen(); }
+                }
+                if !Bridge.viewer-fullscreen: Button {
+                    small: true;
+                    icon: Icons.message-square;
+                    text: @tr("Chat");
+                    accessible-label: @tr("Back to the chat");
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Bridge.hide-viewer(); }
+                }
+                Button {
+                    small: true;
+                    kind: ButtonKind.danger;
+                    icon: Icons.log-out;
+                    text: Bridge.viewer-ended ? @tr("Close") : @tr("Leave");
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Bridge.leave-stream(); }
+                }
+            }
+        }
+    }
+}

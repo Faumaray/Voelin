@@ -1,0 +1,166 @@
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Icon } from "icon.slint";
+import { FocusRing } from "button.slint";
+import { ScrollView } from "std-widgets.slint";
+
+// A drop-down choice (ComboBox). Bind `current-index` (and read
+// `current-value`), or bind `current-value` two-way for a string choice.
+export component Select inherits Rectangle {
+    in property <[string]> model;
+    in-out property <int> current-index: 0;
+    in-out property <string> current-value;
+    in property <bool> enabled: true;
+    in property <image> icon;
+    in property <string> label;
+    in property <string> placeholder;
+    callback selected(string);
+
+    property <length> row-height: Theme.control-height;
+
+    function pick(i: int) {
+        current-index = i;
+        current-value = model[i];
+        selected(current-value);
+    }
+
+    init => {
+        if current-value == "" && current-index >= 0 && current-index < model.length {
+            current-value = model[current-index];
+        }
+    }
+    changed current-index => {
+        if current-index >= 0 && current-index < model.length {
+            current-value = model[current-index];
+        }
+    }
+    changed model => {
+        if current-index >= 0 && current-index < model.length {
+            current-value = model[current-index];
+        }
+    }
+
+    min-width: 80px;
+    min-height: Theme.control-height;
+    max-height: Theme.control-height;
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+    border-radius: Theme.radius-md;
+    background: touch.has-hover ? Theme.surface-3 : Theme.surface-2;
+    border-width: 1px;
+    border-color: focus.has-focus ? Theme.accent : Theme.border;
+    opacity: enabled ? 1.0 : 0.6;
+
+    accessible-role: AccessibleRole.combobox;
+    accessible-label: label;
+    accessible-value: current-value;
+    accessible-enabled: enabled;
+    accessible-expandable: true;
+    accessible-action-default => { popup.show(); }
+
+    FocusRing {
+        shown: focus.has-focus;
+        w: root.width;
+        h: root.height;
+    }
+    focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.UpArrow && root.current-index > 0 {
+                root.pick(root.current-index - 1);
+                return accept;
+            }
+            if event.text == Key.DownArrow && root.current-index < root.model.length - 1 {
+                root.pick(root.current-index + 1);
+                return accept;
+            }
+            if event.text == " " || event.text == "\n" {
+                popup.show();
+                return accept;
+            }
+            reject
+        }
+        touch := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                focus.focus();
+                popup.show();
+            }
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.space-4;
+        padding-right: Theme.space-3;
+        spacing: Theme.space-3;
+        if icon.width > 0: Icon {
+            source: icon;
+            size: Theme.icon-sm;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: root.current-value != "" ? root.current-value : root.placeholder;
+            color: root.current-value != "" ? Theme.text : Theme.text-muted;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        Icon {
+            source: Icons.chevron-down;
+            size: Theme.icon-sm;
+            tint: Theme.text-secondary;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        width: root.width;
+        height: min(root.model.length * root.row-height + 2 * Theme.space-2 + 2px, 320px);
+        close-policy: PopupClosePolicy.close-on-click-outside;
+        Rectangle {
+            border-radius: Theme.radius-md;
+            background: Theme.surface-3;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            clip: true;
+            ScrollView {
+                VerticalLayout {
+                    padding: Theme.space-2;
+                    for item[i] in root.model: Rectangle {
+                        height: root.row-height;
+                        border-radius: Theme.radius-sm;
+                        background: i == root.current-index ? Theme.accent-soft : item-touch.has-hover ? Theme.surface-4 : transparent;
+                        accessible-role: AccessibleRole.list-item;
+                        accessible-label: item;
+                        accessible-item-selectable: true;
+                        accessible-item-selected: i == root.current-index;
+                        accessible-action-default => {
+                            root.pick(i);
+                            popup.close();
+                        }
+                        item-touch := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                root.pick(i);
+                                popup.close();
+                            }
+                        }
+                        HorizontalLayout {
+                            padding-left: Theme.space-3;
+                            padding-right: Theme.space-3;
+                            Text {
+                                text: item;
+                                color: i == root.current-index ? Theme.text : Theme.text-secondary;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

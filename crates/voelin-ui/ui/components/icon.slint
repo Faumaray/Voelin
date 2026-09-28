@@ -1,0 +1,41 @@
+import { Theme } from "../theme.slint";
+
+// A tinted icon from `Icons`.
+export component Icon inherits Image {
+    in property <length> size: Theme.icon-md;
+    in property <brush> tint: Theme.icon;
+    width: size;
+    height: size;
+    colorize: tint;
+    image-fit: contain;
+    accessible-role: AccessibleRole.none;
+}
+
+// A spinning indicator of work in progress: dots on a circle, one lit
+// after the other.
+export component Spinner inherits Rectangle {
+    in property <length> size: 20px;
+    in property <color> tint: Theme.accent-text;
+    in property <bool> running: true;
+    property <int> step;
+    width: size;
+    height: size;
+    accessible-role: AccessibleRole.progress-indicator;
+    accessible-label: @tr("Loading");
+    Timer {
+        interval: 90ms;
+        running: root.running;
+        triggered => { root.step = mod(root.step + 1, 8); }
+    }
+    for i in 8: Rectangle {
+        property <angle> a: i * 45deg;
+        property <length> dot: root.size / 5;
+        x: root.size / 2 + (root.size / 2 - dot / 2) * cos(a) - dot / 2;
+        y: root.size / 2 + (root.size / 2 - dot / 2) * sin(a) - dot / 2;
+        width: dot;
+        height: dot;
+        border-radius: dot / 2;
+        background: root.tint;
+        opacity: mod(i - root.step + 8, 8) == 0 ? 1.0 : 0.15 + (8 - mod(root.step - i + 8, 8)) * 0.08;
+    }
+}

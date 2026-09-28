@@ -41,7 +41,8 @@ Done so far (milestones M0–M4 and the first part of M5 of [the plan](docs/arch
 - `crates/voelin-ui` (`voelin`): Slint desktop app: servers, channel tree with talking indicators,
   chat tabs (own channel via voice, other channels via relay), connect / observe invisibly, mute, push-to-talk
   (in the window and as a global hotkey), audio settings with a level meter, per-client volume, and on
-  TeamSpeak 6 streams: watch in a viewer, share the screen with sound
+  TeamSpeak 6 streams: watch in a viewer, share the screen with sound. Desktop and phone layouts
+  from one design system, dark and light themes, text size, emoji ([docs/ui.md](docs/ui.md))
 - `crates/voelin-stream`: TeamSpeak 6 streams: stream commands and notifications, JSON signalling,
   WebRTC peers (str0m) with host and STUN candidates. A live test streams VP8 + Opus between two
   clients through a TS6 server
@@ -58,11 +59,14 @@ Done so far (milestones M0–M4 and the first part of M5 of [the plan](docs/arch
 Screen sharing works between our clients through a TeamSpeak 6 server (VP8 video, Opus audio);
 interop with the official TeamSpeak 6 client is not verified yet.
 
-| Connected with voice | Observing invisibly through the gateway |
+The UI (design system, desktop and phone layouts, emoji, how to add a screen) is described in
+[docs/ui.md](docs/ui.md). Screenshots with sample data (`VOELIN_DEMO_UI=1`):
+
+| Server, chat and people in the channel | Watching a stream |
 |---|---|
-| ![voice](docs/screenshots/desktop-voice.png) | ![observe](docs/screenshots/desktop-observe.png) |
-| **Watching a stream** | **Sharing the screen** |
-| ![viewer](docs/screenshots/desktop-stream-viewer.png) | ![share](docs/screenshots/desktop-share-dialog.png) |
+| ![server](docs/screenshots/desktop-server.png) | ![viewer](docs/screenshots/desktop-stream-viewer.png) |
+| **Settings** | **Phone layout** |
+| ![settings](docs/screenshots/desktop-settings-voice.png) | ![phone](docs/screenshots/mobile-chat.png) |
 
 ## Try it
 
@@ -102,8 +106,10 @@ Other commands: `voelinctl identity new`, `voelinctl versions`, `voelinctl conne
 
 Development switches of the desktop app (environment variables): `VOELIN_DATA_DIR` (database),
 `VOELIN_AUTOCONNECT=voice|observe`, `VOELIN_SCREENSHOT=<png>` (with `VOELIN_SCREENSHOT_DELAY`),
-`VOELIN_DEMO_STREAM=1` (a local test stream in the viewer, no server needed),
-`VOELIN_OPEN=share|settings[:<tab>]|about|client`, `VOELIN_AUTOWATCH=1`, `VOELIN_AUTOSHARE=test-pattern`.
+`VOELIN_WINDOW_SIZE=<w>x<h>`, `VOELIN_DEMO_UI=1` (sample servers and chat, no server needed),
+`VOELIN_DEMO_STREAM=1` (a local test stream in the viewer),
+`VOELIN_OPEN=home|settings[:<section>]|about|share|bookmark|emoji|client|tab:<tab>` (comma-separated),
+`VOELIN_AUTOWATCH=1`, `VOELIN_AUTOSHARE=test-pattern`; details in [docs/ui.md](docs/ui.md).
 
 Ready-made packages (Linux `.tar.gz`/`.deb`/Flatpak, Windows zip and installer, Android APK,
 and the `tsgw` gateway for Linux servers) come from the release workflow (version tags, or run by
@@ -123,6 +129,7 @@ the same terms in `Cargo.toml`.
 Third-party notices: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), generated from
 `Cargo.lock` by `scripts/notices.sh` and shown in the app's About page. The UI toolkit,
 Slint, is used under its royalty-free license, which requires an attribution in the
-About page.
+About page. The UI bundles the Inter font (SIL OFL 1.1), Lucide icons (ISC) and Twemoji
+graphics (CC-BY 4.0); `scripts/notices.sh` appends their notices from `about-assets.md`.
 
 Security issues: see [SECURITY.md](SECURITY.md). Releases: [docs/release.md](docs/release.md).

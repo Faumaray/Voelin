@@ -1,0 +1,271 @@
+// The chat: header, chat tabs, messages (virtualised), the composer with
+// the emoji picker.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Bridge, ChatLine } from "../bridge.slint";
+import { Nav } from "../nav.slint";
+import { Icon, IconButton, Avatar, Chip, TabItem, TextField, RichText, Banner, Button, ButtonKind, ListView } from "../components/index.slint";
+
+// The header of the main area: an icon, a title and a description, and
+// actions (@children) at the right.
+export component PageHeader inherits Rectangle {
+    in property <image> icon: Icons.hash;
+    in property <string> title;
+    in property <string> description;
+    min-height: 60px;
+    border-width: 0px;
+    HorizontalLayout {
+        padding-left: Theme.space-6;
+        padding-right: Theme.space-4;
+        spacing: Theme.space-4;
+        Icon {
+            source: root.icon;
+            size: 26px;
+            tint: Theme.text-secondary;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: root.title;
+            font-size: Theme.font-xl;
+            font-weight: Theme.weight-semibold;
+            color: Theme.text;
+            vertical-alignment: center;
+            overflow: elide;
+            max-width: self.preferred-width;
+        }
+        if root.description != "": Rectangle {
+            width: 1px;
+            height: 22px;
+            y: (parent.height - self.height) / 2;
+            background: Theme.border-strong;
+        }
+        Text {
+            text: root.description;
+            font-size: Theme.font-sm;
+            color: Theme.text-muted;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        @children
+    }
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.border;
+    }
+}
+
+// One message; `continued` lines (same author just before) omit the header.
+component MessageRow inherits Rectangle {
+    in property <ChatLine> line;
+    property <length> avatar: 40px;
+    min-height: body.preferred-height;
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: line.author + ": " + line.text;
+    accessible-description: line.time;
+    body := HorizontalLayout {
+        padding-left: Theme.space-6;
+        padding-right: Theme.space-6;
+        padding-top: line.continued ? 1px : Theme.space-4;
+        padding-bottom: 1px;
+        spacing: Theme.space-4;
+        VerticalLayout {
+            width: root.avatar;
+            alignment: start;
+            if !line.continued: Avatar {
+                size: root.avatar;
+                initials: line.initials;
+                tint: line.tint;
+                label: line.author;
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 2px;
+            if !line.continued: HorizontalLayout {
+                spacing: Theme.space-3;
+                alignment: start;
+                Text {
+                    text: line.author;
+                    color: line.relayed ? Theme.accent-text : Theme.name-text;
+                    font-size: Theme.font-md;
+                    font-weight: Theme.weight-semibold;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: line.time;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    vertical-alignment: center;
+                }
+                if line.relayed: Chip {
+                    text: @tr("via relay");
+                    icon: Icons.radio;
+                    tint: Theme.accent-text;
+                    y: (parent.height - self.height) / 2;
+                }
+            }
+            if !line.rich: Text {
+                text: line.text;
+                color: Theme.text;
+                wrap: word-wrap;
+            }
+            if line.rich: RichText {
+                runs: line.runs;
+                emoji-size: line.jumbo ? 44px : Theme.font-body * 1.4;
+            }
+        }
+    }
+}
+
+// Tabs, messages and the composer of the current chat.
+export component ChatView inherits VerticalLayout {
+    // Hide the header (mobile shows its own).
+    in property <bool> header: true;
+    property <string> tab-title: Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length ? Bridge.tabs[Bridge.current-tab].title : "";
+    property <string> tab-name: Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length ? Bridge.tabs[Bridge.current-tab].name : "";
+    property <int> tab-kind: Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length ? Bridge.tabs[Bridge.current-tab].kind : 0;
+    property <string> tab-topic: Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length ? Bridge.tabs[Bridge.current-tab].topic : "";
+
+    if root.header: PageHeader {
+        icon: root.tab-kind == 1 ? Icons.hash : root.tab-kind == 2 ? Icons.at-sign : Icons.message-square;
+        title: root.tab-name;
+        description: root.tab-topic != "" ? root.tab-topic : Bridge.server-title;
+        if Bridge.presence-source != "": Chip {
+            text: Bridge.presence-source;
+            icon: Icons.radio;
+            tint: Theme.accent-text;
+            y: (parent.height - self.height) / 2;
+        }
+        if Bridge.viewer-open == false && Bridge.streams.length > 0: Button {
+            small: true;
+            icon: Icons.monitor-up;
+            text: @tr("Streams ({})", Bridge.streams.length);
+            y: (parent.height - self.height) / 2;
+            clicked => { Nav.right-panel-open = true; }
+        }
+        IconButton {
+            icon: Icons.users;
+            label: @tr("Members and streams");
+            checked: Nav.right-panel-open;
+            y: (parent.height - self.height) / 2;
+            clicked => { Nav.right-panel-open = !Nav.right-panel-open; }
+        }
+    }
+    if Bridge.crash-notice != "": Rectangle {
+        HorizontalLayout {
+            padding: Theme.space-3;
+            padding-left: Theme.space-5;
+            padding-right: Theme.space-5;
+            Banner {
+                text: Bridge.crash-notice;
+                Button {
+                    small: true;
+                    text: @tr("Open folder");
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Bridge.open-crash-folder(); }
+                }
+                Button {
+                    small: true;
+                    kind: ButtonKind.danger;
+                    text: @tr("Delete");
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Bridge.delete-crash-reports(); }
+                }
+                IconButton {
+                    icon: Icons.x;
+                    label: @tr("Dismiss");
+                    size: 28px;
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Bridge.dismiss-crash-notice(); }
+                }
+            }
+        }
+    }
+    // Chat tabs: server chat, channel chats, private chats.
+    Rectangle {
+        height: Theme.control-height + 4px;
+        accessible-role: AccessibleRole.tab-list;
+        accessible-label: @tr("Chats");
+        Rectangle {
+            y: parent.height - 1px;
+            height: 1px;
+            background: Theme.border;
+        }
+        HorizontalLayout {
+            padding-left: Theme.space-5;
+            alignment: start;
+            for tab[i] in Bridge.tabs: TabItem {
+                text: tab.title;
+                selected: Bridge.current-tab == i;
+                badge: tab.unread;
+                closable: tab.kind == 1;
+                clicked => { Bridge.select-tab(i); }
+                close => { Bridge.close-tab(i); }
+            }
+        }
+    }
+    messages := ListView {
+        vertical-stretch: 1;
+        accessible-label: @tr("Messages");
+        for line in Bridge.messages: MessageRow {
+            line: line;
+        }
+    }
+    // Composer.
+    HorizontalLayout {
+        padding: Theme.space-4;
+        padding-left: Theme.space-5;
+        padding-right: Theme.space-5;
+        spacing: Theme.space-3;
+        composer := Rectangle {
+            horizontal-stretch: 1;
+            min-height: 48px;
+            border-radius: Theme.radius-lg;
+            background: Theme.surface-2;
+            border-width: 1px;
+            border-color: input.has-focus ? Theme.accent : Theme.border;
+            HorizontalLayout {
+                padding-left: Theme.space-5;
+                padding-right: Theme.space-2;
+                spacing: Theme.space-2;
+                input := TextField {
+                    text <=> Nav.draft;
+                    bare: true;
+                    placeholder: root.tab-title != "" ? @tr("Message {}", root.tab-title) : @tr("Message");
+                    label: @tr("Message");
+                    accepted(text) => {
+                        if text != "" {
+                            Bridge.send-message(text);
+                            self.clear();
+                        }
+                    }
+                }
+                IconButton {
+                    icon: Icons.smile;
+                    label: @tr("Emoji");
+                    checked: Nav.emoji-open;
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Nav.emoji-open = !Nav.emoji-open; }
+                }
+                IconButton {
+                    icon: Icons.send;
+                    label: @tr("Send");
+                    round: true;
+                    enabled: input.text != "";
+                    tint: input.text != "" ? Theme.on-accent : Theme.text-muted;
+                    filled: input.text != "";
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        if input.text != "" {
+                            Bridge.send-message(input.text);
+                            input.clear();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

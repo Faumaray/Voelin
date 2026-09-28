@@ -1,0 +1,185 @@
+import { Theme } from "../theme.slint";
+import { Icon } from "icon.slint";
+import { FocusRing } from "button.slint";
+
+// The pill switch.
+export component Toggle inherits Rectangle {
+    in-out property <bool> checked;
+    in property <bool> enabled: true;
+    in property <string> label;
+    callback toggled(bool);
+
+    function flip() {
+        if enabled {
+            checked = !checked;
+            toggled(checked);
+        }
+    }
+
+    width: 44px;
+    height: 24px;
+    border-radius: self.height / 2;
+    background: checked ? (touch.has-hover ? Theme.accent-hover : Theme.accent) : (touch.has-hover ? Theme.surface-4 : Theme.surface-3);
+    border-width: 1px;
+    border-color: checked ? Theme.accent-hover : Theme.border-strong;
+    opacity: enabled ? 1.0 : 0.5;
+    animate background { duration: Theme.fast; }
+
+    accessible-role: AccessibleRole.switch;
+    accessible-label: label;
+    accessible-checkable: true;
+    accessible-checked: checked;
+    accessible-enabled: enabled;
+    accessible-action-default => { flip(); }
+
+    FocusRing {
+        shown: focus.has-focus;
+        radius: root.border-radius;
+        w: root.width;
+        h: root.height;
+    }
+    focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.flip();
+                return accept;
+            }
+            reject
+        }
+        touch := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                focus.focus();
+                root.flip();
+            }
+        }
+    }
+    Rectangle {
+        width: parent.height - 6px;
+        height: self.width;
+        y: 3px;
+        x: root.checked ? parent.width - self.width - 3px : 3px;
+        border-radius: self.width / 2;
+        background: root.checked ? #ffffff : Theme.text-secondary;
+        animate x { duration: Theme.fast; easing: ease-out; }
+    }
+}
+
+// A settings row: icon, title and description, a switch at the right; the
+// whole row toggles.
+export component ToggleRow inherits Rectangle {
+    in-out property <bool> checked;
+    in property <bool> enabled: true;
+    in property <string> text;
+    in property <string> description;
+    in property <image> icon;
+    callback toggled(bool);
+
+    min-height: Theme.row-height + 8px;
+    accessible-role: AccessibleRole.none;
+    TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+    HorizontalLayout {
+        spacing: Theme.space-4;
+        padding-top: Theme.space-2;
+        padding-bottom: Theme.space-2;
+        if icon.width > 0: Icon {
+            source: root.icon;
+            size: Theme.icon-md;
+            y: (parent.height - self.height) / 2;
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: 1px;
+            Text {
+                text: root.text;
+                color: root.enabled ? Theme.text : Theme.text-disabled;
+                wrap: word-wrap;
+            }
+            if root.description != "": Text {
+                text: root.description;
+                font-size: Theme.font-sm;
+                color: Theme.text-muted;
+                wrap: word-wrap;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Toggle {
+                checked <=> root.checked;
+                enabled: root.enabled;
+                label: root.text;
+                toggled(on) => { root.toggled(on); }
+            }
+        }
+    }
+}
+
+// A round radio button with a title and description (a choice among rows).
+export component RadioRow inherits Rectangle {
+    in property <bool> checked;
+    in property <bool> enabled: true;
+    in property <string> text;
+    in property <string> description;
+    in property <image> icon;
+    callback clicked();
+
+    min-height: Theme.row-height + 8px;
+    accessible-role: AccessibleRole.radio-button;
+    accessible-label: text;
+    accessible-checkable: true;
+    accessible-checked: checked;
+    accessible-action-default => { clicked(); }
+    TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        spacing: Theme.space-4;
+        padding-top: Theme.space-2;
+        padding-bottom: Theme.space-2;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 20px;
+                height: 20px;
+                border-radius: 10px;
+                border-width: 2px;
+                border-color: root.checked ? Theme.accent : Theme.border-strong;
+                if root.checked: Rectangle {
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 5px;
+                    background: Theme.accent;
+                }
+            }
+        }
+        if icon.width > 0: Icon {
+            source: root.icon;
+            y: (parent.height - self.height) / 2;
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.text;
+                color: Theme.text;
+            }
+            if root.description != "": Text {
+                text: root.description;
+                font-size: Theme.font-sm;
+                color: Theme.text-muted;
+                wrap: word-wrap;
+            }
+        }
+    }
+}

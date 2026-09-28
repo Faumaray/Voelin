@@ -1,0 +1,191 @@
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Icon } from "icon.slint";
+
+// A single-line text input on a surface, with an optional leading icon.
+export component TextField inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> placeholder;
+    in property <InputType> input-type: InputType.text;
+    in property <bool> enabled <=> input.enabled;
+    in property <bool> read-only <=> input.read-only;
+    in property <image> icon;
+    // For screen readers; defaults to the placeholder.
+    in property <string> label: placeholder;
+    in property <length> font-size: Theme.font-body;
+    // Drawn without its own background and border (inside a composer).
+    in property <bool> bare;
+    out property <bool> has-focus: input.has-focus;
+    callback accepted(string);
+    callback edited(string);
+    callback key-pressed(KeyEvent) -> EventResult;
+
+    public function clear() {
+        input.text = "";
+    }
+
+    public function select-all() {
+        input.select-all();
+    }
+
+    property <length> margin: Theme.space-2;
+
+    min-width: 60px;
+    min-height: Theme.control-height;
+    max-height: bare ? 1000px : Theme.control-height + 8px;
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+    border-radius: Theme.radius-md;
+    background: bare ? transparent : Theme.surface-2;
+    border-width: bare ? 0px : 1px;
+    border-color: input.has-focus ? Theme.accent : touch.has-hover ? Theme.border-strong : Theme.border;
+    opacity: enabled ? 1.0 : 0.6;
+    forward-focus: input;
+    accessible-role: AccessibleRole.text-input;
+    accessible-label: label;
+    accessible-value: input-type == InputType.password ? "" : text;
+    accessible-placeholder-text: placeholder;
+    accessible-enabled: enabled;
+    accessible-read-only: read-only;
+    accessible-action-set-value(v) => { text = v; edited(v); }
+
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.text;
+        clicked => { input.focus(); }
+    }
+
+    HorizontalLayout {
+        padding-left: bare ? 0px : Theme.space-4;
+        padding-right: bare ? 0px : Theme.space-4;
+        spacing: Theme.space-3;
+        if icon.width > 0: Icon {
+            source: icon;
+            size: Theme.icon-sm;
+            tint: Theme.text-muted;
+            y: (parent.height - self.height) / 2;
+        }
+        Rectangle {
+            clip: true;
+            horizontal-stretch: 1;
+            placeholder-text := Text {
+                width: 100%;
+                height: 100%;
+                vertical-alignment: center;
+                text: root.text == "" && input.preedit-text == "" ? root.placeholder : "";
+                font-size: root.font-size;
+                color: Theme.text-muted;
+                overflow: elide;
+                accessible-role: AccessibleRole.none;
+            }
+            ContextMenuArea {
+                enabled: root.enabled;
+                Menu {
+                    MenuItem {
+                        title: @tr("Cut");
+                        enabled: !root.read-only && root.enabled;
+                        activated => { input.cut(); }
+                    }
+                    MenuItem {
+                        title: @tr("Copy");
+                        enabled: root.text != "";
+                        activated => { input.copy(); }
+                    }
+                    MenuItem {
+                        title: @tr("Paste");
+                        enabled: !root.read-only && root.enabled;
+                        activated => { input.paste(); }
+                    }
+                    MenuItem {
+                        title: @tr("Select All");
+                        enabled: root.text != "";
+                        activated => { input.select-all(); }
+                    }
+                }
+                input := TextInput {
+                    property <length> computed-x;
+                    x: min(0px, max(parent.width - self.width - self.text-cursor-width, self.computed-x));
+                    width: max(parent.width - self.text-cursor-width, self.preferred-width);
+                    height: 100%;
+                    vertical-alignment: center;
+                    single-line: true;
+                    color: Theme.text;
+                    font-size: root.font-size;
+                    selection-background-color: Theme.accent-soft;
+                    selection-foreground-color: Theme.text;
+                    input-type: root.input-type;
+                    accessible-role: AccessibleRole.none;
+                    cursor-position-changed(pos) => {
+                        if pos.x + self.computed-x < root.margin {
+                            self.computed-x = - pos.x + root.margin;
+                        } else if pos.x + self.computed-x > parent.width - root.margin - self.text-cursor-width {
+                            self.computed-x = parent.width - pos.x - root.margin - self.text-cursor-width;
+                        }
+                    }
+                    accepted => { root.accepted(self.text); }
+                    edited => { root.edited(self.text); }
+                    key-pressed(event) => { root.key-pressed(event) }
+                }
+            }
+        }
+        @children
+    }
+}
+
+// A key cap ("Ctrl", "K").
+export component Kbd inherits Rectangle {
+    in property <string> text;
+    min-width: 20px;
+    height: 20px;
+    border-radius: Theme.radius-xs;
+    background: Theme.surface-3;
+    border-width: 1px;
+    border-color: Theme.border-strong;
+    HorizontalLayout {
+        padding-left: 5px;
+        padding-right: 5px;
+        Text {
+            text: root.text;
+            font-size: Theme.font-xs;
+            color: Theme.text-secondary;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+// The search field of the top bar: a magnifier, and the Ctrl K hint while
+// empty. Ctrl+K is bound by the shell (focus()).
+export component SearchBox inherits TextField {
+    in property <bool> show-shortcut: true;
+    icon: Icons.search;
+    border-radius: Theme.radius-md;
+    background: Theme.surface-2.transparentize(0.2);
+    if show-shortcut && root.text == "" && !root.has-focus: VerticalLayout {
+        alignment: center;
+        HorizontalLayout {
+            spacing: 3px;
+            Kbd { text: "Ctrl"; }
+            Kbd { text: "K"; }
+        }
+    }
+}
+
+// A form row: a label above (or beside) a control, with an optional hint.
+export component Field inherits VerticalLayout {
+    in property <string> label;
+    in property <string> hint;
+    spacing: Theme.space-2;
+    if label != "": Text {
+        text: root.label;
+        font-size: Theme.font-sm;
+        color: Theme.text-secondary;
+        font-weight: Theme.weight-medium;
+    }
+    @children
+    if hint != "": Text {
+        text: root.hint;
+        font-size: Theme.font-xs;
+        color: Theme.text-muted;
+        wrap: word-wrap;
+    }
+}

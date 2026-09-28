@@ -20,11 +20,15 @@ path = "src/main.rs"
 anyhow = "1.0.104"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 dirs = "6"
+# Twemoji archive blocks (raw deflate); already used by png.
+miniz_oxide = "0.8"
 png = "0.18"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# Grapheme clusters for emoji in chat text.
+unicode-segmentation = "1.13"
 voelin-audio = { path = "../voelin-audio" }
 voelin-core = { path = "../voelin-core", default-features = false, features = ["audio-device"] }
 voelin-model = { path = "../voelin-model" }
@@ -43,10 +47,12 @@ voelin-platform = { path = "../voelin-platform" }
 voelin-store = { path = "../voelin-store", features = ["keyring"] }
 
 # Android (voelin-android): no keyring backend (the app passes Keystore-backed
-# secrets), no winit/femtovg (the app picks Slint's Android backend), stream
-# media through MediaCodec and the app's capture source.
+# secrets), no winit/femtovg, stream media through MediaCodec and the app's
+# capture source. Slint's Android backend (the one the app runs) also brings
+# the SVG and image decoders the icons and emoji need, so this crate builds
+# alone for Android too.
 [target.'cfg(target_os = "android")'.dependencies]
-slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "renderer-software"] }
+slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "renderer-software", "backend-android-activity-06"] }
 voelin-core = { path = "../voelin-core", default-features = false, features = ["media"] }
 
 [dev-dependencies]

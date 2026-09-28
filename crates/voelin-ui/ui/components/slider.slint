@@ -1,0 +1,101 @@
+import { Theme } from "../theme.slint";
+
+// A horizontal slider: blue track and a round knob. `changed` fires while
+// dragging, `released` at the end.
+export component Slider inherits Rectangle {
+    in-out property <float> value;
+    in property <float> minimum: 0;
+    in property <float> maximum: 100;
+    // Arrow keys move by this much.
+    in property <float> step: 1;
+    in property <bool> enabled: true;
+    in property <string> label;
+    callback changed(float);
+    callback released(float);
+
+    property <length> knob-size: 16px;
+    property <float> ratio: maximum > minimum ? clamp((value - minimum) / (maximum - minimum), 0, 1) : 0;
+
+    function set(v: float) {
+        let clamped = clamp(v, minimum, maximum);
+        if clamped != value {
+            value = clamped;
+            changed(clamped);
+        }
+    }
+
+    min-width: 80px;
+    height: 24px;
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+    opacity: enabled ? 1.0 : 0.45;
+
+    accessible-role: AccessibleRole.slider;
+    accessible-label: label;
+    accessible-value: round(value);
+    accessible-value-minimum: minimum;
+    accessible-value-maximum: maximum;
+    accessible-value-step: step;
+    accessible-enabled: enabled;
+    accessible-action-increment => { set(value + step); }
+    accessible-action-decrement => { set(value - step); }
+
+    track := Rectangle {
+        x: knob-size / 2;
+        width: parent.width - knob-size;
+        height: 6px;
+        border-radius: 3px;
+        background: Theme.meter-off;
+        Rectangle {
+            x: 0;
+            width: parent.width * root.ratio;
+            height: 100%;
+            border-radius: 3px;
+            background: Theme.accent;
+        }
+    }
+    knob := Rectangle {
+        x: track.x + track.width * root.ratio - self.width / 2;
+        width: knob-size;
+        height: knob-size;
+        border-radius: knob-size / 2;
+        background: #ffffff;
+        border-width: focus.has-focus || touch.pressed ? 3px : 2px;
+        border-color: Theme.accent;
+    }
+    focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.RightArrow || event.text == Key.UpArrow {
+                root.set(root.value + root.step);
+                root.released(root.value);
+                return accept;
+            }
+            if event.text == Key.LeftArrow || event.text == Key.DownArrow {
+                root.set(root.value - root.step);
+                root.released(root.value);
+                return accept;
+            }
+            reject
+        }
+        touch := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: MouseCursor.pointer;
+            property <float> start-value;
+            pointer-event(e) => {
+                if e.button == PointerEventButton.left && e.kind == PointerEventKind.down {
+                    focus.focus();
+                    root.set(root.minimum + (self.mouse-x - track.x) / max(track.width, 1px) * (root.maximum - root.minimum));
+                    self.start-value = root.value;
+                } else if e.kind == PointerEventKind.up {
+                    root.released(root.value);
+                }
+            }
+            moved => {
+                if self.pressed && root.enabled {
+                    root.set(self.start-value + (self.mouse-x - self.pressed-x) / max(track.width, 1px) * (root.maximum - root.minimum));
+                }
+            }
+        }
+    }
+}
