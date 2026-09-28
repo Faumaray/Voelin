@@ -24,7 +24,7 @@ use ndk::media::media_codec::{
 use ndk::media::media_format::MediaFormat;
 use tracing::{debug, info};
 
-use super::hw::HardwareEncoderFactory;
+use super::hw::EncoderFactory;
 use super::image_layout::{
 	COLOR_FORMAT_FLEXIBLE, COLOR_FORMAT_I420, COLOR_FORMAT_NV12, ImageLayout,
 };
@@ -56,6 +56,7 @@ fn mime(codec: Codec) -> &'static str {
 		Codec::Vp9 => "video/x-vnd.on2.vp9",
 		Codec::H264 => "video/avc",
 		Codec::Av1 => "video/av01",
+		Codec::H265 => "video/hevc",
 	}
 }
 
@@ -145,7 +146,7 @@ pub struct MediaCodecFactory {
 	codecs: Vec<Codec>,
 }
 
-impl HardwareEncoderFactory for MediaCodecFactory {
+impl EncoderFactory for MediaCodecFactory {
 	fn name(&self) -> &'static str {
 		NAME
 	}

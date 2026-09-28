@@ -173,14 +173,7 @@ impl OpenH264 {
 	}
 }
 
-/// H.264 profile of the encoder output.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum H264Profile {
-	/// Constrained High (what TeamSpeak clients decode).
-	#[default]
-	ConstrainedHigh,
-	ConstrainedBaseline,
-}
+pub use super::H264Profile;
 
 /// OpenH264 encoder.
 pub struct OpenH264Encoder {
@@ -196,8 +189,8 @@ impl OpenH264Encoder {
 	fn new(library: OpenH264, config: EncoderConfig) -> Result<Self> {
 		let mut encoder = Self {
 			library,
+			profile: config.h264_profile,
 			config,
-			profile: H264Profile::default(),
 			encoder: None,
 			output: Vec::new(),
 		};
