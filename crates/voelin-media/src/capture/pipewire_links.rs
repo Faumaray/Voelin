@@ -34,9 +34,14 @@
 //! `application.process.id`, else its client's `application.process.id`,
 //! else the client's `pipewire.sec.pid`, compared with our pid and walked up
 //! the `/proc/<pid>/stat` parent chain (and, without any pid, by our
-//! executable's name). A playback stream is linked only once its node and
-//! client details have arrived, so our playback is never linked, not even
-//! briefly.
+//! executable's name). In a sandbox with a pid namespace of its own the
+//! daemon sees other pids than we do, so the manager's own connection
+//! carries a marker property: native clients with that connection's
+//! `pipewire.sec.pid` are ours too. A playback stream is linked only once
+//! its node and client details have arrived, so our playback is never
+//! linked, not even briefly. The playing sides of loopbacks and filters
+//! (`node.link-group`) are never linked: what they replay is captured at
+//! the applications that played it.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

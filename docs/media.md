@@ -1,7 +1,8 @@
 # Media: frames, codecs and capture (`voelin-media`)
 
-`crates/voelin-media` turns screens and system audio into frames, encodes and
-decodes video, and converts pixels for rendering. It does no networking:
+`crates/voelin-media` turns screens and what applications play into frames,
+mixes the stream's audio, encodes and decodes video, and converts pixels for
+rendering. It does no networking:
 `voelin-stream` carries the encoded frames (`Peer::write(MediaKind::Video,
 MediaTime::new(frame.pts_90khz, Frequency::NINETY_KHZ), data)`), and received
 `MediaFrame`s go to `VideoDecoder::decode`.
@@ -30,6 +31,8 @@ MediaTime::new(frame.pts_90khz, Frequency::NINETY_KHZ), data)`), and received
 | `FrameReceiver<T>` | bounded queue that drops the oldest item; `recv().await`, `try_recv()`, `recv_timeout()` |
 | `capture::default_screen_capture()`, `default_audio_capture()` | the backend for this session |
 | `capture::synthetic::{SyntheticScreen, SineSource}` | test pattern (moving rectangle, frame counter) and sine tone |
+| `mix::{StreamMixer, MixerHandle, SourceHandle, SourceInput, BlockClock}` | the stream's audio mixer: any number of sources, each with gain, mute, level meters and any number of inputs (see [Stream audio](#stream-audio)) |
+| `capture::playback::{start_playback, audio_apps, window_pid}` | what applications play, captured into a mixer source (`PlaybackFilter::AllButSelf` or `App(AppMatch::Name / Pid)`); the applications that play, updated live (`AudioApps`) |
 
 ```rust
 let codecs = Codecs::new().with_openh264(OpenH264::find_in(&data_dir)?); // H.264 optional
@@ -58,7 +61,7 @@ streamer: capture thread ── FrameSink: pace, convert + scale (Pyramid on all
             ├─ encoder thread, layer 0 ─┐
             ├─ encoder thread, layer 1 ─┤
             └─ ...                      ├─ MediaSink: StreamSink / EncodedSource
-          AudioCapture ─ 20 ms stereo Opus (128 kbit/s) ─┘
+          audio sources ─ StreamMixer (thread, every 20 ms) ─ stereo Opus (128 kbit/s) ─┘
 viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder ─ picture callback ─ Latest
           stream audio ─ session audio thread (mixer, own volume) ─ speakers
 ```
@@ -66,10 +69,11 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
 - `Streamer::start(&codecs, StreamerConfig)` starts capturing right away (the
   portal asks the user then), so a cancelled dialog never starts a stream;
   frames are converted and encoded only after `attach(sink)`, i.e. once the
-  stream is live. Audio follows the capture clock across gaps. With the test
-  pattern (`SourceId::Synthetic`, `synthetic_pattern`) the audio is a quiet
-  sine tone. The portal's restore token is available afterwards
-  (`restore_token()`) to store.
+  stream is live. The audio is mixed from `StreamerConfig::audio_sources`
+  (see [Stream audio](#stream-audio)); without any, it is desktop audio
+  without Voelin, or a quiet sine tone with the test pattern
+  (`SourceId::Synthetic`, `synthetic_pattern`). The portal's restore token
+  is available afterwards (`restore_token()`) to store.
 - Threads: the capture backend calls the streamer's `FrameSink` on its own
   thread with the frame still in its capture buffer. Frames over the
   frame-rate cap (`StreamerConfig::fps`, any value >= 1) are skipped before
@@ -90,7 +94,7 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   `max_bitrate`), else its configured bitrate; libvpx changes it in place
   without a keyframe.
 - `Streamer::reconfigure(&codecs, StreamerConfigUpdate { fps, bitrate_kbps,
-  codec, layers })` applies from the next frame without restarting the
+  codec, layers, audio_sources })` applies from the next frame without restarting the
   capture: encoders are created first (an error changes nothing), layers
   keep their encoder when their id stays, new ids get threads, removed ones
   stop, a new codec swaps every encoder (first frame a keyframe), and the
@@ -99,7 +103,9 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
 - `stats()`: `StreamerStats` with capture fps, convert time and threads,
   dropped frames, codec, and per layer (`LayerStats`) size, frames,
   keyframes, dropped, fps, kbit/s, encode time, target bitrate, threads
-  and encoder speed. Counters are atomics; rates are computed once a
+  and encoder speed; the audio mix's level and limiter gain, and per audio
+  source (`AudioSourceStats`) level, state, latency, underruns and why it
+  captures nothing, if so. Counters are atomics; rates are computed once a
   second, and a one-line summary is logged every 5 s at debug level
   (`RUST_LOG=voelin_core::media=debug`).
 - `CaptureBackend`: `Auto` (the session default: portal on Wayland, X11,
@@ -121,6 +127,70 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   hands the Opus frames to its audio thread, which plays them through the
   jitter buffer and mixer under a made-up client id, with its own volume.
   Playback is mono like the rest of the audio path.
+
+## Stream audio
+
+The audio of our stream is a mix of any number of sources
+(`StreamerConfig::audio_sources`: `AudioSourceSpec { kind, gain, muted }`):
+
+| `AudioSourceKind` | Captures |
+|---|---|
+| `DesktopWithoutSelf` (default) | everything that plays except Voelin: viewers do not hear the voices or streams we play |
+| `App(AppMatch::Name(..))` | one application by name, ignoring case: application name or executable (`.exe` optional), the package on Android; found again when it restarts |
+| `App(AppMatch::Pid(..))` | one process and its children (Linux, Windows) |
+| `WindowAudio` | the application of the shared window: X11 `_NET_WM_PID`, the owner of a Windows `HWND`. The ScreenCast portal does not say whose window it shares; on Wayland, pick the application |
+| `Microphone` | our microphone as the voice connection sends it (after echo cancellation, noise suppression and gain control), through `voelin_audio::tap::microphone()`, while a voice connection runs |
+| `Synthetic { hz }` | a quiet sine tone (tests, and the default with the test pattern) |
+
+- Mixer (`voelin_media::mix::StreamMixer`): each source has inputs,
+  lock-free single-producer rings that capture threads fill at their own
+  pace, rate and channel count. Each input is held at a small latency
+  (40 ms by default, more for an input that delivers in bursts or keeps
+  arriving late). An input that runs dry fades out and buffers again
+  while the others go on. Clock drift is absorbed by resampling up to
+  0.5 % while a buffer is off target. The sum passes a master gain and a
+  soft limiter, so it never exceeds full scale. Levels (peak and RMS) of
+  every source and of the output are atomics. Nothing is allocated per
+  block (`tests/mix_alloc.rs`; `benches/mix.rs` measures it).
+- The streamer's audio thread mixes one 20 ms block whenever
+  `BlockClock` says it is due (monotonic clock, exact, no drift) and
+  encodes it with Opus in music mode. The block's number is its RTP time,
+  so the audio follows real time across silences and stalls; after a
+  stall of more than 25 blocks it jumps ahead instead of sending a burst.
+  It also mixes before a sink is attached, so the inputs keep draining.
+- `StreamerConfigUpdate::audio_sources` changes the sources live.
+  Sources whose kind stays keep their capture and take the new gain and
+  mute; `Some(vec![])` leaves a silent track. A source that cannot
+  capture (an application that is not running, no PipeWire, a window
+  whose process is unknown) does not fail the stream: its
+  `AudioSourceStats::error` and `Streamer::audio_error()` say why.
+  `Streamer::audio_mixer()` hands out the `MixerHandle` for meters.
+- The settings key `stream.audio_sources` stores the sources as JSON, e.g.
+  `[{"kind": "desktop"}, {"kind": "app", "name": "firefox", "gain": 0.5},
+  {"kind": "microphone", "muted": true}]`. Other kinds are `"window"` and
+  `"synthetic"` (`frequency`), and an app can be given by `"pid"`. The
+  default is desktop audio; `[]` shares without sound. The desktop app
+  reads it when sharing starts (`media::audio_source_specs`).
+  `media::audio_apps()` lists the applications for a picker.
+
+What applications play is captured by `capture::playback::start_playback`:
+
+| Platform | All but ours | One application | Application list |
+|---|---|---|---|
+| Linux (PipeWire) | `pipewire_links::LinkManager`: a capture stream of ours that the session manager leaves unlinked (`node.autoconnect = false`) gets links from the output ports of every other playback stream (`Stream/Output/Audio`); PipeWire sums them. Links follow streams as they come and go | links from that application's streams only | playback streams in the registry, one entry per application, live |
+| Windows | WASAPI process loopback excluding our process tree (before Windows 10 2004: plain loopback of the default device, which includes our playback) | process loopback including the process tree; by name, one capture per matching process, matched again every 2 s | processes with audio sessions on any playback device, polled every 2 s |
+| Android | `AudioPlaybackCapture` excluding our uid | matching the package's uid | launchable apps (Android cannot tell which play) |
+
+On Linux, our own streams are recognised by the process id of the node, of
+its client, or of the client's socket (`pipewire.sec.pid`, compared with our
+own connection's, which also works in a sandbox), walked up the `/proc`
+parent chain. The playing sides of loopbacks and filters (`node.link-group`)
+are skipped: what they replay is captured at its source. This needs no
+session-manager policy and no extra sink, and leaves the user's routing and
+volumes alone. On Android, a capture needs the running screen capture and
+the microphone permission, and apps can opt out
+(`allowAudioPlaybackCapture`, or usages other than media, game and unknown,
+e.g. calls).
 
 ## Codecs
 
@@ -205,14 +275,14 @@ found at ...").
 
 ## Capture
 
-| Platform | Screen | System audio |
+| Platform | Screen | System audio (`AudioCapture`; streams use [Stream audio](#stream-audio)) |
 |---|---|---|
 | any | `SyntheticScreen` | `SineSource` |
 | Linux X11 (`x11`, default) | `X11Capture`: MIT-SHM 1.2 (memfd passed to the server) or GetImage; RandR 1.5 monitors; windows from `_NET_CLIENT_LIST` (root children without a WM); XFixes cursor blended in | |
 | Linux Wayland (`pipewire`, default) | `PortalCapture`: xdg-desktop-portal ScreenCast via `ashpd`, frames from a PipeWire video stream (LINEAR DMA-BUF or shared memory) | `PipeWireAudioCapture`: default sink monitor (`stream.capture.sink = true`) |
 | Linux wlroots (`wlroots`, default) | `WlrootsCapture`: `ext-image-copy-capture-v1`, else `wlr-screencopy-unstable-v1`, outputs only, shared memory | |
 | Windows | `WindowsCapture`: Windows Graphics Capture (`windows-capture`), monitors and windows | `WasapiLoopback`: process loopback excluding our own process tree, falling back to plain loopback |
-| Android | `ExternalScreenCapture` fed by the app (MediaProjection → `ImageReader`, RGBA; see [android.md](android.md)) | `ExternalAudioCapture` fed by the app (`AudioPlaybackCapture`, 48 kHz float) |
+| Android | `ExternalScreenCapture` fed by the app (MediaProjection → `ImageReader`, RGBA; see [android.md](android.md)) | `ExternalAudioCapture` fed by the app (`AudioPlaybackCapture` of every app but ours, 48 kHz float) |
 
 `default_screen_capture()` picks a registered external provider first
 (`capture::external::set_screen_provider`, which the Android app calls at
@@ -251,12 +321,11 @@ Notes:
 - X11 reads through the shared-memory segment in place (cursor blended into
   it); the monitor or window geometry is looked up once a second rather than
   per frame. x11rb still allocates a small reply buffer per request.
-- PipeWire system audio captures everything the default sink plays, including
-  our own playback (TeamSpeak voices): PipeWire has no "all but this process"
-  monitor. Excluding our nodes needs a private null sink with links from every
-  other application's output (via the registry); TODO. Until then, play voices
-  on another sink or accept that viewers hear them. Without a PipeWire daemon,
-  `start` returns `Error::CaptureUnavailable`.
+- `PipeWireAudioCapture` (the plain `AudioCapture`) captures everything the
+  default sink plays, including our own playback. Streams do not use it: their
+  desktop audio links every other application's playback into a capture
+  stream of ours ([Stream audio](#stream-audio)). Without a PipeWire daemon,
+  both return `Error::CaptureUnavailable`.
 - Windows process loopback needs Windows 10 2004 or later.
 
 ## Performance and benchmarks
@@ -369,6 +438,12 @@ run on Windows yet.
 | Test pattern → VP8 → decoder, rectangle position and colour | `voelin-core` `media::tests::local_preview_decodes_the_pattern` | tested |
 | Test pattern → two engine stream tasks → str0m peers on loopback → decoder | `voelin-core` `stream::tests::test_pattern_through_stream_tasks` | tested |
 | Stream audio (RTP time → jitter buffer ids, volume, end) | `voelin-core` `audio::tests::stream_audio_with_volume`, stream task test | tested |
+| Stream mixer (latency, fade on underrun, drift correction, rate conversion, limiter, levels, live source changes), `BlockClock` | `voelin-media` `mix::tests`, `tests/mix_alloc.rs` (no allocation per block) | tested |
+| Application audio on PipeWire: desktop without our own stream, by name, by pid, a new player linked live, a quit one dropped, a restarted one matched again, the app list | `voelin-media/tests/pipewire_apps.rs` (private PipeWire, WirePlumber and D-Bus; tones told apart by frequency) | tested with PipeWire 1.0 and WirePlumber 0.4; skipped without them |
+| Streamer audio sources (mix levels, gain, mute, live change, microphone tap, window source error, silence) | `voelin-core` `media::tests::audio_sources_change_live`, `audio_sources_from_settings`, `settings::tests::audio_sources` | tested |
+| X11 `_NET_WM_PID` of the shared window | `tests/x11_capture.rs` under Xvfb | tested |
+| WASAPI per-process loopback, audio sessions, `HWND` owner | – | type-checked for `x86_64-pc-windows-gnu` only |
+| Android per-app and all-but-ours playback capture | `cargo ndk -t arm64-v8a clippy`, `gradlew compileDebugKotlin` | compiles only (no device or emulator here) |
 | The same through the TeamSpeak 6 server | `voelin-core/tests/media_live.rs` (`VOELIN_LIVE=1`), `voelinctl stream start --synthetic` / `watch --expect-frames` | tested against 6.0.0-beta13.1 |
 | X11 monitor capture → VP8 → server → decoder | `voelinctl stream start --source x11` under Xvfb | tested manually (debug build: about 8 fps at 1400×900) |
 | Desktop app watching and sharing | Xvfb, `VOELIN_AUTOWATCH` / `VOELIN_AUTOSHARE` against voelinctl, screenshots | tested manually |
