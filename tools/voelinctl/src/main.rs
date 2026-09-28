@@ -1,5 +1,6 @@
 //! `voelinctl`: headless TeamSpeak 3/6 client for development and integration tests.
 
+mod engine;
 mod gateway;
 mod identity;
 mod observe;
@@ -45,7 +46,9 @@ enum Command {
 	Observe(observe::ObserveArgs),
 	/// Read and write a channel's chat through an invisible query relay.
 	Relay(observe::RelayArgs),
-	/// Use a tsgw gateway as a user: presence, chat, history.
+	/// Use a tsgw gateway as a user: presence, chat, history; with
+	/// `--engine` through the client engine (chat history sync, pins,
+	/// reactions, topics, events, stream directory, administration).
 	Gateway(gateway::GatewayArgs),
 	/// TeamSpeak 6: probe how a client that arrives after a stream started
 	/// can learn about it; prints every command both clients exchange.

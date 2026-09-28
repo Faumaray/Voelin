@@ -564,13 +564,19 @@ pub(crate) fn gateway_history(client: &GatewayClient, target: &ChatTarget) -> bo
 
 /// A chat opened (or its session reconnected): the stored page, then what
 /// the gateway has that we do not.
-pub(crate) async fn open_chat(ctx: ChatCtx, target: ChatTarget, gateway: Option<GatewayClient>) {
+pub(crate) async fn open_chat(
+	ctx: ChatCtx,
+	target: ChatTarget,
+	gateway: Option<GatewayClient>,
+	gateway_pending: bool,
+) {
 	let gateway = gateway.filter(|g| gateway_history(g, &target));
 	let limit = ctx.page_limit();
 	let query = PageQuery { limit: limit.map(|l| l as usize), ..Default::default() };
 	match ctx.history.page(&ctx.server_uid, &target, query, ctx.memory()).await {
 		Ok(local) => {
-			let complete = gateway.is_none() && limit.is_none_or(|l| local.len() < l as usize);
+			let short = limit.is_none_or(|l| local.len() < l as usize);
+			let complete = short && gateway.is_none() && !gateway_pending;
 			ctx.emit_batch(&target, local, HistorySource::Local, complete);
 		}
 		Err(e) => warn!("cannot read chat history: {e}"),

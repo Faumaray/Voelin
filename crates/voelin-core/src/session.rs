@@ -521,7 +521,10 @@ impl Session {
 	/// Show a chat's stored messages, then sync it with the gateway.
 	fn open_history(&self, target: &ChatTarget) {
 		if let Some(ctx) = self.chat_ctx() {
-			tokio::spawn(history::open_chat(ctx, target.clone(), self.gateway_client.clone()));
+			// A gateway that is still connecting may have more.
+			let pending = self.gateway.is_some() && self.gateway_client.is_none();
+			let gateway = self.gateway_client.clone();
+			tokio::spawn(history::open_chat(ctx, target.clone(), gateway, pending));
 		}
 	}
 
