@@ -36,6 +36,8 @@ dav1d = { version = "0.11.1", optional = true }
 libvpx-native-sys = { version = "5.0.17", optional = true }
 openh264 = { version = "0.9.8", default-features = false, features = ["libloading"], optional = true }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"], optional = true }
+# Lock-free single-producer rings from capture threads to the stream mixer.
+rtrb = "0.4.0"
 sha2 = { version = "0.10.9", optional = true }
 str0m = { version = "0.23.1", default-features = false, optional = true }
 thiserror = "2.0.21"
@@ -66,6 +68,10 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] 
 
 [[bench]]
 name = "convert"
+harness = false
+
+[[bench]]
+name = "mix"
 harness = false
 
 [lints]
