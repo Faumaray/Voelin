@@ -55,7 +55,7 @@ component ServerCard inherits Rectangle {
     min-width: 220px;
     max-width: 340px;
     horizontal-stretch: 1;
-    height: 176px;
+    height: 132px;
     border-radius: Theme.radius-lg;
     clip: true;
     background: Theme.surface-2;
@@ -98,6 +98,7 @@ component ServerCard inherits Rectangle {
                 CountBadge { count: root.server.unread; }
             }
         }
+        Rectangle { vertical-stretch: 1; }
         Text {
             text: root.server.name;
             color: Theme.text;
@@ -125,14 +126,15 @@ component ServerCard inherits Rectangle {
 }
 
 export component HomePage inherits Rectangle {
-    ScrollView {
+    sv := ScrollView {
         VerticalLayout {
+            width: sv.visible-width;
             padding: Theme.space-6;
             spacing: Theme.space-6;
             alignment: start;
             // Welcome banner.
             Rectangle {
-                height: 220px;
+                min-height: 220px;
                 border-radius: Theme.radius-xl;
                 clip: true;
                 background: @linear-gradient(115deg, #0e1d5c 0%, #1c1470 45%, #3a1f86 75%, #0b2a6b 100%);
@@ -152,6 +154,8 @@ export component HomePage inherits Rectangle {
                     height: ring.size;
                     border-radius: ring.size / 2;
                     background: ring.color;
+                    // Behind the text in narrow windows.
+                    visible: parent.width > 640px;
                 }
                 for star[i] in [
                     { x: 0.55, y: 0.18 }, { x: 0.62, y: 0.52 }, { x: 0.71, y: 0.1 }, { x: 0.9, y: 0.3 },
@@ -189,10 +193,12 @@ export component HomePage inherits Rectangle {
                         color: #ffffff;
                         font-size: Theme.font-xl;
                         font-weight: Theme.weight-medium;
+                        wrap: word-wrap;
                     }
                     Text {
                         text: @tr("Talk. Watch. Share. Or look in without joining.");
                         color: #c9d4ff;
+                        wrap: word-wrap;
                     }
                     HorizontalLayout {
                         alignment: start;

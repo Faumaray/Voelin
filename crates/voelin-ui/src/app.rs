@@ -602,6 +602,9 @@ impl App {
 				self.refresh_tree();
 				self.refresh_streams();
 				self.autoshare();
+				if self.open_client_pending && self.current == Some(id) {
+					self.open_first_client();
+				}
 			}
 			Event::ServerInfo { session, name, flavor, capabilities } => {
 				self.sessions.entry(session as i64).or_default().capabilities = capabilities;

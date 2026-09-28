@@ -193,9 +193,10 @@ export component StreamsPanel inherits VerticalLayout {
         font-size: Theme.font-sm;
         wrap: word-wrap;
     }
-    ScrollView {
+    sv := ScrollView {
         vertical-stretch: 1;
         VerticalLayout {
+            width: sv.visible-width;
             spacing: Theme.space-2;
             alignment: start;
             for member in Bridge.members: MemberRow {

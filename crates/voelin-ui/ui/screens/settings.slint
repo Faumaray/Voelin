@@ -468,8 +468,9 @@ export component SettingsPage inherits Rectangle {
         : Nav.settings-section == SettingsSection.privacy ? @tr("What the app keeps on this device.") : @tr("Theme, text size and layout. Changes apply at once.");
     accessible-role: AccessibleRole.groupbox;
     accessible-label: section-title;
-    ScrollView {
+    sv := ScrollView {
         VerticalLayout {
+            width: sv.visible-width;
             padding: compact ? Theme.space-4 : Theme.space-7;
             spacing: Theme.space-5;
             alignment: start;
