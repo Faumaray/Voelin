@@ -1,0 +1,143 @@
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Icon } from "icon.slint";
+
+// A section title with an optional count and a "See All >" link.
+export component SectionHeader inherits HorizontalLayout {
+    in property <string> text;
+    in property <image> icon;
+    in property <string> count;
+    in property <string> action;
+    // Uppercase-ish small header (sidebar sections) instead of a title.
+    in property <bool> small;
+    callback action-clicked();
+    spacing: Theme.space-3;
+    min-height: small ? 24px : 32px;
+    if icon.width > 0: Icon {
+        source: root.icon;
+        size: small ? Theme.icon-sm : Theme.icon-md;
+        tint: Theme.text-secondary;
+        y: (parent.height - self.height) / 2;
+    }
+    Text {
+        text: root.count != "" ? root.text + " — " + root.count : root.text;
+        color: root.small ? Theme.text-secondary : Theme.text;
+        font-size: root.small ? Theme.font-sm : Theme.font-lg;
+        font-weight: root.small ? Theme.weight-semibold : Theme.weight-semibold;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+        overflow: elide;
+        accessible-role: AccessibleRole.text;
+    }
+    if action != "": Rectangle {
+        accessible-role: AccessibleRole.button;
+        accessible-label: root.action;
+        accessible-action-default => { root.action-clicked(); }
+        min-width: link.preferred-width;
+        link := HorizontalLayout {
+            spacing: 2px;
+            Text {
+                text: root.action;
+                color: link-area.has-hover ? Theme.accent-hover : Theme.accent-text;
+                font-size: Theme.font-sm;
+                vertical-alignment: center;
+            }
+            Icon {
+                source: Icons.chevron-right;
+                size: 14px;
+                tint: Theme.accent-text;
+                y: (parent.height - self.height) / 2;
+            }
+        }
+        link-area := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { root.action-clicked(); }
+        }
+    }
+}
+
+// A panel card: surface, border, rounded corners; an optional header with
+// icon, title and a trailing slot.
+export component Card inherits Rectangle {
+    in property <string> title;
+    in property <image> icon;
+    in property <string> subtitle;
+    in property <length> inset: Theme.space-5;
+    in property <length> gap: Theme.space-4;
+    // Highlighted border (selected cards).
+    in property <bool> selected;
+    background: Theme.surface-2.transparentize(0.25);
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: selected ? Theme.accent : Theme.border;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: title;
+    VerticalLayout {
+        padding: root.inset;
+        spacing: root.gap;
+        if root.title != "": HorizontalLayout {
+            spacing: Theme.space-3;
+            if root.icon.width > 0: Icon {
+                source: root.icon;
+                size: Theme.icon-md;
+                tint: Theme.accent-text;
+                y: (parent.height - self.height) / 2;
+            }
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: root.title;
+                    font-size: Theme.font-lg;
+                    font-weight: Theme.weight-semibold;
+                    color: Theme.text;
+                }
+                if root.subtitle != "": Text {
+                    text: root.subtitle;
+                    font-size: Theme.font-sm;
+                    color: Theme.text-muted;
+                    wrap: word-wrap;
+                }
+            }
+        }
+        @children
+    }
+}
+
+// A thin horizontal separator line.
+export component Divider inherits Rectangle {
+    height: 1px;
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+    background: Theme.border;
+}
+
+// A warning or error strip with actions (crash notice, share errors).
+export component Banner inherits Rectangle {
+    in property <string> text;
+    in property <image> icon: Icons.triangle-alert;
+    in property <color> tone: Theme.warning;
+    background: tone.transparentize(0.85);
+    border-radius: Theme.radius-md;
+    border-width: 1px;
+    border-color: tone.transparentize(0.55);
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: text;
+    HorizontalLayout {
+        padding: Theme.space-3;
+        padding-left: Theme.space-4;
+        spacing: Theme.space-3;
+        Icon {
+            source: root.icon;
+            tint: root.tone;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: root.text;
+            color: Theme.text;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            wrap: word-wrap;
+        }
+        @children
+    }
+}

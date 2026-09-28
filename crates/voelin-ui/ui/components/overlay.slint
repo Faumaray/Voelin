@@ -1,0 +1,313 @@
+// Floating things: menus, tooltips, modal dialogs, toasts, the resize
+// handle of side panels.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Icon } from "icon.slint";
+import { IconButton } from "button.slint";
+
+// An entry of a `PopupMenu`.
+export struct MenuEntry {
+    text: string,
+    icon: image,
+    // Red (leave, delete).
+    danger: bool,
+    enabled: bool,
+    // A line above this entry.
+    separator: bool,
+}
+
+// A themed menu: open with `show(x, y)` (relative to the element that
+// contains it); `activated(index)` when an entry is chosen. For right-click
+// menus wrap a `TouchArea` and call `show` on `pointer-event` of the right
+// button.
+export component PopupMenu inherits Rectangle {
+    in property <[MenuEntry]> entries;
+    in property <length> menu-width: 220px;
+    callback activated(int);
+    property <length> px;
+    property <length> py;
+    property <length> row-height: Theme.control-height;
+
+    public function show(x: length, y: length) {
+        px = x;
+        py = y;
+        popup.show();
+    }
+
+    width: 0;
+    height: 0;
+    popup := PopupWindow {
+        x: root.px;
+        y: root.py;
+        width: root.menu-width;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+        Rectangle {
+            border-radius: Theme.radius-md;
+            background: Theme.surface-3;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            accessible-role: AccessibleRole.list;
+            VerticalLayout {
+                padding: Theme.space-2;
+                for entry[i] in root.entries: VerticalLayout {
+                    if entry.separator: Rectangle {
+                        height: 9px;
+                        Rectangle {
+                            height: 1px;
+                            background: Theme.border;
+                        }
+                    }
+                    Rectangle {
+                        height: root.row-height;
+                        border-radius: Theme.radius-sm;
+                        background: item.has-hover && entry.enabled ? (entry.danger ? Theme.danger-soft : Theme.surface-4) : transparent;
+                        opacity: entry.enabled ? 1.0 : 0.5;
+                        accessible-role: AccessibleRole.button;
+                        accessible-label: entry.text;
+                        accessible-enabled: entry.enabled;
+                        accessible-action-default => {
+                            root.activated(i);
+                            popup.close();
+                        }
+                        item := TouchArea {
+                            enabled: entry.enabled;
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                root.activated(i);
+                                popup.close();
+                            }
+                        }
+                        HorizontalLayout {
+                            padding-left: Theme.space-3;
+                            padding-right: Theme.space-3;
+                            spacing: Theme.space-3;
+                            if entry.icon.width > 0: Icon {
+                                source: entry.icon;
+                                size: Theme.icon-sm;
+                                tint: entry.danger ? Theme.danger : Theme.icon;
+                                y: (parent.height - self.height) / 2;
+                            }
+                            Text {
+                                text: entry.text;
+                                color: entry.danger ? Theme.danger : Theme.text;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Hover help: wraps @children and shows `text` in a bubble after a moment.
+export component Tooltip inherits Rectangle {
+    in property <string> text;
+    // Above (default) or below the element.
+    in property <bool> below;
+    area := TouchArea {
+        @children
+    }
+    Timer {
+        interval: 600ms;
+        running: area.has-hover && root.text != "";
+        triggered => {
+            self.running = false;
+            bubble.show();
+        }
+    }
+    bubble := PopupWindow {
+        x: (root.width - self.width) / 2;
+        y: root.below ? root.height + 6px : -self.height - 6px;
+        width: label.preferred-width + 20px;
+        height: label.preferred-height + 12px;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+        Rectangle {
+            border-radius: Theme.radius-sm;
+            background: Theme.surface-4;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            label := Text {
+                text: root.text;
+                color: Theme.text;
+                font-size: Theme.font-sm;
+            }
+        }
+    }
+}
+
+// A modal dialog: a dimmed backdrop and a card with a title, a close button,
+// the content (@children) and usually a footer row inside the content.
+// Clicking the backdrop or Escape dismisses it.
+export component Modal inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <image> icon;
+    // Tint the icon with the accent (off for full-colour images).
+    in property <bool> tint-icon: true;
+    in property <length> card-width: 520px;
+    in property <length> card-height: 520px;
+    callback dismissed();
+
+    background: Theme.scrim;
+    accessible-role: AccessibleRole.none;
+    TouchArea {
+        clicked => { root.dismissed(); }
+    }
+    FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.dismissed();
+                return accept;
+            }
+            reject
+        }
+    }
+    card := Rectangle {
+        width: min(root.width - 32px, root.card-width);
+        height: min(root.height - 32px, root.card-height);
+        background: Theme.surface;
+        border-radius: Theme.radius-xl;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        accessible-role: AccessibleRole.groupbox;
+        accessible-label: root.title;
+        // Clicks inside the card do not dismiss it.
+        TouchArea { }
+        // A faint accent line along the top edge.
+        Rectangle {
+            y: 0;
+            x: Theme.radius-xl;
+            width: parent.width - 2 * Theme.radius-xl;
+            height: 1px;
+            background: @linear-gradient(90deg, transparent 0%, Theme.accent 50%, transparent 100%);
+        }
+        VerticalLayout {
+            padding: Theme.space-6;
+            spacing: Theme.space-5;
+            HorizontalLayout {
+                spacing: Theme.space-4;
+                if root.icon.width > 0: Rectangle {
+                    width: 40px;
+                    height: 40px;
+                    border-radius: Theme.radius-md;
+                    background: Theme.accent-soft;
+                    if root.tint-icon: Icon {
+                        source: root.icon;
+                        tint: Theme.accent-text;
+                    }
+                    if !root.tint-icon: Image {
+                        width: 28px;
+                        height: 28px;
+                        source: root.icon;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: root.title;
+                        font-size: Theme.font-xl;
+                        font-weight: Theme.weight-semibold;
+                        color: Theme.text;
+                        overflow: elide;
+                    }
+                    if root.subtitle != "": Text {
+                        text: root.subtitle;
+                        font-size: Theme.font-sm;
+                        color: Theme.text-muted;
+                        wrap: word-wrap;
+                    }
+                }
+                VerticalLayout {
+                    alignment: start;
+                    IconButton {
+                        icon: Icons.x;
+                        label: @tr("Close");
+                        size: 32px;
+                        clicked => { root.dismissed(); }
+                    }
+                }
+            }
+            @children
+        }
+    }
+}
+
+// A short message at the bottom of the window that hides itself.
+export component Toast inherits Rectangle {
+    in property <string> text;
+    in property <image> icon: Icons.info;
+    in property <duration> timeout: 5s;
+    in-out property <bool> shown;
+    height: shown ? row.preferred-height + 16px : 0px;
+    width: min(row.preferred-width + 24px, 560px);
+    visible: shown;
+    border-radius: Theme.radius-lg;
+    background: Theme.surface-3;
+    border-width: 1px;
+    border-color: Theme.border-strong;
+    accessible-role: AccessibleRole.text;
+    accessible-label: text;
+    accessible-live-region: polite;
+    Timer {
+        interval: root.timeout;
+        running: root.shown;
+        triggered => { root.shown = false; }
+    }
+    TouchArea {
+        clicked => { root.shown = false; }
+    }
+    row := HorizontalLayout {
+        padding-left: Theme.space-4;
+        padding-right: Theme.space-4;
+        spacing: Theme.space-3;
+        Icon {
+            source: root.icon;
+            size: Theme.icon-sm;
+            tint: Theme.accent-text;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: root.text;
+            color: Theme.text;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+// A vertical grip between panels: drag to resize. `size` is the width of
+// the panel on the `left` or right side of the handle, kept within bounds.
+export component ResizeHandle inherits Rectangle {
+    in-out property <length> size;
+    in property <length> minimum: 160px;
+    in property <length> maximum: 600px;
+    // The panel is left of the handle (dragging right grows it).
+    in property <bool> left;
+    width: 8px;
+    horizontal-stretch: 0;
+    accessible-role: AccessibleRole.slider;
+    accessible-label: @tr("Panel width");
+    accessible-value: round(size / 1px);
+    accessible-action-increment => { size = min(maximum, size + 16px); }
+    accessible-action-decrement => { size = max(minimum, size - 16px); }
+    Rectangle {
+        width: 2px;
+        height: 36px;
+        border-radius: 1px;
+        background: touch.has-hover || touch.pressed ? Theme.accent : Theme.border-strong;
+    }
+    // The handle moves with the edge, so each move adds the distance from
+    // where it was pressed.
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.col-resize;
+        moved => {
+            if self.pressed {
+                root.size = clamp(root.size + (root.left ? 1 : -1) * (self.mouse-x - self.pressed-x), root.minimum, root.maximum);
+            }
+        }
+    }
+}

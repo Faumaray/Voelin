@@ -165,8 +165,15 @@ RANGES = [
 	((0x1F3FB, 0x1F3FF), "people"),
 ]
 
-# Emoji newer than Python 3.11's Unicode database (14.0).
+# Emoji newer than Python 3.11's Unicode database (14.0), and common
+# emoji whose character name differs from the name people search for.
 EXTRA_NAMES = {
+	0x2764: "red heart",
+	0x2B50: "star",
+	0x1F44D: "thumbs up",
+	0x1F44E: "thumbs down",
+	0x1F525: "fire",
+	0x1F602: "face with tears of joy laughing",
 	0x1F6DC: "wireless",
 	0x1FA75: "light blue heart",
 	0x1FA76: "grey heart",
@@ -212,16 +219,17 @@ def entry_name(cps):
 
 
 def category(cps):
+	"""The category and the position of the matching range (for ordering)."""
 	if all(0x1F1E6 <= cp <= 0x1F1FF for cp in cps) and len(cps) == 2:
-		return "flags"
+		return "flags", 0
 	first = cps[0]
 	# Keycaps and other text symbols.
 	if first < 0x2000 or (0x20E3 in cps):
-		return "symbols"
-	for (lo, hi), cat in RANGES:
+		return "symbols", len(RANGES)
+	for i, ((lo, hi), cat) in enumerate(RANGES):
 		if lo <= first <= hi:
-			return cat
-	return "symbols"
+			return cat, i
+	return "symbols", len(RANGES)
 
 
 def in_picker(cps):
@@ -248,17 +256,19 @@ def main():
 		cps = [int(p, 16) for p in key.split("-")]
 		with open(os.path.join(src, file), "rb") as f:
 			svg = f.read().strip()
-		cat = category(cps)
+		cat, order = category(cps)
 		items.append({
 			"key": key,
 			"cps": cps,
 			"svg": svg,
 			"cat": CATEGORIES.index(cat),
+			"order": order,
 			"name": entry_name(cps),
 			"picker": in_picker(cps) and entry_name(cps) != "",
 		})
-	# Data in picker order: category, then code points.
-	items.sort(key=lambda it: (it["cat"], it["cps"]))
+	# Data in picker order: category, the order of RANGES (smileys start
+	# with the smiling faces), then code points.
+	items.sort(key=lambda it: (it["cat"], it["order"], it["cps"]))
 	blocks = []
 	raw = bytearray()
 	for it in items:

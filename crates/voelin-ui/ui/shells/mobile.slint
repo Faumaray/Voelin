@@ -1,0 +1,182 @@
+// The narrow (phone) frame: a top bar, one page at a time (@children), and
+// the bottom navigation (Home, Servers, Chat, Activity, You). Used while
+// the window is narrower than `Nav.narrow-breakpoint`.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Bridge } from "../bridge.slint";
+import { Nav, Page, MobileTab, SettingsSection } from "../nav.slint";
+import { Icon, IconButton, CountBadge } from "../components/index.slint";
+
+// One entry of the bottom navigation.
+component NavTab inherits Rectangle {
+    in property <image> icon;
+    in property <string> text;
+    in property <bool> selected;
+    in property <int> badge;
+    in property <bool> dot;
+    callback clicked();
+    horizontal-stretch: 1;
+    accessible-role: AccessibleRole.tab;
+    accessible-label: text;
+    accessible-item-selectable: true;
+    accessible-item-selected: selected;
+    accessible-action-default => { clicked(); }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    if selected: Rectangle {
+        width: 56px;
+        height: 32px;
+        y: 6px;
+        border-radius: 16px;
+        background: Theme.accent-soft;
+        border-width: 1px;
+        border-color: Theme.glow;
+    }
+    VerticalLayout {
+        alignment: center;
+        spacing: 3px;
+        HorizontalLayout {
+            alignment: center;
+            Icon {
+                source: root.icon;
+                size: 22px;
+                tint: root.selected ? Theme.accent-text : Theme.icon;
+            }
+        }
+        Text {
+            text: root.text;
+            color: root.selected ? Theme.accent-text : Theme.text-secondary;
+            font-size: Theme.font-xs;
+            font-weight: root.selected ? Theme.weight-semibold : Theme.weight-regular;
+            horizontal-alignment: center;
+        }
+    }
+    if badge > 0: CountBadge {
+        x: parent.width / 2 + 4px;
+        y: 2px;
+        count: root.badge;
+    }
+    if dot && badge == 0: Rectangle {
+        x: parent.width / 2 + 8px;
+        y: 6px;
+        width: 9px;
+        height: 9px;
+        border-radius: 4.5px;
+        background: Theme.success;
+    }
+}
+
+export component MobileShell inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    // Total unread messages (the Chat tab's badge).
+    in property <int> unread;
+    // Show a back arrow (sub-pages such as the settings).
+    in property <bool> back;
+    callback go-back();
+    background: Theme.backdrop;
+    VerticalLayout {
+        // Top bar.
+        Rectangle {
+            height: 60px;
+            accessible-role: AccessibleRole.banner;
+            HorizontalLayout {
+                padding-left: Theme.space-4;
+                padding-right: Theme.space-3;
+                spacing: Theme.space-3;
+                if root.back: IconButton {
+                    icon: Icons.arrow-left;
+                    label: @tr("Back");
+                    round: true;
+                    filled: true;
+                    y: (parent.height - self.height) / 2;
+                    clicked => { root.go-back(); }
+                }
+                if !root.back: Image {
+                    width: 34px;
+                    height: 34px;
+                    y: (parent.height - self.height) / 2;
+                    source: Icons.logo;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: root.title;
+                        color: Theme.text;
+                        font-size: Theme.font-xl;
+                        font-weight: Theme.weight-semibold;
+                        overflow: elide;
+                    }
+                    if root.subtitle != "": Text {
+                        text: root.subtitle;
+                        color: Theme.accent-text;
+                        font-size: Theme.font-sm;
+                        overflow: elide;
+                    }
+                }
+                IconButton {
+                    icon: Icons.bell;
+                    label: @tr("Notifications");
+                    round: true;
+                    filled: true;
+                    dot: Bridge.share-requests > 0 || Bridge.crash-notice != "";
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Nav.mobile-tab = MobileTab.activity; Nav.show(Page.server); }
+                }
+            }
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            @children
+        }
+        // Bottom navigation.
+        Rectangle {
+            height: 64px;
+            background: Theme.surface;
+            border-width: 1px;
+            border-color: Theme.border;
+            accessible-role: AccessibleRole.tab-list;
+            accessible-label: @tr("Navigation");
+            HorizontalLayout {
+                padding-left: Theme.space-2;
+                padding-right: Theme.space-2;
+                NavTab {
+                    icon: Icons.home;
+                    text: @tr("Home");
+                    selected: Nav.mobile-tab == MobileTab.home && Nav.page != Page.settings;
+                    clicked => { Nav.show(Page.home); Nav.mobile-tab = MobileTab.home; }
+                }
+                NavTab {
+                    icon: Icons.server;
+                    text: @tr("Servers");
+                    selected: Nav.mobile-tab == MobileTab.servers && Nav.page != Page.settings;
+                    dot: Bridge.voice-connected;
+                    clicked => { Nav.show(Page.server); Nav.mobile-tab = MobileTab.servers; }
+                }
+                NavTab {
+                    icon: Bridge.viewer-open ? Icons.monitor : Icons.message-circle;
+                    text: Bridge.viewer-open ? @tr("Stream") : @tr("Chat");
+                    selected: Nav.mobile-tab == MobileTab.chat && Nav.page != Page.settings;
+                    badge: root.unread;
+                    clicked => { Nav.show(Page.server); Nav.mobile-tab = MobileTab.chat; }
+                }
+                NavTab {
+                    icon: Icons.activity;
+                    text: @tr("Activity");
+                    selected: Nav.mobile-tab == MobileTab.activity && Nav.page != Page.settings;
+                    badge: Bridge.share-requests;
+                    clicked => { Nav.show(Page.server); Nav.mobile-tab = MobileTab.activity; }
+                }
+                NavTab {
+                    icon: Icons.user;
+                    text: @tr("You");
+                    selected: Nav.mobile-tab == MobileTab.you || Nav.page == Page.settings;
+                    clicked => { Nav.show(Page.server); Nav.mobile-tab = MobileTab.you; }
+                }
+            }
+        }
+    }
+}

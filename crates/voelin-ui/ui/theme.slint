@@ -1,0 +1,140 @@
+// Design tokens: colours, radii, spacing, type sizes. Components and screens
+// use these instead of literal values, so the theme and the font scale can
+// change while the app runs (Rust sets `mode` and `font-scale` from the
+// settings `ui.theme` and `ui.font_scale`).
+//
+// The software renderer draws no drop shadows and no gradient window
+// background, so "glow" is a translucent accent ring (`glow`, `glow-width`)
+// and the backdrop gradient is a rectangle (`backdrop`).
+
+import { Palette } from "std-widgets.slint";
+
+export global Theme {
+    // "dark", "light" or "system" (the setting `ui.theme`).
+    in-out property <string> mode: "dark";
+    // Dark or light colours. The standard widgets (scroll bars, context
+    // menus) follow the system's scheme.
+    out property <bool> dark: mode == "system" ? Palette.color-scheme != ColorScheme.light : mode != "light";
+    // Multiplies every type size (and the sizes that follow text).
+    in-out property <float> font-scale: 1.0;
+
+    // Backgrounds, from the window outwards in.
+    out property <color> bg-app: dark ? #060a18 : #e9eef9;
+    out property <brush> backdrop: dark
+        ? @linear-gradient(160deg, #0a1230 0%, #060a18 55%, #0a1638 100%)
+        : @linear-gradient(160deg, #f4f7fd 0%, #e6ecf8 60%, #dde6f7 100%);
+    // The server rail, the far left.
+    out property <color> bg-rail: dark ? #070c1d : #dfe6f4;
+    // Panels: sidebar, main area, right panel.
+    out property <color> surface: dark ? #0b1330 : #f7f9fe;
+    // Cards and inputs inside panels.
+    out property <color> surface-2: dark ? #101a3c : #ffffff;
+    // Raised: hovered rows, menus, popups.
+    out property <color> surface-3: dark ? #16224b : #eaf0fb;
+    // Pressed or strongly highlighted.
+    out property <color> surface-4: dark ? #1c2b5c : #dce5f7;
+    // Dimmed backdrop behind modals.
+    out property <color> scrim: dark ? #02050fc0 : #0b132b80;
+    // Translucent bar over video.
+    out property <color> overlay: dark ? #060a18c8 : #0b1330b0;
+
+    out property <color> border: dark ? #1b2750 : #d3dcee;
+    out property <color> border-strong: dark ? #2a3a6e : #b9c6e2;
+
+    // Accent (buttons, selection, links).
+    out property <color> accent: dark ? #2d6bff : #2458e6;
+    out property <color> accent-hover: dark ? #4a82ff : #3a6cf0;
+    out property <color> accent-pressed: dark ? #1f55d9 : #1b47c0;
+    // Selected rows and chips.
+    out property <color> accent-soft: dark ? #18348a : #d6e2ff;
+    out property <color> accent-soft-hover: dark ? #1d3d9c : #c8d8ff;
+    // Links, "See All", highlighted names.
+    out property <color> accent-text: dark ? #5c9dff : #1d4fd6;
+    // Author names in chat.
+    out property <color> name-text: dark ? #45b9ff : #0f6cc4;
+    out property <color> on-accent: #ffffff;
+    // The ring around focused and selected items.
+    out property <color> glow: dark ? #3f7bff90 : #2458e660;
+    out property <length> glow-width: 2px;
+
+    // States.
+    out property <color> live: dark ? #ff2d55 : #e0203f;
+    out property <color> live-soft: dark ? #3a0f22 : #ffe0e6;
+    out property <color> danger: dark ? #ff4d5e : #d92c3c;
+    out property <color> danger-soft: dark ? #3b1020 : #ffe3e6;
+    out property <color> success: dark ? #22d36b : #16a557;
+    out property <color> success-soft: dark ? #0d3326 : #d7f5e4;
+    out property <color> warning: dark ? #f5b301 : #b77f00;
+    out property <color> warning-soft: dark ? #3a2a06 : #fff0c8;
+    out property <color> idle: dark ? #f5b301 : #c98b00;
+    out property <color> dnd: dark ? #ff4d5e : #d92c3c;
+    out property <color> offline: dark ? #5f6d93 : #8d99b5;
+    out property <color> gold: dark ? #ffc233 : #d99a00;
+    out property <color> info: dark ? #3fb3ff : #1180d6;
+
+    // Text.
+    out property <color> text: dark ? #eef2ff : #0e1733;
+    out property <color> text-secondary: dark ? #aeb9d8 : #43506f;
+    out property <color> text-muted: dark ? #6d7ca6 : #6f7b98;
+    out property <color> text-disabled: dark ? #46527a : #a7b1c8;
+    // Icons without their own colour.
+    out property <color> icon: dark ? #b9c4e2 : #43506f;
+
+    // Audio meter segments.
+    out property <color> meter-low: #21d07a;
+    out property <color> meter-mid: #f5d000;
+    out property <color> meter-high: #ff4d5e;
+    out property <color> meter-off: dark ? #1a2550 : #d5ddef;
+
+    // Radii.
+    out property <length> radius-xs: 4px;
+    out property <length> radius-sm: 6px;
+    out property <length> radius-md: 8px;
+    out property <length> radius-lg: 12px;
+    out property <length> radius-xl: 16px;
+    out property <length> radius-pill: 999px;
+
+    // Spacing scale.
+    out property <length> space-1: 2px;
+    out property <length> space-2: 4px;
+    out property <length> space-3: 8px;
+    out property <length> space-4: 12px;
+    out property <length> space-5: 16px;
+    out property <length> space-6: 20px;
+    out property <length> space-7: 24px;
+    out property <length> space-8: 32px;
+
+    // Type sizes (scaled).
+    out property <length> font-xs: 11px * font-scale;
+    out property <length> font-sm: 12px * font-scale;
+    out property <length> font-body: 14px * font-scale;
+    out property <length> font-md: 15px * font-scale;
+    out property <length> font-lg: 17px * font-scale;
+    out property <length> font-xl: 20px * font-scale;
+    out property <length> font-2xl: 24px * font-scale;
+    out property <length> font-3xl: 30px * font-scale;
+    out property <int> weight-regular: 400;
+    out property <int> weight-medium: 500;
+    out property <int> weight-semibold: 600;
+    out property <int> weight-bold: 700;
+    out property <string> font-family: "Inter";
+
+    // Sizes that follow the text.
+    out property <length> row-height: 32px * font-scale;
+    out property <length> control-height: 36px * font-scale;
+    out property <length> control-height-sm: 28px * font-scale;
+    out property <length> icon-sm: 16px;
+    out property <length> icon-md: 20px;
+    out property <length> icon-lg: 24px;
+
+    // Shell dimensions.
+    out property <length> rail-width: 72px;
+    out property <length> sidebar-width: 264px;
+    out property <length> topbar-height: 56px;
+    out property <length> right-panel-min: 220px;
+    out property <length> right-panel-max: 420px;
+
+    // Motion.
+    out property <duration> fast: 120ms;
+    out property <duration> normal: 200ms;
+}

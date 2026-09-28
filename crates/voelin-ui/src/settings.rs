@@ -27,6 +27,75 @@ pub static CLIENT_PLAYBACK: Key<ClientPlaybackMap> = Key::new(
 	ClientPlaybackMap::new,
 );
 
+/// Colours of the window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeChoice {
+	#[default]
+	Dark,
+	Light,
+	/// The system's light or dark scheme.
+	System,
+}
+
+impl ThemeChoice {
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Dark => "dark",
+			Self::Light => "light",
+			Self::System => "system",
+		}
+	}
+
+	pub fn parse(text: &str) -> Self {
+		match text {
+			"light" => Self::Light,
+			"system" => Self::System,
+			_ => Self::Dark,
+		}
+	}
+}
+
+/// `ui.theme`. (In a config file write `"ui.theme" = "light"` at the top:
+/// a `[ui]` table would be read as the `ui` blob.)
+pub static UI_THEME: Key<ThemeChoice> = Key::new(
+	"ui.theme",
+	Kind::Choice(&["dark", "light", "system"]),
+	"Colours of the window: dark, light, or the system's scheme.",
+	ThemeChoice::default,
+);
+
+fn positive_scale(v: &f32) -> Result<(), String> {
+	if v.is_finite() && *v > 0.0 { Ok(()) } else { Err("must be a number above 0".into()) }
+}
+
+/// `ui.font_scale`: text size, 1 = normal (no upper limit).
+pub static UI_FONT_SCALE: Key<f32> =
+	Key::new("ui.font_scale", Kind::Json, "Text size as a factor (a number; 1 = normal).", || 1.0)
+		.validated(positive_scale);
+
+/// `ui.narrow_breakpoint`: below this window width (logical pixels) the
+/// phone layout is used.
+pub static UI_NARROW_BREAKPOINT: Key<u32> = Key::new(
+	"ui.narrow_breakpoint",
+	Kind::UInt { min: 0 },
+	"Window width in pixels below which the phone layout is used.",
+	|| 800,
+);
+
+/// `ui.image_cache_mb`: memory for decoded images (avatars, icons, emoji).
+pub static UI_IMAGE_CACHE_MB: Key<u32> = Key::new(
+	"ui.image_cache_mb",
+	Kind::UInt { min: 0 },
+	"Memory in MB for decoded images (avatars, icons, emoji); 0 keeps none.",
+	|| 64,
+);
+
+/// The UI's keys besides [`UI`] and [`CLIENT_PLAYBACK`], for registering.
+pub fn appearance_keys() -> [&'static dyn voelin_core::settings::Setting; 4] {
+	[&UI_THEME, &UI_FONT_SCALE, &UI_NARROW_BREAKPOINT, &UI_IMAGE_CACHE_MB]
+}
+
 /// Frame rates and bitrates (kbit/s) the share dialog offers; any other
 /// value can be typed in.
 pub const FPS_CHOICES: [u32; 3] = [15, 30, 60];
@@ -293,6 +362,11 @@ mod tests {
 		assert!(!parsed.crash_reports, "crash reports are opt-in");
 		assert_eq!(parsed.ptt_key, "Ctrl+Shift+T");
 		assert_eq!(parsed.share, ShareDefaults::default());
+		assert_eq!(serde_json::to_value(ThemeChoice::System).unwrap(), "system");
+		assert_eq!(ThemeChoice::parse("light"), ThemeChoice::Light);
+		assert_eq!(ThemeChoice::parse("??"), ThemeChoice::Dark);
+		assert!(UI_FONT_SCALE.validate(&0.0).is_err());
+		assert!(UI_FONT_SCALE.validate(&3.5).is_ok());
 		let map: ClientPlaybackMap =
 			serde_json::from_str(r#"{"uid=":{"volume":0.5,"muted":false}}"#).unwrap();
 		assert_eq!(map["uid="].volume, 0.5);

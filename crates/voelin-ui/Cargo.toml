@@ -20,11 +20,15 @@ path = "src/main.rs"
 anyhow = "1.0.104"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 dirs = "6"
+# Twemoji archive blocks (raw deflate); already used by png.
+miniz_oxide = "0.8"
 png = "0.18"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# Grapheme clusters for emoji in chat text.
+unicode-segmentation = "1.13"
 voelin-audio = { path = "../voelin-audio" }
 voelin-core = { path = "../voelin-core", default-features = false, features = ["audio-device"] }
 voelin-model = { path = "../voelin-model" }

@@ -1,0 +1,350 @@
+// The data Rust gives the UI and the callbacks it handles. Models are
+// VecModels that Rust updates row by row (src/vm/), so screens can bind to
+// them freely.
+
+export struct ServerItem {
+    id: int,
+    name: string,
+    address: string,
+    // "offline", "connecting", "observing" or "connected"
+    status: string,
+    // Avatar of a server without an icon.
+    initials: string,
+    tint: color,
+    // Unread messages in its chats.
+    unread: int,
+    // Someone streams in our channel there.
+    live: bool,
+}
+
+export struct TreeItem {
+    is-channel: bool,
+    depth: int,
+    id: int,
+    name: string,
+    own: bool,
+    talking: bool,
+    muted: bool,
+    sound-off: bool,
+    away: bool,
+    streaming: bool,
+    locked: bool,
+    collapsed: bool,
+    // Local playback of this client: muted, or its volume in percent
+    // (100 = unchanged).
+    local-muted: bool,
+    local-volume: int,
+    // Our own client.
+    myself: bool,
+    // Avatar of a client.
+    initials: string,
+    tint: color,
+    // Channels: clients inside, and the limit (-1: none).
+    members: int,
+    max-members: int,
+}
+
+// A client in our channel, for the members panel.
+export struct MemberItem {
+    id: int,
+    name: string,
+    initials: string,
+    tint: color,
+    talking: bool,
+    muted: bool,
+    sound-off: bool,
+    away: bool,
+    streaming: bool,
+    myself: bool,
+    // "Speaking", "Streaming", "Away", ...
+    status: string,
+}
+
+export struct ChatTab {
+    title: string,
+    // 0 = server chat, 1 = channel chat, 2 = private chat
+    kind: int,
+    id: int,
+    unread: int,
+    // The channel's topic (channel chats).
+    topic: string,
+}
+
+// A piece of a chat line: text, or an emoji shown as an image (`emoji` is
+// its Twemoji key, e.g. "1f600"; `text` then holds the characters).
+export struct TextRun {
+    text: string,
+    emoji: string,
+}
+
+export struct ChatLine {
+    author: string,
+    text: string,
+    time: string,
+    relayed: bool,
+    // The text split into runs; only filled when it has emoji (`rich`).
+    runs: [TextRun],
+    rich: bool,
+    // Only one to three emoji: shown large.
+    jumbo: bool,
+    // Same author as the line before, shortly after: no header.
+    continued: bool,
+    initials: string,
+    tint: color,
+}
+
+export struct BookmarkForm {
+    id: int,
+    name: string,
+    address: string,
+    nickname: string,
+    server-password: string,
+    gateway-url: string,
+    query-transport: string,
+    query-addr: string,
+    query-user: string,
+    query-password: string,
+}
+
+// A stream in our channel. An empty id: a client that streams, but whose
+// stream is still being looked up (it started before we joined).
+export struct StreamItem {
+    id: string,
+    name: string,
+    streamer: string,
+    audio: bool,
+    // Shown in the viewer.
+    watching: bool,
+    // Our own stream.
+    own: bool,
+}
+
+// A viewer of our stream. state: "requested", "connecting" or "connected".
+export struct ViewerItem {
+    client: int,
+    name: string,
+    state: string,
+    message: string,
+}
+
+// A capture source for the share dialog.
+export struct SourceItem {
+    name: string,
+    detail: string,
+}
+
+export struct ShareForm {
+    source: int,
+    name: string,
+    // Index into the frame rate choices (15, 30, 60).
+    fps-index: int,
+    // Frames per second as typed; a choice fills it in. Any number above 0.
+    fps: string,
+    // Index into the bitrate choices (2.5, 4.6, 8, 10 Mbit/s).
+    bitrate-index: int,
+    // Video bitrate in kbit/s as typed; a choice fills it in.
+    bitrate: string,
+    audio: bool,
+    auto-accept: bool,
+}
+
+export struct AudioForm {
+    // 0 = system default, then the devices.
+    input-index: int,
+    output-index: int,
+    // 0 = push-to-talk, 1 = voice activation, 2 = continuous.
+    transmit: int,
+    // dBFS.
+    vad-threshold: float,
+    echo-cancellation: bool,
+    noise-suppression: bool,
+    // 0 = low ... 3 = very high.
+    noise-level: int,
+    auto-gain: bool,
+    // dB.
+    input-gain: float,
+    // Percent.
+    output-volume: float,
+    // Milliseconds.
+    playback-buffer: float,
+}
+
+// Local playback settings of one client. volume in percent.
+export struct ClientAudio {
+    id: int,
+    name: string,
+    volume: float,
+    muted: bool,
+}
+
+// The appearance settings (`ui.*` keys).
+export struct AppearanceForm {
+    // "dark", "light" or "system"
+    theme: string,
+    font-scale: float,
+    // Pixels.
+    narrow-breakpoint: float,
+    image-cache-mb: float,
+}
+
+export global Bridge {
+    in property <[ServerItem]> servers;
+    in-out property <int> current-server: -1;
+    in property <[TreeItem]> tree;
+    // Clients in our channel.
+    in property <[MemberItem]> members;
+    in property <[ChatTab]> tabs;
+    in-out property <int> current-tab: 0;
+    in property <[ChatLine]> messages;
+    in property <string> status-text;
+    // Unread messages in all chats of the current server.
+    in property <int> unread-total;
+    in property <string> server-title: @tr("No server selected");
+    // "12 online · 8 channels"
+    in property <string> server-stats;
+    // Our nickname on the current server, and the channel we are in.
+    in property <string> nickname;
+    in property <string> own-channel;
+    in property <bool> voice-connected;
+    in property <bool> voice-connecting;
+    in property <bool> observing;
+    in property <bool> can-observe;
+    in property <bool> input-muted;
+    in property <bool> output-muted;
+    in property <bool> transmitting;
+    in property <string> presence-source;
+
+    // Streams (TeamSpeak 6 while connected with voice).
+    in property <bool> streams-available;
+    in property <[StreamItem]> streams;
+    // Our stream: "", "starting", "live" or "ended".
+    in property <string> share-state;
+    in property <string> share-status;
+    in property <[ViewerItem]> share-viewers;
+    in property <int> share-requests;
+    in property <[SourceItem]> share-sources;
+    in property <string> share-error;
+    in property <bool> share-busy;
+    // Whether capture and encoding are built in.
+    in property <bool> can-share: true;
+
+    // The stream shown in the viewer.
+    in property <bool> viewer-open;
+    in property <image> viewer-frame;
+    in property <bool> viewer-has-frame;
+    in property <string> viewer-title;
+    // Shown instead of (or over) the picture: waiting, ended, errors.
+    in property <string> viewer-status;
+    in property <string> viewer-info;
+    in property <bool> viewer-ended;
+    in-out property <float> viewer-volume: 100;
+    in property <bool> viewer-fullscreen;
+
+    // Settings.
+    in property <[string]> input-devices;
+    in property <[string]> output-devices;
+    in-out property <AudioForm> audio;
+    // Microphone level in dBFS and whether voice is sent.
+    in property <float> input-level: -100;
+    in property <bool> input-sending;
+    in property <bool> mic-test;
+    in-out property <bool> global-ptt;
+    in-out property <string> ptt-key;
+    in property <string> ptt-status;
+    in-out property <bool> h264-enabled;
+    in property <bool> h264-loaded;
+    in property <bool> h264-busy;
+    in property <string> h264-status;
+    in property <string> h264-attribution;
+    in-out property <AppearanceForm> appearance;
+    // "3.2 of 64 MB"
+    in property <string> image-cache-usage;
+    // The product name (voelin_platform::APP_NAME, not translated) and version.
+    in property <string> app-name: "Voelin";
+    in property <string> app-version;
+    in-out property <ClientAudio> client-audio;
+    // Opt-in local crash reports, and a notice about reports on disk.
+    in-out property <bool> crash-reports;
+    in property <string> crash-notice;
+    // Third-party notices, one entry per line, for the About page.
+    in property <[string]> notices;
+
+    callback select-server(int);
+    // The search field of the top bar: filters the channel tree.
+    callback search(string);
+    callback connect-voice();
+    callback disconnect-voice();
+    callback toggle-observe();
+    callback join-channel(int);
+    callback open-channel-chat(int);
+    callback toggle-collapse(int);
+    callback select-tab(int);
+    callback close-tab(int);
+    callback send-message(string);
+    callback set-input-muted(bool);
+    callback set-output-muted(bool);
+    callback push-to-talk(bool);
+    callback edit-bookmark(int) -> BookmarkForm;
+    callback save-bookmark(BookmarkForm);
+    callback delete-bookmark(int);
+
+    callback open-share() -> ShareForm;
+    callback start-share(ShareForm);
+    callback stop-share();
+    callback respond-viewer(int, bool);
+    callback kick-viewer(int);
+    callback watch-stream(string);
+    callback show-viewer();
+    callback hide-viewer();
+    callback leave-stream();
+    callback set-stream-volume(float);
+    callback toggle-fullscreen();
+
+    callback open-settings();
+    callback close-settings();
+    callback audio-changed(AudioForm);
+    callback toggle-mic-test();
+    callback apply-ptt(bool, string);
+    callback set-h264(bool);
+    callback download-h264();
+    callback appearance-changed(AppearanceForm);
+    callback open-client(int) -> bool;
+    callback client-audio-changed(ClientAudio);
+    callback set-crash-reports(bool);
+    callback open-crash-folder();
+    callback delete-crash-reports();
+    callback dismiss-crash-notice();
+    callback open-about();
+}
+
+// Decoded images by key, from Rust's image cache (src/images.rs): each is
+// decoded once and kept while the cache (setting `ui.image_cache_mb`) has
+// room.
+export global Images {
+    // A Twemoji by key ("1f600", "1f468-200d-1f4bb"); empty if unknown.
+    pure callback emoji(string) -> image;
+}
+
+// One emoji of the picker. `text` is what picking it inserts.
+export struct EmojiCell {
+    key: string,
+    name: string,
+    text: string,
+}
+
+export struct EmojiRow {
+    cells: [EmojiCell],
+}
+
+// The emoji picker's data (src/bind/emoji.rs).
+export global Emoji {
+    // The shown category as rows of `columns` cells.
+    in property <[EmojiRow]> rows;
+    // The category shown (see EmojiPicker), -1 while searching.
+    in-out property <int> category: 0;
+    in property <int> columns: 8;
+    // Filled once the picker is first opened.
+    callback load();
+    callback show-category(int);
+    callback search(string);
+}

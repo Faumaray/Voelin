@@ -1,0 +1,225 @@
+// Pages of the narrow (phone) layout that the desktop shows elsewhere:
+// the server list with the channels, activity, and the "You" page.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Bridge } from "../bridge.slint";
+import { Nav, Page, SettingsSection } from "../nav.slint";
+import { Icon, Button, ButtonKind, IconButton, Avatar, Status, CountBadge, LiveBadge, NavItem, ListItem, SectionHeader, Card, Banner, ScrollView, ActionButton } from "../components/index.slint";
+import { ServerHeader, ConnectActions, ChannelTree } from "channels.slint";
+import { StreamsPanel } from "streams.slint";
+import { VoiceCard, VoiceButtons } from "../shells/common.slint";
+
+// Servers as a horizontal strip, the current server, its channels.
+export component MobileServers inherits VerticalLayout {
+    padding: Theme.space-3;
+    spacing: Theme.space-3;
+    ScrollView {
+        height: 64px;
+        vertical-stretch: 0;
+        HorizontalLayout {
+            spacing: Theme.space-3;
+            alignment: start;
+            for server in Bridge.servers: Rectangle {
+                width: 56px;
+                height: 56px;
+                accessible-role: AccessibleRole.list-item;
+                accessible-label: server.name;
+                accessible-item-selectable: true;
+                accessible-item-selected: Bridge.current-server == server.id;
+                accessible-action-default => { Nav.select-server(server.id); }
+                if Bridge.current-server == server.id: Rectangle {
+                    width: 56px;
+                    height: 56px;
+                    border-radius: Theme.radius-lg + 3px;
+                    border-width: 2px;
+                    border-color: Theme.accent;
+                }
+                Avatar {
+                    size: 46px;
+                    square: true;
+                    initials: server.initials;
+                    tint: server.tint;
+                    status: server.status == "connected" ? Status.online : server.status == "observing" ? Status.info : Status.none;
+                }
+                if server.unread > 0: CountBadge {
+                    x: parent.width - self.width;
+                    y: 0;
+                    count: server.unread;
+                }
+                TouchArea {
+                    clicked => { Nav.select-server(server.id); }
+                    double-clicked => { Nav.edit-server(server.id); }
+                }
+            }
+            IconButton {
+                icon: Icons.plus;
+                label: @tr("Add server");
+                round: true;
+                filled: true;
+                size: 46px;
+                tint: Theme.success;
+                y: 5px;
+                clicked => { Nav.add-server(); }
+            }
+        }
+    }
+    ServerHeader { }
+    if !Bridge.voice-connected && !Bridge.voice-connecting: ConnectActions { }
+    if Bridge.voice-connected || Bridge.voice-connecting: VoiceCard { }
+    ChannelTree {
+        vertical-stretch: 1;
+    }
+}
+
+// Streams, requests and the app's status.
+export component ActivityPage inherits VerticalLayout {
+    spacing: Theme.space-3;
+    if Bridge.crash-notice != "": HorizontalLayout {
+        padding: Theme.space-3;
+        Banner {
+            text: Bridge.crash-notice;
+            IconButton {
+                icon: Icons.x;
+                label: @tr("Dismiss");
+                size: 28px;
+                y: (parent.height - self.height) / 2;
+                clicked => { Bridge.dismiss-crash-notice(); }
+            }
+        }
+    }
+    if Bridge.status-text != "": HorizontalLayout {
+        padding-left: Theme.space-4;
+        padding-right: Theme.space-4;
+        spacing: Theme.space-3;
+        Icon {
+            source: Icons.info;
+            size: Theme.icon-sm;
+            tint: Theme.accent-text;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: Bridge.status-text;
+            color: Theme.text-secondary;
+            font-size: Theme.font-sm;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+        }
+    }
+    StreamsPanel {
+        vertical-stretch: 1;
+    }
+}
+
+// Profile, voice controls, settings and About.
+export component YouPage inherits ScrollView {
+    VerticalLayout {
+        padding: Theme.space-4;
+        spacing: Theme.space-4;
+        alignment: start;
+        Card {
+            HorizontalLayout {
+                spacing: Theme.space-4;
+                Avatar {
+                    size: 56px;
+                    initials: "";
+                    tint: Theme.accent;
+                    status: Bridge.voice-connected ? Status.online : Bridge.observing ? Status.info : Status.offline;
+                    Icon {
+                        source: Icons.user;
+                        size: 28px;
+                        tint: #ffffff;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: Bridge.nickname != "" ? Bridge.nickname : Bridge.app-name;
+                        color: Theme.text;
+                        font-size: Theme.font-lg;
+                        font-weight: Theme.weight-semibold;
+                    }
+                    Text {
+                        text: Bridge.voice-connected ? Bridge.server-title : @tr("Offline");
+                        color: Theme.text-muted;
+                        font-size: Theme.font-sm;
+                    }
+                }
+            }
+            HorizontalLayout {
+                alignment: space-around;
+                ActionButton {
+                    icon: Bridge.input-muted ? Icons.mic-off : Icons.mic;
+                    text: Bridge.input-muted ? @tr("Unmute") : @tr("Mute");
+                    checked: Bridge.input-muted;
+                    danger: true;
+                    enabled: Bridge.voice-connected;
+                    clicked => { Bridge.set-input-muted(!Bridge.input-muted); }
+                }
+                ActionButton {
+                    icon: Bridge.output-muted ? Icons.headphone-off : Icons.headphones;
+                    text: Bridge.output-muted ? @tr("Undeafen") : @tr("Deafen");
+                    checked: Bridge.output-muted;
+                    danger: true;
+                    enabled: Bridge.voice-connected;
+                    clicked => { Bridge.set-output-muted(!Bridge.output-muted); }
+                }
+                if Bridge.streams-available && Bridge.can-share: ActionButton {
+                    icon: Icons.radio;
+                    text: Bridge.share-state == "live" ? @tr("Live") : @tr("Go Live");
+                    checked: Bridge.share-state == "live";
+                    clicked => { Nav.open-share(); }
+                }
+                ActionButton {
+                    icon: Icons.phone-off;
+                    text: @tr("Leave");
+                    danger: true;
+                    checked: Bridge.voice-connected;
+                    enabled: Bridge.voice-connected;
+                    clicked => { Bridge.disconnect-voice(); }
+                }
+            }
+        }
+        SectionHeader {
+            text: @tr("Settings");
+            small: true;
+        }
+        NavItem {
+            icon: Icons.mic;
+            text: @tr("Voice & Video");
+            chevron: true;
+            clicked => { Nav.open-settings(SettingsSection.voice); }
+        }
+        NavItem {
+            icon: Icons.keyboard;
+            text: @tr("Keybinds");
+            chevron: true;
+            clicked => { Nav.open-settings(SettingsSection.keybinds); }
+        }
+        NavItem {
+            icon: Icons.radio;
+            text: @tr("Streaming");
+            chevron: true;
+            clicked => { Nav.open-settings(SettingsSection.streaming); }
+        }
+        NavItem {
+            icon: Icons.shield;
+            text: @tr("Privacy & Safety");
+            chevron: true;
+            clicked => { Nav.open-settings(SettingsSection.privacy); }
+        }
+        NavItem {
+            icon: Icons.palette;
+            text: @tr("Appearance");
+            chevron: true;
+            clicked => { Nav.open-settings(SettingsSection.appearance); }
+        }
+        NavItem {
+            icon: Icons.info;
+            text: @tr("About {}", Bridge.app-name);
+            chevron: true;
+            clicked => { Nav.open-about(); }
+        }
+    }
+}

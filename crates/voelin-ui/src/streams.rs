@@ -78,6 +78,7 @@ impl App {
 					.map(|s| s.id.clone());
 				view.streams = streams;
 				self.refresh_streams();
+				self.refresh_servers();
 				if autowatch && let Some(id) = first {
 					self.watch_stream(id);
 				}
@@ -208,7 +209,7 @@ impl App {
 			});
 		}
 		bridge.set_streams_available(self.demo || view.is_some_and(|v| v.streams_available()));
-		bridge.set_streams(model(items));
+		crate::vm::list::sync(&self.models.streams, &items);
 		bridge.set_can_share(video::AVAILABLE);
 
 		let share = self.share.as_ref().filter(|s| Some(s.session) == current);
@@ -243,7 +244,7 @@ impl App {
 			.unwrap_or_default();
 		let requests = viewers.iter().filter(|v| v.state == "requested").count();
 		bridge.set_share_requests(requests as i32);
-		bridge.set_share_viewers(model(viewers));
+		crate::vm::list::sync(&self.models.viewers, &viewers);
 		let status = match share {
 			Some(s) if s.live => s.capture.status(),
 			Some(s) => format!("Starting the stream of {}…", s.capture.source_name()),

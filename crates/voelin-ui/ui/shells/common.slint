@@ -1,0 +1,193 @@
+// Pieces both shells use: the voice controls and the user card.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Bridge } from "../bridge.slint";
+import { Nav, SettingsSection } from "../nav.slint";
+import { Icon, IconButton, Avatar, Status } from "../components/index.slint";
+
+// A rounded panel of the frame (sidebar, main area, right panel).
+export component Panel inherits Rectangle {
+    background: Theme.surface.transparentize(0.08);
+    border-radius: Theme.radius-xl;
+    border-width: 1px;
+    border-color: Theme.border;
+    clip: true;
+}
+
+// Push-to-talk in the window: talks while held.
+export component HoldToTalk inherits Rectangle {
+    height: Theme.control-height;
+    border-radius: Theme.radius-md;
+    background: Bridge.transmitting ? Theme.success.transparentize(0.2) : ptt-area.has-hover ? Theme.surface-3 : Theme.surface-2;
+    border-width: 1px;
+    border-color: Bridge.transmitting ? Theme.success : Theme.border;
+    opacity: Bridge.voice-connected ? 1.0 : 0.4;
+    accessible-role: AccessibleRole.button;
+    accessible-label: @tr("Hold to talk");
+    accessible-enabled: Bridge.voice-connected;
+    accessible-checkable: true;
+    accessible-checked: Bridge.transmitting;
+    accessible-action-default => { Bridge.push-to-talk(!Bridge.transmitting); }
+    HorizontalLayout {
+        alignment: center;
+        spacing: Theme.space-2;
+        Icon {
+            source: Icons.mic;
+            size: Theme.icon-sm;
+            tint: Bridge.transmitting ? Theme.on-accent : Theme.text-secondary;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: Bridge.transmitting ? @tr("Talking…") : @tr("Hold to talk");
+            color: Bridge.transmitting ? Theme.on-accent : Theme.text-secondary;
+            font-size: Theme.font-sm;
+            font-weight: Theme.weight-medium;
+            vertical-alignment: center;
+        }
+    }
+    ptt-area := TouchArea {
+        enabled: Bridge.voice-connected;
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down {
+                Bridge.push-to-talk(true);
+            } else if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
+                Bridge.push-to-talk(false);
+            }
+        }
+    }
+}
+
+// "Voice Connected — channel / server", disconnect, and hold-to-talk.
+export component VoiceCard inherits Rectangle {
+    border-radius: Theme.radius-lg;
+    background: Theme.surface-2;
+    border-width: 1px;
+    border-color: Theme.border;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: @tr("Voice");
+    VerticalLayout {
+        padding: Theme.space-3;
+        spacing: Theme.space-3;
+        HorizontalLayout {
+            spacing: Theme.space-3;
+            Rectangle {
+                width: 10px;
+                height: 10px;
+                y: (parent.height - self.height) / 2;
+                border-radius: 5px;
+                background: Bridge.voice-connected ? Theme.success : Theme.warning;
+            }
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                Text {
+                    text: Bridge.voice-connected ? @tr("Voice Connected") : @tr("Connecting…");
+                    color: Bridge.voice-connected ? Theme.success : Theme.warning;
+                    font-size: Theme.font-sm;
+                    font-weight: Theme.weight-semibold;
+                }
+                Text {
+                    text: Bridge.own-channel != "" ? Bridge.own-channel + " / " + Bridge.server-title : Bridge.server-title;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    overflow: elide;
+                }
+            }
+            IconButton {
+                icon: Icons.phone-off;
+                label: @tr("Disconnect");
+                size: 32px;
+                icon-size: Theme.icon-sm;
+                tint: Theme.danger;
+                y: (parent.height - self.height) / 2;
+                clicked => { Bridge.disconnect-voice(); }
+            }
+        }
+        if Bridge.voice-connected: HoldToTalk { }
+    }
+}
+
+// Mute, deafen, share, settings.
+export component VoiceButtons inherits HorizontalLayout {
+    in property <length> size: 34px;
+    spacing: Theme.space-1;
+    IconButton {
+        icon: Bridge.input-muted ? Icons.mic-off : Icons.mic;
+        label: Bridge.input-muted ? @tr("Microphone off") : @tr("Microphone on");
+        checked: Bridge.input-muted;
+        danger: true;
+        size: root.size;
+        enabled: Bridge.voice-connected;
+        clicked => { Bridge.set-input-muted(!Bridge.input-muted); }
+    }
+    IconButton {
+        icon: Bridge.output-muted ? Icons.headphone-off : Icons.headphones;
+        label: Bridge.output-muted ? @tr("Sound off") : @tr("Sound on");
+        checked: Bridge.output-muted;
+        danger: true;
+        size: root.size;
+        enabled: Bridge.voice-connected;
+        clicked => { Bridge.set-output-muted(!Bridge.output-muted); }
+    }
+    if Bridge.streams-available && Bridge.can-share: IconButton {
+        icon: Icons.monitor-up;
+        label: Bridge.share-state == "live" ? @tr("Sharing") : @tr("Share screen");
+        checked: Bridge.share-state == "live";
+        size: root.size;
+        clicked => { Nav.open-share(); }
+    }
+    IconButton {
+        icon: Icons.settings;
+        label: @tr("Settings");
+        size: root.size;
+        clicked => { Nav.open-settings(SettingsSection.voice); }
+    }
+}
+
+// Who we are on the current server, and the voice buttons.
+export component UserCard inherits Rectangle {
+    min-height: 60px;
+    border-radius: Theme.radius-lg;
+    background: Theme.surface-2.transparentize(0.3);
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: @tr("You");
+    HorizontalLayout {
+        padding: Theme.space-2;
+        padding-left: Theme.space-3;
+        spacing: Theme.space-3;
+        VerticalLayout {
+            alignment: center;
+            Avatar {
+                size: 38px;
+                initials: Bridge.nickname != "" ? "" : "?";
+                tint: Theme.accent;
+                label: Bridge.nickname;
+                status: Bridge.voice-connected ? Status.online : Bridge.observing ? Status.info : Status.offline;
+                Icon {
+                    source: Icons.user;
+                    size: 20px;
+                    tint: #ffffff;
+                    visible: Bridge.nickname != "";
+                }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: Bridge.nickname != "" ? Bridge.nickname : Bridge.app-name;
+                color: Theme.text;
+                font-weight: Theme.weight-semibold;
+                overflow: elide;
+            }
+            Text {
+                text: Bridge.voice-connected ? @tr("Online") : Bridge.observing ? @tr("Observing") : @tr("Offline");
+                color: Theme.text-muted;
+                font-size: Theme.font-xs;
+                overflow: elide;
+            }
+        }
+        VoiceButtons { }
+    }
+}
