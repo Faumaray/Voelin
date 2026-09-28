@@ -47,10 +47,12 @@ voelin-platform = { path = "../voelin-platform" }
 voelin-store = { path = "../voelin-store", features = ["keyring"] }
 
 # Android (voelin-android): no keyring backend (the app passes Keystore-backed
-# secrets), no winit/femtovg (the app picks Slint's Android backend), stream
-# media through MediaCodec and the app's capture source.
+# secrets), no winit/femtovg, stream media through MediaCodec and the app's
+# capture source. Slint's Android backend (the one the app runs) also brings
+# the SVG and image decoders the icons and emoji need, so this crate builds
+# alone for Android too.
 [target.'cfg(target_os = "android")'.dependencies]
-slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "renderer-software"] }
+slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "renderer-software", "backend-android-activity-06"] }
 voelin-core = { path = "../voelin-core", default-features = false, features = ["media"] }
 
 [dev-dependencies]
