@@ -712,8 +712,23 @@ impl Store {
 	pub fn prune_messages(&self, before_ms: i64) -> Result<usize> {
 		Ok(self
 			.db
-			.prepare_cached("DELETE FROM messages WHERE ts_ms < ?1 AND pinned = 0")?
+			.prepare_cached(
+				"DELETE FROM messages WHERE ts_ms < ?1 AND pinned = 0 AND server_uid <> ''",
+			)?
 			.execute([before_ms])?)
+	}
+
+	/// Give new messages ids from `first` on (e.g. negative ones, for a
+	/// database whose ids must not be confused with another's). SQLite
+	/// numbers a new row one above the largest id, so this keeps a hidden
+	/// row (no server) just below `first`. For an empty chat table.
+	pub fn start_message_ids_at(&self, first: i64) -> Result<()> {
+		self.db.execute(
+			"INSERT INTO messages (id, server_uid, target, ts, author_name, text)
+			 VALUES (?1, '', '', 0, '', '')",
+			[first.saturating_sub(1)],
+		)?;
+		Ok(())
 	}
 }
 
@@ -945,6 +960,19 @@ mod tests {
 		);
 		drop(store);
 		std::fs::remove_dir_all(dir).unwrap();
+	}
+
+	#[test]
+	fn ids_can_start_elsewhere() {
+		let mut store = Store::open_in_memory().unwrap();
+		store.start_message_ids_at(-1000).unwrap();
+		let w = store.write_messages(&[msg(MessageSource::Voice, "a", "x", 1)], 0).unwrap();
+		assert_eq!(w[0].message.id, -1000);
+		let w = store.write_messages(&[msg(MessageSource::Voice, "a", "y", 2)], 0).unwrap();
+		assert_eq!(w[0].message.id, -999);
+		assert_eq!(store.prune_messages(i64::MAX).unwrap(), 2, "the hidden row stays");
+		let w = store.write_messages(&[msg(MessageSource::Voice, "a", "z", 3)], 0).unwrap();
+		assert_eq!(w[0].message.id, -1000);
 	}
 
 	#[test]

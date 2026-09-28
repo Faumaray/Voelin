@@ -23,9 +23,19 @@
 //! and defaults. The engine reads its own keys from it (e.g. who may watch
 //! our stream), takes [`Command::SetSetting`] / [`Command::ResetSetting`],
 //! and reports every change as [`Event::SettingChanged`].
+//!
+//! Chat history: every message a session sees is stored under the server's
+//! unique id ([`history`], the client database with
+//! [`Command::AttachHistory`]). Opening a chat emits the stored messages,
+//! then, with a gateway, what we missed ([`Event::ChatHistory`]);
+//! [`Command::LoadOlderHistory`] pages back. The gateway's other features
+//! (pins, reactions, topics, events, stream directory, activity,
+//! administration) are [`Command::Gateway`] requests and
+//! [`Event::Gateway`] updates ([`gateway`]).
 
 mod audio;
-mod gateway;
+pub mod gateway;
+pub mod history;
 #[cfg(feature = "media")]
 pub mod media;
 mod query;
@@ -44,6 +54,9 @@ pub use voelin_audio::{AudioSettings, ProcessingSettings, VadSettings};
 use voelin_model::{Capabilities, ChannelId, ChatMessage, ChatTarget, Presence, ServerFlavor};
 
 use crate::audio::{AudioEvent, AudioHandle, AudioIn};
+pub use gateway::{GatewayRequest, GatewayUpdate};
+use history::SharedHistory;
+pub use history::{History, HistoryMessage, HistorySource};
 pub use route::{ChatRoute, Dedup, route_chat};
 use settings::{SettingChange, Settings, SharedSettings};
 pub use stream::{StreamFrame, StreamSink, StreamState, WatchState};
@@ -90,6 +103,21 @@ pub enum Command {
 		session: SessionId,
 		target: ChatTarget,
 		text: String,
+	},
+	/// The history page before the message with local id `before`
+	/// ([`HistoryMessage::id`]; the newest page without it), answered with
+	/// [`Event::ChatHistory`]. With a gateway, its page for that time is
+	/// fetched and merged first.
+	LoadOlderHistory {
+		session: SessionId,
+		target: ChatTarget,
+		before: Option<i64>,
+	},
+	/// A request to the session's gateway, answered with [`Event::Gateway`]
+	/// (see [`gateway`]).
+	Gateway {
+		session: SessionId,
+		request: GatewayRequest,
 	},
 	MoveToChannel {
 		session: SessionId,
@@ -213,6 +241,10 @@ pub enum Command {
 	/// Use these settings from now on (e.g. the ones of the client database,
 	/// for an engine started without).
 	AttachSettings(Settings),
+	/// Keep chat history here from now on (e.g. [`History::open`] on the
+	/// client database; without it, history lives in memory). Chats opened
+	/// later read from it.
+	AttachHistory(History),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -252,6 +284,9 @@ pub struct SessionState {
 	pub input_muted: bool,
 	pub output_muted: bool,
 	pub transmitting: bool,
+	/// The server's unique id once a source told it (the key of its chat
+	/// history; for query-only sessions the query address).
+	pub server_uid: Option<String>,
 }
 
 /// What the engine reports.
@@ -272,9 +307,28 @@ pub enum Event {
 		session: SessionId,
 		presence: Arc<Presence>,
 	},
+	/// A live message, as it arrives (without ids; see [`Event::ChatHistory`]).
 	Chat {
 		session: SessionId,
 		message: ChatMessage,
+	},
+	/// Messages of a chat to add to or update in its list, by
+	/// [`HistoryMessage::id`], ordered by `(ts_ms, id)`: stored ones when a
+	/// chat opens, the gateway's, older pages, and live messages and changes.
+	/// See [`history`] for when each comes.
+	ChatHistory {
+		session: SessionId,
+		target: ChatTarget,
+		/// Oldest first.
+		messages: Vec<HistoryMessage>,
+		source: HistorySource,
+		/// Nothing older exists as far as the engine can tell.
+		complete: bool,
+	},
+	/// An answer or push of the session's gateway (see [`gateway`]).
+	Gateway {
+		session: SessionId,
+		update: GatewayUpdate,
 	},
 	/// A client in the session started or stopped talking (voice only).
 	Talking {
@@ -360,6 +414,7 @@ pub struct Engine {
 	frames: broadcast::Sender<StreamFrame>,
 	runtime: tokio::runtime::Handle,
 	settings: SharedSettings,
+	history: SharedHistory,
 }
 
 impl Engine {
@@ -371,13 +426,33 @@ impl Engine {
 
 	/// Start the engine on the current tokio runtime with `settings`.
 	pub fn start_with_settings(settings: Settings) -> Self {
+		Self::start_with(settings, History::in_memory())
+	}
+
+	/// Start the engine on the current tokio runtime with `settings` and
+	/// chat `history`.
+	pub fn start_with(settings: Settings, history: History) -> Self {
 		let (commands, rx) = mpsc::unbounded_channel();
 		let (events, _) = broadcast::channel(4096);
 		// About a minute of one watched stream.
 		let (frames, _) = broadcast::channel(4096);
 		let settings = SharedSettings::new(settings);
-		tokio::spawn(run(rx, events.clone(), frames.clone(), settings.clone()));
-		Self { commands, events, frames, runtime: tokio::runtime::Handle::current(), settings }
+		let history = SharedHistory::new(history);
+		let shared = Shared { settings: settings.clone(), history: history.clone() };
+		tokio::spawn(run(rx, events.clone(), frames.clone(), shared));
+		Self {
+			commands,
+			events,
+			frames,
+			runtime: tokio::runtime::Handle::current(),
+			settings,
+			history,
+		}
+	}
+
+	/// The chat history the engine uses.
+	pub fn history(&self) -> History {
+		self.history.current()
 	}
 
 	/// The settings the engine uses (read, watch or change them directly;
@@ -412,6 +487,22 @@ enum Input {
 	Setting(SettingChange),
 	/// Changes were missed: the engine re-reads what it uses.
 	SettingsLagged,
+	/// Time to delete chat history past `chat.retention_days`.
+	Prune,
+}
+
+/// What the engine and its sessions share and commands can replace.
+struct Shared {
+	settings: SharedSettings,
+	history: SharedHistory,
+}
+
+/// Delete chat history past `chat.retention_days` (0: keep everything).
+fn prune_history(settings: &Settings, history: &History) {
+	let days = settings.get(&settings::CHAT_RETENTION_DAYS);
+	if days > 0 {
+		history.prune(history::now_ms().saturating_sub(i64::from(days) * 86_400_000));
+	}
 }
 
 /// A command that applies the stored audio settings if they differ from
@@ -425,10 +516,13 @@ async fn run(
 	mut commands: mpsc::UnboundedReceiver<Command>,
 	events: broadcast::Sender<Event>,
 	frames: broadcast::Sender<StreamFrame>,
-	shared: SharedSettings,
+	shared: Shared,
 ) {
+	let Shared { settings: shared, history } = shared;
 	let mut sessions: HashMap<SessionId, session::SessionHandle> = HashMap::new();
 	let mut current = shared.current();
+	// Pruning: at start, then hourly (and when the setting changes).
+	let mut prune = tokio::time::interval(std::time::Duration::from_secs(3600));
 	let mut changes = current.subscribe();
 	let mut settings = AudioSettings::default();
 	let mut srtp_profiles: Option<Vec<SrtpProfile>> = None;
@@ -445,10 +539,18 @@ async fn run(
 				// Not while `current` holds the settings.
 				Err(broadcast::error::RecvError::Closed) => continue,
 			},
+			_ = prune.tick() => Input::Prune,
 		};
 		let command = match input {
 			Input::Command(command) => command,
+			Input::Prune => {
+				prune_history(&current, &history.current());
+				continue;
+			}
 			Input::Setting(change) => {
+				if change.key == settings::CHAT_RETENTION_DAYS.name() {
+					prune_history(&current, &history.current());
+				}
 				let audio = change.key == settings::AUDIO.name();
 				let _ = events.send(Event::SettingChanged { key: change.key });
 				match audio.then(|| stored_audio(&current, &settings)).flatten() {
@@ -501,6 +603,11 @@ async fn run(
 				current = new;
 				continue;
 			}
+			Command::AttachHistory(new) => {
+				history.replace(new.clone());
+				prune_history(&current, &new);
+				continue;
+			}
 			ref command => command_session(command),
 		};
 		if matches!(command, Command::CloseSession { .. }) {
@@ -518,6 +625,7 @@ async fn run(
 					frames.clone(),
 					settings.clone(),
 					shared.clone(),
+					history.clone(),
 				);
 				if let Some(profiles) = &srtp_profiles {
 					s.send(Command::SetSrtpProfiles(profiles.clone()));
@@ -558,6 +666,8 @@ fn command_session(command: &Command) -> SessionId {
 		| Command::OpenChat { session, .. }
 		| Command::CloseChat { session, .. }
 		| Command::SendChat { session, .. }
+		| Command::LoadOlderHistory { session, .. }
+		| Command::Gateway { session, .. }
 		| Command::MoveToChannel { session, .. }
 		| Command::SetInputMuted { session, .. }
 		| Command::SetOutputMuted { session, .. }
@@ -580,7 +690,8 @@ fn command_session(command: &Command) -> SessionId {
 		| Command::TestMicrophone { .. }
 		| Command::SetSetting { .. }
 		| Command::ResetSetting { .. }
-		| Command::AttachSettings(_) => {
+		| Command::AttachSettings(_)
+		| Command::AttachHistory(_) => {
 			unreachable!("engine-wide commands have no session")
 		}
 	}

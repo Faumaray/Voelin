@@ -3,18 +3,26 @@
 //!
 //! The voice task forwards stream notifications here and sends the resulting
 //! commands. Only started for TeamSpeak 6 servers.
+//!
+//! Streams that started before we joined are looked up on the server
+//! (`requeststreaminfo`) and in the session's gateway directory: its
+//! registered entries (stream id and streamer) are handed to the stream
+//! sessions ([`voelin_stream::Streams::discovered`]) for streamers in our
+//! channel, and a [`StreamLookup`] answers for the gateway when the server
+//! cannot. Our own stream's life (live, viewers, ended) goes back to the
+//! session ([`OwnStreamEvent`]), which keeps its directory entry.
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::sync::{broadcast, mpsc};
 use tracing::debug;
 use tsclientlib::ClientId;
 use voelin_stream::{
-	ClientState, LayerFeedback, Output, Request, StreamEvent, StreamNotification, StreamerEvent,
-	StreamerOptions, Streams, WatchEvent,
+	ClientState, LayerFeedback, Output, Request, StreamEvent, StreamLookup, StreamNotification,
+	StreamerEvent, StreamerOptions, Streams, WatchEvent,
 };
 pub use voelin_stream::{
 	Codec, EncodedFrame, EndReason, FrameSource, Frequency, LayerId, LayerSet, LayerSpec,
@@ -145,8 +153,70 @@ pub(crate) enum StreamInput {
 	RequestFailed(Request, String),
 	/// Clients on the server: channel and `client_is_streaming`.
 	Clients(BTreeMap<u16, ClientState>),
+	/// The registered streams of the gateway's directory (full list).
+	Directory(Vec<StreamInfo>),
 	/// The voice connection is gone.
 	Shutdown(String),
+}
+
+/// Our own stream, for the session (the gateway directory).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum OwnStreamEvent {
+	Live {
+		id: String,
+		title: String,
+		kind: StreamKind,
+	},
+	/// Connected viewers.
+	Viewers(u32),
+	Ended {
+		id: String,
+	},
+}
+
+/// The kind of a stream as the gateway directory names it.
+pub(crate) fn kind_name(kind: StreamKind) -> String {
+	match kind {
+		StreamKind::Camera => "camera".into(),
+		StreamKind::Screen => "screen".into(),
+		StreamKind::Window => "window".into(),
+		StreamKind::Other(v) => format!("other:{v}"),
+	}
+}
+
+/// [`kind_name`] back; unknown names are screens.
+pub(crate) fn parse_kind(name: &str) -> StreamKind {
+	match name {
+		"camera" => StreamKind::Camera,
+		"window" => StreamKind::Window,
+		other => match other.strip_prefix("other:").and_then(|v| v.parse().ok()) {
+			Some(v) => StreamKind::from_u8(v),
+			None => StreamKind::Screen,
+		},
+	}
+}
+
+/// The gateway directory as the stream task sees it.
+#[derive(Default)]
+struct GatewayStreams {
+	entries: Vec<StreamInfo>,
+	/// Streamers the [`GatewayLookup`] was asked about.
+	wanted: Vec<ClientId>,
+}
+
+/// Looks unannounced streams up in the gateway's directory (after the
+/// server, see [`voelin_stream::discovery`]).
+struct GatewayLookup(Arc<Mutex<GatewayStreams>>);
+
+impl StreamLookup for GatewayLookup {
+	fn lookup(&mut self, streamer: ClientId, _out: &mut voelin_stream::session::Outbox) -> bool {
+		let mut dir = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+		let known = dir.entries.iter().any(|e| e.streamer == streamer);
+		if known {
+			dir.wanted.push(streamer);
+		}
+		known
+	}
 }
 
 pub(crate) struct StreamHandle {
@@ -164,11 +234,15 @@ impl StreamHandle {
 		frames: broadcast::Sender<StreamFrame>,
 		audio: Option<AudioHandle>,
 		settings: SharedSettings,
+		own: mpsc::UnboundedSender<OwnStreamEvent>,
 	) -> Self {
 		let (tx, rx) = mpsc::unbounded_channel();
+		let mut streams = Streams::new(ClientId(own_client), config);
+		let gateway = Arc::new(Mutex::new(GatewayStreams::default()));
+		streams.add_lookup(Box::new(GatewayLookup(gateway.clone())));
 		let task = StreamTask {
 			session,
-			streams: Streams::new(ClientId(own_client), config),
+			streams,
 			voice,
 			events,
 			frames,
@@ -177,6 +251,12 @@ impl StreamHandle {
 			sink: None,
 			layers: Vec::new(),
 			settings,
+			own,
+			setup: None,
+			live: None,
+			viewers: 0,
+			clients: BTreeMap::new(),
+			gateway,
 		};
 		tokio::spawn(task.run(rx));
 		Self { tx }
@@ -203,6 +283,17 @@ struct StreamTask {
 	layers: Vec<LayerSpec>,
 	/// `stream.permissions` decides join requests.
 	settings: SharedSettings,
+	/// Our stream's life, for the session.
+	own: mpsc::UnboundedSender<OwnStreamEvent>,
+	/// The setup of our stream since `Start`.
+	setup: Option<StreamSetup>,
+	/// Our live stream's id.
+	live: Option<String>,
+	/// Connected viewers of our stream, as last told.
+	viewers: u32,
+	/// The clients as of the last update.
+	clients: BTreeMap<u16, ClientState>,
+	gateway: Arc<Mutex<GatewayStreams>>,
 }
 
 impl StreamTask {
@@ -232,6 +323,7 @@ impl StreamTask {
 		let session = self.session;
 		let result = match input {
 			StreamInput::Start { setup, auto_accept } => {
+				self.setup = Some(setup.clone());
 				let layers = self.layers.clone();
 				let options = StreamerOptions { setup, auto_accept, layers, ..Default::default() };
 				self.streams.start(options).map(|()| {
@@ -279,7 +371,14 @@ impl StreamTask {
 			StreamInput::Clients(clients) => {
 				// Streams of clients that left, stopped streaming or are not
 				// in our channel are gone; unannounced ones are looked up.
+				self.clients = clients.clone();
 				self.streams.update_clients(clients);
+				self.add_directory_streams();
+				Ok(())
+			}
+			StreamInput::Directory(entries) => {
+				self.gateway.lock().unwrap_or_else(PoisonError::into_inner).entries = entries;
+				self.add_directory_streams();
 				Ok(())
 			}
 			StreamInput::Shutdown(_) => Ok(()),
@@ -287,6 +386,30 @@ impl StreamTask {
 		if let Err(e) = result {
 			self.emit(Event::Error { session, message: format!("stream: {e}") });
 		}
+	}
+
+	/// Streams of the gateway directory we were not told about: streamers in
+	/// our channel that still stream (the sessions check the channel).
+	fn add_directory_streams(&mut self) {
+		let entries = {
+			let mut dir = self.gateway.lock().unwrap_or_else(PoisonError::into_inner);
+			dir.wanted.clear();
+			dir.entries.clone()
+		};
+		let own = self.streams.own_client();
+		for info in entries {
+			let stopped =
+				self.clients.get(&info.streamer.0).is_some_and(|c| c.streaming == Some(false));
+			if info.streamer != own && !stopped && self.streams.directory().get(&info.id).is_none()
+			{
+				debug!(stream = %info.id, streamer = info.streamer.0, "stream from the gateway directory");
+				self.streams.discovered(info);
+			}
+		}
+	}
+
+	fn own_stream(&self, event: OwnStreamEvent) {
+		let _ = self.own.send(event);
 	}
 
 	/// Send the requests on the connection and report the events.
@@ -316,6 +439,14 @@ impl StreamTask {
 					feedback,
 				};
 				self.sink = Some(sink.clone());
+				let setup = self.setup.clone().unwrap_or_default();
+				self.live = Some(id.clone());
+				self.viewers = 0;
+				self.own_stream(OwnStreamEvent::Live {
+					id: id.clone(),
+					title: setup.name,
+					kind: setup.kind,
+				});
 				self.emit(Event::StreamState { session, state: StreamState::Live { id, sink } });
 			}
 			StreamEvent::Streamer(StreamerEvent::Request { viewer, message }) => {
@@ -338,6 +469,12 @@ impl StreamTask {
 				}
 			}
 			StreamEvent::Streamer(StreamerEvent::Viewers(viewers)) => {
+				let connected =
+					viewers.iter().filter(|v| v.state == ViewerState::Connected).count() as u32;
+				if connected != self.viewers && self.live.is_some() {
+					self.viewers = connected;
+					self.own_stream(OwnStreamEvent::Viewers(connected));
+				}
 				self.emit(Event::StreamViewers { session, viewers });
 			}
 			// The sink already has it (layer feedback).
@@ -350,6 +487,9 @@ impl StreamTask {
 			StreamEvent::Streamer(StreamerEvent::Ended(reason)) => {
 				if let Some(sink) = self.sink.take() {
 					sink.live.store(false, Ordering::Relaxed);
+				}
+				if let Some(id) = self.live.take() {
+					self.own_stream(OwnStreamEvent::Ended { id });
 				}
 				self.emit(Event::StreamState { session, state: StreamState::Ended(reason) });
 			}
@@ -404,6 +544,9 @@ impl StreamTask {
 		}
 		if let Some(sink) = self.sink.take() {
 			sink.live.store(false, Ordering::Relaxed);
+		}
+		if let Some(id) = self.live.take() {
+			self.own_stream(OwnStreamEvent::Ended { id });
 		}
 		for watched in self.streams.watching() {
 			let stream_id = watched.id().to_owned();
@@ -539,6 +682,7 @@ mod tests {
 				frames.clone(),
 				if session == 2 { audio.take() } else { None },
 				SharedSettings::new(settings.clone()),
+				mpsc::unbounded_channel().0,
 			));
 			voices.push(voice_rx);
 		}
