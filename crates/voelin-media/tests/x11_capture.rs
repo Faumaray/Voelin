@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use voelin_media::capture::x11::X11Capture;
+use voelin_media::capture::x11::{self, X11Capture};
 use voelin_media::{
 	CaptureOptions, Codec, Codecs, EncoderConfig, FrameReceiver, ScreenCapture, SourceId,
 	VideoFrame, convert,
@@ -167,6 +167,23 @@ async fn x11_capture_end_to_end() {
 		.unwrap_or_else(|| panic!("test window not listed in {sources:?}"));
 	assert_eq!(window.id, SourceId::Window(scene.test_window.into()));
 	assert_eq!((window.width, window.height), (u32::from(WW), u32::from(WH)));
+
+	// The window's process, for capturing its audio.
+	let window_id = u64::from(scene.test_window);
+	assert_eq!(x11::window_pid(Some(&display), window_id), None, "no _NET_WM_PID yet");
+	let net_wm_pid = scene.conn.intern_atom(false, b"_NET_WM_PID").unwrap().reply().unwrap().atom;
+	scene
+		.conn
+		.change_property32(
+			PropMode::REPLACE,
+			scene.test_window,
+			net_wm_pid,
+			AtomEnum::CARDINAL,
+			&[std::process::id()],
+		)
+		.unwrap();
+	scene.conn.sync().unwrap();
+	assert_eq!(x11::window_pid(Some(&display), window_id), Some(std::process::id()));
 
 	// Same pixels through MIT-SHM and through GetImage.
 	check_monitor(&mut capture, &scene).await;
