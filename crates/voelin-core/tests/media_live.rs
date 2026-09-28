@@ -159,7 +159,11 @@ async fn ts6_test_pattern_decoded() {
 	assert!(widths.iter().all(|w| (120..=136).contains(w)), "{widths:?}");
 	let stats = viewer.stats();
 	assert!(stats.error.is_none(), "{stats:?}");
-	eprintln!("decoded {stats:?}, sent {:?}", streamer.stats());
+	// The mixed test tone went out as 20 ms Opus frames all along.
+	let sent = streamer.stats();
+	eprintln!("decoded {stats:?}, sent {sent:?}");
+	assert!(sent.audio_frames >= 50, "{sent:?}");
+	assert!(sent.audio_sources.iter().all(|s| s.error.is_none()), "{sent:?}");
 
 	engine.send(Command::StopStream { session: 1 });
 	wait_for(&mut events, "stream ended", |e| match e {
