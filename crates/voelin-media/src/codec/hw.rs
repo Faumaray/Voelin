@@ -25,6 +25,12 @@ pub trait EncoderFactory: Send + Sync {
 		true
 	}
 
+	/// Whether the automatic choice may use it (not for encoders with a long
+	/// delay; those are used only when named in the settings).
+	fn is_automatic(&self) -> bool {
+		true
+	}
+
 	/// The backend its encoders report.
 	fn backend(&self) -> EncoderBackend {
 		EncoderBackend::Hardware(self.name())

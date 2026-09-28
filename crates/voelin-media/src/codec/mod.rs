@@ -389,6 +389,14 @@ struct Candidate {
 	codec: Codec,
 	backend: EncoderBackend,
 	hardware: bool,
+	/// See [`hw::EncoderFactory::is_automatic`].
+	automatic: bool,
+}
+
+impl Candidate {
+	fn builtin(codec: Codec, backend: EncoderBackend) -> Self {
+		Self { codec, backend, hardware: false, automatic: true }
+	}
 }
 
 /// The codecs this build and machine can use, and factories for them.
@@ -429,6 +437,17 @@ impl Codecs {
 	pub fn new() -> Self {
 		Self {
 			factories: hw::probe(),
+			#[cfg(feature = "openh264")]
+			openh264: None,
+			preference: EncoderPreference::default(),
+		}
+	}
+
+	/// Only the codecs compiled into this crate (libvpx, OpenH264 once
+	/// loaded, dav1d): no FFmpeg or MediaCodec, nothing probed.
+	pub fn builtin() -> Self {
+		Self {
+			factories: Vec::new(),
 			#[cfg(feature = "openh264")]
 			openh264: None,
 			preference: EncoderPreference::default(),
@@ -505,7 +524,8 @@ impl Codecs {
 		let factories = |codec: Codec, hardware: bool, list: &mut Vec<Candidate>| {
 			for f in self.factories.iter().filter(|f| f.is_hardware() == hardware) {
 				if f.codecs().contains(&codec) {
-					list.push(Candidate { codec, backend: f.backend(), hardware });
+					let automatic = f.is_automatic();
+					list.push(Candidate { codec, backend: f.backend(), hardware, automatic });
 				}
 			}
 		};
@@ -514,16 +534,15 @@ impl Codecs {
 		}
 		#[cfg(feature = "vpx")]
 		if vpx::check(Codec::Vp8, true).is_ok() {
-			list.push(Candidate { codec: Codec::Vp8, backend: EncoderBackend::Libvpx, hardware: false });
+			list.push(Candidate::builtin(Codec::Vp8, EncoderBackend::Libvpx));
 		}
 		factories(Codec::H264, false, &mut list);
 		if self.has_openh264() {
-			let backend = EncoderBackend::OpenH264;
-			list.push(Candidate { codec: Codec::H264, backend, hardware: false });
+			list.push(Candidate::builtin(Codec::H264, EncoderBackend::OpenH264));
 		}
 		#[cfg(feature = "vpx")]
 		if vpx::check(Codec::Vp9, true).is_ok() {
-			list.push(Candidate { codec: Codec::Vp9, backend: EncoderBackend::Libvpx, hardware: false });
+			list.push(Candidate::builtin(Codec::Vp9, EncoderBackend::Libvpx));
 		}
 		for codec in [Codec::Av1, Codec::H265, Codec::Vp8, Codec::Vp9] {
 			factories(codec, false, &mut list);
@@ -539,10 +558,10 @@ impl Codecs {
 	/// Encoders in the order `preference` gives.
 	pub fn encoders_for(&self, preference: &EncoderPreference) -> Vec<(Codec, EncoderBackend)> {
 		let all = self.candidates();
-		let automatic = |c: &Candidate| preference.hardware || !c.hardware;
+		let automatic = |c: &Candidate| c.automatic && (preference.hardware || !c.hardware);
 		let chosen: Vec<&Candidate> = match &preference.backend {
 			BackendChoice::Auto => all.iter().filter(|c| automatic(c)).collect(),
-			BackendChoice::Software => all.iter().filter(|c| !c.hardware).collect(),
+			BackendChoice::Software => all.iter().filter(|c| c.automatic && !c.hardware).collect(),
 			BackendChoice::Named(name) => {
 				let named = all.iter().filter(|c| c.backend.name() == name);
 				let rest = all.iter().filter(|c| c.backend.name() != name && automatic(c));
@@ -753,12 +772,13 @@ mod tests {
 
 	#[test]
 	fn preference_order() {
-		let codecs = Codecs::new();
+		let codecs = Codecs::builtin();
 		// Without OpenH264, H.264 is neither offered nor accepted.
 		assert!(!codecs.decoders().contains(&Codec::H264));
 		assert!(codecs.new_decoder(Codec::H264).is_err());
 		let err = codecs.new_encoder(Codec::H264, EncoderConfig::default()).err().unwrap();
 		assert!(matches!(err, Error::CodecUnavailable { codec: Codec::H264, .. }), "{err}");
+		assert!(codecs.new_decoder(Codec::H265).is_err());
 		#[cfg(feature = "vpx")]
 		{
 			assert_eq!(codecs.decoders()[..2], [Codec::Vp9, Codec::Vp8]);
@@ -775,6 +795,71 @@ mod tests {
 			.map(|c| VIEWER_PREFERENCE.iter().position(|p| p == c).unwrap())
 			.collect();
 		assert!(order.windows(2).all(|w| w[0] < w[1]));
+	}
+
+	struct Fake(&'static str, Codec, bool);
+
+	impl hw::EncoderFactory for Fake {
+		fn name(&self) -> &'static str {
+			self.0
+		}
+
+		fn codecs(&self) -> Vec<Codec> {
+			vec![self.1]
+		}
+
+		fn create(&self, codec: Codec, _: &EncoderConfig) -> Result<Box<dyn VideoEncoder>> {
+			Err(unavailable(codec, "fake"))
+		}
+
+		fn is_hardware(&self) -> bool {
+			self.2
+		}
+
+		fn backend(&self) -> EncoderBackend {
+			EncoderBackend::Ffmpeg(self.0)
+		}
+	}
+
+	#[test]
+	fn encoder_preference() {
+		let mut codecs = Codecs::builtin();
+		codecs.factories = vec![
+			Box::new(Fake("x264", Codec::H264, false)),
+			Box::new(Fake("vp8_gpu", Codec::Vp8, true)),
+			Box::new(Fake("h264_gpu", Codec::H264, true)),
+			Box::new(Fake("hevc_gpu", Codec::H265, true)),
+			Box::new(Fake("av1_sw", Codec::Av1, false)),
+		];
+		let names = |preference: EncoderPreference| -> Vec<&'static str> {
+			codecs.encoders_for(&preference).iter().map(|(_, b)| b.name()).collect()
+		};
+		let auto = names(EncoderPreference::default());
+		// Hardware in codec order (HEVC last), then software.
+		assert_eq!(auto[..3], ["h264_gpu", "vp8_gpu", "hevc_gpu"]);
+		let position = |list: &[&str], name| list.iter().position(|n| *n == name).unwrap();
+		assert!(position(&auto, "x264") < position(&auto, "av1_sw"));
+		#[cfg(feature = "vpx")]
+		assert!(position(&auto, "libvpx") < position(&auto, "x264"), "VP8 before software H.264");
+		let no_hardware = names(EncoderPreference { hardware: false, ..Default::default() });
+		assert!(!no_hardware.iter().any(|n| n.ends_with("_gpu")));
+		let software =
+			names(EncoderPreference { hardware: true, backend: "software".parse().unwrap() });
+		assert_eq!(software, no_hardware);
+		// A named backend comes first, even hardware with acceleration off.
+		let named =
+			names(EncoderPreference { hardware: false, backend: "hevc_gpu".parse().unwrap() });
+		assert_eq!(named[0], "hevc_gpu");
+		assert!(!named[1..].iter().any(|n| n.ends_with("_gpu")));
+		// The codecs follow the preference.
+		codecs.set_preference(EncoderPreference::default());
+		assert_eq!(codecs.encoder_codecs()[..3], [Codec::H264, Codec::Vp8, Codec::H265]);
+		// The report ranks what the preference uses.
+		let report = codecs.report();
+		let openh264 = report.encoders.iter().find(|e| e.name == "openh264").unwrap();
+		assert!(openh264.status.is_err() && openh264.rank.is_none());
+		assert_eq!("auto".parse::<BackendChoice>().unwrap(), BackendChoice::Auto);
+		assert_eq!(BackendChoice::Named("h264_vaapi".into()).to_string(), "h264_vaapi");
 	}
 
 	#[test]

@@ -105,7 +105,8 @@ pub static BACKENDS: &[BackendSpec] = &[
 	backend!("av1_vaapi", Av1, "VA-API", Hardware, Vaapi, false, INFINITE),
 	backend!("av1_qsv", Av1, "Quick Sync", Hardware, Nv12, true, 65535),
 	backend!("libsvtav1", Av1, "SVT-AV1", Software, Yuv420p, false, INFINITE),
-	backend!("librav1e", Av1, "rav1e", Software, Yuv420p, false, INFINITE),
+	// rav1e refuses a keyframe interval of 2^30.
+	backend!("librav1e", Av1, "rav1e", Software, Yuv420p, false, 1 << 29),
 	backend!("libaom-av1", Av1, "libaom", Software, Yuv420p, false, INFINITE),
 	// VP9 and VP8 (software VP8 / VP9 is libvpx, used directly)
 	backend!("vp9_vaapi", Vp9, "VA-API", Hardware, Vaapi, false, INFINITE),
@@ -120,6 +121,13 @@ impl BackendSpec {
 
 	pub fn is_hardware(&self) -> bool {
 		self.kind == BackendKind::Hardware
+	}
+
+	/// Whether the automatic choice may use it: rav1e holds about 20 frames
+	/// before its first packet even in its low-latency mode (measured with
+	/// rav1e 0.7), so it is only used when named in the settings.
+	pub fn is_automatic(&self) -> bool {
+		self.name != "librav1e"
 	}
 
 	fn is_vaapi(&self) -> bool {
@@ -186,7 +194,8 @@ fn settings(spec: &BackendSpec, config: &EncoderConfig, low_power: bool) -> Vec<
 	let screen = config.content == ContentHint::Screen;
 	let baseline = config.h264_profile == H264Profile::ConstrainedBaseline;
 	let h264 = spec.codec == Codec::H264;
-	let generic_profile = if baseline { PROFILE_H264_CONSTRAINED_BASELINE } else { PROFILE_H264_HIGH };
+	let generic_profile =
+		if baseline { PROFILE_H264_CONSTRAINED_BASELINE } else { PROFILE_H264_HIGH };
 	let mut list = Vec::new();
 	match spec.family() {
 		"nvenc" => {
@@ -213,7 +222,10 @@ fn settings(spec: &BackendSpec, config: &EncoderConfig, low_power: bool) -> Vec<
 			list.push(opt("look_ahead_depth", &["0"]));
 			list.push(opt("forced_idr", &["1"]));
 			list.push(opt("low_delay_brc", &["1"]));
-			list.push(opt("scenario", if screen { &["displayremoting"] } else { &["videoconference"] }));
+			list.push(opt(
+				"scenario",
+				if screen { &["displayremoting"] } else { &["videoconference"] },
+			));
 			if h264 {
 				list.push(opt("profile", if baseline { &["baseline"] } else { &["high"] }));
 			}
@@ -290,12 +302,18 @@ fn settings(spec: &BackendSpec, config: &EncoderConfig, low_power: bool) -> Vec<
 			"libsvtav1" => {
 				let preset = config.speed.unwrap_or(10).to_string();
 				list.push(Setting { values: vec![preset], ..opt("preset", &[]) });
-				list.push(opt("svtav1-params", &["pred-struct=1:lookahead=0:scd=0", "pred-struct=1"]));
+				list.push(opt(
+					"svtav1-params",
+					&["rc=2:pred-struct=1:lookahead=0:scd=0", "rc=2:pred-struct=1"],
+				));
 			}
 			"librav1e" => {
 				let speed = config.speed.unwrap_or(10).to_string();
 				list.push(Setting { values: vec![speed], ..opt("speed", &[]) });
-				list.push(opt("rav1e-params", &["low_latency=true"]));
+				list.push(opt(
+					"rav1e-params",
+					&["low_latency=true:rdo_lookahead_frames=1:reservoir_frame_delay=12"],
+				));
 			}
 			"libaom-av1" => {
 				let cpu_used = config.speed.unwrap_or(8).to_string();
@@ -356,10 +374,20 @@ fn vaapi_device(ffmpeg: &Ffmpeg) -> std::result::Result<Ptr, String> {
 			let c_path = cstr(&path);
 			// SAFETY: out pointer and C strings are valid; no options.
 			let ret = unsafe {
-				(api.av_hwdevice_ctx_create)(&mut device, kind, c_path.as_ptr(), std::ptr::null_mut(), 0)
+				(api.av_hwdevice_ctx_create)(
+					&mut device,
+					kind,
+					c_path.as_ptr(),
+					std::ptr::null_mut(),
+					0,
+				)
 			};
 			if ret < 0 {
-				return Err(format!("VA-API device {path}: {}{}", api.error_text(ret), log_suffix()));
+				return Err(format!(
+					"VA-API device {path}: {}{}",
+					api.error_text(ret),
+					log_suffix("vaapi")
+				));
 			}
 			Ok(Device(device))
 		})
@@ -369,8 +397,8 @@ fn vaapi_device(ffmpeg: &Ffmpeg) -> std::result::Result<Ptr, String> {
 }
 
 /// FFmpeg's recent messages, appended to an error.
-fn log_suffix() -> String {
-	let log = take_log();
+fn log_suffix(context: &str) -> String {
+	let log = take_log(context);
 	if log.is_empty() { String::new() } else { format!(" ({})", log.join("; ")) }
 }
 
@@ -419,6 +447,9 @@ struct Session {
 	hw: Ptr,
 	packet: Ptr,
 	last_pts: Option<i64>,
+	/// No packet came out yet: the first one starts the stream, so it is a
+	/// keyframe even where the wrapper does not flag it (rav1e).
+	first_packet: bool,
 	timestamps: Timestamps,
 	nv12: bool,
 }
@@ -488,7 +519,7 @@ impl FfmpegEncoder {
 				"{} {what}: {}{}",
 				self.spec.name,
 				self.ffmpeg.api.error_text(code),
-				log_suffix()
+				log_suffix(self.spec.name)
 			),
 		}
 	}
@@ -587,6 +618,7 @@ impl FfmpegEncoder {
 			hw: std::ptr::null_mut(),
 			packet: std::ptr::null_mut(),
 			last_pts: None,
+			first_packet: true,
 			timestamps: Timestamps::new(),
 			nv12: self.spec.input != Input::Yuv420p,
 		};
@@ -596,7 +628,9 @@ impl FfmpegEncoder {
 		let (w, h) = (width as c_int, height as c_int);
 		let sw_format = if session.nv12 { pix.nv12 } else { pix.yuv420p };
 		let format = match self.spec.input {
-			Input::Vaapi => pix.vaapi.ok_or_else(|| self.unavailable("no VA-API pixel format".into()))?,
+			Input::Vaapi => {
+				pix.vaapi.ok_or_else(|| self.unavailable("no VA-API pixel format".into()))?
+			}
 			_ => sw_format,
 		};
 		let size = cstr("video_size");
@@ -620,7 +654,9 @@ impl FfmpegEncoder {
 		let gop = self.config.keyframe_interval.map_or(self.spec.infinite_gop, i64::from);
 		let mut list = vec![
 			generic("b", bitrate),
-			generic("maxrate", bitrate),
+			// SVT-AV1 takes CBR from its own `rc=2` and rejects a maximum
+			// that is not above the target.
+			generic("maxrate", if self.spec.name == "libsvtav1" { 0 } else { bitrate }),
 			generic("bufsize", bitrate),
 			generic("g", gop),
 			generic("bf", 0),
@@ -691,7 +727,8 @@ impl FfmpegEncoder {
 	fn vaapi_pool(&self, width: u32, height: u32) -> Result<Ptr> {
 		let api = &self.ffmpeg.api;
 		let device = vaapi_device(self.ffmpeg).map_err(|e| self.unavailable(e))?;
-		let vaapi = self.ffmpeg.pix.vaapi.ok_or_else(|| self.unavailable("no VA-API format".into()))?;
+		let vaapi =
+			self.ffmpeg.pix.vaapi.ok_or_else(|| self.unavailable("no VA-API format".into()))?;
 		// SAFETY: `device` is a live device reference.
 		let mut pool = unsafe { (api.av_hwframe_ctx_alloc)(device) };
 		if pool.is_null() {
@@ -778,11 +815,7 @@ impl FfmpegEncoder {
 	}
 
 	/// Receive every packet that is ready.
-	fn drain(
-		&self,
-		session: &mut Session,
-		out: &mut dyn FnMut(EncodedChunk<'_>),
-	) -> Result<bool> {
+	fn drain(&self, session: &mut Session, out: &mut dyn FnMut(EncodedChunk<'_>)) -> Result<bool> {
 		let api = &self.ffmpeg.api;
 		let mut keyframe = false;
 		loop {
@@ -798,11 +831,13 @@ impl FfmpegEncoder {
 			// `size` bytes until av_packet_unref.
 			unsafe {
 				let head = &*session.packet.cast::<PacketHead>();
-				let key = head.flags & sys::PKT_FLAG_KEY != 0;
+				let key = head.flags & sys::PKT_FLAG_KEY != 0 || session.first_packet;
+				session.first_packet = false;
 				keyframe |= key;
-				let pts_90khz = session.timestamps.take(head.pts).unwrap_or_else(|| {
-					(head.pts.max(0) as u64) * 90_000 / u64::from(session.fps)
-				});
+				let pts_90khz = session
+					.timestamps
+					.take(head.pts)
+					.unwrap_or_else(|| (head.pts.max(0) as u64) * 90_000 / u64::from(session.fps));
 				if !head.data.is_null() && head.size > 0 {
 					let data = std::slice::from_raw_parts(head.data, head.size as usize);
 					out(EncodedChunk { data, keyframe: key, pts_90khz });
@@ -855,8 +890,14 @@ impl FfmpegEncoder {
 			}
 		};
 		if reopen {
-			// One session at a time (hardware encoders have few).
-			self.session = None;
+			// Frames the old session still holds (encoders with a delay) come
+			// out first; then one session at a time (hardware encoders have
+			// few).
+			if let Some(mut old) = self.session.take()
+				&& let Err(e) = self.send(&mut old, std::ptr::null_mut(), out)
+			{
+				tracing::debug!(backend = self.spec.name, "flushing the old session: {e}");
+			}
 			self.session = Some(self.open(w, h)?);
 			self.reinit = Reinit::No;
 			force = true;
@@ -1080,9 +1121,9 @@ pub fn probe() -> &'static [BackendStatus] {
 					spec,
 					available: match test {
 						None => Err("not in this FFmpeg build".into()),
-						Some(handle) => handle
-							.join()
-							.unwrap_or_else(|_| Err("the self-test panicked".into())),
+						Some(handle) => {
+							handle.join().unwrap_or_else(|_| Err("the self-test panicked".into()))
+						}
 					},
 				})
 				.collect()
@@ -1090,7 +1131,9 @@ pub fn probe() -> &'static [BackendStatus] {
 		for status in &statuses {
 			match &status.available {
 				Ok(()) => tracing::info!(backend = status.spec.name, "FFmpeg encoder available"),
-				Err(e) => tracing::debug!(backend = status.spec.name, "FFmpeg encoder unusable: {e}"),
+				Err(e) => {
+					tracing::debug!(backend = status.spec.name, "FFmpeg encoder unusable: {e}")
+				}
 			}
 		}
 		statuses
@@ -1138,6 +1181,10 @@ impl EncoderFactory for FfmpegFactory {
 
 	fn is_hardware(&self) -> bool {
 		self.spec.is_hardware()
+	}
+
+	fn is_automatic(&self) -> bool {
+		self.spec.is_automatic()
 	}
 
 	fn backend(&self) -> EncoderBackend {

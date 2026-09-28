@@ -105,8 +105,10 @@ pub fn frame_fields(api: &Api) -> Result<FrameFields, String> {
 			pict_type: offset_of!(FrameWithoutKeyFrame, pict_type),
 			pts: offset_of!(FrameWithoutKeyFrame, pts),
 		}),
-		_ => Err("unknown AVFrame layout (pict_type / pts not where any known release has them)"
-			.into()),
+		_ => {
+			Err("unknown AVFrame layout (pict_type / pts not where any known release has them)"
+				.into())
+		}
 	}
 }
 
@@ -208,7 +210,9 @@ fn locate_hw_frames(api: &Api, ctx: Ptr) -> Result<usize, String> {
 				break 'found base + frames_off;
 			}
 		}
-		return Err("unknown AVCodecContext layout (hw_frames_ctx not next to hwaccel_flags)".into());
+		return Err(
+			"unknown AVCodecContext layout (hw_frames_ctx not next to hwaccel_flags)".into()
+		);
 	};
 	let device = found + size_of::<Ptr>();
 	// SAFETY: both offsets lie before `hwaccel_flags`, an option of this
@@ -377,8 +381,7 @@ pub unsafe fn check_hw_frames_ctx(frame: Ptr, pool: Ptr, refs: FrameRefs) -> boo
 	// SAFETY: guaranteed by the caller; the offset is inside AVFrame.
 	unsafe {
 		let hw: Ptr = read(frame, refs.hw_frames_ctx);
-		!hw.is_null()
-			&& (*hw.cast::<BufferRefHead>()).data == (*pool.cast::<BufferRefHead>()).data
+		!hw.is_null() && (*hw.cast::<BufferRefHead>()).data == (*pool.cast::<BufferRefHead>()).data
 	}
 }
 

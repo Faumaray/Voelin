@@ -27,7 +27,7 @@ fn assert_close(actual: [u8; 3], expected: [u8; 3], tolerance: i32, what: &str) 
 /// Encode 30 frames of the pattern, force a keyframe midway, lower the
 /// bitrate, and check every decoded frame.
 fn roundtrip(codec: Codec) {
-	let codecs = Codecs::new();
+	let codecs = Codecs::builtin();
 	let screen = SyntheticScreen::new(W, H);
 	let config = EncoderConfig { fps: FPS, bitrate_bps: 1_500_000, ..EncoderConfig::default() };
 	let mut encoder = codecs.new_encoder(codec, config).unwrap();
@@ -69,7 +69,7 @@ fn vp9_synthetic_roundtrip() {
 /// Frames from the capture thread go through encode / decode in order.
 #[tokio::test]
 async fn capture_thread_to_decoder() {
-	let codecs = Codecs::new();
+	let codecs = Codecs::builtin();
 	let mut screen = SyntheticScreen::new(W, H);
 	let options = CaptureOptions { fps: 60, cursor: false, queue: 8 };
 	let mut frames = screen.start(&SourceId::Synthetic, &options).await.unwrap();

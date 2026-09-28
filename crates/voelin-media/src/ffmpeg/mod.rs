@@ -133,8 +133,7 @@ impl Ffmpeg {
 		static FFMPEG: OnceLock<Result<Ffmpeg, String>> = OnceLock::new();
 		FFMPEG
 			.get_or_init(|| {
-				if std::env::var("VOELIN_FFMPEG").is_ok_and(|v| matches!(v.as_str(), "0" | "off"))
-				{
+				if std::env::var("VOELIN_FFMPEG").is_ok_and(|v| matches!(v.as_str(), "0" | "off")) {
 					return Err("disabled by VOELIN_FFMPEG".into());
 				}
 				let loaded = Self::load(&Search::from_env());
@@ -173,16 +172,32 @@ impl Ffmpeg {
 	}
 }
 
-type FormatLine = unsafe extern "C" fn(Ptr, c_int, *const c_char, VaList, *mut c_char, c_int, *mut c_int) -> c_int;
+type FormatLine = unsafe extern "C" fn(
+	Ptr,
+	c_int,
+	*const c_char,
+	VaList,
+	*mut c_char,
+	c_int,
+	*mut c_int,
+) -> c_int;
 
 static LOG_FORMAT: OnceLock<FormatLine> = OnceLock::new();
 
 /// The last FFmpeg messages (warnings and errors), for error reports.
 static LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// Take the FFmpeg messages logged since the last call (at most 16).
-pub fn take_log() -> Vec<String> {
-	std::mem::take(&mut *LOG.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+/// Take the FFmpeg messages logged since the last call (at most 16) that
+/// are about `context` (an encoder name such as `h264_vaapi`: FFmpeg
+/// prefixes its messages with `[h264_vaapi @ 0x...]`) or about nothing in
+/// particular. Messages of other encoders (tested in parallel) stay.
+pub fn take_log(context: &str) -> Vec<String> {
+	let mut log = LOG.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+	let tag = format!("[{context} @");
+	let (mine, others): (Vec<String>, Vec<String>) =
+		log.drain(..).partition(|line| line.contains(&tag) || !line.contains(" @ 0x"));
+	*log = others;
+	mine
 }
 
 unsafe extern "C" fn log_callback(avcl: Ptr, level: c_int, fmt: *const c_char, vl: VaList) {

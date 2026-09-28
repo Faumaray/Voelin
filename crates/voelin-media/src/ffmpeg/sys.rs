@@ -394,7 +394,8 @@ fn candidates(search: &Search, base: &str) -> Vec<PathBuf> {
 			}
 		}
 		if cfg!(windows)
-			&& let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_owned))
+			&& let Some(dir) =
+				std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_owned))
 		{
 			list.extend(files_in(&dir, base));
 		}
