@@ -67,3 +67,10 @@ against or offered back to upstream.
    required `reason`; `notifyjoinstreamrequest` carries `is_remove`,
    `notifystreamstopped` and `notifystreamclientleft` carry `reason`, the latter also
    `return_code`.
+8. **File transfer fixes** (`tsclientlib/src/lib.rs`, marked "Voelin patch").
+   A server that refuses `ftinitdownload`/`ftinitupload` (file not found, no
+   permission, quota) answers with an `error` for the command's return code, which
+   came out as a `MessageResult` the caller cannot match to its
+   `FiletransferHandle`; it now fails the transfer (`FiletransferFailed`). A
+   transfer address of `0.0.0.0`/`::` means the server's own address. The return
+   code and transfer id counters wrap instead of overflowing.
