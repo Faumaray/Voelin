@@ -43,7 +43,7 @@ tsclientlib = { path = "../proto/tsclientlib" }
 tsproto-packets = { path = "../proto/tsproto-packets" }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "test-util"] }
 
 [lints]
 workspace = true

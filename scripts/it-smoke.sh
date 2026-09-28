@@ -11,12 +11,23 @@
 #   6. relay chat: a query relay reads channel chat and posts into the channel
 #   7. gateway (tsgw): login with a TeamSpeak identity, presence, channel chat
 #      both ways, refusal of an identity the server does not know
-#   8. stream (TeamSpeak 6 only): a viewer watches a synthetic VP8 + Opus stream
-#   9. late stream (TeamSpeak 6 only): a viewer that connects after the stream
+#   8. chat history through the engine (voelinctl gateway --engine): an admin
+#      sets a runtime gateway setting; messages sent while a user is offline
+#      reach the user's stored history when it connects again
+#   9. pins, reactions and topics through the engine: post, pin (allowed by
+#      a permission rule the admin sets), react, start a topic from the post,
+#      post into it, read the topic and the pins back
+#  10. stream directory (TeamSpeak 6 only): an engine session's stream
+#      registers itself in the gateway's directory; a viewer that connects
+#      later finds it there and watches it
+#  11. stream (TeamSpeak 6 only): a viewer watches a synthetic VP8 + Opus stream
+#  12. late stream (TeamSpeak 6 only): a viewer that connects after the stream
 #      started finds it (requeststreaminfo) and watches it
 #
 # Usage: scripts/it-smoke.sh [ts3|ts6]...   (default: both)
-# Env:   VOELINCTL=path/to/voelinctl (default: builds target/debug/voelinctl)
+# Env:   VOELINCTL=path/to/voelinctl, TSGW=path/to/tsgw (default: builds both
+#        into $CARGO_TARGET_DIR or target)
+#        TSGW_PORT_TS3, TSGW_PORT_TS6: gateway ports (default 7787, 7788)
 #        COMPOSE_FILE=dev/docker-compose.yml
 set -euo pipefail
 
@@ -29,16 +40,17 @@ mkdir -p "$STATE_DIR"
 # Never leave background clients behind.
 trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
 
+BUILD_DIR="${CARGO_TARGET_DIR:-target}/debug"
 if [[ -z "${VOELINCTL:-}" ]]; then
 	cargo build --quiet -p voelinctl -p voelin-gateway
-	VOELINCTL=target/debug/voelinctl
+	VOELINCTL=$BUILD_DIR/voelinctl
 fi
-TSGW="${TSGW:-target/debug/tsgw}"
+TSGW="${TSGW:-$BUILD_DIR/tsgw}"
 
 declare -A PORTS=([ts3]=9987 [ts6]=9988)
 # ServerQuery transport and address per server (dev/docker-compose.yml).
 declare -A QUERY=([ts3]="raw 127.0.0.1:10011" [ts6]="ssh 127.0.0.1:10022")
-declare -A GATEWAY=([ts3]=7787 [ts6]=7788)
+declare -A GATEWAY=([ts3]=${TSGW_PORT_TS3:-7787} [ts6]=${TSGW_PORT_TS6:-7788})
 QUERY_SECRET=voelin-dev-admin
 SERVERS=("$@")
 [[ ${#SERVERS[@]} -eq 0 ]] && SERVERS=(ts3 ts6)
@@ -201,7 +213,8 @@ relay_check() {
 gateway_check() {
 	local svc=$1 addr=$2 port=${GATEWAY[$svc]} out="$STATE_DIR/gateway.log"
 	local url="ws://127.0.0.1:$port/v1" token="gw-$RANDOM$RANDOM"
-	"$TSGW" --config "dev/tsgw-$svc.toml" >"$STATE_DIR/tsgw-$svc.log" 2>&1 &
+	"$TSGW" --config "dev/tsgw-$svc.toml" --set "listen.bind=127.0.0.1:$port" \
+		--set "history.path=$STATE_DIR/tsgw-$svc.db" >"$STATE_DIR/tsgw-$svc.log" 2>&1 &
 	local gateway=$!
 	for _ in $(seq 1 40); do
 		grep -q "listening" "$STATE_DIR/tsgw-$svc.log" 2>/dev/null && break
@@ -236,8 +249,107 @@ gateway_check() {
 	fi
 	grep -E "presence:|to-gateway-$token" "$out"
 	grep "from-gateway-$token" "$STATE_DIR/gateway-heard.log"
+
+	history_check "$svc" "$addr" "$url" "$user"
+	features_check "$svc" "$url" "$user"
+	if [[ $svc == ts6 ]]; then
+		directory_check "$svc" "$addr" "$url" "$user"
+	fi
 	kill "$gateway"
 	wait "$gateway" 2>/dev/null || true
+}
+
+# An engine session through the gateway: voelinctl gateway --engine.
+engine() {
+	local url=$1 identity=$2
+	shift 2
+	"$VOELINCTL" gateway "$url" --identity "$identity" --engine "$@"
+}
+
+# A gateway request as the server's admin; the answer must contain $expect.
+admin_request() {
+	local svc=$1 url=$2 request=$3 expect=$4 out="$STATE_DIR/admin-request.log"
+	if ! engine "$url" "$STATE_DIR/$svc-admin.json" --request "$request" --expect "$expect" \
+		--seconds 15 >"$out" 2>&1; then
+		cat "$out"
+		fail "gateway request $request was not answered with $expect"
+	fi
+	grep -F "$expect" "$out" | cut -c1-200
+}
+
+# Messages sent while a user is offline reach the user's stored history
+# through the gateway when the user connects again.
+history_check() {
+	local svc=$1 addr=$2 url=$3 user=$4 token="offline-$RANDOM$RANDOM"
+	local db="$STATE_DIR/$svc-history-$$.db" out="$STATE_DIR/history.log"
+	rm -f "$db"*
+	# The gateway reads channel 1 even while nobody has it open (runtime setting).
+	admin_request "$svc" "$url" '{"config_set":{"key":"relay.pinned_channels","value":[1]}}' \
+		'"config_value":{"entry":{"key":"relay.pinned_channels","value":[1]'
+	# First visit: the chat is synced and stored.
+	if ! engine "$url" "$user" --db "$db" --chat channel:1 --expect "history gateway channel:1 batch" \
+		--seconds 15 >"$out" 2>&1; then
+		cat "$out"
+		fail "first chat history sync failed"
+	fi
+	# Away: someone talks in the channel.
+	sleep 2
+	"$VOELINCTL" connect "$addr" --nick history-talker chat channel "$token-1"
+	"$VOELINCTL" connect "$addr" --nick history-talker chat channel "$token-2"
+	sleep 1
+	# Back: the stored history at once, then what was missed, from the gateway.
+	if ! engine "$url" "$user" --db "$db" --chat channel:1 --expect "$token-2" \
+		--seconds 15 >"$out" 2>&1; then
+		cat "$out" "$STATE_DIR/tsgw-$svc.log"
+		fail "messages sent while offline did not arrive"
+	fi
+	grep -E "^history gateway channel:1 .*$token-1" "$out" || { cat "$out"; fail "$token-1 not from the gateway"; }
+	grep -E "^history gateway channel:1 .*$token-2" "$out" || { cat "$out"; fail "$token-2 not from the gateway"; }
+	# And stored: the next visit shows them from the database first.
+	if ! engine "$url" "$user" --db "$db" --chat channel:1 --expect "history gateway channel:1 batch" \
+		--seconds 15 >"$out" 2>&1; then
+		cat "$out"
+		fail "third chat history sync failed"
+	fi
+	grep -E "^history local channel:1 .*$token-2" "$out" || { cat "$out"; fail "$token-2 was not stored"; }
+	admin_request "$svc" "$url" '{"config_reset":{"key":"relay.pinned_channels"}}' '"config_value"' >/dev/null
+	rm -f "$db"*
+}
+
+# Post, pin, react, topic and topic post through the engine as a normal user;
+# pinning is allowed by a permission rule the admin sets for the test.
+features_check() {
+	local svc=$1 url=$2 user=$3 out="$STATE_DIR/roundtrip.log"
+	admin_request "$svc" "$url" '{"perm_set":{"action":"pin","rule":{"everyone":true}}}' '"perm_rules"' >/dev/null
+	if ! engine "$url" "$user" --roundtrip channel:1 --seconds 20 >"$out" 2>&1; then
+		cat "$out"
+		admin_request "$svc" "$url" '{"perm_reset":{"action":"pin"}}' '"perm_rules"' >/dev/null || true
+		fail "pin/react/topic round trip failed"
+	fi
+	admin_request "$svc" "$url" '{"perm_reset":{"action":"pin"}}' '"perm_rules"' >/dev/null
+	grep -E "^roundtrip|\"pinned\":\{|\"reaction\":\{" "$out" | cut -c1-160
+}
+
+# TeamSpeak 6: an engine session streams; its stream registers in the
+# gateway's directory; a viewer that connects later finds it and watches it.
+directory_check() {
+	local svc=$1 addr=$2 url=$3 user=$4 streamer="dir-$$-$RANDOM" title="directory-$RANDOM"
+	local out="$STATE_DIR/directory-stream.log" viewer_out="$STATE_DIR/directory-watch.log"
+	engine "$url" "$STATE_DIR/$svc-admin.json" --voice "$addr" --nick "$streamer" --loopback \
+		--stream-seconds 30 --stream-title "$title" --seconds 45 >"$out" 2>&1 &
+	local streamer_pid=$!
+	for _ in $(seq 1 80); do grep -q '"stream_registered"' "$out" 2>/dev/null && break; sleep 0.25; done
+	grep -q '"stream_registered"' "$out" || { cat "$out"; fail "the stream did not register in the directory"; }
+	if ! engine "$url" "$user" --voice "$addr" --nick "late-dir-$$" --loopback \
+		--watch-streamer "$streamer" --expect-frames 30 --seconds 25 >"$viewer_out" 2>&1; then
+		cat "$viewer_out" "$out"
+		fail "late viewer did not watch the stream from the directory"
+	fi
+	grep -qF "\"title\":\"$title\"" "$viewer_out" || { cat "$viewer_out"; fail "the directory did not list the stream"; }
+	kill -INT "$streamer_pid" 2>/dev/null || true
+	wait "$streamer_pid" 2>/dev/null || true
+	grep -E '"stream_registered"' "$out" | cut -c1-160
+	grep -E "^watching|^received" "$viewer_out"
 }
 
 for svc in "${SERVERS[@]}"; do

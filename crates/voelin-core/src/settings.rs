@@ -1061,8 +1061,43 @@ pub static STREAM_PERMISSIONS: Key<StreamPermissions> = Key::new(
 	StreamPermissions::default,
 );
 
+/// Keep chat history in the client database. Off: messages seen from now
+/// on are kept in memory only (for this run), nothing is read from or
+/// written to the database.
+pub static CHAT_STORE_HISTORY: Key<bool> =
+	Key::new("chat.store_history", Kind::Bool, "Keep chat history on this device.", || true);
+
+/// Messages per history page: shown when a chat opens, fetched per step
+/// when scrolling back, and per request while syncing with a gateway.
+/// 0: everything at once. No maximum.
+pub static CHAT_HISTORY_PAGE: Key<u32> = Key::new(
+	"chat.history_page",
+	Kind::UInt { min: 0 },
+	"Messages per chat history page (0: all at once).",
+	|| 100,
+);
+
+/// How far apart (ms) two copies of a message from different sources may
+/// be stamped and still count as one message (e.g. live over voice and
+/// again from the gateway). No maximum.
+pub static CHAT_DEDUPE_TOLERANCE_MS: Key<u64> = Key::new(
+	"chat.dedupe_tolerance_ms",
+	Kind::UInt { min: 0 },
+	"Time difference (ms) within which two copies of a message are one.",
+	|| 5000,
+);
+
+/// Delete stored chat messages older than this many days (pinned ones
+/// stay); 0 keeps everything.
+pub static CHAT_RETENTION_DAYS: Key<u32> = Key::new(
+	"chat.retention_days",
+	Kind::UInt { min: 0 },
+	"Delete stored chat messages older than this many days (0: keep all).",
+	|| 0,
+);
+
 /// The keys every [`Settings`] knows from the start.
-pub fn builtin_keys() -> [&'static dyn Setting; 11] {
+pub fn builtin_keys() -> [&'static dyn Setting; 15] {
 	[
 		&CRASH_REPORTS,
 		&AUDIO,
@@ -1075,6 +1110,10 @@ pub fn builtin_keys() -> [&'static dyn Setting; 11] {
 		&STREAM_SRTP_PROFILES,
 		&STREAM_HARDWARE_ACCELERATION,
 		&STREAM_PERMISSIONS,
+		&CHAT_STORE_HISTORY,
+		&CHAT_HISTORY_PAGE,
+		&CHAT_DEDUPE_TOLERANCE_MS,
+		&CHAT_RETENTION_DAYS,
 	]
 }
 
@@ -1127,6 +1166,10 @@ mod tests {
 		);
 		assert!(s.get(&STREAM_HARDWARE_ACCELERATION));
 		assert_eq!(s.get(&STREAM_ENCODER_BACKEND), "auto");
+		assert!(s.get(&CHAT_STORE_HISTORY));
+		assert_eq!(s.get(&CHAT_HISTORY_PAGE), 100);
+		assert_eq!(s.get(&CHAT_DEDUPE_TOLERANCE_MS), 5000);
+		assert_eq!(s.get(&CHAT_RETENTION_DAYS), 0);
 		assert_eq!(s.source("stream.fps"), Some(Source::Default));
 		let names: Vec<_> = s.keys().iter().map(|k| k.name()).collect();
 		assert!(names.contains(&"stream.permissions") && names.contains(&"audio"));

@@ -3,7 +3,12 @@
 How Voelin talks to `tsgw` ([gateway-admin.md](gateway-admin.md)). The types
 are in `crates/voelin-gateway-proto` (`messages.rs`, `types.rs`); its
 `client` feature is a typed client (one async method per request, pushes as
-`Push`), which the app uses through `voelin_core::gateway`.
+`Push`), which the app uses through `voelin_core::gateway`: the engine's
+`Command::Gateway` requests and `Event::Gateway` updates map onto the
+messages below one to one, and the chat history sync uses `query_history`
+and `sync` ([architecture.md](architecture.md#chat-history)).
+`voelinctl gateway --engine --request '<json>'` sends any request through
+the engine, e.g. `'{"config_get":{"key":"relay.pinned_channels"}}'`.
 
 ## Transport
 

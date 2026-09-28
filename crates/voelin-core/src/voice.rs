@@ -68,6 +68,11 @@ pub(crate) enum VoiceEvent {
 		name: String,
 		flavor: ServerFlavor,
 		own_client: u16,
+		/// The server's unique id (from its public key, as the server
+		/// generation computes it).
+		server_uid: String,
+		/// Our unique id as the server knows it.
+		own_uid: Option<String>,
 	},
 	Presence(Presence),
 	OwnChannel(ChannelId),
@@ -201,11 +206,20 @@ async fn run_inner(
 	{
 		let state = con.get_state()?;
 		let flavor = ServerFlavor::from_version_string(&state.server.version);
-		info!(server = %state.server.name, ?flavor, "voice connected");
+		let ids = voelin_gateway_proto::UniqueIds::from_omega(&state.server.public_key.to_ts());
+		let server_uid = ids.for_server(matches!(flavor, ServerFlavor::Ts6(_))).to_owned();
+		info!(server = %state.server.name, ?flavor, %server_uid, "voice connected");
+		let own_uid = state
+			.clients
+			.get(&state.own_client)
+			.and_then(|c| c.uid.as_ref())
+			.map(|u| u.as_ref().to_string());
 		let _ = events.send(VoiceEvent::Connected {
 			name: state.server.name.clone(),
 			flavor,
 			own_client: state.own_client.0,
+			server_uid,
+			own_uid,
 		});
 	}
 	// Subscribe to all channels to see everyone.
@@ -240,6 +254,13 @@ async fn run_inner(
 								MessageTarget::Server => ChatTarget::Server,
 								MessageTarget::Channel => {
 									ChatTarget::Channel(own_channel.unwrap_or(0))
+								}
+								// Our own private message comes back to us: it
+								// belongs to the chat with its receiver.
+								MessageTarget::Client(to)
+									if Some(invoker.id) == own_client(&con) =>
+								{
+									ChatTarget::Private(client_uid(&con, to).unwrap_or_default())
 								}
 								MessageTarget::Client(_) | MessageTarget::Poke(_) => {
 									ChatTarget::Private(
@@ -312,6 +333,15 @@ async fn run_inner(
 	con.disconnect(DisconnectOptions::new())?;
 	let _ = timeout(Duration::from_secs(3), con.events().for_each(|_| future::ready(()))).await;
 	Ok(())
+}
+
+fn own_client(con: &Connection) -> Option<tsclientlib::ClientId> {
+	con.get_state().ok().map(|state| state.own_client)
+}
+
+fn client_uid(con: &Connection, client: &tsclientlib::ClientId) -> Option<String> {
+	let state = con.get_state().ok()?;
+	state.clients.get(client)?.uid.as_ref().map(|u| u.as_ref().to_string())
 }
 
 fn own_channel(con: &Connection) -> Option<ChannelId> {

@@ -1,18 +1,25 @@
 //! Local persistence for the client.
 //!
-//! One SQLite database holds identities, bookmarks, settings and a chat
-//! cache. Passwords and query credentials never go into the database; they
-//! live in a [`Secrets`] store (the OS keyring with the `keyring` feature).
+//! One SQLite database holds identities, bookmarks, settings and the chat
+//! history ([`chat`]). Passwords and query credentials never go into the
+//! database; they live in a [`Secrets`] store (the OS keyring with the
+//! `keyring` feature).
+//!
+//! The schema is versioned (`PRAGMA user_version`): opening a database runs
+//! the migrations it has not seen, each in one transaction, keeping the data.
 
+pub mod chat;
 mod secrets;
 mod store;
 
+pub use chat::{
+	ChatCursor, ChatTarget, MessageSource, NewMessage, PageQuery, Reaction, RemoteInfo,
+	StoredMessage, SyncState, WriteOutcome, Written,
+};
 #[cfg(feature = "keyring")]
 pub use secrets::KeyringSecrets;
 pub use secrets::{MemorySecrets, Secrets};
-pub use store::{
-	Bookmark, ChatTarget, IdentityEntry, QueryConfig, QueryTransport, Store, StoredMessage,
-};
+pub use store::{Bookmark, IdentityEntry, QueryConfig, QueryTransport, Store};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
