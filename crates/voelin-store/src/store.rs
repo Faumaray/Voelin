@@ -18,8 +18,11 @@ enum Migration {
 /// Schema migrations; entry `i` upgrades from version `i` to `i + 1`
 /// (`PRAGMA user_version`). Add new ones at the end; never change one that
 /// shipped.
-const MIGRATIONS: &[Migration] =
-	&[Migration::Sql(SCHEMA_1), Migration::Code(crate::chat::migrate_2)];
+const MIGRATIONS: &[Migration] = &[
+	Migration::Sql(SCHEMA_1),
+	Migration::Code(crate::chat::migrate_2),
+	Migration::Sql(crate::contacts::SCHEMA_3),
+];
 
 /// Version 1: identities, bookmarks, settings and a first chat cache.
 pub(crate) const SCHEMA_1: &str = r#"
