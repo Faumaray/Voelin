@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Regenerate THIRD_PARTY_NOTICES.md from Cargo.lock with cargo-about
-# (about.toml, about.hbs). The app shows the file in its About page
+# (about.toml, about.hbs), followed by about-assets.md (the fonts, icons and
+# emoji the UI bundles, which cargo-about does not see). The app shows the
+# file in its About page
 # (voelin_platform::notices::text()), so it is committed; run this after changing
 # dependencies.
 #
@@ -44,6 +46,7 @@ if grep -E "WARN|ERROR" "$tmp/log" >&2; then
 	echo "cargo-about reported problems (above); fix about.toml" >&2
 	exit 1
 fi
+cat about-assets.md >>"$tmp/$OUT"
 
 if $check; then
 	if ! diff -u "$OUT" "$tmp/$OUT" >"$tmp/diff"; then

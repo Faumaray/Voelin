@@ -125,6 +125,7 @@ impl App {
 					.iter()
 					.map(|t| ChatTab {
 						title: t.title.clone().into(),
+						name: t.title.trim_start_matches(['#', '@']).into(),
 						kind: match t.target {
 							ChatTarget::Server => 0,
 							ChatTarget::Channel(_) => 1,

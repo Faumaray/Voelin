@@ -138,15 +138,20 @@ export component HomePage inherits Rectangle {
                 background: @linear-gradient(115deg, #0e1d5c 0%, #1c1470 45%, #3a1f86 75%, #0b2a6b 100%);
                 border-width: 1px;
                 border-color: Theme.border-strong;
-                // A moon.
-                Rectangle {
-                    x: parent.width - 260px;
-                    y: 24px;
-                    width: 150px;
-                    height: 150px;
-                    border-radius: 75px;
-                    background: @radial-gradient(circle, #9fb6ff 0%, #5a6fd6 55%, #2a2f86 100%);
-                    opacity: 0.55;
+                // A moon: soft rings (the software renderer clips no
+                // gradients to circles).
+                for ring[i] in [
+                    { size: 190px, color: #7f95ff14 },
+                    { size: 160px, color: #8fa4ff26 },
+                    { size: 132px, color: #a9b9ff5a },
+                    { size: 118px, color: #c4d0ffa0 },
+                ]: Rectangle {
+                    x: parent.width - 180px - ring.size / 2;
+                    y: 100px - ring.size / 2;
+                    width: ring.size;
+                    height: ring.size;
+                    border-radius: ring.size / 2;
+                    background: ring.color;
                 }
                 for star[i] in [
                     { x: 0.55, y: 0.18 }, { x: 0.62, y: 0.52 }, { x: 0.71, y: 0.1 }, { x: 0.9, y: 0.3 },

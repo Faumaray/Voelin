@@ -176,14 +176,6 @@ export component Modal inherits Rectangle {
         accessible-label: root.title;
         // Clicks inside the card do not dismiss it.
         TouchArea { }
-        // A faint accent line along the top edge.
-        Rectangle {
-            y: 0;
-            x: Theme.radius-xl;
-            width: parent.width - 2 * Theme.radius-xl;
-            height: 1px;
-            background: @linear-gradient(90deg, transparent 0%, Theme.accent 50%, transparent 100%);
-        }
         VerticalLayout {
             padding: Theme.space-6;
             spacing: Theme.space-5;

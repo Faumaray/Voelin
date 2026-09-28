@@ -61,7 +61,10 @@ export struct MemberItem {
 }
 
 export struct ChatTab {
+    // "#Lobby", "@alice", "Server"
     title: string,
+    // The name alone ("Lobby").
+    name: string,
     // 0 = server chat, 1 = channel chat, 2 = private chat
     kind: int,
     id: int,

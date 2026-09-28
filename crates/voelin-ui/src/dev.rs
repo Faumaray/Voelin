@@ -334,6 +334,7 @@ fn demo_ui(app: &mut App) {
 		};
 		app.add_message(id, message);
 	}
-	app.set_status("Connected to Nightfall Guild (TeamSpeak 6 6.0.0-beta13.1)");
+	// No toast over the screenshots.
+	app.set_status("");
 	app.refresh_all();
 }

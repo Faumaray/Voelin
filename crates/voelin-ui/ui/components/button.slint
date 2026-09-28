@@ -47,8 +47,8 @@ export component Button inherits Rectangle {
         : kind == ButtonKind.danger ? (active ? Theme.danger : touch.has-hover ? Theme.danger-soft.brighter(0.3) : Theme.danger-soft)
         : kind == ButtonKind.ghost ? (active ? Theme.surface-4 : touch.has-hover ? Theme.surface-3 : transparent)
         : (active ? Theme.surface-4 : touch.has-hover ? Theme.surface-3 : Theme.surface-2);
-    property <color> ink: !enabled ? Theme.text-disabled
-        : kind == ButtonKind.primary ? Theme.on-accent
+    property <color> ink: kind == ButtonKind.primary ? Theme.on-accent
+        : !enabled ? Theme.text-disabled
         : kind == ButtonKind.danger ? (active ? Theme.on-accent : Theme.danger)
         : checked ? Theme.accent-text : Theme.text;
 
@@ -61,7 +61,7 @@ export component Button inherits Rectangle {
     background: fill;
     border-width: kind == ButtonKind.secondary || kind == ButtonKind.danger || checked ? 1px : 0px;
     border-color: checked ? Theme.accent : kind == ButtonKind.danger ? Theme.danger.transparentize(55%) : Theme.border-strong;
-    opacity: enabled ? 1.0 : 0.6;
+    opacity: enabled ? 1.0 : 0.5;
     animate background { duration: Theme.fast; }
 
     accessible-role: AccessibleRole.button;

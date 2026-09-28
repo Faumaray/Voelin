@@ -152,7 +152,7 @@ export component MainWindow inherits Window {
 
     toast := Toast {
         x: (parent.width - self.width) / 2;
-        y: Nav.narrow ? 68px : Theme.topbar-height + 8px;
+        y: parent.height - self.height - (Nav.narrow ? 140px : 96px);
         text: Bridge.status-text;
     }
 
