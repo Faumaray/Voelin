@@ -16,7 +16,9 @@ use tsclientlib::{
 };
 use tsproto_packets::packets::{AudioData, InAudioBuf, OutPacket};
 use voelin_model::{
-	ChannelId, ChannelInfo, ChatMessage, ChatTarget, ClientInfo, Presence, ServerFlavor,
+	ChannelId, ChannelInfo, ChatMessage, ChatTarget, ClientInfo, GroupInfo, GroupNamingMode,
+	GroupType, HostBannerMode, HostMessageMode, Presence, ServerDetails, ServerFlavor,
+	parse_badges,
 };
 use voelin_stream::{PeerConfig, Request, StreamNotification};
 
@@ -88,14 +90,97 @@ pub(crate) enum VoiceEvent {
 	Disconnected(Option<String>),
 }
 
-/// The presence visible through a voice connection.
-pub(crate) fn presence_from_book(book: &data::Connection) -> Presence {
+fn group_info(
+	id: u64,
+	name: &str,
+	icon: tsclientlib::IconId,
+	sort_id: i32,
+	naming_mode: tsclientlib::GroupNamingMode,
+	group_type: tsclientlib::GroupType,
+) -> GroupInfo {
+	GroupInfo {
+		id,
+		name: name.to_owned(),
+		icon: icon.0,
+		sort_id,
+		naming_mode: match naming_mode {
+			tsclientlib::GroupNamingMode::None => GroupNamingMode::None,
+			tsclientlib::GroupNamingMode::Before => GroupNamingMode::Before,
+			tsclientlib::GroupNamingMode::After => GroupNamingMode::After,
+		},
+		group_type: match group_type {
+			tsclientlib::GroupType::Template => GroupType::Template,
+			tsclientlib::GroupType::Regular => GroupType::Regular,
+			tsclientlib::GroupType::Query => GroupType::Query,
+		},
+	}
+}
+
+/// What the server tells about itself; `uid` as the voice source computed it.
+fn server_details(server: &data::Server, uid: Option<&str>) -> ServerDetails {
+	ServerDetails {
+		name: server.name.clone(),
+		uid: uid.map(str::to_owned),
+		welcome_message: server.welcome_message.clone(),
+		host_message: server.hostmessage.clone(),
+		host_message_mode: match server.hostmessage_mode {
+			tsclientlib::HostMessageMode::None => HostMessageMode::None,
+			tsclientlib::HostMessageMode::Log => HostMessageMode::Log,
+			tsclientlib::HostMessageMode::Modal => HostMessageMode::Modal,
+			tsclientlib::HostMessageMode::Modalquit => HostMessageMode::ModalQuit,
+		},
+		banner_url: server.hostbanner_url.clone(),
+		banner_gfx_url: server.hostbanner_gfx_url.clone(),
+		banner_gfx_interval_s: server.hostbanner_gfx_interval.whole_seconds().max(0) as u64,
+		banner_mode: match server.hostbanner_mode {
+			tsclientlib::HostBannerMode::NoAdjust => HostBannerMode::NoAdjust,
+			tsclientlib::HostBannerMode::AdjustIgnoreAspect => HostBannerMode::IgnoreAspect,
+			tsclientlib::HostBannerMode::AdjustKeepAspect => HostBannerMode::KeepAspect,
+		},
+		host_button_tooltip: server.hostbutton_tooltip.clone(),
+		host_button_url: server.hostbutton_url.clone(),
+		host_button_gfx_url: server.hostbutton_gfx_url.clone(),
+		icon: server.icon.0,
+		platform: server.platform.clone(),
+		version: server.version.clone(),
+		max_clients: server.max_clients,
+		default_server_group: Some(server.default_server_group.0),
+		default_channel_group: Some(server.default_channel_group.0),
+	}
+}
+
+/// The presence visible through a voice connection; `server_uid` as
+/// [`VoiceEvent::Connected`] told it, `talking` the clients talking now.
+pub(crate) fn presence_from_book(
+	book: &data::Connection,
+	server_uid: Option<&str>,
+	talking: impl Fn(u16) -> bool,
+) -> Presence {
 	let limit = |m: &Option<MaxClients>| match m {
 		Some(MaxClients::Limited(n)) => Some(*n as i32),
 		_ => None,
 	};
 	Presence {
 		server_name: book.server.name.clone(),
+		server: server_details(&book.server, server_uid),
+		server_groups: book
+			.server_groups
+			.values()
+			.map(|g| {
+				let info =
+					group_info(g.id.0, &g.name, g.icon, g.sort_id, g.naming_mode, g.group_type);
+				(g.id.0, info)
+			})
+			.collect(),
+		channel_groups: book
+			.channel_groups
+			.values()
+			.map(|g| {
+				let info =
+					group_info(g.id.0, &g.name, g.icon, g.sort_id, g.naming_mode, g.group_type);
+				(g.id.0, info)
+			})
+			.collect(),
 		channels: book
 			.channels
 			.values()
@@ -113,6 +198,7 @@ pub(crate) fn presence_from_book(book: &data::Connection) -> Presence {
 						needed_subscribe_power: 0,
 						needed_talk_power: c.needed_talk_power.unwrap_or(0),
 						is_default: c.is_default.unwrap_or(false),
+						icon: c.icon.map_or(0, |i| i.0),
 					},
 				)
 			})
@@ -121,6 +207,8 @@ pub(crate) fn presence_from_book(book: &data::Connection) -> Presence {
 			.clients
 			.values()
 			.map(|c| {
+				let mut server_groups: Vec<u64> = c.server_groups.iter().map(|g| g.0).collect();
+				server_groups.sort_unstable();
 				(
 					c.id.0,
 					ClientInfo {
@@ -132,10 +220,21 @@ pub(crate) fn presence_from_book(book: &data::Connection) -> Presence {
 						away: c.away_message.clone(),
 						input_muted: c.input_muted,
 						output_muted: c.output_muted,
-						talking: None,
+						talking: Some(talking(c.id.0)),
 						streaming: c.is_streaming,
-						server_groups: c.server_groups.iter().map(|g| g.0).collect(),
+						server_groups,
 						country: Some(c.country_code.clone()).filter(|c| !c.is_empty()),
+						avatar: Some(c.avatar_hash.clone()).filter(|h| !h.is_empty()),
+						description: Some(c.description.clone()).filter(|d| !d.is_empty()),
+						talk_power: c.talk_power,
+						talker: c.talk_power_granted,
+						channel_group: Some(c.channel_group.0),
+						badges: parse_badges(&c.badges),
+						icon: c.icon.0,
+						recording: c.is_recording,
+						priority_speaker: c.is_priority_speaker,
+						channel_commander: c.is_channel_commander,
+						database_id: Some(c.database_id.0),
 					},
 				)
 			})
@@ -203,7 +302,7 @@ async fn run_inner(
 		Some(Err(e)) => return Err(e.into()),
 		None => anyhow::bail!("connection closed"),
 	}
-	{
+	let server_uid = {
 		let state = con.get_state()?;
 		let flavor = ServerFlavor::from_version_string(&state.server.version);
 		let ids = voelin_gateway_proto::UniqueIds::from_omega(&state.server.public_key.to_ts());
@@ -218,17 +317,18 @@ async fn run_inner(
 			name: state.server.name.clone(),
 			flavor,
 			own_client: state.own_client.0,
-			server_uid,
+			server_uid: server_uid.clone(),
 			own_uid,
 		});
-	}
+		server_uid
+	};
 	// Subscribe to all channels to see everyone.
 	let cmd = con.get_state()?.server.set_subscribed(true);
 	cmd.send(&mut con)?;
-	publish_state(&con, events)?;
-
 	// Who is talking: last voice packet per client.
-	let mut talking: std::collections::HashMap<u16, Instant> = Default::default();
+	let mut talking: HashMap<u16, Instant> = HashMap::new();
+	publish_state(&con, &server_uid, &talking, events)?;
+
 	let mut tick = tokio::time::interval(Duration::from_millis(250));
 	// Stream commands waiting for the server's answer.
 	let mut stream_requests: HashMap<MessageHandle, Request> = HashMap::new();
@@ -280,10 +380,11 @@ async fn run_inner(
 								text: message.clone(),
 								ts_ms: now_ms(),
 								via_relay: false,
+								blocked: false,
 							}));
 						}
 					}
-					publish_state(&con, events)?;
+					publish_state(&con, &server_uid, &talking, events)?;
 				}
 				StreamItem::Audio(packet) => {
 					let from = match packet.data().data() {
@@ -351,10 +452,13 @@ fn own_channel(con: &Connection) -> Option<ChannelId> {
 
 fn publish_state(
 	con: &Connection,
+	server_uid: &str,
+	talking: &HashMap<u16, Instant>,
 	events: &mpsc::UnboundedSender<VoiceEvent>,
 ) -> anyhow::Result<()> {
 	let state = con.get_state()?;
-	let _ = events.send(VoiceEvent::Presence(presence_from_book(state)));
+	let presence = presence_from_book(state, Some(server_uid), |id| talking.contains_key(&id));
+	let _ = events.send(VoiceEvent::Presence(presence));
 	if let Some(own) = state.clients.get(&state.own_client) {
 		let _ = events.send(VoiceEvent::OwnChannel(own.channel.0));
 	}

@@ -657,7 +657,7 @@ impl Hub {
 			.filter(|(_, c)| !c.is_query && channels.contains_key(&c.channel))
 			.map(|(id, c)| (*id, c.clone()))
 			.collect();
-		Presence { server_name: p.server_name.clone(), channels, clients }
+		Presence { server_name: p.server_name.clone(), channels, clients, ..Presence::default() }
 	}
 
 	// Chat
@@ -783,6 +783,7 @@ impl Hub {
 				text: text.to_string(),
 				ts_ms: now_ms(),
 				via_relay: true,
+				blocked: false,
 			},
 			topic,
 		))

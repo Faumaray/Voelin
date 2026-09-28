@@ -331,6 +331,7 @@ fn demo_ui(app: &mut App) {
 			text: text.into(),
 			ts_ms: now - (60 - minute) * 60_000,
 			via_relay: relay,
+			blocked: false,
 		};
 		app.add_message(id, message);
 	}

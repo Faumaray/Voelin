@@ -223,6 +223,7 @@ mod tests {
 				text: text.into(),
 				ts_ms: 0,
 				via_relay: false,
+				blocked: false,
 			},
 		}
 	}

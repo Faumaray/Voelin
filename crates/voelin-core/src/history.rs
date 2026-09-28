@@ -125,6 +125,7 @@ impl From<StoredMessage> for HistoryMessage {
 				text: m.text,
 				ts_ms: m.ts_ms,
 				via_relay: m.via_relay,
+				blocked: false,
 			},
 			source: m.source,
 			remote_id: m.remote_id,
@@ -757,6 +758,7 @@ mod tests {
 			text: text.into(),
 			ts_ms,
 			via_relay: false,
+			blocked: false,
 		};
 		new_message("srv", &msg, MessageSource::Voice)
 	}

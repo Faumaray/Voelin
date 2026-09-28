@@ -15,6 +15,7 @@ fn msg(target: ChatTarget, text: &str, ts_ms: i64) -> ChatMessage {
 		text: text.into(),
 		ts_ms,
 		via_relay: true,
+		blocked: false,
 	}
 }
 

@@ -78,15 +78,103 @@ impl ServerFlavor {
 
 	pub fn capabilities(&self) -> Capabilities {
 		match self {
-			ServerFlavor::Ts3(_) => {
-				Capabilities { streams: false, raw_query: true, ssh_query: true, http_query: false }
-			}
-			ServerFlavor::Ts6(_) => {
-				Capabilities { streams: true, raw_query: false, ssh_query: true, http_query: true }
-			}
+			ServerFlavor::Ts3(_) => Capabilities {
+				streams: false,
+				raw_query: true,
+				ssh_query: true,
+				http_query: false,
+				file_transfer: true,
+				offline_messages: true,
+			},
+			// Verified against 6.0.0-beta13.1: file transfer and offline
+			// messages work as on TeamSpeak 3.
+			ServerFlavor::Ts6(_) => Capabilities {
+				streams: true,
+				raw_query: false,
+				ssh_query: true,
+				http_query: true,
+				file_transfer: true,
+				offline_messages: true,
+			},
 			ServerFlavor::Unknown(_) => Capabilities::default(),
 		}
 	}
+}
+
+/// Where the host message shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostMessageMode {
+	/// Not shown.
+	#[default]
+	None,
+	/// In the chat log.
+	Log,
+	/// In a dialog.
+	Modal,
+	/// In a dialog; the connection ends when it is closed.
+	ModalQuit,
+}
+
+/// How the host banner image is scaled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostBannerMode {
+	/// As it is.
+	#[default]
+	NoAdjust,
+	/// Stretched to the banner area.
+	IgnoreAspect,
+	/// Scaled to fit, keeping its aspect ratio.
+	KeepAspect,
+}
+
+/// What a server tells its (voice) clients about itself.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerDetails {
+	pub name: String,
+	/// `virtualserver_unique_identifier` (the key of its chat history).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub uid: Option<String>,
+	#[serde(default)]
+	pub welcome_message: String,
+	#[serde(default)]
+	pub host_message: String,
+	#[serde(default)]
+	pub host_message_mode: HostMessageMode,
+	/// Where a click on the banner leads.
+	#[serde(default)]
+	pub banner_url: String,
+	/// The banner image.
+	#[serde(default)]
+	pub banner_gfx_url: String,
+	/// Reload the banner image this often (seconds); 0: never.
+	#[serde(default)]
+	pub banner_gfx_interval_s: u64,
+	#[serde(default)]
+	pub banner_mode: HostBannerMode,
+	#[serde(default)]
+	pub host_button_tooltip: String,
+	#[serde(default)]
+	pub host_button_url: String,
+	/// The host button's image.
+	#[serde(default)]
+	pub host_button_gfx_url: String,
+	/// Icon id (`virtualserver_icon_id`); 0: none.
+	#[serde(default)]
+	pub icon: u32,
+	/// Server platform, e.g. `Linux`.
+	#[serde(default)]
+	pub platform: String,
+	/// `virtualserver_version`, e.g. `3.13.8 [Build: 1779874471]`.
+	#[serde(default)]
+	pub version: String,
+	#[serde(default)]
+	pub max_clients: u16,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub default_server_group: Option<u64>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub default_channel_group: Option<u64>,
 }
 
 /// Features that depend on the server software.
@@ -100,6 +188,12 @@ pub struct Capabilities {
 	pub ssh_query: bool,
 	/// HTTP WebQuery (TeamSpeak 6), request/response only, no events.
 	pub http_query: bool,
+	/// Channel file browsers, avatars and icons (`ftinit*` over TCP).
+	#[serde(default)]
+	pub file_transfer: bool,
+	/// Offline messages to a unique id (`messageadd`, `messagelist`, …).
+	#[serde(default)]
+	pub offline_messages: bool,
 }
 
 #[cfg(test)]

@@ -592,6 +592,7 @@ impl Session {
 			text: text.to_owned(),
 			ts_ms: history::now_ms(),
 			via_relay: *route != ChatRoute::Voice,
+			blocked: false,
 		};
 		ctx.store_live(vec![history::new_message(&ctx.server_uid, &msg, MessageSource::Local)]);
 	}

@@ -12,6 +12,7 @@ fn chat(text: &str) -> ChatMessage {
 		text: text.into(),
 		ts_ms: 1_700_000_000_123,
 		via_relay: true,
+		blocked: false,
 	}
 }
 
