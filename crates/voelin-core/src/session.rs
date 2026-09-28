@@ -558,12 +558,11 @@ impl Session {
 	/// A source told the server's unique id. The gateway's wins: its
 	/// history is the one synced. `true` if the history key changed.
 	fn learn_server_uid(&mut self, uid: String, from: Source) -> bool {
-		if from != Source::Gateway && self.gateway_client.is_some() {
-			return false;
-		}
+		let gateway_key = self.state.server_uid.clone().filter(|_| self.gateway_client.is_some());
+		let keep = from != Source::Gateway && gateway_key.is_some();
 		if from != Source::Query {
 			let aliases = self.aliases.clone();
-			let key = uid.clone();
+			let key = gateway_key.filter(|_| keep).unwrap_or_else(|| uid.clone());
 			self.history.current().run_then(
 				self.memory(),
 				move |s| aliases.iter().try_for_each(|a| s.set_server_alias(a, &key)),
@@ -574,7 +573,7 @@ impl Session {
 				},
 			);
 		}
-		if self.state.server_uid.as_deref() == Some(uid.as_str()) {
+		if keep || self.state.server_uid.as_deref() == Some(uid.as_str()) {
 			return false;
 		}
 		self.state.server_uid = Some(uid);
