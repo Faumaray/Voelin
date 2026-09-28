@@ -9175,6 +9175,7 @@ dependencies = [
  "openh264",
  "pipewire",
  "reqwest",
+ "rtrb",
  "rustix 1.1.5",
  "sha2 0.10.9",
  "str0m",
