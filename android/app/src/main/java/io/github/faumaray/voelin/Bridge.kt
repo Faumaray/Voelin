@@ -2,6 +2,7 @@ package io.github.faumaray.voelin
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 
@@ -60,6 +61,40 @@ object Bridge {
     @JvmStatic
     fun stopSystemAudio() {
         ScreenCaptureService.stopAudio()
+    }
+
+    /**
+     * Capture into mixer input `id` (Native.onAudioInput) what `packageName`
+     * plays, or with null everything but us. False without a running screen
+     * capture or for a package we cannot see.
+     */
+    @JvmStatic
+    fun startAudioInput(id: Long, packageName: String?): Boolean =
+        ScreenCaptureService.startInput(app, id, packageName)
+
+    @JvmStatic
+    fun stopAudioInput(id: Long) {
+        ScreenCaptureService.stopInput(id)
+    }
+
+    /** Launchable apps other than us, as "label<TAB>package" lines sorted by label. */
+    @JvmStatic
+    fun launchableApps(): String {
+        val pm = app.packageManager
+        val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val activities = if (Build.VERSION.SDK_INT >= 33) {
+            pm.queryIntentActivities(launcher, PackageManager.ResolveInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            pm.queryIntentActivities(launcher, 0)
+        }
+        val separators = Regex("[\t\n]")
+        return activities
+            .map { it.activityInfo.packageName to it.loadLabel(pm).toString() }
+            .filter { it.first != app.packageName }
+            .distinctBy { it.first }
+            .sortedBy { it.second.lowercase() }
+            .joinToString("\n") { (packageName, label) -> label.replace(separators, " ") + "\t" + packageName }
     }
 
     @JvmStatic

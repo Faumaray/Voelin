@@ -22,9 +22,11 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
+import android.os.Process
 import android.util.Log
 import android.view.Display
 import android.view.Surface
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.concurrent.thread
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -32,8 +34,9 @@ import kotlin.math.roundToInt
 /**
  * Screen sharing: holds the MediaProjection (a `mediaProjection` foreground
  * service, as Android requires), mirrors the display into an ImageReader and
- * hands each RGBA frame to Native.onScreenFrame; optionally captures what the
- * device plays (AudioPlaybackCapture) for Native.onSystemAudio.
+ * hands each RGBA frame to Native.onScreenFrame; optionally captures what
+ * other apps play (AudioPlaybackCapture: all but us, or one app) for
+ * Native.onSystemAudio and Native.onAudioInput.
  */
 class ScreenCaptureService : Service() {
     private var projection: MediaProjection? = null
@@ -41,9 +44,17 @@ class ScreenCaptureService : Service() {
     private var reader: ImageReader? = null
     private var worker: HandlerThread? = null
 
-    @Volatile
-    private var audioRunning = false
-    private var audioThread: Thread? = null
+    /** A running AudioPlaybackCapture recording. */
+    private class AudioCapture {
+        @Volatile
+        var running = true
+
+        @Volatile
+        var thread: Thread? = null
+    }
+
+    /** Recordings by id: SYSTEM_AUDIO, or a mixer input of the Rust side. */
+    private val captures = ConcurrentHashMap<Long, AudioCapture>()
 
     private val main = Handler(Looper.getMainLooper())
 
@@ -148,18 +159,24 @@ class ScreenCaptureService : Service() {
         )
     }
 
-    /** Capture media, game and unknown-usage playback as 48 kHz stereo float. */
-    private fun startAudioCapture(): Boolean {
+    /**
+     * Capture media, game and unknown-usage playback as 48 kHz stereo float:
+     * of app `uid`, or with null of every app but us (our voices and watched
+     * streams). Several recordings may run at once.
+     */
+    private fun startAudioCapture(id: Long, uid: Int?): Boolean {
         val projection = projection ?: return false
-        if (audioRunning) return true
+        if (captures[id]?.running == true) return true
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             return false
         }
-        val config = AudioPlaybackCaptureConfiguration.Builder(projection)
+        val builder = AudioPlaybackCaptureConfiguration.Builder(projection)
             .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
             .addMatchingUsage(AudioAttributes.USAGE_GAME)
             .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
-            .build()
+        // Uid rules cannot mix matching and excluding; one of them.
+        if (uid != null) builder.addMatchingUid(uid) else builder.excludeUid(Process.myUid())
+        val config = builder.build()
         val format = AudioFormat.Builder()
             .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
             .setSampleRate(SAMPLE_RATE)
@@ -174,22 +191,30 @@ class ScreenCaptureService : Service() {
                 .setBufferSizeInBytes(max(minimum, SAMPLE_RATE / 10 * 2 * 4))
                 .build()
         } catch (e: Exception) {
-            Log.w(TAG, "system audio capture unavailable", e)
+            Log.w(TAG, "playback capture unavailable", e)
             return false
         }
-        audioRunning = true
+        val capture = AudioCapture()
+        captures[id] = capture
         record.startRecording()
-        audioThread = thread(name = "voelin-system-audio") {
+        capture.thread = thread(name = "voelin-audio-$id") {
             // 10 ms of stereo.
             val buffer = FloatArray(SAMPLE_RATE / 100 * 2)
             try {
-                while (audioRunning) {
+                while (capture.running) {
                     val read = record.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
                     if (read < 0) break
-                    if (read > 0 && !Native.onSystemAudio(buffer, read, 2, System.nanoTime())) break
+                    if (read == 0) continue
+                    val wanted = if (id == SYSTEM_AUDIO) {
+                        Native.onSystemAudio(buffer, read, 2, System.nanoTime())
+                    } else {
+                        Native.onAudioInput(id, buffer, read, 2)
+                    }
+                    if (!wanted) break
                 }
             } finally {
-                audioRunning = false
+                capture.running = false
+                captures.remove(id, capture)
                 record.stop()
                 record.release()
             }
@@ -197,15 +222,15 @@ class ScreenCaptureService : Service() {
         return true
     }
 
-    private fun stopAudioCapture() {
-        audioRunning = false
-        audioThread?.join(500)
-        audioThread = null
+    private fun stopAudioCapture(id: Long) {
+        val capture = captures.remove(id) ?: return
+        capture.running = false
+        capture.thread?.join(500)
     }
 
     override fun onDestroy() {
         if (instance === this) instance = null
-        stopAudioCapture()
+        captures.keys.toList().forEach { stopAudioCapture(it) }
         display?.release()
         display = null
         reader?.close()
@@ -222,6 +247,9 @@ class ScreenCaptureService : Service() {
         private const val TAG = "ScreenCaptureService"
         private const val ID = 2
         private const val SAMPLE_RATE = 48_000
+
+        /** The recording for Native.onSystemAudio (Rust input ids start at 1). */
+        private const val SYSTEM_AUDIO = 0L
         private const val ACTION_STOP = "io.github.faumaray.voelin.STOP_SHARING"
         private const val EXTRA_RESULT = "result"
         private const val EXTRA_DATA = "data"
@@ -247,11 +275,37 @@ class ScreenCaptureService : Service() {
 
         fun startAudio(): Boolean {
             val service = instance ?: return false
-            return service.startAudioCapture()
+            return service.startAudioCapture(SYSTEM_AUDIO, null)
         }
 
         fun stopAudio() {
-            instance?.stopAudioCapture()
+            instance?.stopAudioCapture(SYSTEM_AUDIO)
+        }
+
+        /** Capture `packageName` (null: every app but us) into mixer input `id`. */
+        fun startInput(context: Context, id: Long, packageName: String?): Boolean {
+            val service = instance ?: return false
+            val uid = if (packageName == null) {
+                null
+            } else {
+                try {
+                    val pm = context.packageManager
+                    if (Build.VERSION.SDK_INT >= 33) {
+                        pm.getApplicationInfo(packageName, PackageManager.ApplicationInfoFlags.of(0)).uid
+                    } else {
+                        @Suppress("DEPRECATION")
+                        pm.getApplicationInfo(packageName, 0).uid
+                    }
+                } catch (e: PackageManager.NameNotFoundException) {
+                    Log.w(TAG, "no package $packageName to capture")
+                    return false
+                }
+            }
+            return service.startAudioCapture(id, uid)
+        }
+
+        fun stopInput(id: Long) {
+            instance?.stopAudioCapture(id)
         }
     }
 }

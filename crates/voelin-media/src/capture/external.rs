@@ -13,12 +13,14 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::Result;
+use crate::capture::playback::{AudioApp, PlaybackFilter, SourceCapture, forward_audio};
 use crate::capture::{
 	AudioCapture, BoxFuture, CaptureOptions, CaptureSource, ScreenCapture, SourceId,
 };
-use crate::frame::{AudioBuffer, VideoFrame};
+use crate::frame::{AUDIO_SAMPLE_RATE, AudioBuffer, VideoFrame};
+use crate::mix::{SourceHandle, SourceInput};
 use crate::queue::{FrameReceiver, FrameSender, frame_channel};
+use crate::{Error, Result};
 
 /// Platform code that captures the screen.
 pub trait ScreenProvider: Send + Sync {
@@ -50,6 +52,63 @@ pub trait AudioProvider: Send + Sync {
 	fn start(&self, buffers: FrameSender<AudioBuffer>) -> Result<()>;
 
 	fn stop(&self);
+
+	/// Start capturing the playback `filter` selects straight into a mixer
+	/// input; several captures may run at once. Returns an id for
+	/// [`stop_input`](Self::stop_input). The default supports none (see
+	/// [`start_playback`] for the fallback).
+	fn start_input(&self, filter: &PlaybackFilter, input: SourceInput) -> Result<u64> {
+		let _ = (filter, input);
+		Err(Error::CaptureUnavailable {
+			backend: self.name(),
+			reason: "capturing single applications is not supported".into(),
+		})
+	}
+
+	fn stop_input(&self, id: u64) {
+		let _ = id;
+	}
+
+	/// Applications whose playback can be captured (Android: the launchable
+	/// apps, since it cannot tell which play).
+	fn apps(&self) -> Vec<AudioApp> {
+		Vec::new()
+	}
+}
+
+/// A capture of [`AudioProvider::start_input`]; stops it when dropped.
+struct ProviderCapture {
+	provider: Arc<dyn AudioProvider>,
+	id: u64,
+}
+
+impl SourceCapture for ProviderCapture {
+	fn backend(&self) -> &'static str {
+		self.provider.name()
+	}
+}
+
+impl Drop for ProviderCapture {
+	fn drop(&mut self) {
+		self.provider.stop_input(self.id);
+	}
+}
+
+/// Capture through `provider` into `source`: [`AudioProvider::start_input`],
+/// or for everything but our own playback, providers without it run their
+/// plain [`AudioProvider::start`] into the source.
+pub fn start_playback(
+	provider: Arc<dyn AudioProvider>,
+	filter: &PlaybackFilter,
+	source: &SourceHandle,
+) -> Result<Box<dyn SourceCapture>> {
+	match provider.start_input(filter, source.input(AUDIO_SAMPLE_RATE)) {
+		Ok(id) => Ok(Box::new(ProviderCapture { provider, id })),
+		Err(_) if *filter == PlaybackFilter::AllButSelf => {
+			forward_audio(Box::new(ExternalAudioCapture::new(provider)), source)
+		}
+		Err(e) => Err(e),
+	}
 }
 
 type Slot<T> = Mutex<Option<Arc<T>>>;
@@ -174,7 +233,6 @@ mod tests {
 	use std::time::Duration;
 
 	use super::*;
-	use crate::Error;
 
 	/// Sends one frame per start, or refuses.
 	#[derive(Default)]

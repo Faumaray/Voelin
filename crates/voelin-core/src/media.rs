@@ -1,17 +1,19 @@
 //! Stream media (feature `media`): capture and encoding for our stream,
 //! decoding for the streams we watch.
 //!
-//! - [`Streamer`] captures a screen or window (and optionally system audio),
-//!   encodes the video with the codec our offer carries ([`stream_codec`],
-//!   VP8 by default) in one or more simulcast layers ([`LayerSpec`]), and
-//!   the audio with Opus (48 kHz stereo, 20 ms). Capture, conversion and
-//!   each layer's encoder run on threads of their own, connected by
-//!   latest-wins handoffs. It hands the frames to a [`MediaSink`]: the
-//!   [`StreamSink`] of a live stream, or an [`EncodedSource`] for code that
-//!   drives `voelin_stream::Streams` itself. Keyframe requests of viewers
-//!   are honoured per layer, and each layer's encoder follows the bitrate
-//!   the sink allows. [`Streamer::reconfigure`] changes frame rate,
-//!   bitrate, codec and layers while streaming.
+//! - [`Streamer`] captures a screen or window, encodes the video with the
+//!   codec our offer carries ([`stream_codec`], VP8 by default) in one or
+//!   more simulcast layers ([`LayerSpec`]), and mixes any number of audio
+//!   sources ([`AudioSourceSpec`]: desktop audio without Voelin's own
+//!   playback, single applications, the shared window's application, the
+//!   microphone) into Opus (48 kHz stereo, 20 ms). Capture, conversion,
+//!   each layer's encoder and the audio mixer run on threads of their own.
+//!   It hands the frames to a [`MediaSink`]: the [`StreamSink`] of a live
+//!   stream, or an [`EncodedSource`] for code that drives
+//!   `voelin_stream::Streams` itself. Keyframe requests of viewers are
+//!   honoured per layer, and each layer's encoder follows the bitrate the
+//!   sink allows. [`Streamer::reconfigure`] changes frame rate, bitrate,
+//!   codec, layers and audio sources while streaming.
 //! - [`VideoPipeline`] decodes the video of a watched stream on its own
 //!   thread and hands every picture to a callback. After lost frames or
 //!   decoder errors it skips to the next keyframe and asks for one.
@@ -34,25 +36,29 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use tracing::{debug, warn};
+use voelin_audio::tap::{self, TapGuard, TapSink};
 use voelin_audio::{VoiceCodec, VoiceEncoder};
 pub use voelin_media;
+use voelin_media::capture::playback::{self, PlaybackFilter, SourceCapture};
+pub use voelin_media::capture::playback::{AppMatch, AudioApp, AudioApps};
 pub use voelin_media::capture::synthetic::Pattern;
 use voelin_media::capture::synthetic::{SineSource, SyntheticScreen};
 use voelin_media::capture::{
-	self, AudioCapture, CaptureOptions, CaptureSource, FramePacer, FrameSink, ScreenCapture,
-	SourceId,
+	self, CaptureOptions, CaptureSource, FramePacer, FrameSink, ScreenCapture, SourceId,
 };
 use voelin_media::handoff::Handoff;
-use voelin_media::scale::Pyramid;
-use voelin_media::{
-	AudioBuffer, Codec, Codecs, ContentHint, EncoderConfig, FrameReceiver, FrameRef, VideoEncoder,
-	VideoFrame,
+use voelin_media::mix::{
+	BlockClock, MIX_RATE, MixerConfig, MixerHandle, SourceHandle, SourceInput, StreamMixer,
 };
+pub use voelin_media::mix::{Level, SourceState};
+use voelin_media::scale::Pyramid;
+use voelin_media::{Codec, Codecs, ContentHint, EncoderConfig, FrameRef, VideoEncoder, VideoFrame};
 use voelin_stream::{
 	EncodedFrame, FrameSource, Frequency, LayerId, LayerSet, LayerSpec, MediaFrame, MediaKind,
 	MediaTime, PeerConfig, VideoCodec,
 };
 
+use crate::settings::{AudioSourceKindSetting, AudioSourceSetting};
 use crate::stream::StreamSink;
 use crate::{Command, Engine, SessionId};
 
@@ -233,6 +239,150 @@ impl std::str::FromStr for CaptureBackend {
 	}
 }
 
+/// What an audio source of our stream captures.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum AudioSourceKind {
+	/// Everything that plays except this process and its children (the
+	/// voices and streams we play): PipeWire links from every other
+	/// playback stream, WASAPI process loopback excluding our process tree,
+	/// Android playback capture excluding our uid.
+	DesktopWithoutSelf,
+	/// One application (see [`AppMatch`]; [`audio_apps`] lists them).
+	App(AppMatch),
+	/// The application that owns the shared window ([`SourceId::Window`]),
+	/// where the platform tells: X11 `_NET_WM_PID`, the owner of a Windows
+	/// `HWND`. The ScreenCast portal (Wayland) does not say whose window it
+	/// shares: pick the application from [`audio_apps`] instead.
+	WindowAudio,
+	/// Our microphone as the voice connection sends it (after noise
+	/// suppression and gain control), while a voice connection runs.
+	Microphone,
+	/// A quiet sine tone of this many Hz (tests, the test pattern).
+	Synthetic { hz: u32 },
+}
+
+impl AudioSourceKind {
+	/// A name for the mixer and the UI.
+	pub fn label(&self) -> String {
+		match self {
+			AudioSourceKind::DesktopWithoutSelf => "Desktop audio (without Voelin)".into(),
+			AudioSourceKind::App(app) => format!("App: {app}"),
+			AudioSourceKind::WindowAudio => "Audio of the shared window".into(),
+			AudioSourceKind::Microphone => "Microphone".into(),
+			AudioSourceKind::Synthetic { hz } => format!("Test tone {hz} Hz"),
+		}
+	}
+}
+
+/// One audio source of a stream, with its gain and mute. Compared bit for
+/// bit (`gain` by its bits), so it is `Eq`.
+#[derive(Clone, Debug)]
+pub struct AudioSourceSpec {
+	pub kind: AudioSourceKind,
+	/// Linear gain (1: unchanged), any value >= 0.
+	pub gain: f32,
+	pub muted: bool,
+}
+
+impl PartialEq for AudioSourceSpec {
+	fn eq(&self, other: &Self) -> bool {
+		self.kind == other.kind
+			&& self.gain.to_bits() == other.gain.to_bits()
+			&& self.muted == other.muted
+	}
+}
+
+impl Eq for AudioSourceSpec {}
+
+impl AudioSourceSpec {
+	/// At gain 1, not muted.
+	pub fn new(kind: AudioSourceKind) -> Self {
+		Self { kind, gain: 1.0, muted: false }
+	}
+}
+
+impl From<&AudioSourceSetting> for AudioSourceSpec {
+	fn from(setting: &AudioSourceSetting) -> Self {
+		let kind = match &setting.kind {
+			AudioSourceKindSetting::Desktop => AudioSourceKind::DesktopWithoutSelf,
+			// A pid wins: it names one process exactly.
+			AudioSourceKindSetting::App { pid: Some(pid), .. } => {
+				AudioSourceKind::App(AppMatch::Pid(*pid))
+			}
+			AudioSourceKindSetting::App { name, pid: None } => {
+				AudioSourceKind::App(AppMatch::Name(name.clone().unwrap_or_default()))
+			}
+			AudioSourceKindSetting::Window => AudioSourceKind::WindowAudio,
+			AudioSourceKindSetting::Microphone => AudioSourceKind::Microphone,
+			AudioSourceKindSetting::Synthetic { frequency } => {
+				AudioSourceKind::Synthetic { hz: *frequency }
+			}
+		};
+		Self { kind, gain: setting.gain, muted: setting.muted }
+	}
+}
+
+impl From<&AudioSourceSpec> for AudioSourceSetting {
+	fn from(spec: &AudioSourceSpec) -> Self {
+		let kind = match &spec.kind {
+			AudioSourceKind::DesktopWithoutSelf => AudioSourceKindSetting::Desktop,
+			AudioSourceKind::App(AppMatch::Pid(pid)) => {
+				AudioSourceKindSetting::App { name: None, pid: Some(*pid) }
+			}
+			AudioSourceKind::App(AppMatch::Name(name)) => {
+				AudioSourceKindSetting::App { name: Some(name.clone()), pid: None }
+			}
+			AudioSourceKind::WindowAudio => AudioSourceKindSetting::Window,
+			AudioSourceKind::Microphone => AudioSourceKindSetting::Microphone,
+			AudioSourceKind::Synthetic { hz } => {
+				AudioSourceKindSetting::Synthetic { frequency: *hz }
+			}
+		};
+		Self { kind, gain: spec.gain, muted: spec.muted }
+	}
+}
+
+/// The sources of `settings::STREAM_AUDIO_SOURCES` as [`AudioSourceSpec`]s
+/// (for [`StreamerConfig::audio_sources`]; empty: no audio).
+pub fn audio_source_specs(settings: &[AudioSourceSetting]) -> Vec<AudioSourceSpec> {
+	settings.iter().map(AudioSourceSpec::from).collect()
+}
+
+/// The audio of a stream when none is chosen: a tone with the test
+/// pattern, else desktop audio without Voelin.
+pub fn default_audio_sources(source: &SourceId) -> Vec<AudioSourceSpec> {
+	let kind = match source {
+		SourceId::Synthetic => AudioSourceKind::Synthetic { hz: 440 },
+		_ => AudioSourceKind::DesktopWithoutSelf,
+	};
+	vec![AudioSourceSpec::new(kind)]
+}
+
+/// Applications that play audio now (Android: launchable apps), updated
+/// live, for a picker of [`AudioSourceKind::App`].
+pub fn audio_apps() -> Result<AudioApps, MediaError> {
+	Ok(playback::audio_apps()?)
+}
+
+/// One audio source in [`StreamerStats`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioSourceStats {
+	/// The mixer's id of the source.
+	pub id: u64,
+	pub spec: AudioSourceSpec,
+	pub name: String,
+	/// After its gain, before its mute.
+	pub level: Level,
+	pub state: SourceState,
+	/// How far behind its capture it is mixed.
+	pub latency: Duration,
+	/// Times its capture delivered too late (and the audio broke up).
+	pub underruns: u64,
+	/// Why it captures nothing (no PipeWire, the window's process unknown,
+	/// ...).
+	pub error: Option<String>,
+}
+
 /// What and how to stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamerConfig {
@@ -247,8 +397,12 @@ pub struct StreamerConfig {
 	pub bitrate_kbps: u32,
 	/// The codec of our offer, see [`stream_codec`].
 	pub codec: Codec,
-	/// Capture and send system audio (a sine tone with the test pattern).
+	/// Send audio: [`audio_sources`](Self::audio_sources) mixed.
 	pub audio: bool,
+	/// Audio sources mixed into the stream (any number); empty: the
+	/// [`default_audio_sources`] (a tone with the test pattern, else desktop
+	/// audio without Voelin). [`Streamer::reconfigure`] changes them live.
+	pub audio_sources: Vec<AudioSourceSpec>,
 	pub cursor: bool,
 	/// Size of the test pattern ([`SourceId::Synthetic`]).
 	pub synthetic_size: (u32, u32),
@@ -271,6 +425,7 @@ impl Default for StreamerConfig {
 			bitrate_kbps: 4608,
 			codec: Codec::Vp8,
 			audio: true,
+			audio_sources: Vec::new(),
 			cursor: true,
 			synthetic_size: (1280, 720),
 			synthetic_pattern: Pattern::Simple,
@@ -305,6 +460,10 @@ pub struct StreamerConfigUpdate {
 	/// Another set of layers (`Some(vec![])`: back to a single layer). Layers
 	/// keep their encoder when their id stays; new ids get new encoders.
 	pub layers: Option<Vec<LayerSpec>>,
+	/// Other audio sources. Sources whose kind stays keep their capture and
+	/// just take the new gain and mute; new kinds start capturing, removed
+	/// ones stop. `Some(vec![])` silences the audio (the track stays).
+	pub audio_sources: Option<Vec<AudioSourceSpec>>,
 }
 
 /// One simulcast layer in [`StreamerStats`]. Rates are over the last second.
@@ -358,6 +517,11 @@ pub struct StreamerStats {
 	pub convert_threads: usize,
 	pub codec: Option<Codec>,
 	pub layers: Vec<LayerStats>,
+	/// Level of the stream's audio (after the limiter).
+	pub audio_level: Level,
+	/// The limiter's lowest gain in the last 20 ms (1: not limiting).
+	pub audio_limiter: f32,
+	pub audio_sources: Vec<AudioSourceStats>,
 }
 
 /// One simulcast layer while streaming: its encoder thread's inbox and
@@ -563,15 +727,23 @@ fn new_encoder(
 /// buffers). Each layer's newest frame goes through a one-slot handoff to
 /// that layer's encoder thread; a frame an encoder was too busy for is
 /// replaced, not queued.
+///
+/// Audio sources feed a [`StreamMixer`] from their capture threads; the
+/// mixer runs every 20 ms on a thread of its own and its output is encoded
+/// with Opus.
 pub struct Streamer {
 	shared: Arc<Shared>,
 	screen: Option<Box<dyn ScreenCapture>>,
-	audio: Option<Box<dyn AudioCapture>>,
+	/// The video source (for [`AudioSourceKind::WindowAudio`]).
+	source: SourceId,
+	// Boxed: a `Streamer` is held inline by previews.
+	audio: Mutex<Option<Box<StreamAudio>>>,
 	threads: Vec<JoinHandle<()>>,
 	/// Encoder threads, by layer.
 	encoders: Mutex<Vec<(LayerId, JoinHandle<()>)>>,
 	backend: &'static str,
 	restore_token: Option<String>,
+	/// Why the audio did not start at all.
 	audio_error: Option<String>,
 }
 
@@ -587,7 +759,8 @@ impl Streamer {
 		let mut streamer = Self {
 			shared: shared.clone(),
 			screen: None,
-			audio: None,
+			source: config.source.clone(),
+			audio: Mutex::new(None),
 			threads: Vec::new(),
 			encoders: Mutex::new(Vec::new()),
 			backend: "",
@@ -643,13 +816,13 @@ impl Streamer {
 		streamer.screen = Some(screen);
 		streamer.restore_token = restore_token;
 		if config.audio {
-			match start_audio(&config.source) {
-				Ok((capture, buffers, encoder)) => {
-					streamer.audio = Some(capture);
-					streamer.threads.push(spawn("voelin-stream-audio", move || {
-						audio_loop(&shared, buffers, encoder)
-					})?);
-				}
+			let sources = if config.audio_sources.is_empty() {
+				default_audio_sources(&config.source)
+			} else {
+				config.audio_sources.clone()
+			};
+			match StreamAudio::start(&shared, &config.source, sources) {
+				Ok(audio) => *lock(&streamer.audio) = Some(Box::new(audio)),
 				Err(e) => {
 					warn!("streaming without audio: {e}");
 					streamer.audio_error = Some(e.to_string());
@@ -674,11 +847,15 @@ impl Streamer {
 		Ok(())
 	}
 
-	/// Change frame rate, bitrate, codec or layers while streaming, without
-	/// restarting the capture; applies from the next frame. A new codec
-	/// gets new encoders, which start with a keyframe; new layers get new
-	/// encoders; removed layers stop. Fails without changing anything if an
-	/// encoder cannot be created.
+	/// Change frame rate, bitrate, codec, layers or audio sources while
+	/// streaming, without restarting the capture; applies from the next
+	/// frame. A new codec gets new encoders, which start with a keyframe;
+	/// new layers get new encoders; removed layers stop. Fails without
+	/// changing anything if an encoder cannot be created. Audio sources
+	/// that cannot capture (e.g. an application that is not running by pid)
+	/// do not fail the update: their [`AudioSourceStats::error`] says why.
+	/// Audio sources on a streamer started without audio start the audio
+	/// track.
 	pub fn reconfigure(
 		&self,
 		codecs: &Codecs,
@@ -752,6 +929,17 @@ impl Streamer {
 		for thread in finished {
 			let _ = thread.join();
 		}
+		if let Some(sources) = update.audio_sources {
+			let mut audio = lock(&self.audio);
+			match audio.as_mut() {
+				Some(audio) => audio.apply(sources),
+				None if !sources.is_empty() => {
+					let started = StreamAudio::start(&self.shared, &self.source, sources)?;
+					*audio = Some(Box::new(started));
+				}
+				None => {}
+			}
+		}
 		debug!(?removed, codec_changed, "stream reconfigured");
 		Ok(())
 	}
@@ -776,14 +964,28 @@ impl Streamer {
 		self.restore_token.as_deref()
 	}
 
-	/// Why system audio is not captured, if it was asked for.
-	pub fn audio_error(&self) -> Option<&str> {
-		self.audio_error.as_deref()
+	/// Why there is no audio, or which audio sources capture nothing and why.
+	pub fn audio_error(&self) -> Option<String> {
+		self.audio_error.clone().or_else(|| lock(&self.audio).as_ref().and_then(|a| a.error()))
 	}
 
-	/// Whether system audio is captured.
+	/// Whether the stream has audio (mixed from its audio sources).
 	pub fn has_audio(&self) -> bool {
-		self.audio.is_some()
+		lock(&self.audio).is_some()
+	}
+
+	/// The audio mixer, for lock-free level meters
+	/// ([`MixerHandle::level`], each source's `level`) and direct control.
+	pub fn audio_mixer(&self) -> Option<MixerHandle> {
+		lock(&self.audio).as_ref().map(|a| a.mixer.clone())
+	}
+
+	/// The audio sources now.
+	pub fn audio_sources(&self) -> Vec<AudioSourceSpec> {
+		lock(&self.audio)
+			.as_ref()
+			.map(|a| a.active.iter().map(|s| s.spec.clone()).collect())
+			.unwrap_or_default()
 	}
 
 	/// The ids of the layers being encoded.
@@ -793,6 +995,7 @@ impl Streamer {
 
 	pub fn stats(&self) -> StreamerStats {
 		let shared = &self.shared;
+		let audio = lock(&self.audio);
 		let size = shared.size.load(Ordering::Relaxed);
 		let codec = lock(&shared.settings).as_ref().map(|s| s.codec);
 		let rates = lock(&shared.rates);
@@ -836,6 +1039,9 @@ impl Streamer {
 			convert_threads: shared.convert_threads.load(Ordering::Relaxed),
 			codec,
 			layers,
+			audio_level: audio.as_ref().map(|a| a.mixer.level()).unwrap_or_default(),
+			audio_limiter: audio.as_ref().map_or(1.0, |a| a.mixer.limiter_gain()),
+			audio_sources: audio.as_ref().map(|a| a.stats()).unwrap_or_default(),
 		}
 	}
 
@@ -846,7 +1052,8 @@ impl Streamer {
 		if let Some(mut screen) = self.screen.take() {
 			screen.stop();
 		}
-		if let Some(mut audio) = self.audio.take() {
+		let audio = lock(&self.audio).take();
+		if let Some(audio) = audio {
 			audio.stop();
 		}
 		for layer in lock(&self.shared.layers).iter() {
@@ -913,17 +1120,175 @@ fn screen_backend(backend: &CaptureBackend) -> Result<Box<dyn ScreenCapture>, Me
 	})
 }
 
-type AudioStart = (Box<dyn AudioCapture>, FrameReceiver<AudioBuffer>, VoiceEncoder);
+/// The stream's audio: the mixer (running on its own thread) and the
+/// captures feeding its sources.
+struct StreamAudio {
+	mixer: MixerHandle,
+	/// The video source, for [`AudioSourceKind::WindowAudio`].
+	video: SourceId,
+	active: Vec<ActiveSource>,
+	thread: Option<JoinHandle<()>>,
+}
 
-fn start_audio(source: &SourceId) -> Result<AudioStart, MediaError> {
-	let mut encoder = VoiceEncoder::new(VoiceCodec::Music)?;
-	encoder.set_bitrate(OPUS_BITRATE)?;
-	let mut capture: Box<dyn AudioCapture> = match source {
-		SourceId::Synthetic => Box::new(SineSource::new(440.0, 0.05)),
-		_ => capture::default_audio_capture()?,
-	};
-	let buffers = capture.start()?;
-	Ok((capture, buffers, encoder))
+/// An audio source in the mixer and what feeds it.
+struct ActiveSource {
+	spec: AudioSourceSpec,
+	handle: SourceHandle,
+	_feed: Option<Feed>,
+	error: Option<String>,
+}
+
+impl Drop for ActiveSource {
+	fn drop(&mut self) {
+		// Its captures see the input close and stop.
+		self.handle.remove();
+	}
+}
+
+/// What feeds a source; stops when dropped.
+enum Feed {
+	Capture(#[allow(dead_code)] Box<dyn SourceCapture>),
+	Microphone(#[allow(dead_code)] TapGuard<'static>),
+}
+
+/// Processed microphone audio (48 kHz mono) into a mixer input.
+struct MicrophoneInput(SourceInput);
+
+impl TapSink for MicrophoneInput {
+	fn write(&mut self, samples: &[f32]) {
+		self.0.push(samples, 1);
+	}
+
+	fn silence(&mut self, frames: usize) {
+		self.0.push_silence(frames);
+	}
+}
+
+impl StreamAudio {
+	/// Start the mixer thread and `sources`.
+	fn start(
+		shared: &Arc<Shared>,
+		video: &SourceId,
+		sources: Vec<AudioSourceSpec>,
+	) -> Result<Self, MediaError> {
+		let mut encoder = VoiceEncoder::new(VoiceCodec::Music)?;
+		encoder.set_bitrate(OPUS_BITRATE)?;
+		let mixer =
+			StreamMixer::new(MixerConfig { max_block: OPUS_FRAME, ..MixerConfig::default() });
+		let handle = mixer.handle();
+		let thread = spawn("voelin-stream-audio", {
+			let shared = shared.clone();
+			move || audio_loop(&shared, mixer, encoder)
+		})?;
+		let mut audio =
+			Self { mixer: handle, video: video.clone(), active: Vec::new(), thread: Some(thread) };
+		audio.apply(sources);
+		Ok(audio)
+	}
+
+	/// Make the sources `specs`: kinds that stay keep their capture and
+	/// take the new gain and mute, new ones start, the rest stop.
+	fn apply(&mut self, specs: Vec<AudioSourceSpec>) {
+		let mut old: Vec<Option<ActiveSource>> = self.active.drain(..).map(Some).collect();
+		let mut next = Vec::with_capacity(specs.len());
+		for spec in specs {
+			let same =
+				old.iter().position(|o| o.as_ref().is_some_and(|a| a.spec.kind == spec.kind));
+			match same.and_then(|i| old[i].take()) {
+				Some(mut source) => {
+					source.handle.set_gain(spec.gain);
+					source.handle.set_muted(spec.muted);
+					source.spec = spec;
+					next.push(source);
+				}
+				None => next.push(self.start_source(spec)),
+			}
+		}
+		drop(old);
+		self.active = next;
+	}
+
+	fn start_source(&self, spec: AudioSourceSpec) -> ActiveSource {
+		let handle = self.mixer.add_source(spec.kind.label());
+		handle.set_gain(spec.gain);
+		handle.set_muted(spec.muted);
+		let (feed, error) = match self.feed(&spec.kind, &handle) {
+			Ok(feed) => (Some(feed), None),
+			Err(e) => {
+				warn!("stream audio source {}: {e}", spec.kind.label());
+				(None, Some(e))
+			}
+		};
+		ActiveSource { spec, handle, _feed: feed, error }
+	}
+
+	fn feed(&self, kind: &AudioSourceKind, handle: &SourceHandle) -> Result<Feed, String> {
+		let playback = |filter: PlaybackFilter| {
+			playback::start_playback(&filter, handle).map(Feed::Capture).map_err(|e| e.to_string())
+		};
+		match kind {
+			AudioSourceKind::DesktopWithoutSelf => playback(PlaybackFilter::AllButSelf),
+			AudioSourceKind::App(app) => playback(PlaybackFilter::App(app.clone())),
+			AudioSourceKind::WindowAudio => {
+				let SourceId::Window(window) = self.video else {
+					return Err("no window is shared; pick the application instead".into());
+				};
+				let pid = playback::window_pid(window).ok_or(
+					"the shared window's process is unknown here; pick the application instead",
+				)?;
+				playback(PlaybackFilter::App(AppMatch::Pid(pid)))
+			}
+			AudioSourceKind::Microphone => {
+				let input = MicrophoneInput(handle.input(MIX_RATE));
+				Ok(Feed::Microphone(tap::microphone().attach(Box::new(input))))
+			}
+			AudioSourceKind::Synthetic { hz } => {
+				let tone = SineSource::new(*hz as f32, 0.05);
+				playback::forward_audio(Box::new(tone), handle)
+					.map(Feed::Capture)
+					.map_err(|e| e.to_string())
+			}
+		}
+	}
+
+	/// The sources that capture nothing, and why.
+	fn error(&self) -> Option<String> {
+		let errors: Vec<String> = self
+			.active
+			.iter()
+			.filter_map(|s| s.error.as_ref().map(|e| format!("{}: {e}", s.spec.kind.label())))
+			.collect();
+		(!errors.is_empty()).then(|| errors.join("; "))
+	}
+
+	fn stats(&self) -> Vec<AudioSourceStats> {
+		self.active
+			.iter()
+			.map(|s| {
+				let stats = s.handle.stats();
+				AudioSourceStats {
+					id: s.handle.id(),
+					spec: s.spec.clone(),
+					name: s.handle.name().to_owned(),
+					level: s.handle.level(),
+					state: stats.state,
+					latency: stats.latency,
+					underruns: stats.underruns,
+					error: s.error.clone(),
+				}
+			})
+			.collect()
+	}
+
+	/// Stop the captures and the mixer thread (the streamer's stop flag
+	/// must be set).
+	fn stop(mut self) {
+		self.active.clear();
+		if let Some(thread) = self.thread.take() {
+			thread.thread().unpark();
+			let _ = thread.join();
+		}
+	}
 }
 
 /// A layer as the capture thread sees it.
@@ -1251,66 +1616,37 @@ fn stats_loop(shared: &Shared) {
 	}
 }
 
-/// Interleaved stereo from any channel count (extra channels are dropped).
-fn append_stereo(buffer: &AudioBuffer, out: &mut Vec<f32>) {
-	match buffer.channels {
-		0 => {}
-		1 => out.extend(buffer.samples.iter().flat_map(|s| [*s, *s])),
-		2 => out.extend_from_slice(&buffer.samples),
-		n => {
-			for frame in buffer.samples.chunks_exact(usize::from(n)) {
-				out.extend_from_slice(&frame[..2]);
-			}
-		}
-	}
-}
-
-fn audio_loop(shared: &Shared, mut buffers: FrameReceiver<AudioBuffer>, mut encoder: VoiceEncoder) {
-	// Interleaved stereo waiting for a whole Opus frame.
-	let mut pending: Vec<f32> = Vec::new();
-	// Opus frames since the capture started: the RTP time in 20 ms steps.
-	let mut frames: u64 = 0;
+/// The mixer thread: every 20 ms (on the monotonic clock) one Opus frame
+/// of the mix, encoded while a sink is attached. The RTP time is the
+/// frame's number since the start, so it follows real time across
+/// silences and stalls.
+fn audio_loop(shared: &Shared, mut mixer: StreamMixer, mut encoder: VoiceEncoder) {
+	let mut clock = BlockClock::new(OPUS_FRAME);
+	let mut block = vec![0.0f32; OPUS_FRAME * 2];
 	while !shared.stopped() {
-		let Some(buffer) = buffers.recv_timeout(POLL) else {
-			if buffers.is_closed() {
-				debug!("system audio capture ended");
-				break;
-			}
+		let now = Instant::now();
+		let due = clock.due(now);
+		if due.is_empty() {
+			std::thread::park_timeout(clock.next().saturating_duration_since(now).min(POLL));
 			continue;
-		};
-		// Follow the capture clock across gaps (nothing played, sink not
-		// attached yet), so audio stays in step with video.
-		let at = buffer.timestamp.as_micros() as u64 * 48 / 1000;
-		let position = frames * OPUS_FRAME as u64 + (pending.len() / 2) as u64;
-		if at > position + 10 * OPUS_FRAME as u64 {
-			pending.clear();
-			frames = at / OPUS_FRAME as u64;
 		}
-		let Some(sink) = shared.sink() else { continue };
-		append_stereo(&buffer, &mut pending);
-		while pending.len() >= OPUS_FRAME * 2 {
-			let data: Option<Arc<[u8]>> = match encoder.encode_to_bytes(&pending[..OPUS_FRAME * 2])
-			{
-				Ok(data) => Some(data.into()),
+		for frame in due {
+			// Mixed even without a sink, so the sources' buffers keep moving.
+			mixer.mix(&mut block);
+			let Some(sink) = shared.sink() else { continue };
+			let data: Arc<[u8]> = match encoder.encode_to_bytes(&block) {
+				Ok(data) => data.into(),
 				Err(e) => {
 					warn!("audio encoding failed: {e}");
-					None
+					continue;
 				}
 			};
-			pending.drain(..OPUS_FRAME * 2);
-			if let Some(data) = data {
-				let time = MediaTime::new(frames * OPUS_FRAME as u64, Frequency::FORTY_EIGHT_KHZ);
-				if sink.send(EncodedFrame {
-					kind: MediaKind::Audio,
-					time,
-					data,
-					layer: 0,
-					keyframe: false,
-				}) {
-					shared.audio_frames.fetch_add(1, Ordering::Relaxed);
-				}
+			let time = MediaTime::new(frame * OPUS_FRAME as u64, Frequency::FORTY_EIGHT_KHZ);
+			let frame =
+				EncodedFrame { kind: MediaKind::Audio, time, data, layer: 0, keyframe: false };
+			if sink.send(frame) {
+				shared.audio_frames.fetch_add(1, Ordering::Relaxed);
 			}
-			frames += 1;
 		}
 	}
 }
@@ -2047,6 +2383,118 @@ mod tests {
 		};
 		assert!(source.streamer().reconfigure(&codecs, bad).is_err());
 		assert_eq!(source.streamer().layer_ids(), [0, 7]);
+	}
+
+	#[test]
+	fn audio_sources_from_settings() {
+		use crate::settings::{AudioSourceKindSetting as K, AudioSourceSetting as S};
+		let settings = [
+			S::new(K::Desktop),
+			S { gain: 0.5, ..S::new(K::App { name: Some("firefox".into()), pid: None }) },
+			S { muted: true, ..S::new(K::App { name: None, pid: Some(42) }) },
+			S::new(K::Window),
+			S::new(K::Microphone),
+			S::new(K::Synthetic { frequency: 1000 }),
+		];
+		let specs = audio_source_specs(&settings);
+		let kinds: Vec<AudioSourceKind> = specs.iter().map(|s| s.kind.clone()).collect();
+		assert_eq!(
+			kinds,
+			[
+				AudioSourceKind::DesktopWithoutSelf,
+				AudioSourceKind::App(AppMatch::Name("firefox".into())),
+				AudioSourceKind::App(AppMatch::Pid(42)),
+				AudioSourceKind::WindowAudio,
+				AudioSourceKind::Microphone,
+				AudioSourceKind::Synthetic { hz: 1000 },
+			]
+		);
+		assert_eq!((specs[1].gain, specs[2].muted), (0.5, true));
+		let back: Vec<S> = specs.iter().map(S::from).collect();
+		assert_eq!(back, settings);
+		assert_eq!(
+			default_audio_sources(&SourceId::Monitor(0)),
+			[AudioSourceSpec::new(AudioSourceKind::DesktopWithoutSelf)]
+		);
+	}
+
+	/// Audio sources mixed, then changed while streaming: gain, mute, one
+	/// removed, the microphone added; levels in the stats follow.
+	#[cfg(feature = "media-desktop")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn audio_sources_change_live() {
+		let codecs = Codecs::new();
+		let tone = |hz| AudioSourceSpec::new(AudioSourceKind::Synthetic { hz });
+		let config = StreamerConfig {
+			source: SourceId::Synthetic,
+			synthetic_size: (64, 48),
+			audio_sources: vec![tone(440), AudioSourceSpec { gain: 0.5, ..tone(1000) }],
+			..StreamerConfig::default()
+		};
+		let streamer = Streamer::start(&codecs, config).await.unwrap();
+		let wait = |what: &str, done: &dyn Fn(&StreamerStats) -> bool| {
+			let deadline = Instant::now() + Duration::from_secs(5);
+			loop {
+				let stats = streamer.stats();
+				if done(&stats) {
+					return stats;
+				}
+				assert!(Instant::now() < deadline, "{what}: {:#?}", stats.audio_sources);
+				std::thread::sleep(Duration::from_millis(20));
+			}
+		};
+		// The SineSource tone is 0.05; the second at half gain.
+		let near = |level: f32, want: f32| (level - want).abs() < want * 0.1;
+		let stats = wait("both tones", &|s| {
+			s.audio_sources.len() == 2
+				&& near(s.audio_sources[0].level.peak, 0.05)
+				&& near(s.audio_sources[1].level.peak, 0.025)
+		});
+		assert!(stats.audio_sources.iter().all(|s| s.state == SourceState::Playing));
+		assert!(stats.audio_level.peak > 0.05 && stats.audio_limiter == 1.0, "{stats:?}");
+		let first = stats.audio_sources[0].id;
+
+		// Mute the first (kept: same id), drop the second, add the
+		// microphone and a window source (the pattern is no window).
+		let update = StreamerConfigUpdate {
+			audio_sources: Some(vec![
+				AudioSourceSpec { muted: true, ..tone(440) },
+				AudioSourceSpec::new(AudioSourceKind::Microphone),
+				AudioSourceSpec::new(AudioSourceKind::WindowAudio),
+			]),
+			..StreamerConfigUpdate::default()
+		};
+		streamer.reconfigure(&codecs, update).unwrap();
+		assert_eq!(streamer.audio_sources().len(), 3);
+		let publisher = tap::publisher_id();
+		let speak = std::thread::spawn(move || {
+			// 20 ms of a 0.2 tone every 20 ms, for a second.
+			let chunk: Vec<f32> = (0..960).map(|i| 0.2 * (i as f32 * 0.1).sin()).collect();
+			for _ in 0..50 {
+				tap::microphone().publish(publisher, &chunk);
+				std::thread::sleep(Duration::from_millis(20));
+			}
+		});
+		let stats = wait("microphone in, tone muted", &|s| {
+			s.audio_sources.len() == 3
+				&& s.audio_sources[1].level.peak > 0.15
+				&& s.audio_level.peak > 0.15
+		});
+		speak.join().unwrap();
+		assert_eq!(stats.audio_sources[0].id, first, "the kept tone keeps its source");
+		assert!(stats.audio_sources[0].spec.muted);
+		// Muted sources are still metered.
+		assert!(near(stats.audio_sources[0].level.peak, 0.05), "{stats:?}");
+		let window = &stats.audio_sources[2];
+		assert!(window.error.as_deref().is_some_and(|e| e.contains("no window")), "{window:?}");
+		assert!(streamer.audio_error().is_some_and(|e| e.contains("shared window")));
+		assert!(streamer.audio_mixer().is_some());
+
+		// All sources gone: silence, the track stays.
+		let update = StreamerConfigUpdate { audio_sources: Some(Vec::new()), ..Default::default() };
+		streamer.reconfigure(&codecs, update).unwrap();
+		wait("silence", &|s| s.audio_sources.is_empty() && s.audio_level.peak < 0.01);
+		assert!(streamer.has_audio());
 	}
 
 	/// Audio of the test pattern: 20 ms Opus frames on a 48 kHz clock.

@@ -10,6 +10,8 @@
 //! - [`mixer`]: per-client jitter buffer, decoder, volume and mixing (on the
 //!   vendored `tsclientlib::audio::AudioHandler`)
 //! - [`settings`]: all user audio settings in one serde struct
+//! - [`tap`]: the processed microphone for other consumers (the stream
+//!   mixer), free while nobody listens
 //! - `device` (feature `device`): capture and playback through cpal, device
 //!   lists and loss detection
 
@@ -20,6 +22,7 @@ pub mod pcm;
 pub mod process;
 pub mod resample;
 pub mod settings;
+pub mod tap;
 pub mod vad;
 pub mod wav;
 
