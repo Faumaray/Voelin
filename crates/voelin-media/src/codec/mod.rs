@@ -126,8 +126,13 @@ pub struct EncoderConfig {
 	/// start and on request (PLI), like WebRTC.
 	pub keyframe_interval: Option<u32>,
 	pub content: ContentHint,
-	/// Encoder threads; 0 picks a number from the resolution and CPU count.
+	/// Most encoder threads (still no more than the frame size can use); 0:
+	/// all CPUs but one ([`encoder_cpus`]).
 	pub threads: u32,
+	/// A fixed speed / quality trade-off in the backend's own terms (libvpx
+	/// `cpu-used`); `None` lets the encoder adapt it to how long frames take
+	/// to encode compared to the frame interval.
+	pub speed: Option<i32>,
 }
 
 impl Default for EncoderConfig {
@@ -138,28 +143,44 @@ impl Default for EncoderConfig {
 			keyframe_interval: None,
 			content: ContentHint::Screen,
 			threads: 0,
+			speed: None,
 		}
 	}
 }
 
+/// CPUs encoders use by default: all but one (at least one). libvpx's
+/// threads wait on each other by spinning, so an encode that wants every
+/// core slows down many times over as soon as anything else runs (the
+/// capture and conversion of the next frame, another layer, the desktop);
+/// measured on a 4-core machine: 130-290 ms per 1080p frame with 4 threads
+/// under load, against 9-17 ms with 3.
+pub fn encoder_cpus() -> u32 {
+	let cpus = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
+	cpus.saturating_sub(1).max(1)
+}
+
 impl EncoderConfig {
-	/// Threads for a `width` x `height` encode (libwebrtc's heuristic).
+	/// Threads for a `width` x `height` encode: [`threads`](Self::threads)
+	/// (or [`encoder_cpus`]), but no more than one per 320x240 pixels: more
+	/// would idle on small frames and cost quality (VP8 token partitions).
 	pub fn threads_for(&self, width: u32, height: u32) -> u32 {
-		if self.threads > 0 {
-			return self.threads;
-		}
-		let cpus = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
-		let pixels = width * height;
-		if pixels >= 1920 * 1080 && cpus > 8 {
-			8
-		} else if pixels >= 1280 * 720 && cpus > 3 {
-			4
-		} else if pixels >= 640 * 480 && cpus > 2 {
-			2
-		} else {
-			1
-		}
+		let cpus = match self.threads {
+			0 => encoder_cpus(),
+			n => n,
+		};
+		let useful = (u64::from(width) * u64::from(height) / (320 * 240)).clamp(1, 64) as u32;
+		cpus.min(useful)
 	}
+}
+
+/// An encoded frame borrowed from the encoder (see
+/// [`VideoEncoder::encode_with`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EncodedChunk<'a> {
+	pub data: &'a [u8],
+	pub keyframe: bool,
+	/// Presentation time on the 90 kHz RTP clock.
+	pub pts_90khz: u64,
 }
 
 /// One encoded frame, ready for `voelin_stream::Peer::write`.
@@ -183,8 +204,35 @@ pub trait VideoEncoder: Send {
 	/// encoder skipped it (rate control), usually one.
 	fn encode(&mut self, frame: &VideoFrame, force_keyframe: bool) -> Result<Vec<EncodedFrame>>;
 
+	/// Like [`encode`](Self::encode), but hands each encoded frame to `out`
+	/// borrowed from the encoder's own buffer, so nothing is allocated or
+	/// copied here (libvpx does this; the default goes through `encode`).
+	fn encode_with(
+		&mut self,
+		frame: &VideoFrame,
+		force_keyframe: bool,
+		out: &mut dyn FnMut(EncodedChunk<'_>),
+	) -> Result<()> {
+		for f in self.encode(frame, force_keyframe)? {
+			out(EncodedChunk { data: &f.data, keyframe: f.keyframe, pts_90khz: f.pts_90khz });
+		}
+		Ok(())
+	}
+
 	/// Change the target bitrate (bits per second).
 	fn set_bitrate(&mut self, bps: u32) -> Result<()>;
+
+	/// Change the expected frame rate (rate control and speed decisions);
+	/// ignored by encoders that follow the frame timestamps anyway.
+	fn set_fps(&mut self, fps: u32) -> Result<()> {
+		let _ = fps;
+		Ok(())
+	}
+
+	/// The current speed setting, for statistics (libvpx `cpu-used`).
+	fn speed(&self) -> Option<i32> {
+		None
+	}
 }
 
 /// A video decoder.
@@ -461,6 +509,7 @@ mod tests {
 	fn thread_heuristic() {
 		let config = EncoderConfig { threads: 3, ..EncoderConfig::default() };
 		assert_eq!(config.threads_for(1920, 1080), 3);
+		assert_eq!(config.threads_for(320, 240), 1, "capped by the frame size");
 		assert_eq!(EncoderConfig::default().threads_for(320, 240), 1);
 	}
 }

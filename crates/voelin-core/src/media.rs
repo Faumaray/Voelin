@@ -3,11 +3,15 @@
 //!
 //! - [`Streamer`] captures a screen or window (and optionally system audio),
 //!   encodes the video with the codec our offer carries ([`stream_codec`],
-//!   VP8 by default) at the bitrate of the stream setup, and the audio with
-//!   Opus (48 kHz stereo, 20 ms). It hands the frames to a [`MediaSink`]:
-//!   the [`StreamSink`] of a live stream, or an [`EncodedSource`] for code
-//!   that drives `voelin_stream::Streams` itself. Keyframe requests of viewers
-//!   are honoured.
+//!   VP8 by default) in one or more simulcast layers ([`LayerSpec`]), and
+//!   the audio with Opus (48 kHz stereo, 20 ms). Capture, conversion and
+//!   each layer's encoder run on threads of their own, connected by
+//!   latest-wins handoffs. It hands the frames to a [`MediaSink`]: the
+//!   [`StreamSink`] of a live stream, or an [`EncodedSource`] for code that
+//!   drives `voelin_stream::Streams` itself. Keyframe requests of viewers
+//!   are honoured per layer, and each layer's encoder follows the bitrate
+//!   the sink allows. [`Streamer::reconfigure`] changes frame rate,
+//!   bitrate, codec and layers while streaming.
 //! - [`VideoPipeline`] decodes the video of a watched stream on its own
 //!   thread and hands every picture to a callback. After lost frames or
 //!   decoder errors it skips to the next keyframe and asks for one.
@@ -23,7 +27,7 @@
 //! MediaCodec on Android).
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -32,12 +36,17 @@ use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 use voelin_audio::{VoiceCodec, VoiceEncoder};
 pub use voelin_media;
+pub use voelin_media::capture::synthetic::Pattern;
 use voelin_media::capture::synthetic::{SineSource, SyntheticScreen};
 use voelin_media::capture::{
-	self, AudioCapture, CaptureOptions, CaptureSource, ScreenCapture, SourceId,
+	self, AudioCapture, CaptureOptions, CaptureSource, FramePacer, FrameSink, ScreenCapture,
+	SourceId,
 };
+use voelin_media::handoff::Handoff;
+use voelin_media::scale::Pyramid;
 use voelin_media::{
-	AudioBuffer, Codec, Codecs, ContentHint, EncoderConfig, FrameReceiver, VideoEncoder, VideoFrame,
+	AudioBuffer, Codec, Codecs, ContentHint, EncoderConfig, FrameReceiver, FrameRef, VideoEncoder,
+	VideoFrame,
 };
 use voelin_stream::{
 	EncodedFrame, FrameSource, Frequency, LayerId, LayerSet, LayerSpec, MediaFrame, MediaKind,
@@ -64,6 +73,8 @@ pub enum MediaError {
 	Media(#[from] voelin_media::Error),
 	#[error("Opus: {0}")]
 	Opus(#[from] voelin_audio::Error),
+	#[error("stream settings: {0}")]
+	Config(String),
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -178,11 +189,48 @@ impl MediaSink for StreamSink {
 /// Which backend captures monitors and windows.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum CaptureBackend {
-	/// The one for this desktop session (`capture::default_screen_capture`).
+	/// The one for this desktop session (`capture::default_screen_capture`:
+	/// the ScreenCast portal on Wayland, X11, Windows Graphics Capture).
 	#[default]
 	Auto,
+	/// The xdg-desktop-portal ScreenCast dialog (Wayland; also X11 desktops
+	/// that run the portal). Monitor and window ids are ignored: the
+	/// dialog picks.
+	Portal,
 	/// X11, also under Wayland through XWayland (Linux).
 	X11,
+	/// wlroots compositors (Sway, Hyprland, river, ...) directly, without
+	/// the portal: `ext-image-copy-capture-v1`, or `wlr-screencopy-unstable-v1`
+	/// where that is missing (Linux).
+	Wlroots,
+}
+
+impl CaptureBackend {
+	/// Names as in settings: `auto`, `portal`, `x11`, `wlroots`.
+	pub fn name(&self) -> &'static str {
+		match self {
+			CaptureBackend::Auto => "auto",
+			CaptureBackend::Portal => "portal",
+			CaptureBackend::X11 => "x11",
+			CaptureBackend::Wlroots => "wlroots",
+		}
+	}
+}
+
+impl std::str::FromStr for CaptureBackend {
+	type Err = MediaError;
+
+	fn from_str(s: &str) -> Result<Self, MediaError> {
+		match s.trim().to_ascii_lowercase().as_str() {
+			"auto" | "" => Ok(CaptureBackend::Auto),
+			"portal" => Ok(CaptureBackend::Portal),
+			"x11" => Ok(CaptureBackend::X11),
+			"wlroots" | "wlr" => Ok(CaptureBackend::Wlroots),
+			other => Err(MediaError::Config(format!(
+				"unknown capture backend {other:?}: auto, portal, x11 or wlroots"
+			))),
+		}
+	}
 }
 
 /// What and how to stream.
@@ -191,9 +239,11 @@ pub struct StreamerConfig {
 	pub source: SourceId,
 	/// For monitors and windows.
 	pub backend: CaptureBackend,
-	/// Frames per second (1 to 60).
+	/// Frame-rate cap (at least 1). The capture delivers what the source
+	/// gives up to this rate; layers may cap lower.
 	pub fps: u32,
-	/// Video bitrate in kbit/s, as in `StreamSetup::bitrate`.
+	/// Video bitrate in kbit/s, as in `StreamSetup::bitrate`, for the single
+	/// layer when `layers` is empty.
 	pub bitrate_kbps: u32,
 	/// The codec of our offer, see [`stream_codec`].
 	pub codec: Codec,
@@ -202,10 +252,13 @@ pub struct StreamerConfig {
 	pub cursor: bool,
 	/// Size of the test pattern ([`SourceId::Synthetic`]).
 	pub synthetic_size: (u32, u32),
+	/// What the test pattern shows.
+	pub synthetic_pattern: Pattern,
 	/// Portal restore token from an earlier share: the desktop may skip its
 	/// dialog. The new one is [`Streamer::restore_token`].
 	pub restore_token: Option<String>,
-	/// Simulcast layers to encode. Empty: one layer at `bitrate_kbps`.
+	/// Simulcast layers to encode, each with its own encoder. Empty: one
+	/// layer (id 0) at the source's size and `bitrate_kbps`.
 	pub layers: Vec<LayerSpec>,
 }
 
@@ -220,16 +273,69 @@ impl Default for StreamerConfig {
 			audio: true,
 			cursor: true,
 			synthetic_size: (1280, 720),
+			synthetic_pattern: Pattern::Simple,
 			restore_token: None,
 			layers: Vec::new(),
 		}
 	}
 }
 
-/// What a [`Streamer`] has done so far.
+impl StreamerConfig {
+	/// The layers that are encoded: [`layers`](Self::layers), or one layer at
+	/// `bitrate_kbps`.
+	pub fn effective_layers(&self) -> Vec<LayerSpec> {
+		if self.layers.is_empty() {
+			vec![LayerSpec::single(u64::from(self.bitrate_kbps.max(1)) * 1000)]
+		} else {
+			self.layers.clone()
+		}
+	}
+}
+
+/// Changes for a running [`Streamer`] ([`Streamer::reconfigure`]); `None`
+/// keeps the current value.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct StreamerStats {
+pub struct StreamerConfigUpdate {
+	/// Frame-rate cap; the capture follows without restarting.
+	pub fps: Option<u32>,
+	/// Bitrate of the single layer (used while `layers` is empty).
+	pub bitrate_kbps: Option<u32>,
+	/// Another codec: new encoders, starting with keyframes.
+	pub codec: Option<Codec>,
+	/// Another set of layers (`Some(vec![])`: back to a single layer). Layers
+	/// keep their encoder when their id stays; new ids get new encoders.
+	pub layers: Option<Vec<LayerSpec>>,
+}
+
+/// One simulcast layer in [`StreamerStats`]. Rates are over the last second.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LayerStats {
+	pub id: LayerId,
+	/// Size of the last encoded frame.
+	pub width: u32,
+	pub height: u32,
 	/// Frames handed to the sink.
+	pub frames: u64,
+	pub keyframes: u64,
+	/// Frames the layer's encoder was too busy for (replaced by a newer one
+	/// before it got to them).
+	pub dropped: u64,
+	pub fps: f64,
+	pub kbps: f64,
+	/// Mean time to encode a frame.
+	pub encode_time: Duration,
+	/// The encoder's target bitrate (bit/s): the layer's, or what the
+	/// viewers' bandwidth estimates allow.
+	pub bitrate: u64,
+	pub threads: u32,
+	/// The encoder's speed setting (libvpx `cpu-used`), if it has one.
+	pub speed: Option<i32>,
+}
+
+/// What a [`Streamer`] has done so far. Rates are over the last second.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StreamerStats {
+	/// Frames handed to the sink (all layers).
 	pub video_frames: u64,
 	pub audio_frames: u64,
 	/// Size of the last captured frame.
@@ -240,6 +346,120 @@ pub struct StreamerStats {
 	pub capture_ended: bool,
 	/// The last encoder error.
 	pub error: Option<String>,
+	/// Frames the capture delivered (within the frame-rate cap).
+	pub captured_frames: u64,
+	pub capture_fps: f64,
+	/// Mean time to convert a captured frame to I420 and scale it for every
+	/// layer that is due.
+	pub convert_time: Duration,
+	/// Frames dropped between conversion and the encoders, all layers.
+	pub dropped_frames: u64,
+	/// Threads converting and scaling.
+	pub convert_threads: usize,
+	pub codec: Option<Codec>,
+	pub layers: Vec<LayerStats>,
+}
+
+/// One simulcast layer while streaming: its encoder thread's inbox and
+/// counters (written by the pipeline threads, read lock-free by stats).
+struct Layer {
+	id: LayerId,
+	/// Size, scale and frame-rate cap, read by the capture thread when the
+	/// layer set changes.
+	spec: Mutex<LayerSpec>,
+	/// Newest converted frame for the encoder.
+	inbox: Handoff<VideoFrame>,
+	/// A keyframe was asked for.
+	keyframe: AtomicBool,
+	stop: AtomicBool,
+	/// Configured bitrate and cap (0: none), bit/s.
+	bitrate: AtomicU64,
+	max_bitrate: AtomicU64,
+	/// Frame rate the encoder plans for.
+	fps: AtomicU32,
+	/// An encoder to switch to (codec change).
+	next_encoder: Mutex<Option<Box<dyn VideoEncoder>>>,
+	threads: u32,
+	// Counters.
+	frames: AtomicU64,
+	keyframes: AtomicU64,
+	bytes: AtomicU64,
+	encoded: AtomicU64,
+	encode_ns: AtomicU64,
+	/// `width << 32 | height` of the last encoded frame.
+	size: AtomicU64,
+	target: AtomicU64,
+	/// `cpu-used`, or `i64::MIN`.
+	speed: AtomicI64,
+}
+
+impl Layer {
+	fn new(spec: &LayerSpec, fps: u32, threads: u32) -> Self {
+		Self {
+			id: spec.id,
+			spec: Mutex::new(spec.clone()),
+			inbox: Handoff::new(),
+			keyframe: AtomicBool::new(false),
+			stop: AtomicBool::new(false),
+			bitrate: AtomicU64::new(spec.bitrate.max(1)),
+			max_bitrate: AtomicU64::new(spec.max_bitrate.unwrap_or(0)),
+			fps: AtomicU32::new(layer_fps(spec, fps)),
+			next_encoder: Mutex::new(None),
+			threads,
+			frames: AtomicU64::new(0),
+			keyframes: AtomicU64::new(0),
+			bytes: AtomicU64::new(0),
+			encoded: AtomicU64::new(0),
+			encode_ns: AtomicU64::new(0),
+			size: AtomicU64::new(0),
+			target: AtomicU64::new(spec.bitrate),
+			speed: AtomicI64::new(i64::MIN),
+		}
+	}
+
+	fn update(&self, spec: &LayerSpec, fps: u32) {
+		*lock(&self.spec) = spec.clone();
+		self.bitrate.store(spec.bitrate.max(1), Ordering::Relaxed);
+		self.max_bitrate.store(spec.max_bitrate.unwrap_or(0), Ordering::Relaxed);
+		self.fps.store(layer_fps(spec, fps), Ordering::Relaxed);
+	}
+
+	fn stopped(&self) -> bool {
+		self.stop.load(Ordering::Relaxed)
+	}
+}
+
+/// The frame rate a layer encodes at: its cap, within the capture's.
+fn layer_fps(spec: &LayerSpec, fps: u32) -> u32 {
+	spec.max_fps.map_or(fps, |cap| cap.min(fps)).max(1)
+}
+
+/// What [`Streamer::reconfigure`] changes.
+struct Settings {
+	fps: u32,
+	bitrate_kbps: u32,
+	codec: Codec,
+	layers: Vec<LayerSpec>,
+}
+
+impl Settings {
+	fn effective_layers(&self) -> Vec<LayerSpec> {
+		StreamerConfig {
+			bitrate_kbps: self.bitrate_kbps,
+			layers: self.layers.clone(),
+			..StreamerConfig::default()
+		}
+		.effective_layers()
+	}
+}
+
+/// Rates the stats thread computes once a second.
+#[derive(Default)]
+struct Rates {
+	capture_fps: f64,
+	convert_time: Duration,
+	/// Per layer: id, fps, kbit/s, encode time.
+	layers: Vec<(LayerId, f64, f64, Duration)>,
 }
 
 #[derive(Default)]
@@ -252,6 +472,20 @@ struct Shared {
 	size: AtomicU64,
 	capture_ended: AtomicBool,
 	error: Mutex<Option<String>>,
+	/// Frame-rate cap of the capture.
+	fps: AtomicU32,
+	captured: AtomicU64,
+	converted: AtomicU64,
+	convert_ns: AtomicU64,
+	convert_threads: AtomicUsize,
+	/// The layers being encoded, in configuration order.
+	layers: Mutex<Vec<Arc<Layer>>>,
+	/// Bumped whenever `layers` or a layer's spec changes.
+	generation: AtomicU64,
+	/// Scratch set for the sink's keyframe requests.
+	keyframes: Mutex<LayerSet>,
+	settings: Mutex<Option<Settings>>,
+	rates: Mutex<Rates>,
 }
 
 impl Shared {
@@ -262,16 +496,80 @@ impl Shared {
 	fn stopped(&self) -> bool {
 		self.stop.load(Ordering::Relaxed)
 	}
+
+	fn set_error(&self, e: impl ToString) {
+		*lock(&self.error) = Some(e.to_string());
+	}
+
+	/// Move the sink's keyframe requests to the layers they are for. Any
+	/// encoder thread may call it; one at a time does the work.
+	fn poll_keyframes(&self, sink: &dyn MediaSink) {
+		let Ok(mut requested) = self.keyframes.try_lock() else { return };
+		sink.take_layer_keyframes(&mut requested);
+		if requested.is_empty() {
+			return;
+		}
+		for layer in lock(&self.layers).iter() {
+			if requested.contains(layer.id) {
+				layer.keyframe.store(true, Ordering::Relaxed);
+			}
+		}
+		requested.clear();
+	}
+}
+
+/// Split `cores` encoder threads over layers by their share of the pixels
+/// (source size unknown yet: layers with a fixed size count against
+/// 1920x1080).
+fn thread_split(layers: &[LayerSpec], cores: u32) -> Vec<u32> {
+	let area = |l: &LayerSpec| {
+		let (w, h) = l.output_size(1920, 1080);
+		f64::from(w) * f64::from(h)
+	};
+	let total: f64 = layers.iter().map(area).sum::<f64>().max(1.0);
+	layers.iter().map(|l| ((f64::from(cores) * area(l) / total).round() as u32).max(1)).collect()
+}
+
+/// CPUs split between the layers' encoders (all but one, see
+/// `voelin_media::codec::encoder_cpus`).
+fn cores() -> u32 {
+	voelin_media::codec::encoder_cpus()
+}
+
+fn new_encoder(
+	codecs: &Codecs,
+	codec: Codec,
+	spec: &LayerSpec,
+	fps: u32,
+	threads: u32,
+) -> Result<Box<dyn VideoEncoder>, MediaError> {
+	let config = EncoderConfig {
+		fps: layer_fps(spec, fps),
+		bitrate_bps: spec.bitrate.clamp(1, u64::from(u32::MAX)) as u32,
+		content: ContentHint::Screen,
+		threads,
+		..EncoderConfig::default()
+	};
+	Ok(codecs.new_encoder(codec, config)?)
 }
 
 /// Capture and encoding for our stream. Frames are captured from the start
-/// (the portal asks the user then), but only encoded once a sink is
-/// [attached](Streamer::attach). Stops when dropped.
+/// (the portal asks the user then), but only converted and encoded once a
+/// sink is [attached](Streamer::attach). Stops when dropped.
+///
+/// The capture backend hands each frame, still in its capture buffer, to
+/// the conversion on its own thread: one pass converts it to I420 on all
+/// cores and derives every layer's size from it (a pyramid, recycled
+/// buffers). Each layer's newest frame goes through a one-slot handoff to
+/// that layer's encoder thread; a frame an encoder was too busy for is
+/// replaced, not queued.
 pub struct Streamer {
 	shared: Arc<Shared>,
 	screen: Option<Box<dyn ScreenCapture>>,
 	audio: Option<Box<dyn AudioCapture>>,
 	threads: Vec<JoinHandle<()>>,
+	/// Encoder threads, by layer.
+	encoders: Mutex<Vec<(LayerId, JoinHandle<()>)>>,
 	backend: &'static str,
 	restore_token: Option<String>,
 	audio_error: Option<String>,
@@ -281,67 +579,69 @@ impl Streamer {
 	/// Start capturing. Must run on a Tokio runtime (the portal talks D-Bus
 	/// on it); may wait for the user in the portal's dialog.
 	pub async fn start(codecs: &Codecs, config: StreamerConfig) -> Result<Self, MediaError> {
-		let fps = config.fps.clamp(1, 60);
-		let encoder = codecs.new_encoder(
-			config.codec,
-			EncoderConfig {
-				fps,
-				bitrate_bps: config.bitrate_kbps.clamp(100, 10_000) * 1000,
-				content: ContentHint::Screen,
-				..EncoderConfig::default()
-			},
-		)?;
-		let options = CaptureOptions { fps, cursor: config.cursor, ..CaptureOptions::default() };
-		// The portal's token for this choice comes with the capture.
-		let (screen, frames, restore_token): (Box<dyn ScreenCapture>, _, _) = match &config.source {
-			SourceId::Synthetic => {
-				let (w, h) = config.synthetic_size;
-				let mut screen = SyntheticScreen::new(w, h);
-				let frames = screen.start(&SourceId::Synthetic, &options).await?;
-				(Box::new(screen), frames, None)
-			}
-			#[cfg(all(target_os = "linux", feature = "media-desktop"))]
-			SourceId::Portal => {
-				use voelin_media::capture::portal::PortalCapture;
-				let mut portal = PortalCapture::with_restore_token(config.restore_token.clone());
-				let frames = portal.start(&SourceId::Portal, &options).await?;
-				let token = portal.restore_token().map(str::to_owned);
-				(Box::new(portal), frames, token)
-			}
-			source => {
-				let mut screen = match config.backend {
-					CaptureBackend::Auto => capture::default_screen_capture()?,
-					#[cfg(all(target_os = "linux", feature = "media-desktop"))]
-					CaptureBackend::X11 => Box::new(voelin_media::capture::x11::X11Capture::new()),
-					#[cfg(not(all(target_os = "linux", feature = "media-desktop")))]
-					CaptureBackend::X11 => {
-						return Err(voelin_media::Error::CaptureUnavailable {
-							backend: "x11",
-							reason: "X11 capture is only in Linux desktop builds".into(),
-						}
-						.into());
-					}
-				};
-				let frames = screen.start(source, &options).await?;
-				(screen, frames, None)
-			}
-		};
-		let backend = screen.backend();
-
+		let fps = config.fps.max(1);
+		let layers = config.effective_layers();
+		check_layers(&layers)?;
 		let shared = Arc::new(Shared::default());
+		shared.fps.store(fps, Ordering::Relaxed);
 		let mut streamer = Self {
 			shared: shared.clone(),
-			screen: Some(screen),
+			screen: None,
 			audio: None,
 			threads: Vec::new(),
-			backend,
-			restore_token,
+			encoders: Mutex::new(Vec::new()),
+			backend: "",
+			restore_token: None,
 			audio_error: None,
 		};
-		streamer.threads.push(spawn("voelin-stream-video", {
+		// Encoders first: an unavailable codec fails before any dialog.
+		let split = thread_split(&layers, cores());
+		let mut ready = Vec::new();
+		for (spec, threads) in layers.iter().zip(split) {
+			let encoder = new_encoder(codecs, config.codec, spec, fps, threads)?;
+			ready.push((Arc::new(Layer::new(spec, fps, threads)), encoder));
+		}
+		for (layer, encoder) in ready {
+			streamer.spawn_encoder(layer, encoder)?;
+		}
+		*lock(&shared.settings) = Some(Settings {
+			fps,
+			bitrate_kbps: config.bitrate_kbps,
+			codec: config.codec,
+			layers: config.layers.clone(),
+		});
+		streamer.threads.push(spawn("voelin-stream-stats", {
 			let shared = shared.clone();
-			move || video_loop(&shared, frames, encoder)
+			move || stats_loop(&shared)
 		})?);
+
+		let ingest = Box::new(Ingest::new(shared.clone()));
+		let options = CaptureOptions { fps, cursor: config.cursor, ..CaptureOptions::default() };
+		// The portal's token for this choice comes with the capture.
+		let (screen, restore_token): (Box<dyn ScreenCapture>, _) = match &config.source {
+			SourceId::Synthetic => {
+				let (w, h) = config.synthetic_size;
+				let mut screen = SyntheticScreen::with_pattern(w, h, config.synthetic_pattern);
+				screen.start_sink(&SourceId::Synthetic, &options, ingest).await?;
+				(Box::new(screen), None)
+			}
+			#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+			_ if config.source == SourceId::Portal || config.backend == CaptureBackend::Portal => {
+				use voelin_media::capture::portal::PortalCapture;
+				let mut portal = PortalCapture::with_restore_token(config.restore_token.clone());
+				portal.start_sink(&SourceId::Portal, &options, ingest).await?;
+				let token = portal.restore_token().map(str::to_owned);
+				(Box::new(portal), token)
+			}
+			source => {
+				let mut screen = screen_backend(&config.backend)?;
+				screen.start_sink(source, &options, ingest).await?;
+				(screen, None)
+			}
+		};
+		streamer.backend = screen.backend();
+		streamer.screen = Some(screen);
+		streamer.restore_token = restore_token;
 		if config.audio {
 			match start_audio(&config.source) {
 				Ok((capture, buffers, encoder)) => {
@@ -357,6 +657,103 @@ impl Streamer {
 			}
 		}
 		Ok(streamer)
+	}
+
+	fn spawn_encoder(
+		&self,
+		layer: Arc<Layer>,
+		encoder: Box<dyn VideoEncoder>,
+	) -> Result<(), MediaError> {
+		let id = layer.id;
+		lock(&self.shared.layers).push(layer.clone());
+		self.shared.generation.fetch_add(1, Ordering::Relaxed);
+		let shared = self.shared.clone();
+		let thread =
+			spawn(&format!("voelin-encode-{id}"), move || encode_loop(&shared, &layer, encoder))?;
+		lock(&self.encoders).push((id, thread));
+		Ok(())
+	}
+
+	/// Change frame rate, bitrate, codec or layers while streaming, without
+	/// restarting the capture; applies from the next frame. A new codec
+	/// gets new encoders, which start with a keyframe; new layers get new
+	/// encoders; removed layers stop. Fails without changing anything if an
+	/// encoder cannot be created.
+	pub fn reconfigure(
+		&self,
+		codecs: &Codecs,
+		update: StreamerConfigUpdate,
+	) -> Result<(), MediaError> {
+		let mut guard = lock(&self.shared.settings);
+		let Some(settings) = guard.as_mut() else { return Ok(()) };
+		let old_codec = settings.codec;
+		let next = Settings {
+			fps: update.fps.unwrap_or(settings.fps).max(1),
+			bitrate_kbps: update.bitrate_kbps.unwrap_or(settings.bitrate_kbps),
+			codec: update.codec.unwrap_or(settings.codec),
+			layers: update.layers.unwrap_or_else(|| settings.layers.clone()),
+		};
+		let specs = next.effective_layers();
+		check_layers(&specs)?;
+		let codec_changed = next.codec != old_codec;
+		let current: Vec<Arc<Layer>> = lock(&self.shared.layers).clone();
+		// Create every encoder before changing anything.
+		let split = thread_split(&specs, cores());
+		let mut created = Vec::new();
+		for (spec, &threads) in specs.iter().zip(&split) {
+			let existing = current.iter().any(|l| l.id == spec.id);
+			if !existing || codec_changed {
+				created.push((spec.id, new_encoder(codecs, next.codec, spec, next.fps, threads)?));
+			}
+		}
+		self.shared.fps.store(next.fps, Ordering::Relaxed);
+		let mut layers = Vec::with_capacity(specs.len());
+		for (spec, &threads) in specs.iter().zip(&split) {
+			let encoder =
+				created.iter().position(|(id, _)| *id == spec.id).map(|i| created.swap_remove(i).1);
+			match current.iter().find(|l| l.id == spec.id) {
+				Some(layer) => {
+					layer.update(spec, next.fps);
+					if let Some(encoder) = encoder {
+						*lock(&layer.next_encoder) = Some(encoder);
+					}
+					layers.push(layer.clone());
+				}
+				None => {
+					let layer = Arc::new(Layer::new(spec, next.fps, threads));
+					let encoder = encoder.expect("created above");
+					let shared = self.shared.clone();
+					let thread = spawn(&format!("voelin-encode-{}", spec.id), {
+						let layer = layer.clone();
+						move || encode_loop(&shared, &layer, encoder)
+					})?;
+					lock(&self.encoders).push((spec.id, thread));
+					layers.push(layer);
+				}
+			}
+		}
+		// Stop removed layers.
+		let removed: Vec<LayerId> =
+			current.iter().filter(|l| !specs.iter().any(|s| s.id == l.id)).map(|l| l.id).collect();
+		for layer in current.iter().filter(|l| removed.contains(&l.id)) {
+			layer.stop.store(true, Ordering::Relaxed);
+			layer.inbox.close();
+		}
+		*lock(&self.shared.layers) = layers;
+		self.shared.generation.fetch_add(1, Ordering::Relaxed);
+		*settings = next;
+		drop(guard);
+		let finished: Vec<JoinHandle<()>> = {
+			let mut encoders = lock(&self.encoders);
+			let (done, keep) = encoders.drain(..).partition(|(id, _)| removed.contains(id));
+			*encoders = keep;
+			done.into_iter().map(|(_, t)| t).collect()
+		};
+		for thread in finished {
+			let _ = thread.join();
+		}
+		debug!(?removed, codec_changed, "stream reconfigured");
+		Ok(())
 	}
 
 	/// Start encoding into `sink` (replacing an earlier one).
@@ -389,15 +786,56 @@ impl Streamer {
 		self.audio.is_some()
 	}
 
+	/// The ids of the layers being encoded.
+	pub fn layer_ids(&self) -> Vec<LayerId> {
+		lock(&self.shared.layers).iter().map(|l| l.id).collect()
+	}
+
 	pub fn stats(&self) -> StreamerStats {
-		let size = self.shared.size.load(Ordering::Relaxed);
+		let shared = &self.shared;
+		let size = shared.size.load(Ordering::Relaxed);
+		let codec = lock(&shared.settings).as_ref().map(|s| s.codec);
+		let rates = lock(&shared.rates);
+		let layers: Vec<LayerStats> = lock(&shared.layers)
+			.iter()
+			.map(|l| {
+				let size = l.size.load(Ordering::Relaxed);
+				let (fps, kbps, encode_time) = rates
+					.layers
+					.iter()
+					.find(|r| r.0 == l.id)
+					.map_or((0.0, 0.0, Duration::ZERO), |r| (r.1, r.2, r.3));
+				let speed = l.speed.load(Ordering::Relaxed);
+				LayerStats {
+					id: l.id,
+					width: (size >> 32) as u32,
+					height: size as u32,
+					frames: l.frames.load(Ordering::Relaxed),
+					keyframes: l.keyframes.load(Ordering::Relaxed),
+					dropped: l.inbox.replaced(),
+					fps,
+					kbps,
+					encode_time,
+					bitrate: l.target.load(Ordering::Relaxed),
+					threads: l.threads,
+					speed: (speed != i64::MIN).then_some(speed as i32),
+				}
+			})
+			.collect();
 		StreamerStats {
-			video_frames: self.shared.video_frames.load(Ordering::Relaxed),
-			audio_frames: self.shared.audio_frames.load(Ordering::Relaxed),
+			video_frames: shared.video_frames.load(Ordering::Relaxed),
+			audio_frames: shared.audio_frames.load(Ordering::Relaxed),
 			width: (size >> 32) as u32,
 			height: size as u32,
-			capture_ended: self.shared.capture_ended.load(Ordering::Relaxed),
-			error: lock(&self.shared.error).clone(),
+			capture_ended: shared.capture_ended.load(Ordering::Relaxed),
+			error: lock(&shared.error).clone(),
+			captured_frames: shared.captured.load(Ordering::Relaxed),
+			capture_fps: rates.capture_fps,
+			convert_time: rates.convert_time,
+			dropped_frames: layers.iter().map(|l| l.dropped).sum(),
+			convert_threads: shared.convert_threads.load(Ordering::Relaxed),
+			codec,
+			layers,
 		}
 	}
 
@@ -411,7 +849,15 @@ impl Streamer {
 		if let Some(mut audio) = self.audio.take() {
 			audio.stop();
 		}
+		for layer in lock(&self.shared.layers).iter() {
+			layer.inbox.close();
+		}
+		let encoders: Vec<_> = lock(&self.encoders).drain(..).collect();
+		for (_, thread) in encoders {
+			let _ = thread.join();
+		}
 		for thread in self.threads.drain(..) {
+			thread.thread().unpark();
 			let _ = thread.join();
 		}
 	}
@@ -421,6 +867,50 @@ impl Drop for Streamer {
 	fn drop(&mut self) {
 		self.stop();
 	}
+}
+
+/// Layer ids must be unique.
+fn check_layers(layers: &[LayerSpec]) -> Result<(), MediaError> {
+	for (i, layer) in layers.iter().enumerate() {
+		if layers[..i].iter().any(|l| l.id == layer.id) {
+			return Err(MediaError::Config(format!("layer {} is listed twice", layer.id)));
+		}
+	}
+	Ok(())
+}
+
+/// The capture backend for monitors and windows.
+fn screen_backend(backend: &CaptureBackend) -> Result<Box<dyn ScreenCapture>, MediaError> {
+	// Unused where every backend is built in.
+	#[allow(unused_variables)]
+	let unavailable = |backend: &'static str, reason: &str| {
+		MediaError::Media(voelin_media::Error::CaptureUnavailable {
+			backend,
+			reason: reason.into(),
+		})
+	};
+	Ok(match backend {
+		CaptureBackend::Auto => capture::default_screen_capture()?,
+		#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+		CaptureBackend::X11 => Box::new(voelin_media::capture::x11::X11Capture::new()),
+		#[cfg(not(all(target_os = "linux", feature = "media-desktop")))]
+		CaptureBackend::X11 => {
+			return Err(unavailable("x11", "X11 capture is only in Linux desktop builds"));
+		}
+		#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+		CaptureBackend::Wlroots => Box::new(voelin_media::capture::wlroots::WlrootsCapture::new()),
+		#[cfg(not(all(target_os = "linux", feature = "media-desktop")))]
+		CaptureBackend::Wlroots => {
+			return Err(unavailable("wlroots", "wlroots capture is only in Linux desktop builds"));
+		}
+		// Only reached where the portal is not built in.
+		CaptureBackend::Portal => {
+			return Err(unavailable(
+				"portal",
+				"the ScreenCast portal is only in Linux desktop builds",
+			));
+		}
+	})
 }
 
 type AudioStart = (Box<dyn AudioCapture>, FrameReceiver<AudioBuffer>, VoiceEncoder);
@@ -436,48 +926,327 @@ fn start_audio(source: &SourceId) -> Result<AudioStart, MediaError> {
 	Ok((capture, buffers, encoder))
 }
 
-fn video_loop(
-	shared: &Shared,
-	mut frames: FrameReceiver<VideoFrame>,
-	mut encoder: Box<dyn VideoEncoder>,
-) {
+/// A layer as the capture thread sees it.
+struct IngestLayer {
+	layer: Arc<Layer>,
+	spec: LayerSpec,
+	pacer: FramePacer,
+}
+
+/// The conversion stage, on the capture backend's thread: paces frames,
+/// converts and scales them for every layer that is due, and hands each
+/// layer's frame to its encoder. Allocates nothing per frame once the
+/// frame pools are warm.
+struct Ingest {
+	shared: Arc<Shared>,
+	pyramid: Pyramid,
+	pacer: FramePacer,
+	fps: u32,
+	generation: u64,
+	layers: Vec<IngestLayer>,
+	sizes: Vec<(u32, u32)>,
+	due: Vec<bool>,
+	out: Vec<Option<Arc<VideoFrame>>>,
+}
+
+impl Ingest {
+	fn new(shared: Arc<Shared>) -> Self {
+		let pyramid = Pyramid::new(0);
+		shared.convert_threads.store(pyramid.threads(), Ordering::Relaxed);
+		let fps = shared.fps.load(Ordering::Relaxed);
+		Self {
+			shared,
+			pyramid,
+			pacer: FramePacer::new(Some(fps)),
+			fps,
+			generation: u64::MAX,
+			layers: Vec::new(),
+			sizes: Vec::new(),
+			due: Vec::new(),
+			out: Vec::new(),
+		}
+	}
+
+	/// Pick up layer and frame-rate changes.
+	fn refresh(&mut self) {
+		let fps = self.shared.fps.load(Ordering::Relaxed);
+		if fps != self.fps {
+			self.fps = fps;
+			self.pacer.set_fps(Some(fps));
+		}
+		let generation = self.shared.generation.load(Ordering::Relaxed);
+		if generation == self.generation {
+			return;
+		}
+		self.generation = generation;
+		let layers = lock(&self.shared.layers).clone();
+		let old = std::mem::take(&mut self.layers);
+		for layer in layers {
+			let spec = lock(&layer.spec).clone();
+			let fps = spec.max_fps.map(|cap| cap.min(self.fps));
+			// Keep a layer's pacing across changes.
+			let pacer = match old.iter().find(|l| l.layer.id == layer.id) {
+				Some(l) => {
+					let mut pacer = l.pacer.clone();
+					pacer.set_fps(fps);
+					pacer
+				}
+				None => FramePacer::new(fps),
+			};
+			self.layers.push(IngestLayer { layer, spec, pacer });
+		}
+		self.sizes.resize(self.layers.len(), (0, 0));
+		self.due.resize(self.layers.len(), false);
+		self.out.resize(self.layers.len(), None);
+	}
+}
+
+impl FrameSink for Ingest {
+	fn max_fps(&self) -> u32 {
+		self.shared.fps.load(Ordering::Relaxed).max(1)
+	}
+
+	fn wants(&mut self, timestamp: Duration) -> bool {
+		if self.shared.stopped() {
+			return false;
+		}
+		let fps = self.shared.fps.load(Ordering::Relaxed);
+		if fps != self.fps {
+			self.fps = fps;
+			self.pacer.set_fps(Some(fps));
+		}
+		self.pacer.due(timestamp)
+	}
+
+	fn frame(&mut self, frame: FrameRef<'_>) -> bool {
+		if self.shared.stopped() {
+			return false;
+		}
+		self.pacer.keep(frame.timestamp);
+		self.refresh();
+		let shared = &self.shared;
+		shared.captured.fetch_add(1, Ordering::Relaxed);
+		shared
+			.size
+			.store(u64::from(frame.width) << 32 | u64::from(frame.height), Ordering::Relaxed);
+		if lock(&shared.sink).is_none() {
+			return true;
+		}
+		let mut any = false;
+		for (i, l) in self.layers.iter_mut().enumerate() {
+			self.sizes[i] = l.spec.output_size(frame.width, frame.height);
+			self.due[i] = !l.layer.stopped() && l.pacer.take(frame.timestamp);
+			any |= self.due[i];
+		}
+		if !any {
+			return true;
+		}
+		let started = Instant::now();
+		if let Err(e) = self.pyramid.process(&frame, &self.sizes, &self.due, &mut self.out) {
+			warn!("cannot convert a captured frame: {e}");
+			shared.set_error(e);
+			return true;
+		}
+		shared.convert_ns.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+		shared.converted.fetch_add(1, Ordering::Relaxed);
+		for (l, out) in self.layers.iter().zip(&mut self.out) {
+			if let Some(frame) = out.take() {
+				l.layer.inbox.put(frame);
+			}
+		}
+		true
+	}
+}
+
+impl Drop for Ingest {
+	fn drop(&mut self) {
+		if !self.shared.stopped() {
+			debug!("screen capture ended");
+			self.shared.capture_ended.store(true, Ordering::Relaxed);
+		}
+	}
+}
+
+/// One layer's encoder thread.
+fn encode_loop(shared: &Shared, layer: &Layer, mut encoder: Box<dyn VideoEncoder>) {
 	// A requested keyframe the encoder has not produced yet (rate control
 	// may skip a frame).
 	let mut keyframe_due = false;
-	while !shared.stopped() {
-		let Some(frame) = frames.recv_timeout(POLL) else {
-			if frames.is_closed() {
-				debug!("screen capture ended");
-				shared.capture_ended.store(true, Ordering::Relaxed);
-				break;
-			}
-			continue;
-		};
-		let size = u64::from(frame.width) << 32 | u64::from(frame.height);
-		shared.size.store(size, Ordering::Relaxed);
+	// The last picture, and when it came: a static screen sends no frames,
+	// so keyframe requests are answered by encoding it again.
+	let mut last: Option<(Arc<VideoFrame>, Instant)> = None;
+	let mut bitrate = layer.bitrate.load(Ordering::Relaxed);
+	let mut fps = layer.fps.load(Ordering::Relaxed);
+	layer.speed.store(encoder.speed().map_or(i64::MIN, i64::from), Ordering::Relaxed);
+	while !shared.stopped() && !layer.stopped() {
+		let frame = layer.inbox.wait_timeout(POLL);
+		if let Some(next) = lock(&layer.next_encoder).take() {
+			// Another codec: its first frame is a keyframe anyway.
+			encoder = next;
+			bitrate = 0;
+			keyframe_due = true;
+		}
 		let Some(sink) = shared.sink() else { continue };
-		let keyframe = sink.take_keyframe_request() || keyframe_due;
-		match encoder.encode(&frame, keyframe) {
-			Ok(encoded) => {
-				keyframe_due = keyframe && !encoded.iter().any(|f| f.keyframe);
-				for f in encoded {
-					let frame = EncodedFrame {
-						kind: MediaKind::Video,
-						time: MediaTime::from_90khz(f.pts_90khz),
-						data: f.data.into(),
-						layer: 0,
-						keyframe: f.keyframe,
-					};
-					if sink.send(frame) {
-						shared.video_frames.fetch_add(1, Ordering::Relaxed);
-					}
+		shared.poll_keyframes(&*sink);
+		let requested = layer.keyframe.swap(false, Ordering::Relaxed);
+		let force = requested || keyframe_due;
+		let frame = match frame {
+			Some(frame) => {
+				last = Some((frame.clone(), Instant::now()));
+				frame
+			}
+			None if force => {
+				let Some((frame, at)) = &last else {
+					layer.keyframe.store(requested, Ordering::Relaxed);
+					continue;
+				};
+				// Same picture, later timestamp (rare: copies the frame).
+				Arc::new((**frame).clone().with_timestamp(frame.timestamp + at.elapsed()))
+			}
+			None => continue,
+		};
+		// Follow the layer's bitrate, or what the viewers' estimates allow.
+		let configured = layer.bitrate.load(Ordering::Relaxed);
+		let cap = match layer.max_bitrate.load(Ordering::Relaxed) {
+			0 => u64::MAX,
+			max => max,
+		};
+		let target = sink.layer_bitrate(layer.id).unwrap_or(configured).clamp(1, cap);
+		if target.abs_diff(bitrate) * 100 > bitrate {
+			match encoder.set_bitrate(target.min(u64::from(u32::MAX)) as u32) {
+				Ok(()) => {
+					bitrate = target;
+					layer.target.store(target, Ordering::Relaxed);
 				}
+				Err(e) => warn!(layer = layer.id, "cannot change the bitrate: {e}"),
 			}
+		}
+		let want_fps = layer.fps.load(Ordering::Relaxed);
+		if want_fps != fps && encoder.set_fps(want_fps).is_ok() {
+			fps = want_fps;
+		}
+		let started = Instant::now();
+		let mut produced_keyframe = false;
+		let result = encoder.encode_with(&frame, force, &mut |chunk| {
+			produced_keyframe |= chunk.keyframe;
+			let encoded = EncodedFrame {
+				kind: MediaKind::Video,
+				time: MediaTime::from_90khz(chunk.pts_90khz),
+				// The one allocation per encoded frame.
+				data: Arc::from(chunk.data),
+				layer: layer.id,
+				keyframe: chunk.keyframe,
+			};
+			if sink.send(encoded) {
+				layer.frames.fetch_add(1, Ordering::Relaxed);
+				layer.keyframes.fetch_add(u64::from(chunk.keyframe), Ordering::Relaxed);
+				layer.bytes.fetch_add(chunk.data.len() as u64, Ordering::Relaxed);
+				shared.video_frames.fetch_add(1, Ordering::Relaxed);
+			}
+		});
+		layer.encode_ns.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+		layer.encoded.fetch_add(1, Ordering::Relaxed);
+		layer.size.store(u64::from(frame.width) << 32 | u64::from(frame.height), Ordering::Relaxed);
+		layer.speed.store(encoder.speed().map_or(i64::MIN, i64::from), Ordering::Relaxed);
+		match result {
+			Ok(()) => keyframe_due = force && !produced_keyframe,
 			Err(e) => {
-				warn!("video encoding failed: {e}");
-				keyframe_due = keyframe;
-				*lock(&shared.error) = Some(e.to_string());
+				warn!(layer = layer.id, "video encoding failed: {e}");
+				keyframe_due = force;
+				shared.set_error(e);
 			}
+		}
+	}
+}
+
+/// Counter values at the last stats sample.
+#[derive(Clone, Copy, Default)]
+struct Sample {
+	captured: u64,
+	converted: u64,
+	convert_ns: u64,
+}
+
+/// Once a second: rates for [`Streamer::stats`]; every five seconds a
+/// summary at debug level.
+fn stats_loop(shared: &Shared) {
+	const PERIOD: Duration = Duration::from_secs(1);
+	let mut last = Sample::default();
+	// Per layer: id, frames, bytes, encoded, encode_ns.
+	let mut last_layers: Vec<(LayerId, u64, u64, u64, u64)> = Vec::new();
+	let mut at = Instant::now();
+	let mut ticks = 0u32;
+	while !shared.stopped() {
+		std::thread::park_timeout(PERIOD.saturating_sub(at.elapsed()));
+		if shared.stopped() {
+			break;
+		}
+		let elapsed = at.elapsed();
+		if elapsed < PERIOD {
+			continue;
+		}
+		at = Instant::now();
+		let secs = elapsed.as_secs_f64();
+		let now = Sample {
+			captured: shared.captured.load(Ordering::Relaxed),
+			converted: shared.converted.load(Ordering::Relaxed),
+			convert_ns: shared.convert_ns.load(Ordering::Relaxed),
+		};
+		let mean = |ns: u64, n: u64| Duration::from_nanos(ns.checked_div(n).unwrap_or(0));
+		let mut rates = lock(&shared.rates);
+		rates.capture_fps = (now.captured - last.captured) as f64 / secs;
+		rates.convert_time = mean(now.convert_ns - last.convert_ns, now.converted - last.converted);
+		rates.layers.clear();
+		let layers = lock(&shared.layers);
+		for layer in layers.iter() {
+			let current = (
+				layer.id,
+				layer.frames.load(Ordering::Relaxed),
+				layer.bytes.load(Ordering::Relaxed),
+				layer.encoded.load(Ordering::Relaxed),
+				layer.encode_ns.load(Ordering::Relaxed),
+			);
+			let before = last_layers
+				.iter()
+				.find(|l| l.0 == layer.id)
+				.copied()
+				.unwrap_or((layer.id, 0, 0, 0, 0));
+			rates.layers.push((
+				layer.id,
+				(current.1 - before.1) as f64 / secs,
+				(current.2 - before.2) as f64 * 8.0 / secs / 1000.0,
+				mean(current.4 - before.4, current.3 - before.3),
+			));
+		}
+		last_layers.clear();
+		last_layers.extend(layers.iter().map(|l| {
+			(
+				l.id,
+				l.frames.load(Ordering::Relaxed),
+				l.bytes.load(Ordering::Relaxed),
+				l.encoded.load(Ordering::Relaxed),
+				l.encode_ns.load(Ordering::Relaxed),
+			)
+		}));
+		last = now;
+		ticks += 1;
+		if ticks.is_multiple_of(5) && tracing::enabled!(tracing::Level::DEBUG) {
+			let summary: Vec<String> = rates
+				.layers
+				.iter()
+				.map(|(id, fps, kbps, encode)| {
+					format!(
+						"L{id} {fps:.1} fps {kbps:.0} kbit/s enc {:.1} ms",
+						encode.as_secs_f64() * 1e3
+					)
+				})
+				.collect();
+			debug!(
+				"stream: capture {:.1} fps, convert {:.1} ms, {}",
+				rates.capture_fps,
+				rates.convert_time.as_secs_f64() * 1e3,
+				summary.join(", ")
+			);
 		}
 	}
 }
@@ -549,7 +1318,13 @@ fn audio_loop(shared: &Shared, mut buffers: FrameReceiver<AudioBuffer>, mut enco
 /// Collects a [`Streamer`]'s frames for [`EncodedSource`].
 struct ChannelSink {
 	tx: std_mpsc::Sender<EncodedFrame>,
+	/// A keyframe on every layer was asked for.
 	keyframe: AtomicBool,
+	/// Layers a keyframe was asked for.
+	layers: Mutex<LayerSet>,
+	/// What the viewers' bandwidth estimates allow, per layer.
+	bitrates: Mutex<Vec<(LayerId, u64)>>,
+	shared: Arc<Shared>,
 }
 
 impl MediaSink for ChannelSink {
@@ -559,6 +1334,21 @@ impl MediaSink for ChannelSink {
 
 	fn take_keyframe_request(&self) -> bool {
 		self.keyframe.swap(false, Ordering::Relaxed)
+	}
+
+	fn take_layer_keyframes(&self, layers: &mut LayerSet) {
+		if self.keyframe.swap(false, Ordering::Relaxed) {
+			for layer in lock(&self.shared.layers).iter() {
+				layers.insert(layer.id);
+			}
+		}
+		let mut requested = lock(&self.layers);
+		layers.union_with(&requested);
+		requested.clear();
+	}
+
+	fn layer_bitrate(&self, layer: LayerId) -> Option<u64> {
+		lock(&self.bitrates).iter().find(|(id, _)| *id == layer).map(|(_, bps)| *bps)
 	}
 }
 
@@ -573,7 +1363,13 @@ pub struct EncodedSource {
 impl EncodedSource {
 	pub fn new(streamer: Streamer) -> Self {
 		let (tx, frames) = std_mpsc::channel();
-		let sink = Arc::new(ChannelSink { tx, keyframe: AtomicBool::new(true) });
+		let sink = Arc::new(ChannelSink {
+			tx,
+			keyframe: AtomicBool::new(true),
+			layers: Mutex::new(LayerSet::new()),
+			bitrates: Mutex::new(Vec::new()),
+			shared: streamer.shared.clone(),
+		});
 		streamer.attach(sink.clone());
 		Self { streamer, frames, sink }
 	}
@@ -590,6 +1386,18 @@ impl FrameSource for EncodedSource {
 
 	fn request_keyframe(&mut self) {
 		self.sink.keyframe.store(true, Ordering::Relaxed);
+	}
+
+	fn request_layer_keyframe(&mut self, layer: LayerId) {
+		lock(&self.sink.layers).insert(layer);
+	}
+
+	fn set_layer_bitrate(&mut self, layer: LayerId, bitrate: u64) {
+		let mut bitrates = lock(&self.sink.bitrates);
+		match bitrates.iter_mut().find(|(id, _)| *id == layer) {
+			Some(entry) => entry.1 = bitrate,
+			None => bitrates.push((layer, bitrate)),
+		}
 	}
 }
 
@@ -941,15 +1749,20 @@ impl<T> Latest<T> {
 	}
 }
 
-/// Feeds a [`Streamer`]'s video straight into a [`VideoPipeline`].
+/// Feeds one layer of a [`Streamer`]'s video straight into a
+/// [`VideoPipeline`].
 struct PipelineSink {
 	input: FrameInput,
 	codec: voelin_stream::Codec,
+	layer: LayerId,
 	keyframe: Arc<AtomicBool>,
 }
 
 impl MediaSink for PipelineSink {
 	fn send(&self, frame: EncodedFrame) -> bool {
+		if frame.kind != MediaKind::Video || frame.layer != self.layer {
+			return true;
+		}
 		self.input.push(MediaFrame {
 			kind: frame.kind,
 			codec: self.codec,
@@ -963,6 +1776,12 @@ impl MediaSink for PipelineSink {
 
 	fn take_keyframe_request(&self) -> bool {
 		self.keyframe.swap(false, Ordering::Relaxed)
+	}
+
+	fn take_layer_keyframes(&self, layers: &mut LayerSet) {
+		if self.take_keyframe_request() {
+			layers.insert(self.layer);
+		}
 	}
 }
 
@@ -983,6 +1802,8 @@ impl LocalPreview {
 		// The audio would go nowhere.
 		config.audio = false;
 		let codec = config.codec;
+		// The first (usually the largest) layer is shown.
+		let layer = config.effective_layers()[0].id;
 		let streamer = Streamer::start(&codecs, config).await?;
 		let keyframe = Arc::new(AtomicBool::new(true));
 		let pipeline = VideoPipeline::new(codecs, on_frame, {
@@ -990,7 +1811,7 @@ impl LocalPreview {
 			move || keyframe.store(true, Ordering::Relaxed)
 		});
 		let input = pipeline.input();
-		streamer.attach(Arc::new(PipelineSink { input, codec: codec.into(), keyframe }));
+		streamer.attach(Arc::new(PipelineSink { input, codec: codec.into(), layer, keyframe }));
 		Ok(Self { streamer, pipeline })
 	}
 
@@ -1108,6 +1929,124 @@ mod tests {
 		assert!(stats.decoded >= 10 && stats.error.is_none(), "{stats:?}");
 		assert_eq!(stats.codec, Some(Codec::Vp8));
 		assert_eq!(preview.streamer().backend(), "synthetic");
+	}
+
+	fn layer(id: LayerId, scale: f32, max_fps: Option<u32>, bitrate: u64) -> LayerSpec {
+		LayerSpec { id, scale, max_fps, ..LayerSpec::single(bitrate) }
+	}
+
+	/// Poll `source` until `done` holds for the frames collected since the
+	/// last call (at most 10 s).
+	async fn collect(
+		source: &mut EncodedSource,
+		done: impl Fn(&[EncodedFrame]) -> bool,
+	) -> Vec<EncodedFrame> {
+		let mut frames = Vec::new();
+		let deadline = Instant::now() + Duration::from_secs(10);
+		while !done(&frames) {
+			assert!(Instant::now() < deadline, "timed out with {} frames", frames.len());
+			tokio::time::sleep(Duration::from_millis(20)).await;
+			source.poll_frames(Instant::now(), &mut frames);
+		}
+		frames
+	}
+
+	/// Size of the last picture of `layer`, and whether the first frame that
+	/// decoded was a keyframe. Frames before it (another codec) are skipped.
+	fn decoded_size(codec: Codec, frames: &[EncodedFrame], layer: LayerId) -> ((u32, u32), bool) {
+		let mut decoder = Codecs::new().new_decoder(codec).unwrap();
+		let (mut size, mut first_keyframe) = ((0, 0), None);
+		for f in frames.iter().filter(|f| f.layer == layer) {
+			match decoder.decode(&f.data) {
+				Ok(Some(p)) => {
+					size = (p.width, p.height);
+					first_keyframe.get_or_insert(f.keyframe);
+				}
+				Ok(None) => {}
+				Err(e) => assert!(first_keyframe.is_none(), "layer {layer}: {e}"),
+			}
+		}
+		(size, first_keyframe == Some(true))
+	}
+
+	/// Two layers at their own sizes and frame rates, keyframes per layer,
+	/// then a new codec and another layer set while streaming.
+	#[cfg(feature = "media-desktop")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn simulcast_layers_and_reconfigure() {
+		let codecs = Codecs::new();
+		let config = StreamerConfig {
+			source: SourceId::Synthetic,
+			synthetic_size: (320, 240),
+			fps: 30,
+			audio: false,
+			layers: vec![layer(0, 1.0, None, 800_000), layer(5, 0.5, Some(10), 300_000)],
+			..StreamerConfig::default()
+		};
+		let streamer = Streamer::start(&codecs, config).await.unwrap();
+		assert_eq!(streamer.layer_ids(), [0, 5]);
+		let mut source = EncodedSource::new(streamer);
+		let count = |frames: &[EncodedFrame], id| frames.iter().filter(|f| f.layer == id).count();
+		let started = Instant::now();
+		let frames = collect(&mut source, |f| count(f, 0) >= 30).await;
+		let seconds = started.elapsed().as_secs_f64();
+		// Both start with a keyframe (the source asks for one on every layer).
+		for id in [0, 5] {
+			assert!(frames.iter().find(|f| f.layer == id).unwrap().keyframe, "layer {id}");
+		}
+		assert_eq!(decoded_size(Codec::Vp8, &frames, 0), ((320, 240), true));
+		assert_eq!(decoded_size(Codec::Vp8, &frames, 5), ((160, 120), true));
+		// Layer 5 is capped at 10 fps (layer 0 may fall behind its 30 under
+		// load, dropping stale frames).
+		let small = count(&frames, 5) as f64;
+		assert!(small >= 3.0 && small <= seconds * 10.0 * 1.2 + 2.0, "{small} in {seconds:.2} s");
+
+		// A keyframe on layer 5 only.
+		source.request_layer_keyframe(5);
+		let frames = collect(&mut source, |f| f.iter().any(|f| f.layer == 5 && f.keyframe)).await;
+		assert!(!frames.iter().any(|f| f.layer == 0 && f.keyframe), "layer 0 got a keyframe");
+
+		// A viewer's estimate lowers layer 5's encoder bitrate only.
+		source.set_layer_bitrate(5, 150_000);
+		let target = |id| {
+			let stats = source.streamer().stats();
+			stats.layers.iter().find(|l| l.id == id).map(|l| l.bitrate)
+		};
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while target(5) != Some(150_000) {
+			assert!(Instant::now() < deadline, "layer 5 at {:?}", target(5));
+			tokio::time::sleep(Duration::from_millis(20)).await;
+		}
+		assert_eq!(target(0), Some(800_000));
+
+		// VP9, layer 5 gone, a new layer 7 at a fixed size.
+		let fixed = LayerSpec { size: Some((96, 64)), ..layer(7, 1.0, None, 200_000) };
+		let update = StreamerConfigUpdate {
+			codec: Some(Codec::Vp9),
+			layers: Some(vec![layer(0, 1.0, None, 600_000), fixed]),
+			fps: Some(20),
+			..StreamerConfigUpdate::default()
+		};
+		source.streamer().reconfigure(&codecs, update).unwrap();
+		assert_eq!(source.streamer().layer_ids(), [0, 7]);
+		// VP8 frames encoded before the switch may still come first; the
+		// first VP9 picture of each layer is a keyframe.
+		let frames = collect(&mut source, |f| count(f, 7) >= 10 && count(f, 0) >= 10).await;
+		assert_eq!(decoded_size(Codec::Vp9, &frames, 0), ((320, 240), true));
+		assert_eq!(decoded_size(Codec::Vp9, &frames, 7), ((96, 64), true));
+		let stats = source.streamer().stats();
+		assert_eq!(stats.codec, Some(Codec::Vp9));
+		assert_eq!(stats.layers.iter().map(|l| l.id).collect::<Vec<_>>(), [0, 7]);
+		assert!(stats.error.is_none(), "{stats:?}");
+		assert!(stats.captured_frames > 0 && stats.convert_threads >= 1, "{stats:?}");
+
+		// Duplicate ids are refused and change nothing.
+		let bad = StreamerConfigUpdate {
+			layers: Some(vec![layer(1, 1.0, None, 1), layer(1, 0.5, None, 1)]),
+			..StreamerConfigUpdate::default()
+		};
+		assert!(source.streamer().reconfigure(&codecs, bad).is_err());
+		assert_eq!(source.streamer().layer_ids(), [0, 7]);
 	}
 
 	/// Audio of the test pattern: 20 ms Opus frames on a 48 kHz clock.

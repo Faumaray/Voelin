@@ -15,11 +15,6 @@ use vpx_sys as ffi;
 
 pub(super) type RawResult<T> = std::result::Result<T, String>;
 
-/// Speed for realtime encoding. VP8: negative means a fixed speed (a
-/// positive value would let libvpx pick one from a CPU budget).
-const VP8_CPU_USED: c_int = -8;
-const VP9_CPU_USED: c_int = 8;
-
 fn iface(vp9: bool, encoder: bool) -> *const ffi::vpx_codec_iface {
 	// SAFETY: these return pointers to static interface tables (or NULL if
 	// libvpx was built without that codec); no arguments.
@@ -109,13 +104,20 @@ pub(super) struct EncoderParams {
 	pub keyframe_interval: Option<u32>,
 	pub screen: bool,
 	pub threads: u32,
+	/// `cpu-used`: VP8 -16 (fastest) to -4 as a fixed speed (negative), VP9
+	/// 5 to 9 in realtime mode.
+	pub speed: i32,
 }
 
-pub(super) struct Packet {
-	pub data: Vec<u8>,
+/// An encoded frame, borrowed from libvpx until the next call.
+pub(super) struct Packet<'a> {
+	pub data: &'a [u8],
 	pub keyframe: bool,
 	pub pts: i64,
 }
+
+/// Longest keyframe distance libvpx is given with keyframes on request only.
+const NO_KEYFRAMES: u32 = 1 << 30;
 
 /// An initialised encoder context.
 pub(super) struct Encoder {
@@ -164,7 +166,11 @@ impl Encoder {
 				cfg.kf_min_dist = 0;
 				cfg.kf_max_dist = n.max(1);
 			}
-			None => cfg.kf_mode = ffi::vpx_kf_mode::VPX_KF_DISABLED,
+			None => {
+				// Keyframes only when forced (a viewer asks for one).
+				cfg.kf_mode = ffi::vpx_kf_mode::VPX_KF_DISABLED;
+				cfg.kf_max_dist = NO_KEYFRAMES;
+			}
 		}
 
 		// SAFETY: zeroed context as libvpx expects before init.
@@ -184,10 +190,14 @@ impl Encoder {
 		})?;
 		let mut encoder = Self { ctx, cfg };
 
+		encoder.set_speed(p.speed)?;
+		// log2 of the thread count, for splitting the frame.
+		let log2_threads = 31 - p.threads.max(1).leading_zeros();
 		if p.vp9 {
-			encoder.control(ffi::vp8e_enc_control_id::VP8E_SET_CPUUSED, VP9_CPU_USED)?;
 			encoder.control(ffi::vp8e_enc_control_id::VP9E_SET_ROW_MT, 1)?;
-			let tiles = (31 - p.threads.max(1).leading_zeros()) as c_int;
+			// Tiles are at least 256 pixels wide.
+			let max_tiles = 31 - (p.width / 256).max(1).leading_zeros();
+			let tiles = log2_threads.min(max_tiles) as c_int;
 			encoder.control(ffi::vp8e_enc_control_id::VP9E_SET_TILE_COLUMNS, tiles)?;
 			// Cyclic refresh: realtime adaptive quantisation.
 			encoder.control(ffi::vp8e_enc_control_id::VP9E_SET_AQ_MODE, 3)?;
@@ -197,7 +207,9 @@ impl Encoder {
 				encoder.control(ffi::vp8e_enc_control_id::VP9E_SET_TUNE_CONTENT, screen)?;
 			}
 		} else {
-			encoder.control(ffi::vp8e_enc_control_id::VP8E_SET_CPUUSED, VP8_CPU_USED)?;
+			// Token partitions (1, 2, 4 or 8) let decoders use threads too.
+			let partitions = log2_threads.min(3) as c_int;
+			encoder.control(ffi::vp8e_enc_control_id::VP8E_SET_TOKEN_PARTITIONS, partitions)?;
 			encoder.control(ffi::vp8e_enc_control_id::VP8E_SET_NOISE_SENSITIVITY, 0)?;
 			if p.screen {
 				encoder.control(ffi::vp8e_enc_control_id::VP8E_SET_SCREEN_CONTENT_MODE, 1)?;
@@ -220,6 +232,11 @@ impl Encoder {
 		check(Some(&self.ctx), err).map_err(|e| format!("control {id:?}: {e}"))
 	}
 
+	/// Change `cpu-used` of the running encoder (see [`EncoderParams::speed`]).
+	pub fn set_speed(&mut self, speed: i32) -> RawResult<()> {
+		self.control(ffi::vp8e_enc_control_id::VP8E_SET_CPUUSED, speed as c_int)
+	}
+
 	/// Change the target bitrate of the running encoder.
 	pub fn set_bitrate(&mut self, kbps: u32) -> RawResult<()> {
 		self.cfg.rc_target_bitrate = kbps.max(1);
@@ -233,14 +250,16 @@ impl Encoder {
 		(self.cfg.g_w, self.cfg.g_h)
 	}
 
-	/// Encode one frame (pts and duration in 1/90000 s).
+	/// Encode one frame (pts and duration in 1/90000 s); `out` gets the
+	/// encoded frames, borrowed from libvpx.
 	pub fn encode(
 		&mut self,
 		img: &I420<'_>,
 		pts: i64,
 		duration: u64,
 		keyframe: bool,
-	) -> RawResult<Vec<Packet>> {
+		out: &mut dyn FnMut(Packet<'_>),
+	) -> RawResult<()> {
 		img.check()?;
 		if (img.width, img.height) != self.size() {
 			return Err("frame size differs from the encoder size".into());
@@ -287,16 +306,16 @@ impl Encoder {
 			)
 		};
 		check(Some(&self.ctx), err)?;
-		Ok(self.drain())
+		self.drain(out);
+		Ok(())
 	}
 
-	fn drain(&mut self) -> Vec<Packet> {
-		let mut packets = Vec::new();
+	fn drain(&mut self, out: &mut dyn FnMut(Packet<'_>)) {
 		let mut iter: ffi::vpx_codec_iter_t = ptr::null();
 		loop {
 			// SAFETY: iterates the packets of the last encode call; each
 			// packet and its buffer stay valid until the next libvpx call on
-			// this context, and are copied before that.
+			// this context, which `out` cannot make (it has no access to it).
 			let pkt = unsafe { ffi::vpx_codec_get_cx_data(&mut *self.ctx, &mut iter) };
 			if pkt.is_null() {
 				break;
@@ -307,18 +326,17 @@ impl Encoder {
 			}
 			// SAFETY: `frame` is the active union member for frame packets.
 			let frame = unsafe { pkt.data.frame };
-			let data = if frame.buf.is_null() || frame.sz == 0 {
-				Vec::new()
+			let data: &[u8] = if frame.buf.is_null() || frame.sz == 0 {
+				&[]
 			} else {
-				unsafe { std::slice::from_raw_parts(frame.buf.cast::<u8>(), frame.sz) }.to_vec()
+				unsafe { std::slice::from_raw_parts(frame.buf.cast::<u8>(), frame.sz) }
 			};
-			packets.push(Packet {
+			out(Packet {
 				data,
 				keyframe: frame.flags & ffi::VPX_FRAME_IS_KEY != 0,
 				pts: frame.pts,
 			});
 		}
-		packets
 	}
 }
 

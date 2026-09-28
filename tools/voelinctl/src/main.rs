@@ -1,5 +1,7 @@
 //! `voelinctl`: headless TeamSpeak 3/6 client for development and integration tests.
 
+mod alloc;
+mod bench;
 mod gateway;
 mod identity;
 mod observe;
@@ -17,6 +19,10 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
+
+/// Counts heap allocations for `stream bench`.
+#[global_allocator]
+static ALLOCATOR: alloc::Counting = alloc::Counting;
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -50,6 +56,8 @@ enum Command {
 	/// TeamSpeak 6: probe how a client that arrives after a stream started
 	/// can learn about it; prints every command both clients exchange.
 	ProbeStream(probe::ProbeStreamArgs),
+	/// Stream tools that need no server (`bench`).
+	Stream(bench::StreamToolArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -213,6 +221,7 @@ fn main() -> Result<()> {
 		Command::Relay(args) => tokio::runtime::Runtime::new()?.block_on(observe::relay(args)),
 		Command::Gateway(args) => tokio::runtime::Runtime::new()?.block_on(gateway::run(args)),
 		Command::ProbeStream(args) => tokio::runtime::Runtime::new()?.block_on(probe::run(args)),
+		Command::Stream(args) => bench::run(args),
 	}
 }
 

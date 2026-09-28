@@ -1,13 +1,15 @@
-//! Synthetic sources for tests and `--synthetic` streaming: an animated test
-//! pattern (a rectangle moving over a flat background, plus a frame counter)
-//! and a sine tone.
+//! Synthetic sources for tests, benchmarks and `--synthetic` streaming: an
+//! animated test pattern (a rectangle moving over a flat background, or over
+//! a desktop-like picture, plus a frame counter) and a sine tone.
 
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::capture::{
-	AudioCapture, BoxFuture, CaptureOptions, CaptureSource, ScreenCapture, SourceId, Ticker, Worker,
+	AudioCapture, BoxFuture, CaptureOptions, CaptureSource, FrameSink, QueueSink, ScreenCapture,
+	SourceId, Ticker, Worker,
 };
-use crate::frame::{AUDIO_SAMPLE_RATE, AudioBuffer, VideoFrame};
+use crate::frame::{AUDIO_SAMPLE_RATE, AudioBuffer, FrameRef, PixelsRef, PlaneRef, VideoFrame};
 use crate::queue::{FrameReceiver, frame_channel};
 use crate::{Error, Result};
 
@@ -32,16 +34,224 @@ const DIGITS: [[u8; 5]; 10] = [
 	[7, 5, 7, 1, 7],
 ];
 
+/// What the test pattern shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Pattern {
+	/// A flat background, the moving rectangle and a frame counter: cheap to
+	/// encode and easy to check after decoding.
+	#[default]
+	Simple,
+	/// Like a desktop with a code editor: a title bar with a gradient, a side
+	/// bar, lines of coloured text in a document that scrolls three pixels
+	/// per frame, a status bar, and the moving rectangle and frame counter on
+	/// top. Costs an encoder about as much as real screen content (for
+	/// benchmarks).
+	Desktop,
+}
+
+/// A rectangle: `(x, y, width, height)`.
+type Rect = (usize, usize, usize, usize);
+
+fn bgra(c: [u8; 3]) -> [u8; 4] {
+	[c[2], c[1], c[0], 255]
+}
+
+/// Fill a rectangle of a BGRA image (`width` pixels per row), clipped.
+fn fill(data: &mut [u8], width: usize, rect: Rect, color: [u8; 3]) {
+	let rows = data.len() / (width * 4).max(1);
+	let (x0, y0, w, h) = rect;
+	let x1 = (x0 + w).min(width);
+	if x0 >= x1 {
+		return;
+	}
+	let px = bgra(color);
+	for y in y0..(y0 + h).min(rows) {
+		for d in data[(y * width + x0) * 4..(y * width + x1) * 4].chunks_exact_mut(4) {
+			d.copy_from_slice(&px);
+		}
+	}
+}
+
+/// Draw one 3x5 glyph at `scale` pixels per dot.
+fn glyph(
+	data: &mut [u8],
+	width: usize,
+	at: (usize, usize),
+	scale: usize,
+	bitmap: [u8; 5],
+	color: [u8; 3],
+) {
+	for (row, bits) in bitmap.iter().enumerate() {
+		for col in 0..3 {
+			if bits & (4 >> col) != 0 {
+				fill(data, width, (at.0 + col * scale, at.1 + row * scale, scale, scale), color);
+			}
+		}
+	}
+}
+
+/// Draw the decimal digits of `n`.
+fn number(data: &mut [u8], width: usize, at: (usize, usize), scale: usize, n: u64, color: [u8; 3]) {
+	let mut digits = [0u8; 20];
+	let (mut rest, mut len) = (n, 0);
+	loop {
+		digits[len] = (rest % 10) as u8;
+		len += 1;
+		rest /= 10;
+		if rest == 0 {
+			break;
+		}
+	}
+	for i in 0..len {
+		let bitmap = DIGITS[usize::from(digits[len - 1 - i])];
+		glyph(data, width, (at.0 + i * 4 * scale, at.1), scale, bitmap, color);
+	}
+}
+
+/// A small deterministic generator (xorshift64).
+struct Rng(u64);
+
+impl Rng {
+	fn below(&mut self, n: usize) -> usize {
+		self.0 ^= self.0 << 13;
+		self.0 ^= self.0 >> 7;
+		self.0 ^= self.0 << 17;
+		(self.0 % n.max(1) as u64) as usize
+	}
+}
+
+/// Lines of "code" in `area`: words of glyphs in the palette's colours,
+/// indented, some lines empty.
+fn text_lines(
+	data: &mut [u8],
+	width: usize,
+	area: Rect,
+	scale: usize,
+	palette: &[[u8; 3]],
+	rng: &mut Rng,
+) {
+	let (ax, ay, aw, ah) = area;
+	let (advance, pitch) = (4 * scale, 8 * scale);
+	let columns = aw.saturating_sub(2 * advance) / advance;
+	let mut y = ay + 2 * scale;
+	while columns > 0 && y + pitch <= ay + ah {
+		let indent = rng.below(4) * 2;
+		let end = if rng.below(6) == 0 { 0 } else { indent + 4 + rng.below(columns) };
+		let mut col = indent;
+		while col < end.min(columns) {
+			let word = 2 + rng.below(8);
+			let color = palette[rng.below(palette.len())];
+			for _ in 0..word.min(columns - col) {
+				let x = ax + advance + col * advance;
+				glyph(data, width, (x, y), scale, DIGITS[rng.below(10)], color);
+				col += 1;
+			}
+			col += 1;
+		}
+		y += pitch;
+	}
+}
+
+/// The parts of [`Pattern::Desktop`] that do not change, rendered once: the
+/// page, and the document that scrolls through the editor area.
+struct Desktop {
+	page: Vec<u8>,
+	editor: Rect,
+	/// `editor.2` pixels wide, twice the editor's height (it wraps around).
+	document: Vec<u8>,
+	document_rows: usize,
+}
+
+impl Desktop {
+	fn render(width: usize, height: usize) -> Self {
+		let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+		let scale = (height / 540).max(1);
+		let mut page = vec![0; width * height * 4];
+		let title = (height / 20).max(4);
+		let status = (height / 40).max(2);
+		let side = width / 5;
+		// Title bar: a vertical gradient with tabs.
+		for y in 0..title {
+			let t = y * 255 / title;
+			let c = [(40 + t / 8) as u8, (60 + t / 6) as u8, (110 + t / 4) as u8];
+			fill(&mut page, width, (0, y, width, 1), c);
+		}
+		for tab in 0..6 {
+			let tab = (side + tab * width / 8, title / 3, width / 9, title - title / 3);
+			fill(&mut page, width, tab, [30, 30, 30]);
+			text_lines(&mut page, width, tab, scale, &[[200, 200, 200]], &mut rng);
+		}
+		// Side bar with a file list, status bar.
+		let sidebar = (0, title, side, height - title - status);
+		fill(&mut page, width, sidebar, [37, 37, 38]);
+		let palette = [[204, 204, 204], [150, 150, 150], [230, 200, 120]];
+		text_lines(&mut page, width, sidebar, scale, &palette, &mut rng);
+		fill(&mut page, width, (0, height - status, width, status), [0, 122, 204]);
+		// The editor's document.
+		let editor = (side, title, width - side, height - title - status);
+		let document_rows = editor.3 * 2;
+		let mut document = vec![0; editor.2 * document_rows * 4];
+		fill(&mut document, editor.2, (0, 0, editor.2, document_rows), [30, 30, 30]);
+		let palette =
+			[[212, 212, 212], [86, 156, 214], [206, 145, 120], [106, 153, 85], [197, 134, 192]];
+		text_lines(
+			&mut document,
+			editor.2,
+			(0, 0, editor.2, document_rows),
+			scale,
+			&palette,
+			&mut rng,
+		);
+		Self { page, editor, document, document_rows }
+	}
+
+	/// The page with the document scrolled by `offset` rows.
+	fn draw(&self, out: &mut [u8], width: usize, offset: usize) {
+		out[..self.page.len()].copy_from_slice(&self.page);
+		let (ex, ey, ew, eh) = self.editor;
+		for row in 0..eh {
+			let src = (offset + row) % self.document_rows * ew * 4;
+			let dst = ((ey + row) * width + ex) * 4;
+			out[dst..dst + ew * 4].copy_from_slice(&self.document[src..src + ew * 4]);
+		}
+	}
+}
+
 /// The test pattern as a [`ScreenCapture`] backend.
 pub struct SyntheticScreen {
 	width: u32,
 	height: u32,
+	pattern: Pattern,
+	desktop: Option<Arc<Desktop>>,
 	worker: Option<Worker>,
 }
 
 impl SyntheticScreen {
 	pub fn new(width: u32, height: u32) -> Self {
-		Self { width: width.max(16), height: height.max(16), worker: None }
+		Self::with_pattern(width, height, Pattern::Simple)
+	}
+
+	/// A test pattern of another kind.
+	pub fn with_pattern(width: u32, height: u32, pattern: Pattern) -> Self {
+		let (width, height) = (width.max(16), height.max(16));
+		let desktop = (pattern == Pattern::Desktop)
+			.then(|| Arc::new(Desktop::render(width as usize, height as usize)));
+		Self { width, height, pattern, desktop, worker: None }
+	}
+
+	pub fn pattern(&self) -> Pattern {
+		self.pattern
+	}
+
+	/// Another source drawing the same pattern.
+	fn same_pattern(&self) -> Self {
+		Self {
+			width: self.width,
+			height: self.height,
+			pattern: self.pattern,
+			desktop: self.desktop.clone(),
+			worker: None,
+		}
 	}
 
 	/// The moving rectangle in frame `n`: `(x, y, width, height)`.
@@ -55,40 +265,38 @@ impl SyntheticScreen {
 		(x as u32, (self.height - rh) / 2, rw, rh)
 	}
 
-	/// Frame `n` as BGRA, stamped `n / fps` seconds.
-	pub fn frame(&self, n: u64, fps: u32) -> VideoFrame {
+	/// Draw frame `n` as BGRA (`width * 4` bytes per row) into `out`, reusing
+	/// its memory.
+	pub fn render(&self, n: u64, out: &mut Vec<u8>) {
 		let (w, h) = (self.width as usize, self.height as usize);
-		let mut data = vec![0; w * h * 4];
-		let bgra = |c: [u8; 3]| [c[2], c[1], c[0], 255];
-		for px in data.chunks_exact_mut(4) {
-			px.copy_from_slice(&bgra(BACKGROUND));
-		}
-		let mut fill = |x0: usize, y0: usize, rw: usize, rh: usize, c: [u8; 3]| {
-			for y in y0..(y0 + rh).min(h) {
-				for x in x0..(x0 + rw).min(w) {
-					data[(y * w + x) * 4..][..4].copy_from_slice(&bgra(c));
+		out.resize(w * h * 4, 0);
+		match &self.desktop {
+			Some(desktop) => desktop.draw(out, w, n as usize * 3),
+			None => {
+				// One row, then copies of it.
+				let px = bgra(BACKGROUND);
+				for d in out[..w * 4].chunks_exact_mut(4) {
+					d.copy_from_slice(&px);
+				}
+				let (first, rest) = out.split_at_mut(w * 4);
+				for row in rest.chunks_exact_mut(w * 4) {
+					row.copy_from_slice(first);
 				}
 			}
-		};
+		}
 		let (rx, ry, rw, rh) = self.rect(n);
-		fill(rx as usize, ry as usize, rw as usize, rh as usize, RECT_COLOR);
-
+		fill(out, w, (rx as usize, ry as usize, rw as usize, rh as usize), RECT_COLOR);
 		// Frame counter in the top-left corner.
 		let scale = (h / 48).max(1);
-		for (i, digit) in n.to_string().bytes().enumerate() {
-			let bitmap = DIGITS[usize::from(digit - b'0')];
-			let x0 = scale * 2 + i * 4 * scale;
-			for (row, bits) in bitmap.iter().enumerate() {
-				for col in 0..3 {
-					if bits & (4 >> col) != 0 {
-						let (x, y) = (x0 + col * scale, scale * 2 + row * scale);
-						fill(x, y, scale, scale, TEXT_COLOR);
-					}
-				}
-			}
-		}
+		number(out, w, (scale * 2, scale * 2), scale, n, TEXT_COLOR);
+	}
+
+	/// Frame `n` as BGRA, stamped `n / fps` seconds.
+	pub fn frame(&self, n: u64, fps: u32) -> VideoFrame {
+		let mut data = Vec::new();
+		self.render(n, &mut data);
 		let timestamp = Duration::from_secs(n) / fps.max(1);
-		VideoFrame::from_bgra(self.width, self.height, w * 4, data)
+		VideoFrame::from_bgra(self.width, self.height, self.width as usize * 4, data)
 			.expect("pattern buffer matches its size")
 			.with_timestamp(timestamp)
 	}
@@ -114,24 +322,58 @@ impl ScreenCapture for SyntheticScreen {
 		source: &SourceId,
 		options: &CaptureOptions,
 	) -> BoxFuture<'_, Result<FrameReceiver<VideoFrame>>> {
+		let (sink, rx) = QueueSink::new(options);
+		let started = self.start_sink(source, options, Box::new(sink));
+		Box::pin(async move {
+			started.await?;
+			Ok(rx)
+		})
+	}
+
+	/// Draws frame after frame into one buffer, at [`FrameSink::max_fps`];
+	/// timestamps are the time since the start.
+	fn start_sink(
+		&mut self,
+		source: &SourceId,
+		_options: &CaptureOptions,
+		mut sink: Box<dyn FrameSink>,
+	) -> BoxFuture<'_, Result<()>> {
 		let source = source.clone();
-		let options = options.clone();
 		Box::pin(async move {
 			if source != SourceId::Synthetic {
 				return Err(Error::SourceNotFound(source));
 			}
 			self.stop();
-			let (tx, rx) = frame_channel(options.queue);
-			let pattern = SyntheticScreen::new(self.width, self.height);
-			let fps = options.fps;
+			let pattern = self.same_pattern();
 			self.worker = Some(Worker::spawn("voelin-synthetic-video", move |stop| {
+				let (width, height) = (pattern.width, pattern.height);
+				let mut fps = sink.max_fps();
 				let mut ticker = Ticker::new(fps);
+				let mut buffer = Vec::new();
+				let started = Instant::now();
 				let mut n = 0;
-				while tx.send(pattern.frame(n, fps)) && ticker.wait(&stop) {
-					n += 1;
+				loop {
+					let timestamp = started.elapsed();
+					if sink.wants(timestamp) {
+						pattern.render(n, &mut buffer);
+						let plane = PlaneRef::new(&buffer, width as usize * 4);
+						let frame =
+							FrameRef { width, height, timestamp, pixels: PixelsRef::Bgra(plane) };
+						if !sink.frame(frame) {
+							break;
+						}
+						n += 1;
+					}
+					if sink.max_fps() != fps {
+						fps = sink.max_fps();
+						ticker.set_fps(fps);
+					}
+					if !ticker.wait(&stop) {
+						break;
+					}
 				}
 			})?);
-			Ok(rx)
+			Ok(())
 		})
 	}
 
@@ -223,6 +465,29 @@ mod tests {
 			let (x, _, w, _) = screen.rect(n);
 			assert!(x + w <= 320);
 		}
+	}
+
+	#[test]
+	fn desktop_pattern_scrolls() {
+		let screen = SyntheticScreen::with_pattern(640, 360, Pattern::Desktop);
+		assert_eq!(screen.pattern(), Pattern::Desktop);
+		let (mut a, mut b) = (Vec::new(), Vec::new());
+		screen.render(1, &mut a);
+		screen.render(2, &mut b);
+		assert_eq!(a.len(), 640 * 360 * 4);
+		// The editor (right of the side bar, below the title bar) scrolled.
+		let row = |data: &[u8], y: usize| data[(y * 640 + 200) * 4..(y * 640 + 600) * 4].to_vec();
+		let differs = (40..340).any(|y| row(&a, y) != row(&b, y));
+		assert!(differs);
+		// Lots of detail: many distinct colours in the editor.
+		let mut colours: Vec<&[u8]> = a.chunks_exact(4).collect();
+		colours.sort_unstable();
+		colours.dedup();
+		assert!(colours.len() >= 8, "{} colours", colours.len());
+		// Rendering reuses the buffer.
+		let capacity = a.capacity();
+		screen.render(3, &mut a);
+		assert_eq!(a.capacity(), capacity);
 	}
 
 	#[test]
