@@ -512,6 +512,12 @@ impl Session {
 		})
 	}
 
+	/// `chat.store_history` off: the history (and what it remembers about
+	/// servers) stays in memory.
+	fn memory(&self) -> bool {
+		!self.settings.current().get(&crate::settings::CHAT_STORE_HISTORY)
+	}
+
 	/// Show a chat's stored messages, then sync it with the gateway.
 	fn open_history(&self, target: &ChatTarget) {
 		if let Some(ctx) = self.chat_ctx() {
@@ -536,7 +542,7 @@ impl Session {
 		}
 		let tx = self.sources_tx.clone();
 		self.history.current().run_then(
-			false,
+			self.memory(),
 			move |s| s.server_alias(&alias),
 			move |uid| {
 				if let Ok(Some(uid)) = uid {
@@ -556,7 +562,7 @@ impl Session {
 			let aliases = self.aliases.clone();
 			let key = uid.clone();
 			self.history.current().run_then(
-				false,
+				self.memory(),
 				move |s| aliases.iter().try_for_each(|a| s.set_server_alias(a, &key)),
 				|r| {
 					if let Err(e) = r {

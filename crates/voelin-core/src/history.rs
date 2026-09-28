@@ -211,7 +211,11 @@ impl Drop for Inner {
 	fn drop(&mut self) {
 		// Closing the queue ends the writer after the pending jobs.
 		self.jobs.get_mut().unwrap_or_else(PoisonError::into_inner).take();
-		if let Some(thread) = self.thread.get_mut().unwrap_or_else(PoisonError::into_inner).take() {
+		if let Some(thread) = self.thread.get_mut().unwrap_or_else(PoisonError::into_inner).take()
+			// The last handle may go with a job's callback, on the writer
+			// itself: it ends on its own once the queue is empty.
+			&& thread.thread().id() != std::thread::current().id()
+		{
 			let _ = thread.join();
 		}
 	}
@@ -730,4 +734,73 @@ pub(crate) fn now_ms() -> i64 {
 		.duration_since(std::time::UNIX_EPOCH)
 		.map(|d| d.as_millis() as i64)
 		.unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+	use std::sync::mpsc as std_mpsc;
+
+	use super::*;
+
+	fn live(text: &str, ts_ms: i64) -> NewMessage {
+		let msg = ChatMessage {
+			target: ChatTarget::Channel(1),
+			author_name: "a".into(),
+			author_uid: Some("uid-a".into()),
+			author_id: None,
+			text: text.into(),
+			ts_ms,
+			via_relay: false,
+		};
+		new_message("srv", &msg, MessageSource::Voice)
+	}
+
+	/// Writes queued together run in one batch, each answered with its own
+	/// rows, in order; reads see them.
+	#[tokio::test]
+	async fn writes_are_batched_and_answered_in_order() {
+		let path = std::env::temp_dir()
+			.join(format!("voelin-history-{}", std::process::id()))
+			.join("client.db");
+		let _ = std::fs::remove_dir_all(path.parent().unwrap());
+		let history = History::open(&path).unwrap();
+		let (tx, rx) = std_mpsc::channel();
+		for i in 0..50 {
+			let tx = tx.clone();
+			let batch = vec![live(&format!("m{i}"), i), live(&format!("n{i}"), i)];
+			history.write(false, batch, 5000, move |r| {
+				let texts: Vec<String> = r.unwrap().into_iter().map(|w| w.message.text).collect();
+				tx.send((i, texts)).unwrap();
+			});
+		}
+		history.flush();
+		let answers: Vec<_> = rx.try_iter().collect();
+		assert_eq!(answers.len(), 50);
+		for (n, (i, texts)) in answers.into_iter().enumerate() {
+			assert_eq!(i, n as i64);
+			assert_eq!(texts, [format!("m{i}"), format!("n{i}")]);
+		}
+		let page = history
+			.page(
+				"srv",
+				&ChatTarget::Channel(1),
+				PageQuery { limit: Some(2), ..Default::default() },
+				false,
+			)
+			.await
+			.unwrap();
+		assert_eq!(
+			page.iter().map(|m| m.message.text.as_str()).collect::<Vec<_>>(),
+			["m49", "n49"]
+		);
+		assert!(page[0].id > 0);
+		// Kept in memory only: negative ids, not in the file.
+		let kept = history.write_async(true, vec![live("secret", 99)], 5000).await.unwrap();
+		assert!(kept[0].message.id < 0);
+		let stored =
+			history.page("srv", &ChatTarget::Channel(1), PageQuery::default(), false).await;
+		assert_eq!(stored.unwrap().len(), 100);
+		drop(history);
+		std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+	}
 }

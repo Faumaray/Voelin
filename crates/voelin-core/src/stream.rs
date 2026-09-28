@@ -664,6 +664,25 @@ mod tests {
 		audio: Option<AudioHandle>,
 		settings: &Settings,
 	) -> (Handles, broadcast::Receiver<Event>, broadcast::Receiver<StreamFrame>) {
+		let (handles, rx, frames, _) = pair_full(audio, settings, false);
+		(handles, rx, frames)
+	}
+
+	/// [`pair_with`]; with `late`, the server does not tell the viewer
+	/// (session 2) about streams, as for a client that joined after the
+	/// stream started, and does not answer lookups. Also returns what the
+	/// streamer (session 1) reports about its own stream.
+	fn pair_full(
+		audio: Option<AudioHandle>,
+		settings: &Settings,
+		late: bool,
+	) -> (
+		Handles,
+		broadcast::Receiver<Event>,
+		broadcast::Receiver<StreamFrame>,
+		mpsc::UnboundedReceiver<OwnStreamEvent>,
+	) {
+		let (own_tx, own_rx) = mpsc::unbounded_channel();
 		let (events, rx) = broadcast::channel(4096);
 		let (frames, frames_rx) = broadcast::channel(4096);
 		let mut voices = Vec::new();
@@ -682,7 +701,7 @@ mod tests {
 				frames.clone(),
 				if session == 2 { audio.take() } else { None },
 				SharedSettings::new(settings.clone()),
-				mpsc::unbounded_channel().0,
+				if session == 1 { own_tx.clone() } else { mpsc::unbounded_channel().0 },
 			));
 			voices.push(voice_rx);
 		}
@@ -694,6 +713,10 @@ mod tests {
 				while let Some(cmd) = voice_rx.recv().await {
 					if let VoiceCmd::Stream(request) = cmd {
 						for (to, n) in relay(CLIENTS[i], request) {
+							let announcement = matches!(n, StreamNotification::Started { .. });
+							if late && to == CLIENTS[1] && announcement {
+								continue;
+							}
 							let index = CLIENTS.iter().position(|c| *c == to).unwrap();
 							handles[index].send(StreamInput::Notification(n));
 						}
@@ -701,7 +724,7 @@ mod tests {
 				}
 			});
 		}
-		(handles, rx, frames_rx)
+		(handles, rx, frames_rx, own_rx)
 	}
 
 	/// Session 1 streams (auto-accepting), session 2 watches; returns the sink
@@ -878,6 +901,92 @@ mod tests {
 		})
 		.await;
 		feeder.await.unwrap();
+	}
+
+	/// A viewer that was not told about a running stream, and whose server
+	/// lookup goes unanswered, finds it in the gateway directory and
+	/// watches it; the streamer reports its stream's life for the directory.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn late_viewer_finds_the_stream_in_the_gateway_directory() {
+		let (handles, mut rx, _frames, mut own) = pair_full(None, &Settings::in_memory(), true);
+		let setup = StreamSetup {
+			name: "directory test".into(),
+			kind: StreamKind::Window,
+			..Default::default()
+		};
+		handles[0].send(StreamInput::Start { setup, auto_accept: true });
+		wait(&mut rx, |e| match e {
+			Event::StreamState { session: 1, state: StreamState::Live { .. } } => Some(()),
+			_ => None,
+		})
+		.await;
+		let live = timeout(Duration::from_secs(5), own.recv()).await.unwrap().unwrap();
+		assert_eq!(
+			live,
+			OwnStreamEvent::Live {
+				id: "s-1".into(),
+				title: "directory test".into(),
+				kind: StreamKind::Window
+			}
+		);
+		// Both in channel 1, the streamer streaming: the viewer asks the
+		// server, which does not answer.
+		let clients = BTreeMap::from([
+			(CLIENTS[0], ClientState { channel: 1, streaming: Some(true) }),
+			(CLIENTS[1], ClientState { channel: 1, streaming: Some(false) }),
+		]);
+		handles[1].send(StreamInput::Clients(clients));
+		tokio::time::sleep(Duration::from_millis(200)).await;
+		// The gateway's directory has it.
+		let entry = StreamInfo {
+			id: "s-1".into(),
+			streamer: ClientId(CLIENTS[0]),
+			name: "directory test".into(),
+			kind: parse_kind(&kind_name(StreamKind::Window)),
+			bitrate: 0,
+			viewer_limit: 0,
+			audio: true,
+		};
+		handles[1].send(StreamInput::Directory(vec![entry]));
+		wait(&mut rx, |e| match e {
+			Event::StreamsChanged { session: 2, streams }
+				if streams.iter().any(|s| s.id == "s-1") =>
+			{
+				Some(())
+			}
+			_ => None,
+		})
+		.await;
+		handles[1].send(StreamInput::Watch { stream_id: "s-1".into() });
+		wait(&mut rx, |e| match e {
+			Event::WatchState { session: 2, state: WatchState::Connected, .. } => Some(()),
+			_ => None,
+		})
+		.await;
+		// One connected viewer, then the end.
+		let viewers = timeout(Duration::from_secs(5), own.recv()).await.unwrap().unwrap();
+		assert_eq!(viewers, OwnStreamEvent::Viewers(1));
+		handles[0].send(StreamInput::Stop);
+		loop {
+			match timeout(Duration::from_secs(5), own.recv()).await.unwrap().unwrap() {
+				OwnStreamEvent::Ended { id } => break assert_eq!(id, "s-1"),
+				OwnStreamEvent::Viewers(_) => {}
+				other => panic!("{other:?}"),
+			}
+		}
+		for h in handles.iter() {
+			h.send(StreamInput::Shutdown("done".into()));
+		}
+	}
+
+	#[test]
+	fn kind_names_round_trip() {
+		for kind in
+			[StreamKind::Camera, StreamKind::Screen, StreamKind::Window, StreamKind::Other(9)]
+		{
+			assert_eq!(parse_kind(&kind_name(kind)), kind);
+		}
+		assert_eq!(parse_kind("game"), StreamKind::Screen);
 	}
 
 	/// `stream.permissions` answers join requests unless it is `friends`.
