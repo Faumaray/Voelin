@@ -6,18 +6,22 @@
 //! the address (`voice:<address>`, `gateway:<url>`). The gateway's features
 //! are driven through its client ([`crate::gateway`]).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tracing::debug;
 use tsclientlib::ClientId;
 use voelin_audio::AudioSettings;
 use voelin_gateway_proto::{HistoryEntry, StreamEntry, StreamSpec, feature};
-use voelin_model::{ChatMessage, ChatTarget, Presence};
+use voelin_model::{ChatMessage, ChatTarget, GroupInfo, Presence, ServerDetails};
 use voelin_stream::ClientState;
 
 use crate::audio::{self, AudioEvent, AudioHandle, AudioIn};
+use crate::cache::{self, Fetch, SharedCache, Waiter};
+use crate::contacts::{Contacts, Relation};
+use crate::files::{self, DownloadTo, Report, RequestId, Sink, TransferId, TransferState};
 use crate::gateway::{
 	self, ClientError, GatewayClient, GatewayCmd, GatewayEvent, GatewayRequest, GatewayUpdate,
 	Push, ReactionPush,
@@ -25,13 +29,25 @@ use crate::gateway::{
 use crate::history::{self, ChatCtx, HistoryMessage, MessageSource, SharedHistory};
 use crate::query::{self, QueryCmd, QueryEvent};
 use crate::route::{ChatRoute, Dedup, route_chat};
-use crate::settings::SharedSettings;
+use crate::settings::{
+	BlockMode, CACHE_FETCH_IMAGES, CACHE_MAX_MB, PRIVACY_BLOCK_MODE, SharedSettings,
+};
 use crate::stream::{
 	LayerSpec, OwnStreamEvent, PeerConfig, SrtpProfile, StreamFrame, StreamHandle, StreamInfo,
 	StreamInput, StreamKind, kind_name, parse_kind,
 };
-use crate::voice::{self, VoiceCmd, VoiceEvent};
-use crate::{Command, Event, ObserveState, SessionId, SessionState, Source, VoiceState};
+use crate::voice::{self, Remote, VoiceCmd, VoiceEvent, VoiceLink};
+use crate::{Command, Event, ObserveState, SessionId, SessionState, Shared, Source, VoiceState};
+
+const NO_VOICE: &str = "not connected with voice";
+
+/// Server and channel groups in display order.
+type Groups = (Arc<Vec<GroupInfo>>, Arc<Vec<GroupInfo>>);
+
+/// `cache.max_mb` in bytes (0: no limit).
+fn max_cache_bytes(settings: &SharedSettings) -> u64 {
+	settings.current().get(&CACHE_MAX_MB).saturating_mul(1024 * 1024)
+}
 
 pub(crate) struct SessionHandle {
 	tx: mpsc::UnboundedSender<Command>,
@@ -43,11 +59,10 @@ impl SessionHandle {
 		events: broadcast::Sender<Event>,
 		frames: broadcast::Sender<StreamFrame>,
 		audio_settings: AudioSettings,
-		settings: SharedSettings,
-		history: SharedHistory,
+		shared: Shared,
 	) -> Self {
 		let (tx, rx) = mpsc::unbounded_channel();
-		tokio::spawn(Session::new(id, events, frames, audio_settings, settings, history).run(rx));
+		tokio::spawn(Session::new(id, events, frames, audio_settings, shared).run(rx));
 		Self { tx }
 	}
 
@@ -70,6 +85,8 @@ enum SourceEvent {
 	Directory(u64, Result<Vec<StreamEntry>, ClientError>),
 	/// The server's unique id the database remembers for an address.
 	KnownServer(String),
+	/// Our avatar file is uploaded (its MD5) or failed: announce it.
+	AvatarUploaded(u64, RequestId, Result<String, String>),
 }
 
 /// Our live stream, for the gateway's directory.
@@ -123,6 +140,20 @@ struct Session {
 	dedup: Dedup,
 	sources_tx: mpsc::UnboundedSender<SourceEvent>,
 	sources_rx: Option<mpsc::UnboundedReceiver<SourceEvent>>,
+	cache: SharedCache,
+	contacts: Contacts,
+	contacts_rx: Option<watch::Receiver<u64>>,
+	/// Avatars reported per client unique id (their hash), voice only.
+	avatars: HashMap<String, String>,
+	/// Icons reported or being fetched, voice only.
+	icons: HashSet<u32>,
+	/// Contact volume and mute applied per client.
+	contact_audio: HashMap<u16, (f32, bool)>,
+	/// Friends' client ids, as last told to the streams.
+	stream_friends: BTreeSet<u16>,
+	/// The server's details and groups as last reported.
+	details: Option<Arc<ServerDetails>>,
+	groups: Option<Groups>,
 }
 
 impl Session {
@@ -131,11 +162,21 @@ impl Session {
 		events: broadcast::Sender<Event>,
 		frames: broadcast::Sender<StreamFrame>,
 		audio_settings: AudioSettings,
-		settings: SharedSettings,
-		history: SharedHistory,
+		shared: Shared,
 	) -> Self {
 		let (sources_tx, sources_rx) = mpsc::unbounded_channel();
+		let Shared { settings, history, cache, contacts } = shared;
+		let contacts_rx = Some(contacts.watch());
 		Self {
+			cache,
+			contacts,
+			contacts_rx,
+			avatars: HashMap::new(),
+			icons: HashSet::new(),
+			contact_audio: HashMap::new(),
+			stream_friends: BTreeSet::new(),
+			details: None,
+			groups: None,
 			id,
 			events,
 			state: SessionState::default(),
@@ -187,6 +228,7 @@ impl Session {
 
 	async fn run(mut self, mut commands: mpsc::UnboundedReceiver<Command>) {
 		let mut sources = self.sources_rx.take().expect("receiver");
+		let mut contacts = self.contacts_rx.take().expect("contacts");
 		loop {
 			tokio::select! {
 				cmd = commands.recv() => match cmd {
@@ -194,9 +236,11 @@ impl Session {
 					Some(cmd) => self.command(cmd),
 				},
 				Some(event) = sources.recv() => self.source_event(event),
+				Ok(()) = contacts.changed() => self.contacts_changed(),
 			}
 		}
 		self.stop_all();
+		self.contacts.session_closed(self.id);
 	}
 
 	fn next_generation(&mut self) -> u64 {
@@ -244,8 +288,14 @@ impl Session {
 					self.forward(out_rx, move |p| SourceEvent::AudioOut(generation, p));
 					self.forward(audio_rx, move |e| SourceEvent::Audio(generation, e));
 				}
-				tokio::spawn(voice::run(*options, cmd_rx, ev_tx));
+				let link = VoiceLink {
+					session: self.id,
+					events: self.events.clone(),
+					settings: self.settings.clone(),
+				};
+				tokio::spawn(voice::run(*options, link, cmd_rx, ev_tx));
 				self.forward(ev_rx, move |e| SourceEvent::Voice(generation, e));
+				self.forget_images();
 				self.voice = Some((generation, cmd_tx));
 				self.state.voice = VoiceState::Connecting;
 				self.emit_state();
@@ -427,14 +477,396 @@ impl Session {
 					s.send(StreamInput::SrtpProfiles(profiles));
 				}
 			}
+			Command::Poke { client, message, .. } => {
+				self.voice_cmd(VoiceCmd::Poke { client, message });
+			}
+			Command::ListFiles { request, channel, password, path, .. } => {
+				if self.voice.is_none() {
+					let result = Err(NO_VOICE.into());
+					let path = files::normalize_dir(&path);
+					self.emit(Event::FileList { session: self.id, request, channel, path, result });
+					return;
+				}
+				let dir = Remote { channel, password, path };
+				self.voice_cmd(VoiceCmd::ListFiles { request, dir });
+			}
+			Command::DownloadFile { transfer, channel, password, path, to, .. } => {
+				self.download(transfer, Remote { channel, password, path }, &to);
+			}
+			Command::DownloadChatFile { transfer, file, password, to, .. } => {
+				let elsewhere = file
+					.server_uid
+					.as_ref()
+					.zip(self.state.server_uid.as_ref())
+					.is_some_and(|(theirs, ours)| theirs != ours);
+				if elsewhere {
+					self.transfer_state(
+						transfer,
+						TransferState::Failed("the file is on another server".into()),
+					);
+					return;
+				}
+				let path = file.full_path();
+				self.download(transfer, Remote { channel: file.channel, password, path }, &to);
+			}
+			Command::UploadFile {
+				transfer,
+				channel,
+				password,
+				path,
+				from,
+				overwrite,
+				resume,
+				..
+			} => {
+				if self.voice.is_none() {
+					self.transfer_state(transfer, TransferState::Failed(NO_VOICE.into()));
+					return;
+				}
+				let report = self.transfer_report(transfer);
+				let file = Remote { channel, password, path };
+				let transfer = Some(transfer);
+				self.voice_cmd(VoiceCmd::Upload {
+					transfer,
+					file,
+					from,
+					overwrite,
+					resume,
+					report,
+				});
+			}
+			Command::CancelTransfer { transfer, .. } => {
+				self.voice_cmd(VoiceCmd::CancelTransfer(transfer));
+			}
+			Command::DeleteFiles { request, channel, password, paths, .. } => {
+				let request = Some(request);
+				self.voice_request(
+					request,
+					VoiceCmd::DeleteFiles { request, channel, password, paths },
+				);
+			}
+			Command::RenameFile { request, channel, password, from, to, to_channel, .. } => {
+				let (to_channel, to_password) = to_channel.unwrap_or((channel, password.clone()));
+				let from = Remote { channel, password, path: from };
+				let to = Remote { channel: to_channel, password: to_password, path: to };
+				self.voice_request(Some(request), VoiceCmd::RenameFile { request, from, to });
+			}
+			Command::CreateDirectory { request, channel, password, path, .. } => {
+				let dir = Remote { channel, password, path };
+				self.voice_request(Some(request), VoiceCmd::CreateDirectory { request, dir });
+			}
+			Command::SetAvatar { request, image, .. } => self.set_avatar(request, image),
+			Command::FetchAvatar { client_uid, .. } => {
+				let hash = self
+					.voice_presence
+					.as_ref()
+					.and_then(|p| p.client_by_uid(&client_uid))
+					.and_then(|c| c.avatar.clone());
+				if let Some(hash) = hash {
+					self.fetch_avatar(&client_uid, &hash);
+				}
+			}
+			Command::ListOfflineMessages { request, .. } => {
+				if self.voice.is_none() {
+					let result = Err(NO_VOICE.into());
+					self.emit(Event::OfflineMessages { session: self.id, request, result });
+					return;
+				}
+				self.voice_cmd(VoiceCmd::OfflineList { request });
+			}
+			Command::GetOfflineMessage { request, id, .. } => {
+				if self.voice.is_none() {
+					let result = Err(NO_VOICE.into());
+					self.emit(Event::OfflineMessage { session: self.id, request, result });
+					return;
+				}
+				self.voice_cmd(VoiceCmd::OfflineGet { request, id });
+			}
+			Command::SendOfflineMessage { request, to_uid, subject, text, .. } => {
+				let cmd = VoiceCmd::OfflineAdd { request, to_uid, subject, text };
+				self.voice_request(Some(request), cmd);
+			}
+			Command::DeleteOfflineMessage { request, id, .. } => {
+				self.voice_request(Some(request), VoiceCmd::OfflineDelete { request, id });
+			}
+			Command::SetOfflineMessageRead { request, id, read, .. } => {
+				self.voice_request(Some(request), VoiceCmd::OfflineFlag { request, id, read });
+			}
 			// Engine-wide.
 			Command::CloseSession { .. }
 			| Command::TestMicrophone { .. }
 			| Command::SetSetting { .. }
 			| Command::ResetSetting { .. }
 			| Command::AttachSettings(_)
-			| Command::AttachHistory(_) => {}
+			| Command::AttachHistory(_)
+			| Command::AttachCache(_)
+			| Command::SetContact { .. }
+			| Command::RemoveContact { .. } => {}
 		}
+	}
+
+	// Files, avatars, icons
+
+	/// A request to the voice connection; without one it fails at once.
+	fn voice_request(&self, request: Option<RequestId>, cmd: VoiceCmd) {
+		match (&self.voice, request) {
+			(Some(_), _) => self.voice_cmd(cmd),
+			(None, Some(request)) => self.emit(Event::RequestDone {
+				session: self.id,
+				request,
+				result: Err(NO_VOICE.into()),
+			}),
+			(None, None) => {}
+		}
+	}
+
+	fn transfer_state(&self, transfer: TransferId, state: TransferState) {
+		self.emit(Event::Transfer { session: self.id, transfer, state });
+	}
+
+	/// Reports a user's transfer as [`Event::Transfer`].
+	fn transfer_report(&self, transfer: TransferId) -> Report {
+		let (session, events) = (self.id, self.events.clone());
+		Arc::new(move |state| {
+			let _ = events.send(Event::Transfer { session, transfer, state });
+		})
+	}
+
+	fn download(&self, transfer: TransferId, file: Remote, to: &DownloadTo) {
+		if self.voice.is_none() {
+			self.transfer_state(transfer, TransferState::Failed(NO_VOICE.into()));
+			return;
+		}
+		let report = self.transfer_report(transfer);
+		let sink = Sink::from_target(to);
+		self.voice_cmd(VoiceCmd::Download { transfer: Some(transfer), file, sink, report });
+	}
+
+	/// Upload our avatar and announce its hash, or remove it.
+	fn set_avatar(&mut self, request: RequestId, image: Option<PathBuf>) {
+		let Some((generation, tx)) = self.voice.clone() else {
+			let result = Err(NO_VOICE.into());
+			self.emit(Event::RequestDone { session: self.id, request, result });
+			return;
+		};
+		let Some(image) = image else {
+			// The file too (best effort), then no hash.
+			if let Some(path) = self.own_uid.as_deref().and_then(files::avatar_path) {
+				let cmd = VoiceCmd::DeleteFiles {
+					request: None,
+					channel: 0,
+					password: None,
+					paths: vec![path],
+				};
+				self.voice_cmd(cmd);
+			}
+			let hash = String::new();
+			self.voice_cmd(VoiceCmd::SetAvatarHash { request: Some(request), hash });
+			return;
+		};
+		let (sources, cache, settings) =
+			(self.sources_tx.clone(), self.cache.current(), self.settings.clone());
+		tokio::spawn(async move {
+			let hashed = image.clone();
+			let hash = match tokio::task::spawn_blocking(move || files::md5_file(&hashed)).await {
+				Ok(Ok(hash)) => hash,
+				Ok(Err(e)) => {
+					let e = format!("{}: {e}", image.display());
+					let _ = sources.send(SourceEvent::AvatarUploaded(generation, request, Err(e)));
+					return;
+				}
+				Err(e) => {
+					let e = e.to_string();
+					let _ = sources.send(SourceEvent::AvatarUploaded(generation, request, Err(e)));
+					return;
+				}
+			};
+			// Ours is shown without a download.
+			if let Some(key) = cache::avatar_key(&hash)
+				&& let Err(e) = cache.insert_copy(&key, &image, max_cache_bytes(&settings))
+			{
+				debug!("cannot cache our avatar: {e}");
+			}
+			let report: Report = Arc::new(move |state| {
+				let result = match state {
+					TransferState::Done { .. } => Ok(hash.clone()),
+					TransferState::Failed(e) => Err(e),
+					TransferState::Cancelled => Err("cancelled".into()),
+					_ => return,
+				};
+				let _ = sources.send(SourceEvent::AvatarUploaded(generation, request, result));
+			});
+			let file = Remote { channel: 0, password: None, path: "/avatar".into() };
+			let upload = VoiceCmd::Upload {
+				transfer: None,
+				file,
+				from: image,
+				overwrite: true,
+				resume: false,
+				report,
+			};
+			let _ = tx.send(upload);
+		});
+	}
+
+	/// Forget what was reported about avatars and icons (a new connection
+	/// reports them again).
+	fn forget_images(&mut self) {
+		self.avatars.clear();
+		self.icons.clear();
+		self.contact_audio.clear();
+		self.stream_friends.clear();
+		self.details = None;
+		self.groups = None;
+	}
+
+	/// Fetch the avatars and icons of the voice presence that are new.
+	fn fetch_images(&mut self, p: &Presence) {
+		if !self.settings.current().get(&CACHE_FETCH_IMAGES) {
+			return;
+		}
+		let mut avatars = HashMap::with_capacity(self.avatars.len());
+		for c in p.clients.values() {
+			let (Some(uid), Some(hash)) = (&c.uid, &c.avatar) else { continue };
+			if self.avatars.get(uid) != Some(hash) {
+				self.fetch_avatar(uid, hash);
+			}
+			avatars.insert(uid.clone(), hash.clone());
+		}
+		self.avatars = avatars;
+		let icons = std::iter::once(p.server.icon)
+			.chain(p.server_groups.values().map(|g| g.icon))
+			.chain(p.channel_groups.values().map(|g| g.icon))
+			.chain(p.channels.values().map(|c| c.icon))
+			.chain(p.clients.values().map(|c| c.icon))
+			.filter(|id| *id >= files::FIRST_DOWNLOADABLE_ICON)
+			.collect::<BTreeSet<u32>>();
+		for id in icons {
+			if self.icons.insert(id) {
+				self.fetch_icon(id);
+			}
+		}
+	}
+
+	fn fetch_avatar(&self, uid: &str, hash: &str) {
+		let Some(key) = cache::avatar_key(hash) else { return };
+		let (session, events) = (self.id, self.events.clone());
+		let (client_uid, hash) = (uid.to_owned(), hash.to_owned());
+		let waiter: Waiter = Box::new(move |result| match result {
+			Ok(path) => {
+				let _ = events.send(Event::AvatarReady { session, client_uid, path, hash });
+			}
+			Err(e) => debug!(%client_uid, "no avatar: {e}"),
+		});
+		self.fetch_image(key, files::avatar_path(uid), waiter);
+	}
+
+	fn fetch_icon(&self, icon: u32) {
+		let (session, events) = (self.id, self.events.clone());
+		let waiter: Waiter = Box::new(move |result| match result {
+			Ok(path) => {
+				let _ = events.send(Event::IconReady { session, icon, path });
+			}
+			Err(e) => debug!(icon, "no icon: {e}"),
+		});
+		self.fetch_image(cache::icon_key(icon), Some(files::icon_path(icon)), waiter);
+	}
+
+	/// Get `key` from the cache, downloading `path` of channel 0 once.
+	fn fetch_image(&self, key: String, path: Option<String>, waiter: Waiter) {
+		let cache = self.cache.current();
+		let Fetch::Download(temp) = cache.fetch(&key, waiter) else { return };
+		let settings = self.settings.clone();
+		let (Some(path), Some(_)) = (path, &self.voice) else {
+			cache.finish(&key, &temp, Err(NO_VOICE.into()), max_cache_bytes(&settings));
+			return;
+		};
+		let finish = {
+			let temp = temp.clone();
+			move |result: Result<(), String>| {
+				cache.finish(&key, &temp, result, max_cache_bytes(&settings));
+			}
+		};
+		let report: Report = Arc::new(move |state| match state {
+			TransferState::Done { .. } => finish(Ok(())),
+			TransferState::Failed(e) => finish(Err(e)),
+			TransferState::Cancelled => finish(Err("cancelled".into())),
+			_ => {}
+		});
+		let sink = Sink::File { part: temp.clone(), dest: temp, append: false };
+		let file = Remote { channel: 0, password: None, path };
+		self.voice_cmd(VoiceCmd::Download { transfer: None, file, sink, report });
+	}
+
+	// Contacts
+
+	/// The contacts changed: apply volumes and friends again.
+	fn contacts_changed(&mut self) {
+		if let Some(p) = self.voice_presence.clone() {
+			self.apply_contacts(&p);
+		}
+	}
+
+	/// Contacts' volumes and mutes for their clients, friends for the
+	/// streams (voice presence).
+	fn apply_contacts(&mut self, p: &Presence) {
+		let mut friends = BTreeSet::new();
+		let mut wanted: HashMap<u16, (f32, bool)> = HashMap::new();
+		for c in p.clients.values() {
+			let Some(contact) = c.uid.as_deref().and_then(|uid| self.contacts.get(uid)) else {
+				continue;
+			};
+			if contact.relation == Relation::Friend {
+				friends.insert(c.id);
+			}
+			if contact.muted || contact.volume != 1.0 {
+				wanted.insert(c.id, (contact.volume, contact.muted));
+			}
+		}
+		if let Some(a) = &self.audio {
+			for (client, (volume, muted)) in &wanted {
+				if self.contact_audio.get(client) != Some(&(*volume, *muted)) {
+					a.send(AudioIn::ClientVolume { client: ClientId(*client), volume: *volume });
+					a.send(AudioIn::ClientMuted { client: ClientId(*client), muted: *muted });
+				}
+			}
+			// No contact setting any more: back to normal.
+			for client in self.contact_audio.keys().filter(|c| !wanted.contains_key(c)) {
+				if p.clients.contains_key(client) {
+					a.send(AudioIn::ClientVolume { client: ClientId(*client), volume: 1.0 });
+					a.send(AudioIn::ClientMuted { client: ClientId(*client), muted: false });
+				}
+			}
+			self.contact_audio = wanted;
+		}
+		if friends != self.stream_friends {
+			self.stream_friends = friends.clone();
+			if let Some(s) = &self.streams {
+				s.send(StreamInput::Friends(friends));
+			}
+		}
+	}
+
+	/// Report the server's details and groups when they changed.
+	fn report_details(&mut self, p: &Presence) {
+		if self.details.as_deref() != Some(&p.server) {
+			let details = Arc::new(p.server.clone());
+			self.details = Some(details.clone());
+			self.emit(Event::ServerDetails { session: self.id, details });
+		}
+		let sorted = |groups| -> Arc<Vec<GroupInfo>> {
+			Arc::new(Presence::sorted_groups(groups).into_iter().cloned().collect())
+		};
+		let groups = (sorted(&p.server_groups), sorted(&p.channel_groups));
+		if self.groups.as_ref() != Some(&groups) {
+			self.groups = Some(groups.clone());
+			let (server_groups, channel_groups) = groups;
+			self.emit(Event::Groups { session: self.id, server_groups, channel_groups });
+		}
+	}
+
+	fn block_mode(&self) -> BlockMode {
+		self.settings.current().get(&PRIVACY_BLOCK_MODE)
 	}
 
 	fn stream_input(&self, input: StreamInput) {
@@ -509,6 +941,7 @@ impl Session {
 			history: self.history.current(),
 			settings: self.settings.current(),
 			server_uid: self.state.server_uid.clone()?,
+			contacts: self.contacts.clone(),
 		})
 	}
 
@@ -820,6 +1253,20 @@ impl Session {
 					self.open_histories();
 				}
 			}
+			SourceEvent::AvatarUploaded(g, request, result) => match result {
+				Ok(hash) if self.is_current(Source::Voice, g) => {
+					self.voice_cmd(VoiceCmd::SetAvatarHash { request: Some(request), hash });
+				}
+				Ok(_) => self.emit(Event::RequestDone {
+					session: self.id,
+					request,
+					result: Err("the voice connection changed".into()),
+				}),
+				Err(e) => {
+					let result = Err(format!("avatar upload: {e}"));
+					self.emit(Event::RequestDone { session: self.id, request, result });
+				}
+			},
 			_ => debug!("event from a replaced source ignored"),
 		}
 	}
@@ -880,9 +1327,22 @@ impl Session {
 						s.send(StreamInput::Clients(clients));
 					}
 				}
-				self.voice_presence = Some(p);
+				self.report_details(&p);
+				self.fetch_images(&p);
+				self.apply_contacts(&p);
+				self.voice_presence = Some(*p);
 				self.publish_presence();
 			}
+			VoiceEvent::Poke { from, from_uid, from_name, message } => {
+				let blocked = self.contacts.is_blocked(from_uid.as_deref());
+				if blocked && self.block_mode() == BlockMode::Hide {
+					debug!(?from_uid, "poke of a blocked contact hidden");
+					return;
+				}
+				let session = self.id;
+				self.emit(Event::Poke { session, from, from_uid, from_name, message, blocked });
+			}
+			VoiceEvent::Error(message) => self.error(message),
 			VoiceEvent::Stream(n) => {
 				if let Some(s) = &self.streams {
 					s.send(StreamInput::Notification(n));
@@ -913,6 +1373,7 @@ impl Session {
 				self.voice = None;
 				self.voice_presence = None;
 				self.audio = None;
+				self.forget_images();
 				self.state.voice = VoiceState::Disconnected;
 				self.state.own_channel = None;
 				self.state.own_client = None;
@@ -948,7 +1409,7 @@ impl Session {
 				self.open_histories();
 			}
 			GatewayEvent::Presence(p) => {
-				self.gateway_presence = Some(p);
+				self.gateway_presence = Some(*p);
 				self.publish_presence();
 			}
 			GatewayEvent::Push(push) => self.gateway_push(*push),
@@ -1045,7 +1506,7 @@ impl Session {
 					self.state.observe = ObserveState::Observing;
 					self.emit_state();
 				}
-				self.query_presence = Some(p);
+				self.query_presence = Some(*p);
 				self.publish_presence();
 			}
 			QueryEvent::Chat(msg) => self.chat(msg, MessageSource::Query, None),
@@ -1061,12 +1522,22 @@ impl Session {
 	}
 
 	/// A live message: reported, and stored (merged with other copies).
-	fn chat(&mut self, msg: ChatMessage, source: MessageSource, entry: Option<HistoryEntry>) {
+	/// Messages of blocked contacts are flagged; their private messages
+	/// dropped with `privacy.block_mode = hide`.
+	fn chat(&mut self, mut msg: ChatMessage, source: MessageSource, entry: Option<HistoryEntry>) {
 		let wanted = match &msg.target {
 			ChatTarget::Server | ChatTarget::Private(_) => true,
 			target => self.open_chats.contains(target) || !msg.via_relay,
 		};
 		if !wanted {
+			return;
+		}
+		msg.blocked = self.contacts.is_blocked(msg.author_uid.as_deref());
+		if msg.blocked
+			&& matches!(msg.target, ChatTarget::Private(_))
+			&& self.block_mode() == BlockMode::Hide
+		{
+			debug!(author = ?msg.author_uid, "private message of a blocked contact hidden");
 			return;
 		}
 		if let Some(ctx) = self.chat_ctx() {
@@ -1096,6 +1567,8 @@ impl Session {
 			self.state.presence_source = source;
 			self.emit_state();
 		}
-		self.emit(Event::Presence { session: self.id, presence: Arc::new(presence) });
+		let presence = Arc::new(presence);
+		self.contacts.presence(self.id, presence.clone());
+		self.emit(Event::Presence { session: self.id, presence });
 	}
 }

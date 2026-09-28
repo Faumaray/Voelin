@@ -32,12 +32,24 @@
 //! (pins, reactions, topics, events, stream directory, activity,
 //! administration) are [`Command::Gateway`] requests and
 //! [`Event::Gateway`] updates ([`gateway`]).
+//!
+//! The voice connection also carries pokes ([`Command::Poke`],
+//! [`Event::Poke`]), private messages to any client (a
+//! [`ChatTarget::Private`] chat, stored under the peer's unique id), the
+//! channels' file browsers, avatars and icons ([`files`], cached in
+//! [`cache`]) and offline messages ([`offline`]). Contacts (friends,
+//! blocked people, per-person volume) are engine-wide ([`contacts`]).
 
 mod audio;
+mod book;
+pub mod cache;
+pub mod contacts;
+pub mod files;
 pub mod gateway;
 pub mod history;
 #[cfg(feature = "media")]
 pub mod media;
+pub mod offline;
 mod query;
 mod route;
 mod session;
@@ -46,17 +58,27 @@ pub mod stream;
 mod voice;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::{broadcast, mpsc};
 pub use voelin_audio::settings::TransmitMode;
 pub use voelin_audio::{AudioSettings, ProcessingSettings, VadSettings};
-use voelin_model::{Capabilities, ChannelId, ChatMessage, ChatTarget, Presence, ServerFlavor};
+use voelin_model::{
+	Capabilities, ChannelId, ChatMessage, ChatTarget, FileRef, GroupInfo, Presence, ServerDetails,
+	ServerFlavor,
+};
 
 use crate::audio::{AudioEvent, AudioHandle, AudioIn};
+pub use cache::Cache;
+use cache::SharedCache;
+use contacts::Contacts;
+pub use contacts::{Contact, FriendSpot, Relation};
+pub use files::{Bytes, DownloadTo, FileEntry, RequestId, TransferId, TransferState};
 pub use gateway::{GatewayRequest, GatewayUpdate};
 use history::SharedHistory;
 pub use history::{History, HistoryMessage, HistorySource};
+pub use offline::{OfflineMessage, OfflineMessageInfo};
 pub use route::{ChatRoute, Dedup, route_chat};
 use settings::{SettingChange, Settings, SharedSettings};
 pub use stream::{StreamFrame, StreamSink, StreamState, WatchState};
@@ -223,10 +245,141 @@ pub enum Command {
 		stream_id: String,
 		volume: f32,
 	},
+	/// Poke a client (voice): the server shows it a notification with
+	/// `message`. Failures come as [`Event::Error`].
+	Poke {
+		session: SessionId,
+		client: u16,
+		message: String,
+	},
+	/// List a directory of a channel's files (voice; `path` `/` for the
+	/// root), answered with [`Event::FileList`]. See [`files`].
+	ListFiles {
+		session: SessionId,
+		request: RequestId,
+		channel: ChannelId,
+		password: Option<String>,
+		path: String,
+	},
+	/// Download a channel's file (`path` like `/dir/name`); progress as
+	/// [`Event::Transfer`].
+	DownloadFile {
+		session: SessionId,
+		transfer: TransferId,
+		channel: ChannelId,
+		password: Option<String>,
+		path: String,
+		to: DownloadTo,
+	},
+	/// Download a file linked in chat ([`ChatMessage::file_refs`]); fails if
+	/// the link names another server.
+	DownloadChatFile {
+		session: SessionId,
+		transfer: TransferId,
+		file: FileRef,
+		password: Option<String>,
+		to: DownloadTo,
+	},
+	/// Upload a local file as `path` in a channel; progress as
+	/// [`Event::Transfer`]. `resume` continues a partial upload.
+	UploadFile {
+		session: SessionId,
+		transfer: TransferId,
+		channel: ChannelId,
+		password: Option<String>,
+		path: String,
+		from: PathBuf,
+		overwrite: bool,
+		resume: bool,
+	},
+	/// Stop a transfer ([`TransferState::Cancelled`]); a partial download is
+	/// deleted.
+	CancelTransfer {
+		session: SessionId,
+		transfer: TransferId,
+	},
+	/// Delete files or directories of a channel ([`Event::RequestDone`]).
+	DeleteFiles {
+		session: SessionId,
+		request: RequestId,
+		channel: ChannelId,
+		password: Option<String>,
+		paths: Vec<String>,
+	},
+	/// Rename or move a file, also into another channel
+	/// (`to_channel`: channel and its password) ([`Event::RequestDone`]).
+	RenameFile {
+		session: SessionId,
+		request: RequestId,
+		channel: ChannelId,
+		password: Option<String>,
+		from: String,
+		to: String,
+		to_channel: Option<(ChannelId, Option<String>)>,
+	},
+	CreateDirectory {
+		session: SessionId,
+		request: RequestId,
+		channel: ChannelId,
+		password: Option<String>,
+		path: String,
+	},
+	/// Our avatar (voice): upload `image` and announce it, or remove it
+	/// (`None`) ([`Event::RequestDone`]).
+	SetAvatar {
+		session: SessionId,
+		request: RequestId,
+		image: Option<PathBuf>,
+	},
+	/// Report a client's avatar again ([`Event::AvatarReady`]), fetching it
+	/// if needed (avatars are also fetched by themselves, setting
+	/// `cache.fetch_images`).
+	FetchAvatar {
+		session: SessionId,
+		client_uid: String,
+	},
+	/// Our offline messages ([`Event::OfflineMessages`]); see [`offline`].
+	ListOfflineMessages {
+		session: SessionId,
+		request: RequestId,
+	},
+	GetOfflineMessage {
+		session: SessionId,
+		request: RequestId,
+		id: u32,
+	},
+	SendOfflineMessage {
+		session: SessionId,
+		request: RequestId,
+		to_uid: String,
+		subject: String,
+		text: String,
+	},
+	DeleteOfflineMessage {
+		session: SessionId,
+		request: RequestId,
+		id: u32,
+	},
+	SetOfflineMessageRead {
+		session: SessionId,
+		request: RequestId,
+		id: u32,
+		read: bool,
+	},
 	/// Close everything of a session.
 	CloseSession {
 		session: SessionId,
 	},
+	/// Add or change a contact (engine-wide; see [`contacts`]).
+	SetContact {
+		contact: Box<Contact>,
+	},
+	RemoveContact {
+		uid: String,
+	},
+	/// Keep avatars and icons in this directory from now on (default:
+	/// [`Cache::default_dir`]).
+	AttachCache(PathBuf),
 	/// Set a setting's runtime value (see [`settings`]); invalid values are
 	/// reported as [`Event::SettingRejected`].
 	SetSetting {
@@ -404,6 +557,87 @@ pub enum Event {
 		key: String,
 		message: String,
 	},
+	/// The server's details changed (also in [`Presence::server`]; voice).
+	ServerDetails {
+		session: SessionId,
+		details: Arc<ServerDetails>,
+	},
+	/// The server or channel groups changed (also in the presence; voice),
+	/// in display order.
+	Groups {
+		session: SessionId,
+		server_groups: Arc<Vec<GroupInfo>>,
+		channel_groups: Arc<Vec<GroupInfo>>,
+	},
+	/// Someone poked us. With `blocked` (their contact is blocked,
+	/// `privacy.block_mode = flag`); with `hide` it never comes.
+	Poke {
+		session: SessionId,
+		from: u16,
+		from_uid: Option<String>,
+		from_name: String,
+		message: String,
+		blocked: bool,
+	},
+	/// Answer to [`Command::ListFiles`].
+	FileList {
+		session: SessionId,
+		request: RequestId,
+		channel: ChannelId,
+		/// The listed directory (`/` or `/dir`, no trailing slash).
+		path: String,
+		result: Result<Vec<FileEntry>, String>,
+	},
+	/// A transfer's progress ([`Command::DownloadFile`], `UploadFile`, …).
+	Transfer {
+		session: SessionId,
+		transfer: TransferId,
+		state: TransferState,
+	},
+	/// Answer to a request without data (file operations, avatar, offline
+	/// messages).
+	RequestDone {
+		session: SessionId,
+		request: RequestId,
+		result: Result<(), String>,
+	},
+	/// A client's avatar is in the cache: `path`, its MD5 `hash`
+	/// ([`voelin_model::ClientInfo::avatar`]). Comes when the client appears
+	/// with an avatar and when it changes.
+	AvatarReady {
+		session: SessionId,
+		client_uid: String,
+		path: PathBuf,
+		hash: String,
+	},
+	/// An icon (server, group, channel or client) is in the cache.
+	IconReady {
+		session: SessionId,
+		icon: u32,
+		path: PathBuf,
+	},
+	/// Answer to [`Command::ListOfflineMessages`].
+	OfflineMessages {
+		session: SessionId,
+		request: RequestId,
+		result: Result<Vec<OfflineMessageInfo>, String>,
+	},
+	/// Answer to [`Command::GetOfflineMessage`].
+	OfflineMessage {
+		session: SessionId,
+		request: RequestId,
+		result: Result<OfflineMessage, String>,
+	},
+	/// All contacts, after every change.
+	ContactsChanged {
+		contacts: Arc<Vec<Contact>>,
+	},
+	/// Where a friend is now: one spot per session that sees them (empty:
+	/// nowhere).
+	FriendPresence {
+		uid: String,
+		sessions: Vec<FriendSpot>,
+	},
 }
 
 /// Handle to the engine. Cheap to clone; all methods are non-blocking.
@@ -413,8 +647,7 @@ pub struct Engine {
 	events: broadcast::Sender<Event>,
 	frames: broadcast::Sender<StreamFrame>,
 	runtime: tokio::runtime::Handle,
-	settings: SharedSettings,
-	history: SharedHistory,
+	shared: Shared,
 }
 
 impl Engine {
@@ -436,29 +669,37 @@ impl Engine {
 		let (events, _) = broadcast::channel(4096);
 		// About a minute of one watched stream.
 		let (frames, _) = broadcast::channel(4096);
-		let settings = SharedSettings::new(settings);
 		let history = SharedHistory::new(history);
-		let shared = Shared { settings: settings.clone(), history: history.clone() };
-		tokio::spawn(run(rx, events.clone(), frames.clone(), shared));
-		Self {
-			commands,
-			events,
-			frames,
-			runtime: tokio::runtime::Handle::current(),
-			settings,
+		let shared = Shared {
+			settings: SharedSettings::new(settings),
+			contacts: Contacts::new(events.clone(), history.clone()),
 			history,
-		}
+			cache: SharedCache::new(Cache::new(Cache::default_dir())),
+		};
+		shared.contacts.load();
+		tokio::spawn(run(rx, events.clone(), frames.clone(), shared.clone()));
+		Self { commands, events, frames, runtime: tokio::runtime::Handle::current(), shared }
 	}
 
 	/// The chat history the engine uses.
 	pub fn history(&self) -> History {
-		self.history.current()
+		self.shared.history.current()
 	}
 
 	/// The settings the engine uses (read, watch or change them directly;
 	/// changes are reported as [`Event::SettingChanged`] all the same).
 	pub fn settings(&self) -> Settings {
-		self.settings.current()
+		self.shared.settings.current()
+	}
+
+	/// All contacts (as the last [`Event::ContactsChanged`] told).
+	pub fn contacts(&self) -> Vec<Contact> {
+		self.shared.contacts.list()
+	}
+
+	/// The avatar and icon cache the engine uses.
+	pub fn cache(&self) -> Cache {
+		self.shared.cache.current()
 	}
 
 	/// The runtime the engine runs on, for helpers started from other
@@ -492,9 +733,12 @@ enum Input {
 }
 
 /// What the engine and its sessions share and commands can replace.
-struct Shared {
-	settings: SharedSettings,
-	history: SharedHistory,
+#[derive(Clone)]
+pub(crate) struct Shared {
+	pub settings: SharedSettings,
+	pub history: SharedHistory,
+	pub cache: SharedCache,
+	pub contacts: Contacts,
 }
 
 /// Delete chat history past `chat.retention_days` (0: keep everything).
@@ -516,9 +760,9 @@ async fn run(
 	mut commands: mpsc::UnboundedReceiver<Command>,
 	events: broadcast::Sender<Event>,
 	frames: broadcast::Sender<StreamFrame>,
-	shared: Shared,
+	engine: Shared,
 ) {
-	let Shared { settings: shared, history } = shared;
+	let Shared { settings: shared, history, cache, contacts } = engine.clone();
 	let mut sessions: HashMap<SessionId, session::SessionHandle> = HashMap::new();
 	let mut current = shared.current();
 	// Pruning: at start, then hourly (and when the setting changes).
@@ -606,6 +850,20 @@ async fn run(
 			Command::AttachHistory(new) => {
 				history.replace(new.clone());
 				prune_history(&current, &new);
+				// The contacts live in the same database.
+				contacts.load();
+				continue;
+			}
+			Command::AttachCache(dir) => {
+				cache.replace(Cache::new(dir));
+				continue;
+			}
+			Command::SetContact { contact } => {
+				contacts.set(*contact);
+				continue;
+			}
+			Command::RemoveContact { uid } => {
+				contacts.remove(&uid);
 				continue;
 			}
 			ref command => command_session(command),
@@ -624,8 +882,7 @@ async fn run(
 					events.clone(),
 					frames.clone(),
 					settings.clone(),
-					shared.clone(),
-					history.clone(),
+					engine.clone(),
 				);
 				if let Some(profiles) = &srtp_profiles {
 					s.send(Command::SetSrtpProfiles(profiles.clone()));
@@ -684,6 +941,22 @@ fn command_session(command: &Command) -> SessionId {
 		| Command::SetStreamVolume { session, .. }
 		| Command::SetClientVolume { session, .. }
 		| Command::SetClientMuted { session, .. }
+		| Command::Poke { session, .. }
+		| Command::ListFiles { session, .. }
+		| Command::DownloadFile { session, .. }
+		| Command::DownloadChatFile { session, .. }
+		| Command::UploadFile { session, .. }
+		| Command::CancelTransfer { session, .. }
+		| Command::DeleteFiles { session, .. }
+		| Command::RenameFile { session, .. }
+		| Command::CreateDirectory { session, .. }
+		| Command::SetAvatar { session, .. }
+		| Command::FetchAvatar { session, .. }
+		| Command::ListOfflineMessages { session, .. }
+		| Command::GetOfflineMessage { session, .. }
+		| Command::SendOfflineMessage { session, .. }
+		| Command::DeleteOfflineMessage { session, .. }
+		| Command::SetOfflineMessageRead { session, .. }
 		| Command::CloseSession { session } => *session,
 		Command::SetAudioSettings(_)
 		| Command::SetSrtpProfiles(_)
@@ -691,7 +964,10 @@ fn command_session(command: &Command) -> SessionId {
 		| Command::SetSetting { .. }
 		| Command::ResetSetting { .. }
 		| Command::AttachSettings(_)
-		| Command::AttachHistory(_) => {
+		| Command::AttachHistory(_)
+		| Command::AttachCache(_)
+		| Command::SetContact { .. }
+		| Command::RemoveContact { .. } => {
 			unreachable!("engine-wide commands have no session")
 		}
 	}

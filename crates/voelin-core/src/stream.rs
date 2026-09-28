@@ -12,7 +12,7 @@
 //! cannot. Our own stream's life (live, viewers, ended) goes back to the
 //! session ([`OwnStreamEvent`]), which keeps its directory entry.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -153,6 +153,8 @@ pub(crate) enum StreamInput {
 	RequestFailed(Request, String),
 	/// Clients on the server: channel and `client_is_streaming`.
 	Clients(BTreeMap<u16, ClientState>),
+	/// Clients that are friends (contacts), for `stream.permissions`.
+	Friends(BTreeSet<u16>),
 	/// The registered streams of the gateway's directory (full list).
 	Directory(Vec<StreamInfo>),
 	/// The voice connection is gone.
@@ -256,6 +258,7 @@ impl StreamHandle {
 			live: None,
 			viewers: 0,
 			clients: BTreeMap::new(),
+			friends: BTreeSet::new(),
 			gateway,
 		};
 		tokio::spawn(task.run(rx));
@@ -293,6 +296,8 @@ struct StreamTask {
 	viewers: u32,
 	/// The clients as of the last update.
 	clients: BTreeMap<u16, ClientState>,
+	/// Friends' client ids (`stream.permissions = friends`).
+	friends: BTreeSet<u16>,
 	gateway: Arc<Mutex<GatewayStreams>>,
 }
 
@@ -366,6 +371,10 @@ impl StreamTask {
 			}
 			StreamInput::RequestFailed(request, error) => {
 				self.streams.request_failed(&request, &error);
+				Ok(())
+			}
+			StreamInput::Friends(friends) => {
+				self.friends = friends;
 				Ok(())
 			}
 			StreamInput::Clients(clients) => {
@@ -525,8 +534,8 @@ impl StreamTask {
 		match *self.settings.current().get_arc(&STREAM_PERMISSIONS) {
 			StreamPermissions::Everyone => Some(true),
 			StreamPermissions::Nobody => Some(false),
-			// No contacts yet: ask for everyone.
-			StreamPermissions::Friends => None,
+			// Friends are let in; others: ask.
+			StreamPermissions::Friends => self.friends.contains(&viewer.0).then_some(true),
 			StreamPermissions::Channel => {
 				let discovery = self.streams.discovery();
 				let own = discovery.own_channel();
@@ -989,7 +998,7 @@ mod tests {
 		assert_eq!(parse_kind("game"), StreamKind::Screen);
 	}
 
-	/// `stream.permissions` answers join requests unless it is `friends`.
+	/// `stream.permissions` answers join requests (`friends`: friends only, others are asked).
 	#[tokio::test(flavor = "multi_thread")]
 	async fn permissions_answer_join_requests() {
 		let in_channels = |streamer: u64, viewer: u64| {
@@ -998,18 +1007,22 @@ mod tests {
 				(CLIENTS[1], ClientState { channel: viewer, streaming: Some(false) }),
 			]))
 		};
-		for (permissions, viewer_channel, expected) in [
-			(StreamPermissions::Everyone, 2, Some(true)),
-			(StreamPermissions::Channel, 1, Some(true)),
-			(StreamPermissions::Channel, 2, Some(false)),
-			(StreamPermissions::Nobody, 1, Some(false)),
-			(StreamPermissions::Friends, 1, None),
+		for (permissions, viewer_channel, friend, expected) in [
+			(StreamPermissions::Everyone, 2, false, Some(true)),
+			(StreamPermissions::Channel, 1, false, Some(true)),
+			(StreamPermissions::Channel, 2, false, Some(false)),
+			(StreamPermissions::Nobody, 1, false, Some(false)),
+			(StreamPermissions::Friends, 1, false, None),
+			(StreamPermissions::Friends, 2, true, Some(true)),
 		] {
 			let settings = Settings::in_memory();
 			settings.set(&STREAM_PERMISSIONS, permissions).unwrap();
 			let (handles, mut rx, _frames) = pair_with(None, &settings);
 			for h in handles.iter() {
 				h.send(in_channels(1, viewer_channel));
+			}
+			if friend {
+				handles[0].send(StreamInput::Friends(BTreeSet::from([CLIENTS[1]])));
 			}
 			let setup = StreamSetup { name: "p".into(), ..Default::default() };
 			handles[0].send(StreamInput::Start { setup, auto_accept: false });

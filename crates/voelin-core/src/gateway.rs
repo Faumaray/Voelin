@@ -65,7 +65,7 @@ pub(crate) enum GatewayCmd {
 pub(crate) enum GatewayEvent {
 	/// Logged in; requests go through `client`.
 	Connected(GatewayClient),
-	Presence(Presence),
+	Presence(Box<Presence>),
 	/// A push other than presence.
 	Push(Box<Push>),
 	Disconnected(Option<String>),
@@ -132,11 +132,11 @@ async fn run_inner(
 				Some(Push::Disconnected(Some(reason))) => anyhow::bail!(reason),
 				Some(Push::PresenceSnapshot(snapshot)) => {
 					presence = Presence::from_snapshot(snapshot);
-					let _ = events.send(GatewayEvent::Presence(presence.clone()));
+					let _ = events.send(GatewayEvent::Presence(Box::new(presence.clone())));
 				}
 				Some(Push::PresenceDelta(delta)) => {
 					presence.apply(&delta);
-					let _ = events.send(GatewayEvent::Presence(presence.clone()));
+					let _ = events.send(GatewayEvent::Presence(Box::new(presence.clone())));
 				}
 				// Answers to requests sent without waiting.
 				Some(Push::Other(_) | Push::Error { code: ErrorCode::UnknownType, .. }) => {}

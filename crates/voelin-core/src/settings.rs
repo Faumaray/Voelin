@@ -1044,8 +1044,8 @@ pub static STREAM_HARDWARE_ACCELERATION: Key<bool> = Key::new(
 pub enum StreamPermissions {
 	/// Every join request is accepted.
 	Everyone,
-	/// Friends are accepted. Until there are contacts, every request is
-	/// shown to the user ([`crate::Event::StreamViewerRequest`]).
+	/// Friends (contacts marked friend) are accepted; others are shown to
+	/// the user ([`crate::Event::StreamViewerRequest`]).
 	Friends,
 	/// Clients in our channel are accepted, others denied.
 	#[default]
@@ -1096,8 +1096,53 @@ pub static CHAT_RETENTION_DAYS: Key<u32> = Key::new(
 	|| 0,
 );
 
+/// Size of the avatar and icon cache in MiB; the least recently used files
+/// go first. 0: no limit.
+pub static CACHE_MAX_MB: Key<u64> = Key::new(
+	"cache.max_mb",
+	Kind::UInt { min: 0 },
+	"Size of the avatar and icon cache in MiB (0: no limit).",
+	|| 256,
+);
+
+/// Download the avatars and icons of servers we are on by themselves.
+pub static CACHE_FETCH_IMAGES: Key<bool> = Key::new(
+	"cache.fetch_images",
+	Kind::Bool,
+	"Download avatars and icons of the servers we are on.",
+	|| true,
+);
+
+/// How often a file transfer reports its progress (ms); 0: after every
+/// piece received or sent.
+pub static FILES_PROGRESS_MS: Key<u32> = Key::new(
+	"files.progress_interval_ms",
+	Kind::UInt { min: 0 },
+	"How often a file transfer reports its progress, in ms (0: continuously).",
+	|| 250,
+);
+
+/// What happens to private messages and pokes of blocked contacts (their
+/// channel and server messages are always shown, flagged).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BlockMode {
+	/// Dropped: neither reported nor stored.
+	#[default]
+	Hide,
+	/// Reported and stored with `blocked` set.
+	Flag,
+}
+
+pub static PRIVACY_BLOCK_MODE: Key<BlockMode> = Key::new(
+	"privacy.block_mode",
+	Kind::Choice(&["hide", "flag"]),
+	"Private messages and pokes of blocked contacts: hide them, or show them flagged.",
+	BlockMode::default,
+);
+
 /// The keys every [`Settings`] knows from the start.
-pub fn builtin_keys() -> [&'static dyn Setting; 15] {
+pub fn builtin_keys() -> [&'static dyn Setting; 19] {
 	[
 		&CRASH_REPORTS,
 		&AUDIO,
@@ -1114,6 +1159,10 @@ pub fn builtin_keys() -> [&'static dyn Setting; 15] {
 		&CHAT_HISTORY_PAGE,
 		&CHAT_DEDUPE_TOLERANCE_MS,
 		&CHAT_RETENTION_DAYS,
+		&CACHE_MAX_MB,
+		&CACHE_FETCH_IMAGES,
+		&FILES_PROGRESS_MS,
+		&PRIVACY_BLOCK_MODE,
 	]
 }
 
