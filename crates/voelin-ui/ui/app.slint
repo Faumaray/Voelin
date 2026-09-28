@@ -8,6 +8,7 @@ import "assets/fonts/Inter-SemiBold.ttf";
 import "assets/fonts/Inter-Bold.ttf";
 import "assets/fonts/Inter-Italic.ttf";
 
+import { Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { Bridge } from "bridge.slint";
@@ -44,7 +45,10 @@ export component MainWindow inherits Window {
     property <length> breakpoint: Nav.narrow-breakpoint;
     changed width => { Nav.narrow = self.width < Nav.narrow-breakpoint; }
     changed breakpoint => { Nav.narrow = self.width < Nav.narrow-breakpoint; }
-    init => { Nav.narrow = self.width < Nav.narrow-breakpoint; }
+    init => {
+        Nav.narrow = self.width < Nav.narrow-breakpoint;
+        Theme.system-dark = Palette.color-scheme != ColorScheme.light;
+    }
     // Android: the space under the on-screen keyboard (the window is not
     // resized for it). Zero on desktop.
     property <length> keyboard-inset: 0;
@@ -54,6 +58,23 @@ export component MainWindow inherits Window {
 
     // The viewer takes the whole window in full screen.
     property <bool> chrome: !(Bridge.viewer-open && Bridge.viewer-fullscreen);
+
+    // The standard widgets follow the theme. In "system" mode the palette
+    // is left alone (it tracks the system) unless an explicit mode was
+    // set before; then the scheme seen at start is used.
+    property <string> theme-mode: Theme.mode;
+    property <bool> scheme-set;
+    changed theme-mode => { apply-color-scheme(); }
+    function apply-color-scheme() {
+        if Theme.mode == "dark" {
+            Palette.color-scheme = ColorScheme.dark;
+        } else if Theme.mode == "light" {
+            Palette.color-scheme = ColorScheme.light;
+        } else if Theme.mode == "system" && scheme-set {
+            Palette.color-scheme = Theme.system-dark ? ColorScheme.dark : ColorScheme.light;
+        }
+        scheme-set = scheme-set || Theme.mode == "dark" || Theme.mode == "light";
+    }
 
     // Status messages show as a toast.
     property <string> status: Bridge.status-text;

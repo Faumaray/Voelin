@@ -10,11 +10,15 @@
 import { Palette } from "std-widgets.slint";
 
 export global Theme {
-    // "dark", "light" or "system" (the setting `ui.theme`).
-    in-out property <string> mode: "dark";
+    // "dark", "light" or "system" (the setting `ui.theme`; Rust sets it
+    // right after the window is created, "" until then).
+    in-out property <string> mode: "";
+    // The system's scheme when the window was created (see MainWindow).
+    in-out property <bool> system-dark: true;
     // Dark or light colours. The standard widgets (scroll bars, context
-    // menus) follow the system's scheme.
-    out property <bool> dark: mode == "system" ? Palette.color-scheme != ColorScheme.light : mode != "light";
+    // menus) follow through `Palette.color-scheme`, set by MainWindow.
+    out property <bool> dark: mode == "system" ? Palette.color-scheme == ColorScheme.dark || (Palette.color-scheme == ColorScheme.unknown && system-dark) : mode != "light";
+
     // Multiplies every type size (and the sizes that follow text).
     in-out property <float> font-scale: 1.0;
 
