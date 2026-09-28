@@ -37,7 +37,9 @@ Done so far (milestones M0–M4 and the first part of M5 of [the plan](docs/arch
   with their TeamSpeak identity and get presence, channel chat and history without joining voice,
   limited by their server permissions ([admin guide](docs/gateway-admin.md))
 - `crates/voelin-core`: client engine; sessions merge voice, gateway and query sources, route chat, run audio;
-  the media pipeline for streams (capture → VP8 + Opus → stream, stream → decoder)
+  chat history (stored on the device, synced with the gateway when a chat opens); the gateway's pins,
+  reactions, topics, events, stream directory and administration; the media pipeline for streams
+  (capture → VP8 + Opus → stream, stream → decoder)
 - `crates/voelin-ui` (`voelin`): Slint desktop app: servers, channel tree with talking indicators,
   chat tabs (own channel via voice, other channels via relay), connect / observe invisibly, mute, push-to-talk
   (in the window and as a global hotkey), audio settings with a level meter, per-client volume, and on
@@ -47,9 +49,10 @@ Done so far (milestones M0–M4 and the first part of M5 of [the plan](docs/arch
   clients through a TS6 server
 - `tools/voelinctl`: headless CLI: channel tree, chat, voice send/record, raw commands, stream events,
   `query`, `observe` (invisible presence), `relay` (channel chat without joining) and `gateway`
+  (also through the engine with `--engine`: chat history, gateway requests, stream directory)
 - `dev/`: TeamSpeak 3.13 and TeamSpeak 6 (6.0.0-beta13.1) servers; `scripts/it-smoke.sh`
   checks tree, server chat, channel chat, a voice tone round-trip, invisible presence,
-  relay chat and the gateway on both
+  relay chat, the gateway, chat history sync, pins/reactions/topics and the stream directory
 - `fuzz/`: cargo-fuzz targets for packets, commands and the license chain
 - `android/` + `crates/voelin-android`: the Android app (the same Slint UI in a NativeActivity,
   voice in a foreground service, screen sharing through MediaProjection, MediaCodec, Keystore
@@ -93,6 +96,9 @@ cargo run -p voelinctl -- relay ssh 127.0.0.1:10022 --secret voelin-dev-admin --
 # Gateway: users without voice, logging in with their identity
 cargo run -p voelin-gateway -- --config dev/tsgw-ts6.toml &
 cargo run -p voelinctl -- gateway ws://127.0.0.1:7788/v1 --identity <file> --presence --open channel:1
+# ... through the engine: stored history synced with the gateway, then a request
+cargo run -p voelinctl -- gateway ws://127.0.0.1:7788/v1 --identity <file> --engine \
+  --db /tmp/chat.db --chat channel:1 --older 1 --request '{"pins":{"target":{"kind":"channel","id":1}}}'
 
 scripts/it-smoke.sh   # all of the above, on both servers
 ```
