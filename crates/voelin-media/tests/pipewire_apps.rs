@@ -306,7 +306,7 @@ impl Listener {
 				let mut clock = BlockClock::new(960);
 				let mut block = vec![0.0f32; 1920];
 				while !stop.load(Ordering::Relaxed) {
-					for _ in 0..clock.due(Instant::now()) {
+					for _ in clock.due(Instant::now()) {
 						mixer.mix(&mut block);
 						let mut last = last.lock().unwrap();
 						last.extend_from_slice(&block);

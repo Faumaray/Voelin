@@ -1154,9 +1154,9 @@ impl SourceInput {
 	}
 }
 
-/// Paces mixing on the monotonic clock: how many blocks of `frames` frames
-/// are due. Block `k` is due `k * frames / 48000` s after the start,
-/// computed exactly (no drift).
+/// Paces mixing on the monotonic clock: which blocks of `frames` frames are
+/// due. Block `k` is due `k * frames / 48000` s after the start, computed
+/// exactly (no drift).
 pub struct BlockClock {
 	start: Instant,
 	frames: u64,
@@ -1186,23 +1186,21 @@ impl BlockClock {
 		self.at(self.blocks)
 	}
 
-	/// Blocks due at `now` (0: wait until [`next`](Self::next)).
-	pub fn due(&mut self, now: Instant) -> u64 {
+	/// The numbers of the blocks due at `now` (empty: wait until
+	/// [`next`](Self::next)). A block's number is the audio's position in
+	/// blocks since the start (e.g. its RTP time is `number * frames`).
+	/// After a long stall only the newest block is due; the numbers jump
+	/// ahead with the time.
+	pub fn due(&mut self, now: Instant) -> std::ops::Range<u64> {
 		if now < self.next() {
-			return 0;
+			return self.blocks..self.blocks;
 		}
 		let elapsed = now.duration_since(self.start).as_nanos();
 		let reached =
 			(elapsed * u128::from(MIX_RATE) / (u128::from(self.frames) * 1_000_000_000)) as u64 + 1;
-		let due = reached - self.blocks;
-		if due > self.max_behind {
-			// Start over from now.
-			self.start = now;
-			self.blocks = 1;
-			return 1;
-		}
+		let from = if reached - self.blocks > self.max_behind { reached - 1 } else { self.blocks };
 		self.blocks = reached;
-		due
+		from..reached
 	}
 }
 
@@ -1587,23 +1585,25 @@ mod tests {
 	fn block_clock_paces_and_skips_ahead() {
 		let start = Instant::now();
 		let mut clock = BlockClock::starting_at(start, 960);
-		assert_eq!(clock.due(start), 1);
-		assert_eq!(clock.due(start), 0);
+		assert_eq!(clock.due(start), 0..1);
+		assert!(clock.due(start).is_empty());
 		assert_eq!(clock.next(), start + Duration::from_millis(20));
-		assert_eq!(clock.due(start + Duration::from_millis(59)), 2);
-		assert_eq!(clock.due(start + Duration::from_millis(60)), 1);
+		assert_eq!(clock.due(start + Duration::from_millis(59)), 1..3);
+		assert_eq!(clock.due(start + Duration::from_millis(60)), 3..4);
 		// Exact over a long run: 441 frames is 9.1875 ms.
 		let mut clock = BlockClock::starting_at(start, 441);
 		let mut total = 0;
 		for ms in 1..=10_000u64 {
-			total += clock.due(start + Duration::from_millis(ms));
+			let due = clock.due(start + Duration::from_millis(ms));
+			total += due.end - due.start;
 		}
 		assert_eq!(total, 10_000 * 48 / 441 + 1);
-		// After a long stall it starts over instead of bursting.
+		// After a long stall only the newest block is due, numbered by the
+		// time.
 		let mut clock = BlockClock::starting_at(start, 960);
 		clock.due(start);
-		assert_eq!(clock.due(start + Duration::from_secs(10)), 1);
-		assert_eq!(clock.due(start + Duration::from_millis(10_020)), 1);
+		assert_eq!(clock.due(start + Duration::from_secs(10)), 500..501);
+		assert_eq!(clock.due(start + Duration::from_millis(10_020)), 501..502);
 		assert!(to_db(1.0).abs() < 1e-6 && to_db(0.0) == -120.0);
 	}
 }
