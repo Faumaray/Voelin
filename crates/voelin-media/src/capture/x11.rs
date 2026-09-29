@@ -195,6 +195,21 @@ impl ScreenCapture for X11Capture {
 	}
 }
 
+/// The process that owns `window` (its `_NET_WM_PID`) on `display` (`None`:
+/// `$DISPLAY`), for capturing the window's audio. Clients set it
+/// voluntarily; it is the pid on the window's host.
+pub fn window_pid(display: Option<&str>, window: u64) -> Option<u32> {
+	let (conn, _) = RustConnection::connect(display).ok()?;
+	let atom = conn.intern_atom(true, b"_NET_WM_PID").ok()?.reply().ok()?.atom;
+	if atom == u32::from(AtomEnum::NONE) {
+		return None;
+	}
+	let window = u32::try_from(window).ok()?;
+	let reply =
+		conn.get_property(false, window, atom, AtomEnum::CARDINAL, 0, 1).ok()?.reply().ok()?;
+	reply.value32()?.next().filter(|&pid| pid > 0)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Rect {
 	x: i16,

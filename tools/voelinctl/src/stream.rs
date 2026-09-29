@@ -211,7 +211,7 @@ pub async fn run(con: &mut Connection, args: &StreamArgs) -> Result<()> {
 				let streamer = Streamer::start(&codecs, config).await.context("capture")?;
 				println!("capturing with {} ({codec})", streamer.backend());
 				if let Some(e) = streamer.audio_error() {
-					println!("no system audio: {e}");
+					println!("audio: {e}");
 				}
 				let audio = streamer.has_audio();
 				(Source::Encoded(EncodedSource::new(streamer)), audio)

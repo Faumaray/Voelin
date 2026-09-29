@@ -5,15 +5,21 @@
 //! asks the Kotlin side for the user's consent; on consent it runs
 //! `ScreenCaptureService` (a `mediaProjection` foreground service) whose
 //! `ImageReader` hands RGBA frames to [`on_frame`]. System audio
-//! (`AudioPlaybackCapture`, 48 kHz float) needs that running projection.
+//! (`AudioPlaybackCapture`, 48 kHz float) needs that running projection:
+//! everything but our own uid, or one app's uid, each into a stream mixer
+//! input ([`on_input`]); several captures may run at once.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use tokio::sync::oneshot;
 use tracing::warn;
 use voelin_media::capture::external::{self, AudioProvider, ScreenProvider};
+use voelin_media::capture::playback::{AppMatch, AudioApp, PlaybackFilter};
 use voelin_media::capture::{BoxFuture, CaptureOptions, CaptureSource, SourceId};
+use voelin_media::mix::SourceInput;
 use voelin_media::{AudioBuffer, Error, FrameSender, Result, VideoFrame};
 
 use crate::bridge;
@@ -29,6 +35,8 @@ struct State {
 	/// Answer for the pending `start`.
 	pending: Option<oneshot::Sender<Result<()>>>,
 	audio: Option<FrameSender<AudioBuffer>>,
+	/// Mixer inputs of [`AudioProvider::start_input`] captures, by id.
+	inputs: HashMap<u64, SourceInput>,
 	/// Clock origin of frame and audio timestamps (both `CLOCK_MONOTONIC`
 	/// nanoseconds: `Image.timestamp`, `System.nanoTime`), so they stay in sync.
 	origin_ns: Option<i64>,
@@ -135,6 +143,89 @@ impl AudioProvider for PlaybackAudio {
 			warn!("stopping system audio: {e}");
 		}
 	}
+
+	/// Everything but our uid, or the uid of one app's package.
+	fn start_input(&self, filter: &PlaybackFilter, input: SourceInput) -> Result<u64> {
+		let package = match filter {
+			PlaybackFilter::AllButSelf => None,
+			PlaybackFilter::App(app @ AppMatch::Name(name)) => Some(
+				self.apps()
+					.into_iter()
+					.find(|a| {
+						app.matches_name([a.name.as_str(), a.binary.as_deref().unwrap_or("")])
+					})
+					.and_then(|a| a.binary)
+					// Not launchable (a service, say): maybe the package itself.
+					.unwrap_or_else(|| name.trim().to_owned()),
+			),
+			PlaybackFilter::App(AppMatch::Pid(_)) => {
+				return Err(Error::CaptureUnavailable {
+					backend: AUDIO,
+					reason: "Android captures apps by package, not by process".into(),
+				});
+			}
+		};
+		static NEXT: AtomicU64 = AtomicU64::new(1);
+		let id = NEXT.fetch_add(1, Ordering::Relaxed);
+		with_state(|s| s.inputs.insert(id, input));
+		let started = bridge::start_audio_input(id, package.as_deref());
+		if let Ok(true) = started {
+			return Ok(id);
+		}
+		with_state(|s| s.inputs.remove(&id));
+		let reason = match (started, package) {
+			(Err(e), _) => e.to_string(),
+			(_, Some(package)) => format!(
+				"cannot capture {package}: not installed, or no running screen capture (and \
+				 the microphone permission)"
+			),
+			(_, None) => "needs a running screen capture (and the microphone permission)".into(),
+		};
+		Err(Error::CaptureUnavailable { backend: AUDIO, reason })
+	}
+
+	fn stop_input(&self, id: u64) {
+		with_state(|s| s.inputs.remove(&id));
+		if let Err(e) = bridge::stop_audio_input(id) {
+			warn!("stopping audio capture {id}: {e}");
+		}
+	}
+
+	/// Android cannot tell which apps play: the launchable ones.
+	fn apps(&self) -> Vec<AudioApp> {
+		match bridge::launchable_apps() {
+			Ok(apps) => apps
+				.into_iter()
+				.map(|(name, package)| AudioApp {
+					name,
+					binary: Some(package),
+					..AudioApp::default()
+				})
+				.collect(),
+			Err(e) => {
+				warn!("listing apps: {e}");
+				Vec::new()
+			}
+		}
+	}
+}
+
+pub fn wants_input(id: u64) -> bool {
+	with_state(|s| s.inputs.get(&id).is_some_and(|i| !i.is_closed()))
+}
+
+/// Captured playback for mixer input `id`. Returns `false` once the input
+/// is gone (the capture then stops).
+pub fn on_input(id: u64, samples: &[f32], channels: u16) -> bool {
+	with_state(|s| {
+		let Some(input) = s.inputs.get_mut(&id) else { return false };
+		input.push(samples, channels);
+		if input.is_closed() {
+			s.inputs.remove(&id);
+			return false;
+		}
+		true
+	})
 }
 
 /// The user answered the consent dialog (or the service failed to start).

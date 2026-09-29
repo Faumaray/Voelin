@@ -4,7 +4,8 @@
 
 use slint::{ComponentHandle, Model};
 use tracing::warn;
-use voelin_core::settings::{STREAM_BITRATE_KBPS, STREAM_FPS};
+use voelin_core::media::audio_source_specs;
+use voelin_core::settings::{STREAM_AUDIO_SOURCES, STREAM_BITRATE_KBPS, STREAM_FPS};
 use voelin_core::stream::{EndReason, LeaveReason, StreamSetup, ViewerInfo, ViewerState};
 use voelin_core::{Command, Event, StreamState, WatchState};
 
@@ -397,10 +398,13 @@ impl App {
 			audio: form.audio,
 			auto_accept: form.auto_accept,
 		};
+		// No sources configured: no audio.
+		let audio_sources = audio_source_specs(&self.prefs.get(&STREAM_AUDIO_SOURCES));
 		let request = CaptureRequest {
 			fps,
 			bitrate_kbps: bitrate,
-			audio: form.audio,
+			audio: form.audio && !audio_sources.is_empty(),
+			audio_sources,
 			restore_token: self.settings.portal_restore_token.clone(),
 		};
 		self.settings.share = defaults;
