@@ -676,7 +676,6 @@ impl Engine {
 			history,
 			cache: SharedCache::new(Cache::new(Cache::default_dir())),
 		};
-		shared.contacts.load();
 		tokio::spawn(run(rx, events.clone(), frames.clone(), shared.clone()));
 		Self { commands, events, frames, runtime: tokio::runtime::Handle::current(), shared }
 	}
@@ -763,6 +762,8 @@ async fn run(
 	engine: Shared,
 ) {
 	let Shared { settings: shared, history, cache, contacts } = engine.clone();
+	// Before any command: a contact set meanwhile would be lost.
+	contacts.load().await;
 	let mut sessions: HashMap<SessionId, session::SessionHandle> = HashMap::new();
 	let mut current = shared.current();
 	// Pruning: at start, then hourly (and when the setting changes).
@@ -851,7 +852,7 @@ async fn run(
 				history.replace(new.clone());
 				prune_history(&current, &new);
 				// The contacts live in the same database.
-				contacts.load();
+				contacts.load().await;
 				continue;
 			}
 			Command::AttachCache(dir) => {

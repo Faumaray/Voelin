@@ -110,19 +110,16 @@ impl Contacts {
 	}
 
 	/// Read the contacts of the current database (after it was attached).
-	pub fn load(&self) {
-		let this = self.clone();
-		self.history.current().run_then(
-			false,
-			|s| s.contacts(),
-			move |result| match result {
-				Ok(list) => {
-					this.lock().contacts = list.into_iter().map(|c| (c.uid.clone(), c)).collect();
-					this.changed();
-				}
-				Err(e) => warn!("cannot read contacts: {e}"),
-			},
-		);
+	/// The list read replaces the one in memory, so the engine awaits this
+	/// before its next command: a contact set meanwhile would be lost.
+	pub async fn load(&self) {
+		match self.history.current().run(false, |s| s.contacts()).await {
+			Ok(list) => {
+				self.lock().contacts = list.into_iter().map(|c| (c.uid.clone(), c)).collect();
+				self.changed();
+			}
+			Err(e) => warn!("cannot read contacts: {e}"),
+		}
 	}
 
 	/// Add or change a contact.
@@ -410,7 +407,7 @@ mod tests {
 		history.current().run(false, |s| s.put_contact(&friend("a="))).await.unwrap();
 		let contacts = Contacts::new(events, history.clone());
 		let mut revision = contacts.watch();
-		contacts.load();
+		contacts.load().await;
 		let loaded = loop {
 			if let Event::ContactsChanged { contacts } = rx.recv().await.unwrap() {
 				break contacts;
