@@ -9330,7 +9330,9 @@ dependencies = [
  "voelin-gateway-proto",
  "voelin-model",
  "voelin-observer",
+ "voelin-platform",
  "voelin-query",
+ "voelin-store",
  "voelin-stream",
 ]
 

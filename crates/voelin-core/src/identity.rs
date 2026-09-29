@@ -645,6 +645,73 @@ mod tests {
 		fs::remove_dir_all(dir).unwrap();
 	}
 
+	/// An imported key pair must be whole: the public key derived from the
+	/// private scalar has to verify what that scalar signs. The clients'
+	/// format carries the public point alongside the private one and
+	/// [`Identity`] keeps only the scalar, so this also proves the two
+	/// halves of the parsed key belong together.
+	fn signs_and_verifies(identity: &Identity) {
+		let nonce = b"voelin identity import self-check";
+		let signature = identity.key().clone().sign(nonce);
+		identity.key().to_pub().verify(nonce, &signature).expect("own signature verifies");
+		// A different message must not verify under the same signature.
+		assert!(identity.key().to_pub().verify(b"something else", &signature).is_err());
+	}
+
+	#[test]
+	fn an_imported_key_pair_is_whole() {
+		let dir = temp_dir("whole");
+		let path = dir.join("identity.ini");
+		write_export(&path, "tester", &synthetic()).unwrap();
+		let found = read(&path).unwrap();
+		assert_eq!(found.len(), 1);
+		signs_and_verifies(&found[0].identity);
+		fs::remove_dir_all(dir).unwrap();
+	}
+
+	/// Checks a real client database when `VOELIN_IDENTITY_IMPORT_CHECK`
+	/// points at one, printing only public facts: how many identities were
+	/// found, their nicknames, their unique ids and their levels. Without
+	/// the variable there is nothing to check and the test passes.
+	#[test]
+	fn checks_the_database_the_environment_points_at() {
+		let Some(path) = std::env::var_os("VOELIN_IDENTITY_IMPORT_CHECK") else { return };
+		let path = PathBuf::from(path);
+		let found = read(&path).expect("read the database");
+		println!("{}: {} identities", path.display(), found.len());
+		for identity in &found {
+			let uids = identity.uids();
+			// A TeamSpeak unique id is base64 of a SHA-1 or SHA-256 digest.
+			assert_eq!(uids.ts3.len(), 28, "{}", uids.ts3);
+			assert_eq!(uids.ts6.len(), 44, "{}", uids.ts6);
+			for id in [&uids.ts3, &uids.ts6] {
+				assert!(
+					id.bytes().all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b)),
+					"{id} is not base64"
+				);
+			}
+			assert_eq!(uids.ts3, identity.uid());
+			// Servers reject anything below 8.
+			assert!(identity.level() >= 8, "level {}", identity.level());
+			signs_and_verifies(&identity.identity);
+			// The export must come back as the same identity.
+			let text = export(&identity.nickname, &identity.identity);
+			let again = text_identities(&text, &path);
+			assert_eq!(again.len(), 1);
+			assert_eq!(again[0].uids().ts3, uids.ts3);
+			assert_eq!(again[0].uids().ts6, uids.ts6);
+			assert_eq!(again[0].nickname, identity.nickname);
+			println!(
+				"  {} {} {} level {}",
+				identity.nickname,
+				uids.ts3,
+				uids.ts6,
+				identity.level()
+			);
+		}
+		assert!(!found.is_empty());
+	}
+
 	#[test]
 	fn locations_are_absolute_and_named_settings_db() {
 		for path in locations() {
