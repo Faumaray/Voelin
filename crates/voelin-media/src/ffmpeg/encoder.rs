@@ -1663,6 +1663,112 @@ mod tests {
 		}
 	}
 
+	/// The zero-copy path with a real DMA-BUF, on the GPU.
+	///
+	/// The probe reports the import as available from the offsets alone, and
+	/// screen capture hands over RGB, which the import refuses, so no frame
+	/// had ever gone through it. This makes a VA-API surface, exports it as
+	/// a DRM PRIME DMA-BUF (what a compositor would hand us, tiling
+	/// modifier and all) and feeds it back to a second encoder through
+	/// [`FfmpegEncoder::encode_dmabuf`], so the import, the
+	/// `AVFrame.hw_frames_ctx` check and the encode are exercised for real.
+	///
+	/// Skipped without a working `h264_vaapi`.
+	#[test]
+	fn a_dmabuf_really_reaches_a_vaapi_encoder() {
+		const SIZE: (u32, u32) = (320, 240);
+		if !probe().iter().any(|s| s.spec.name == "h264_vaapi" && s.available.is_ok()) {
+			eprintln!("no usable h264_vaapi, skipped");
+			return;
+		}
+		let ffmpeg = Ffmpeg::get().expect("probed above");
+		let api = &ffmpeg.api;
+		let source = FfmpegEncoder::new("h264_vaapi", EncoderConfig::default()).unwrap();
+		let mut pool = source.vaapi_pool(SIZE.0, SIZE.1).expect("a VA-API surface pool");
+		let drm_prime = ffmpeg.pix.drm_prime.expect("DRM PRIME");
+
+		// SAFETY: `pool` is a live frames context of this process's VA-API
+		// device; both frames are ours and freed below. The exported frame's
+		// `data[0]` is the AVDRMFrameDescriptor FFmpeg filled, valid while
+		// the frame holds the mapping.
+		let exported = unsafe {
+			let surface = (api.av_frame_alloc)();
+			let drm = (api.av_frame_alloc)();
+			assert!(!surface.is_null() && !drm.is_null());
+			let ret = (api.av_hwframe_get_buffer)(pool, surface, 0);
+			assert!(ret >= 0, "av_hwframe_get_buffer: {}", api.error_text(ret));
+			(*drm.cast::<FrameHead>()).format = drm_prime;
+			let ret =
+				(api.av_hwframe_map)(drm, surface, sys::HWFRAME_MAP_READ | sys::HWFRAME_MAP_DIRECT);
+			let mapped = (ret >= 0).then(|| {
+				let descriptor =
+					*(*drm.cast::<FrameHead>()).data[0].cast::<sys::DrmFrameDescriptor>();
+				assert_eq!(descriptor.nb_objects, 1, "one buffer object");
+				// The driver describes the surface one plane per layer (R8
+				// for Y, GR88 for UV) rather than as one NV12 layer, which
+				// is how a compositor hands it over. Both name the same
+				// bytes of the same object, so flatten the layers into the
+				// planes of one NV12 buffer.
+				let object = descriptor.objects[0];
+				let mut planes = [(0usize, 0usize); 4];
+				let mut count = 0;
+				for layer in &descriptor.layers[..descriptor.nb_layers as usize] {
+					for plane in &layer.planes[..layer.nb_planes as usize] {
+						planes[count] = (plane.offset as usize, plane.pitch as usize);
+						count += 1;
+					}
+				}
+				DmaBufRef {
+					width: SIZE.0,
+					height: SIZE.1,
+					timestamp: Duration::ZERO,
+					fourcc: drm_fourcc(b"NV12"),
+					modifier: object.format_modifier,
+					fd: object.fd,
+					size: object.size,
+					planes,
+					plane_count: count,
+				}
+			});
+			// The descriptor is copied out, but the file descriptor belongs
+			// to the mapping, so the encode has to happen before these go.
+			(mapped, surface, drm)
+		};
+		let (frame, mut surface, mut drm) = exported;
+		let Some(frame) = frame else {
+			// SAFETY: allocated above.
+			unsafe {
+				(api.av_frame_free)(&mut drm);
+				(api.av_frame_free)(&mut surface);
+				(api.av_buffer_unref)(&mut pool);
+			}
+			panic!("this driver cannot export a VA-API surface as a DMA-BUF");
+		};
+		assert_eq!(frame.plane_count, 2, "NV12 has two planes");
+		assert!(frame.fd >= 0 && frame.size > 0);
+
+		let mut encoder = FfmpegEncoder::new("h264_vaapi", EncoderConfig::default()).unwrap();
+		let mut packets = 0;
+		let mut keyframe = false;
+		let result = encoder.encode_dmabuf(&frame, true, &mut |chunk| {
+			packets += 1;
+			keyframe |= chunk.keyframe;
+		});
+		drop(encoder);
+		// SAFETY: allocated above; the encode is done with the mapping.
+		unsafe {
+			(api.av_frame_free)(&mut drm);
+			(api.av_frame_free)(&mut surface);
+			(api.av_buffer_unref)(&mut pool);
+		}
+		result.expect("the DMA-BUF was imported and encoded");
+		assert!(packets > 0 && keyframe, "{packets} packets, keyframe {keyframe}");
+		eprintln!(
+			"imported a {}x{} NV12 DMA-BUF (modifier {:#x}) into h264_vaapi: {packets} packet(s)",
+			frame.width, frame.height, frame.modifier
+		);
+	}
+
 	#[test]
 	fn settings_per_backend() {
 		let config = EncoderConfig::default();
