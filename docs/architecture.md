@@ -47,6 +47,9 @@ the admin grants them to the guest query group.
 | Voice | tsproto UDP transport, Opus (`opus2`), echo cancellation / noise suppression (sonora), own jitter buffer, cpal / AAudio |
 | Invisible presence | Gateway presence stream (snapshot + deltas from query events) or direct query; `channelsubscribeall` when voice-connected |
 | Screen share with sound | TS6 stream signalling (`voelin-stream`), str0m WebRTC, per-platform capture and codecs (`voelin-media`) |
+| Channel files, avatars, icons | Voice connection: `ftgetfilelist`, `ftinitdownload`/`ftinitupload` + TCP transfer, `ftdeletefile`/`ftrenamefile`/`ftcreatedir`; images cached on disk by content |
+| Pokes, private messages, offline messages | Voice connection: `clientpoke`, `sendtextmessage targetmode=1`, `messagelist`/`messageget`/`messageadd`/`messagedel`/`messageupdateflag` |
+| Friends, blocking | Contacts by unique id in the client database; presence of every session |
 
 ## Workspace layout
 
@@ -62,14 +65,14 @@ fuzz/                cargo-fuzz targets
 
 | Crate | Responsibility | State |
 |---|---|---|
-| `voelin-model` | UI-facing domain model (servers, channels, clients, chat, capabilities), no IO | done |
+| `voelin-model` | UI-facing domain model (servers and their details, channels, clients, server and channel groups, chat and its file links, capabilities), no IO | done |
 | `voelin-query` | ServerQuery codec and transports: raw TCP, SSH (russh), HTTP WebQuery | done |
 | `voelin-observer` | Presence tracker + chat relay pool over `voelin-query` | done |
 | `voelin-gateway-proto`, `voelin-gateway` (`tsgw`) | Companion service for server admins: identity-challenge auth, permission-mirroring authorization, presence stream, chat relay, SQLite history, WebSocket + JSON (`tsgw.v1+json`) | done |
-| `voelin-store` | Identities, bookmarks, settings, chat history (dedupe, paging, sync cursors), secrets (keyring / Android Keystore); versioned schema | done |
+| `voelin-store` | Identities, bookmarks, settings, chat history (dedupe, paging, sync cursors), contacts, secrets (keyring / Android Keystore); versioned schema | done |
 | `voelin-audio` | Capture/playback, Opus, echo cancellation, resampling, jitter buffer, mixer, VAD/push-to-talk | v0 (no AEC yet) |
 | `voelin-stream` | TS6 stream commands, JSON signalling, str0m peer connections, host/STUN candidates, streamer/viewer sessions, frame-source seam | sessions + transport |
-| `voelin-core` | Engine: runtime, per-server sessions, merge of voice/gateway/query sources, event bus, command API, chat history, the gateway's features, audio settings and volumes, streams on TS6; `media` module (capture → encoder → stream, stream → decoder) | done |
+| `voelin-core` | Engine: runtime, per-server sessions, merge of voice/gateway/query sources, event bus, command API, chat history, the gateway's features, audio settings and volumes, streams on TS6, files, avatar and icon cache, pokes, offline messages, contacts; `media` module (capture → encoder → stream, stream → decoder) | done |
 | `voelin-ui` | Slint UI and the desktop binary: streams panel, viewer, share dialog, audio / hotkey / codec settings | done (desktop) |
 | `voelin-media` | Screen and system-audio capture backends (PipeWire portal, X11, Windows Graphics Capture, Android MediaProjection), video codecs | done (desktop hardware encoders planned; MediaCodec not run on a device yet) |
 | `voelin-platform` | Global hotkeys, notifications, paths, crash reports, notices | done |
@@ -144,6 +147,83 @@ Messages in answers and pushes are stored first, so the UI gets them with
 local ids. The contract is in the module docs of `voelin_core::gateway` and
 `voelin_core::history`; `voelinctl gateway --engine` drives it from the
 command line.
+
+## Server details, groups and client details
+
+The voice connection's book has everything the server tells its clients;
+`voelin-model` carries it: per client the avatar hash (`client_flag_avatar`),
+description, talk power, channel group, server groups, badges, icon, away
+message, mute, talk, recording and stream flags; per server
+(`Presence::server`, `ServerDetails`) the welcome and host message, host
+banner (link, image, reload interval, scaling), host button, icon, unique id,
+platform and version; the server and channel groups (name, icon, sort id,
+naming mode, type). `Event::Presence` carries all of it; `Event::ServerDetails`
+and `Event::Groups` come when those parts change. Gateway and query presence
+fill what their rows have. The new fields are optional in JSON, so gateways
+and clients of different versions still understand each other.
+
+## Files, avatars and icons
+
+Channel file browsers, avatars and icons go over the voice connection (TS3
+and TS6 alike, verified against 3.13.8 and 6.0.0-beta13.1). `ftgetfilelist`
+lists a directory; `ftinitdownload`/`ftinitupload` open a transfer, which
+then runs over its own TCP connection to the port the server announces (the
+dev TS6 server announces 30034, its published port). The engine
+(`voelin_core::files`) streams transfers in 64 KiB pieces: downloads into
+`<path>.part`, renamed when complete (resumable), or into memory; uploads
+read the file as they send it. Progress is reported every
+`files.progress_interval_ms`; transfers can be cancelled. Nothing limits
+sizes besides the server's quotas. Requests and transfers carry ids the
+caller picks (`RequestId`, `TransferId`).
+
+Chat messages link files as `[URL=ts3file://name?serverUID=…&channel=…&path=…&filename=…&size=…]`;
+`ChatMessage::file_refs` finds them (`FileRef`) for file cards and
+`Command::DownloadChatFile` fetches one (refused if the link names another
+server). `FileRef::to_bbcode` writes a link.
+
+Avatars live in channel 0 as `/avatar_<unique id bytes as a–p>` (one letter
+per nibble; the same on TS6 with its longer unique ids); `client_flag_avatar`
+is the file's MD5. Icons are `/icon_<id>`, the id being the CRC32 of the
+image (below 1000: built into clients). The engine fetches every avatar and
+icon of the servers it is on (`cache.fetch_images`) into a content-addressed
+disk cache (`voelin_core::cache`, `<cache>/voelin/images/{avatars,icons}`):
+a lookup is a map access, a download of the same file for several sessions
+runs once, and the least recently used files go when the cache exceeds
+`cache.max_mb` (0: no limit). `Event::AvatarReady` / `Event::IconReady`
+report the files. `Command::SetAvatar` uploads ours to `/avatar` and
+announces its hash (`clientupdate client_flag_avatar`), or removes it.
+
+## Pokes, private and offline messages
+
+`Command::Poke` sends `clientpoke`; incoming pokes are `Event::Poke` (they
+used to be stored as private messages). Private messages to any client on
+the server are a `ChatTarget::Private(unique id)` chat over the voice
+connection, stored in the chat history under the peer's unique id, so the
+conversation survives reconnects and new client ids. Gateways and query
+relays cannot send private messages as the user; without voice the engine
+says so. A voice command that fails (e.g. a private message to a client who
+left) is an error event; the connection stays.
+
+Offline messages (`voelin_core::offline`, capability `offline_messages`,
+TS3 and TS6) are listed, read, sent to a unique id (on TS6 the one that
+server generation derives, see `voelinctl identity show`), deleted and
+marked read. Guests may not send them by default.
+
+## Contacts
+
+Contacts (`voelin_store::contacts`, table `contacts` since schema version 3)
+are people by unique id: friend, blocked or neutral, with a note, a mute and
+a volume, when they were added, and when and on which server they were last
+seen. The engine (`voelin_core::contacts`) keeps them in memory for lookups,
+takes `Command::SetContact` / `RemoveContact`, and reports
+`Event::ContactsChanged`. From the presence of every session (voice,
+gateway or query) it reports where each friend is (`Event::FriendPresence`)
+for Home's friends list, and records sightings in one write per change. A
+contact's mute and volume apply to their voice in every session. Messages of
+blocked contacts are flagged (`ChatMessage::blocked`, live and in history);
+their private messages and pokes are dropped or flagged per
+`privacy.block_mode`. `stream.permissions = friends` lets friends watch our
+stream without asking and asks for everyone else.
 
 ## Streams
 
@@ -230,7 +310,8 @@ key); writes notify subscribers and go to SQLite on a writer thread. The
 engine holds one (`Engine::settings`, `Command::AttachSettings`), takes
 `Command::SetSetting` / `ResetSetting` and reports `Event::SettingChanged`.
 The UI opens it on its database and registers its own keys (`ui`,
-`client_playback`); the stream keys (`stream.*`) and chat keys (`chat.*`)
+`client_playback`); the stream (`stream.*`), chat (`chat.*`), cache (`cache.*`),
+file transfer (`files.*`) and privacy (`privacy.*`) keys
 are defined in the core, which reads them on every use.
 
 ## Milestones
