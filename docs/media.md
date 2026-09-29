@@ -377,7 +377,10 @@ the software encoders above are used as before.
   (`av_hwframe_ctx_init`, surfaces allocated on demand and recycled) filled
   with `av_hwframe_transfer_data`; the device is `VOELIN_VAAPI_DEVICE` or the
   first `/dev/dri/renderD*`, shared by all encoders. Odd sizes are cropped to
-  even ones. The streamer's steady state is 1.1 heap allocations per encoded
+  even ones. `encode_dmabuf` takes a buffer with one NV12 layer of two
+  planes, which is how a compositor hands one over; a driver exporting its
+  own surface may instead describe it as two layers (`R8` for luma, `GR88`
+  for chroma) over the same object, and that form is not accepted yet. The streamer's steady state is 1.1 heap allocations per encoded
   frame with x264 or SVT-AV1, as with libvpx (`voelinctl stream bench`).
 - Zero-copy (Linux): `FfmpegEncoder::encode_dmabuf(&DmaBufRef, ...)` maps a
   DRM PRIME frame onto a VA-API surface (`av_hwframe_map`) that the encoder
@@ -708,7 +711,8 @@ has not run on Windows yet.
 | Hardware encoders NVENC, Quick Sync, Media Foundation, VideoToolbox | – | not tested (no such hardware here); NVENC and Quick Sync are skipped by the vendor check and the Windows code type-checks for `x86_64-pc-windows-gnu` |
 | H.264 SPS against the offered `profile-level-id` (`profile_idc`, `level_idc`) for every usable backend, two sizes, both profiles | `tests/ffmpeg.rs` `sps_carries_the_offered_profile_and_level` | tested: it found `h264_amf` emitting level 4.2 where the offer said 3.1; with the level now set, all backends emit the offered level |
 | The encoder's H.264 level table against the signalling's | `ffmpeg::encoder::tests::levels_agree_with_the_signalling` | tested (8 sizes x 5 rates x 4 bitrates x 2 profiles) |
-| Zero-copy DMA-BUF import into a VA-API encoder | – | not reached: the import is implemented and its offsets are checked, but screen capture delivers RGB and the GPU colour conversion to NV12 is missing, so no frame has ever gone through it on hardware |
+| Zero-copy DMA-BUF import into a VA-API encoder | `ffmpeg::encoder::tests::a_dmabuf_really_reaches_a_vaapi_encoder` (a VA-API surface exported as DRM PRIME and fed back in) | tested: imports and encodes, with an AMD **tiling** modifier (`0x200000028a01f04`), not only LINEAR |
+| Zero-copy from screen capture | – | not reached: the import works (row above), but the portal delivers RGB and the GPU colour conversion to NV12 is missing, so no captured frame has gone through it. `Ingest` also never returns true from `FrameSink::accepts_dmabuf`, so the portal's DMA-BUF offer is never taken |
 | Offer [VP9, VP8], a viewer that decodes only VP8 → its own VP8 encoder, VP9 idle, pictures decoded | `voelin-core/tests/media_live.rs` `ts6_viewer_gets_the_codec_it_chose` (`VOELIN_LIVE=1`) | tested against the TeamSpeak 6 dev server (our client on both ends) |
 | Several codecs against official TeamSpeak viewers | – | not tested (no official client here) |
 | Test pattern → VP8 → decoder, rectangle position and colour | `voelin-core` `media::tests::local_preview_decodes_the_pattern` | tested |
