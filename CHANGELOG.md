@@ -18,6 +18,13 @@ The first release is in preparation.
   them, through the `tsgw` gateway or own ServerQuery credentials.
 - TeamSpeak 6 streams: watching and sharing screens with sound (VP8, VP9,
   optional H.264 through Cisco's OpenH264, AV1 decoding).
+- Hardware video encoders (VA-API, NVENC, Quick Sync, AMF, Media
+  Foundation, VideoToolbox) and more software ones (x264, SVT-AV1, libaom)
+  through an installed FFmpeg, loaded at runtime; each is tested at start
+  and skipped with a reason if it does not work. Viewers that answer with
+  another offered codec get their own encoder. Settings:
+  `stream.hardware_acceleration`, `stream.encoder_backend`, `stream.codec`;
+  `voelinctl stream encoders` lists what works.
 - `tsgw`: companion gateway for server admins (presence, channel chat
   relay, history).
 - Chat history: messages are kept on the device and, with a gateway, what
