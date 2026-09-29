@@ -86,6 +86,38 @@ enum IdentityCommand {
 		#[arg(long)]
 		identity: Option<PathBuf>,
 	},
+	/// List the identities in the client database, with the id `export` takes.
+	List {
+		/// Client database [default: <data dir>/voelin/client.db].
+		#[arg(long)]
+		store: Option<PathBuf>,
+	},
+	/// Import identities from the official TeamSpeak 3 and 6 clients. Their
+	/// files are only read, never changed.
+	Import {
+		/// A TeamSpeak 3 `.ini` export, or a client's `settings.db`.
+		#[arg(long, conflicts_with = "auto", required_unless_present = "auto")]
+		from: Option<PathBuf>,
+		/// Look in the usual locations of both clients instead (see
+		/// `docs/identity.md`).
+		#[arg(long)]
+		auto: bool,
+		/// List what was found and store nothing.
+		#[arg(long)]
+		dry_run: bool,
+		#[arg(long)]
+		store: Option<PathBuf>,
+	},
+	/// Write an identity from the client database to a TeamSpeak 3 `.ini`
+	/// export, which the official client imports.
+	Export {
+		/// Identity id, from `identity list`.
+		id: i64,
+		/// File to write; on Unix it is created readable only by you.
+		path: PathBuf,
+		#[arg(long)]
+		store: Option<PathBuf>,
+	},
 }
 
 #[derive(Args, Debug)]
@@ -259,6 +291,12 @@ fn run_identity(command: IdentityCommand) -> Result<()> {
 			println!("omega: {omega}");
 			Ok(())
 		}
+		IdentityCommand::List { store } => identity::list(store),
+		// `--auto` only means "no --from"; clap has already required one.
+		IdentityCommand::Import { from, auto: _, dry_run, store } => {
+			identity::import(from, dry_run, store)
+		}
+		IdentityCommand::Export { id, path, store } => identity::export(id, &path, store),
 	}
 }
 

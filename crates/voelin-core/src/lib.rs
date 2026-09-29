@@ -47,6 +47,7 @@ pub mod contacts;
 pub mod files;
 pub mod gateway;
 pub mod history;
+pub mod identity;
 #[cfg(feature = "media")]
 pub mod media;
 pub mod offline;
