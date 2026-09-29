@@ -86,6 +86,7 @@ mod tests {
 			text: text.into(),
 			ts_ms,
 			via_relay: false,
+			blocked: false,
 		}
 	}
 

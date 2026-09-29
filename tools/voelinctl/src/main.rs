@@ -2,6 +2,7 @@
 
 mod alloc;
 mod bench;
+mod client;
 mod engine;
 mod gateway;
 mod identity;
@@ -56,6 +57,9 @@ enum Command {
 	/// `--engine` through the client engine (chat history sync, pins,
 	/// reactions, topics, events, stream directory, administration).
 	Gateway(gateway::GatewayArgs),
+	/// A voice session through the client engine: files, avatars, pokes,
+	/// private and offline messages, contacts.
+	Engine(client::EngineArgs),
 	/// TeamSpeak 6: probe how a client that arrives after a stream started
 	/// can learn about it; prints every command both clients exchange.
 	ProbeStream(probe::ProbeStreamArgs),
@@ -223,6 +227,7 @@ fn main() -> Result<()> {
 		Command::Observe(args) => tokio::runtime::Runtime::new()?.block_on(observe::observe(args)),
 		Command::Relay(args) => tokio::runtime::Runtime::new()?.block_on(observe::relay(args)),
 		Command::Gateway(args) => tokio::runtime::Runtime::new()?.block_on(gateway::run(args)),
+		Command::Engine(args) => tokio::runtime::Runtime::new()?.block_on(client::run(args)),
 		Command::ProbeStream(args) => tokio::runtime::Runtime::new()?.block_on(probe::run(args)),
 		Command::Stream(args) => bench::run(args),
 	}
@@ -247,7 +252,11 @@ fn run_identity(command: IdentityCommand) -> Result<()> {
 			let id = identity::load(&path)?;
 			println!("uid:   {}", identity::uid(&id));
 			println!("level: {}", id.level());
-			println!("omega: {}", id.key().to_pub().to_ts());
+			let omega = id.key().to_pub().to_ts();
+			// TeamSpeak 6 servers know the identity by another unique id.
+			let ids = voelin_gateway_proto::UniqueIds::from_omega(&omega);
+			println!("uid6:  {}", ids.ts6);
+			println!("omega: {omega}");
 			Ok(())
 		}
 	}

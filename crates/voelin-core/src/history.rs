@@ -62,6 +62,7 @@ pub use voelin_store::MessageSource;
 use voelin_store::{ChatCursor, WriteOutcome};
 use voelin_store::{NewMessage, PageQuery, Reaction, RemoteInfo, Store, StoredMessage, Written};
 
+use crate::contacts::Contacts;
 use crate::gateway::{GatewayClient, GatewayUpdate};
 use crate::settings::{CHAT_DEDUPE_TOLERANCE_MS, CHAT_HISTORY_PAGE, CHAT_STORE_HISTORY, Settings};
 use crate::{Event, SessionId};
@@ -125,6 +126,7 @@ impl From<StoredMessage> for HistoryMessage {
 				text: m.text,
 				ts_ms: m.ts_ms,
 				via_relay: m.via_relay,
+				blocked: false,
 			},
 			source: m.source,
 			remote_id: m.remote_id,
@@ -471,6 +473,8 @@ pub(crate) struct ChatCtx {
 	pub settings: Settings,
 	/// The key of the server's history.
 	pub server_uid: String,
+	/// Messages of blocked contacts are flagged.
+	pub contacts: Contacts,
 }
 
 impl ChatCtx {
@@ -499,6 +503,10 @@ impl ChatCtx {
 		source: HistorySource,
 		complete: bool,
 	) {
+		let mut messages = messages;
+		for m in &mut messages {
+			m.message.blocked = self.contacts.is_blocked(m.message.author_uid.as_deref());
+		}
 		self.emit(Event::ChatHistory {
 			session: self.session,
 			target: target.clone(),
@@ -523,12 +531,15 @@ impl ChatCtx {
 	/// [`HistorySource::Live`] from the writer thread.
 	pub fn store_live(&self, messages: Vec<NewMessage>) {
 		let (session, events) = (self.session, self.events.clone());
+		let contacts = self.contacts.clone();
 		self.history.write(self.memory(), messages, self.tolerance_ms(), move |result| {
 			for w in result.unwrap_or_default() {
 				if w.outcome == WriteOutcome::Unchanged {
 					continue;
 				}
-				let message = HistoryMessage::from(w.message);
+				let mut message = HistoryMessage::from(w.message);
+				message.message.blocked =
+					contacts.is_blocked(message.message.author_uid.as_deref());
 				let _ = events.send(Event::ChatHistory {
 					session,
 					target: message.message.target.clone(),
@@ -757,6 +768,7 @@ mod tests {
 			text: text.into(),
 			ts_ms,
 			via_relay: false,
+			blocked: false,
 		};
 		new_message("srv", &msg, MessageSource::Voice)
 	}

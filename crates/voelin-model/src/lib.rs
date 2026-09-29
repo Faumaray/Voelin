@@ -8,9 +8,12 @@ mod presence;
 mod server;
 mod tree;
 
-pub use chat::{ChatMessage, ChatTarget, relay_text, split_message};
+pub use chat::{ChatMessage, ChatTarget, FileRef, parse_file_links, relay_text, split_message};
 pub use presence::{
-	ChannelId, ChannelInfo, ClientId, ClientInfo, Presence, PresenceDelta, PresenceSnapshot,
+	ChannelId, ChannelInfo, ClientId, ClientInfo, GroupId, GroupInfo, GroupNamingMode, GroupType,
+	Presence, PresenceDelta, PresenceSnapshot, parse_badges,
 };
-pub use server::{Capabilities, ServerFlavor, ServerVersion};
+pub use server::{
+	Capabilities, HostBannerMode, HostMessageMode, ServerDetails, ServerFlavor, ServerVersion,
+};
 pub use tree::{TreeRow, order_siblings, tree_rows};

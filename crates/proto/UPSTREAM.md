@@ -67,3 +67,14 @@ against or offered back to upstream.
    required `reason`; `notifyjoinstreamrequest` carries `is_remove`,
    `notifystreamstopped` and `notifystreamclientleft` carry `reason`, the latter also
    `return_code`.
+8. **File transfer fixes** (`tsclientlib/src/lib.rs`, marked "Voelin patch").
+   A server that refuses `ftinitdownload`/`ftinitupload` (file not found, no
+   permission, quota) answers with an `error` for the command's return code, which
+   came out as a `MessageResult` the caller cannot match to its
+   `FiletransferHandle`; it now fails the transfer (`FiletransferFailed`). A
+   transfer address of `0.0.0.0`/`::` means the server's own address. The return
+   code and transfer id counters wrap instead of overflowing.
+9. **TeamSpeak 6 times in milliseconds** (`ts-bookkeeping/build/message_parser.rs`,
+   "Voelin patch"). TeamSpeak 6 sends some times, e.g. `datetime` of `notifyfilelist`,
+   in milliseconds, which failed to parse and dropped the whole message (empty file
+   lists). Values from 10^11 on (year 5138 in seconds) are taken as milliseconds.

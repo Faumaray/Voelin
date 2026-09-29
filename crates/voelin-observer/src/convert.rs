@@ -17,6 +17,7 @@ pub fn channel_from_row(row: &Row) -> Option<ChannelInfo> {
 		needed_subscribe_power: row.parse("channel_needed_subscribe_power").unwrap_or(0),
 		needed_talk_power: row.parse("channel_needed_talk_power").unwrap_or(0),
 		is_default: row.flag("channel_flag_default").unwrap_or(false),
+		icon: row.parse::<i64>("channel_icon_id").map_or(0, |i| i as u32),
 	})
 }
 
@@ -69,6 +70,19 @@ pub fn client_from_row(row: &Row) -> Option<ClientInfo> {
 			.map(|g| g.split(',').filter_map(|g| g.parse().ok()).collect())
 			.unwrap_or_default(),
 		country: row.get("client_country").filter(|c| !c.is_empty()).map(str::to_string),
+		// What the row carries (`notifycliententerview` all of it,
+		// `clientlist -voice -groups -icon` some).
+		avatar: row.get("client_flag_avatar").filter(|a| !a.is_empty()).map(str::to_string),
+		description: row.get("client_description").filter(|d| !d.is_empty()).map(str::to_string),
+		talk_power: row.parse("client_talk_power").unwrap_or(0),
+		talker: row.flag("client_is_talker").unwrap_or(false),
+		channel_group: row.parse("client_channel_group_id"),
+		badges: row.get("client_badges").map(voelin_model::parse_badges).unwrap_or_default(),
+		icon: row.parse::<i64>("client_icon_id").map_or(0, |i| i as u32),
+		recording: row.flag("client_is_recording").unwrap_or(false),
+		priority_speaker: row.flag("client_is_priority_speaker").unwrap_or(false),
+		channel_commander: row.flag("client_is_channel_commander").unwrap_or(false),
+		database_id: row.parse("client_database_id"),
 	})
 }
 
@@ -130,6 +144,7 @@ pub fn is_text_message(n: &Notification, now_ms: i64) -> Option<ChatMessage> {
 		text: row.get("msg").unwrap_or_default().to_string(),
 		ts_ms: now_ms,
 		via_relay: true,
+		blocked: false,
 	})
 }
 

@@ -77,6 +77,7 @@ impl State {
 			text: text.into(),
 			ts_ms,
 			via_relay: true,
+			blocked: false,
 		};
 		let entry =
 			HistoryEntry { rev, ..HistoryEntry::new(self.messages.len() as i64 + 1, message) };
@@ -275,6 +276,7 @@ fn answer(
 				text,
 				ts_ms: now_ms(),
 				via_relay: true,
+				blocked: false,
 			};
 			let entry = HistoryEntry {
 				rev,

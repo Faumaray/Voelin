@@ -26,7 +26,10 @@ pub fn route_chat(
 	match target {
 		ChatTarget::Server | ChatTarget::Private(_) if voice_channel.is_some() => ChatRoute::Voice,
 		ChatTarget::Channel(cid) if voice_channel == Some(*cid) => ChatRoute::Voice,
-		ChatTarget::Private(_) => ChatRoute::Unavailable("private chat needs a voice connection"),
+		ChatTarget::Private(_) => ChatRoute::Unavailable(
+			"private messages need a voice connection (gateways and query relays cannot send them \
+			 as you; an offline message reaches clients who are away)",
+		),
 		_ if gateway => ChatRoute::Gateway,
 		_ if query => ChatRoute::Query,
 		ChatTarget::Channel(_) => ChatRoute::Unavailable(
@@ -106,6 +109,7 @@ mod tests {
 			text: text.into(),
 			ts_ms,
 			via_relay: false,
+			blocked: false,
 		}
 	}
 

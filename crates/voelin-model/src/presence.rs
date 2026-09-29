@@ -3,13 +3,34 @@
 //! The same model is fed from a voice connection, a query session or a
 //! gateway. Sources send a [`PresenceSnapshot`] followed by
 //! [`PresenceDelta`]s; sources that can only poll use [`Presence::diff`].
+//!
+//! A voice connection also knows the server's details (welcome message,
+//! host banner, …) and its server and channel groups ([`Presence::server`],
+//! [`Presence::server_groups`], [`Presence::channel_groups`]); snapshots and
+//! deltas do not carry them (other sources leave them empty).
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::server::ServerDetails;
+
 pub type ChannelId = u64;
 pub type ClientId = u16;
+/// A server or channel group id.
+pub type GroupId = u64;
+
+fn is_zero_i32(n: &i32) -> bool {
+	*n == 0
+}
+
+fn is_zero_u32(n: &u32) -> bool {
+	*n == 0
+}
+
+fn is_false(b: &bool) -> bool {
+	!*b
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelInfo {
@@ -32,6 +53,9 @@ pub struct ChannelInfo {
 	pub needed_talk_power: i32,
 	#[serde(default)]
 	pub is_default: bool,
+	/// Icon id (`channel_icon_id`); 0: none.
+	#[serde(default, skip_serializing_if = "is_zero_u32")]
+	pub icon: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +68,7 @@ pub struct ClientInfo {
 	/// ServerQuery clients (bots, our own relays). UIs normally hide them.
 	#[serde(default)]
 	pub is_query: bool,
+	/// Away, with the away message (empty without one); `None`: not away.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub away: Option<String>,
 	#[serde(default)]
@@ -56,9 +81,89 @@ pub struct ClientInfo {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub streaming: Option<bool>,
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub server_groups: Vec<u64>,
+	pub server_groups: Vec<GroupId>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub country: Option<String>,
+	/// MD5 hash of the client's avatar (`client_flag_avatar`, hex); `None`:
+	/// no avatar. A new hash means a new avatar.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub avatar: Option<String>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub description: Option<String>,
+	#[serde(default, skip_serializing_if = "is_zero_i32")]
+	pub talk_power: i32,
+	/// Allowed to talk regardless of talk power (`client_is_talker`).
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub talker: bool,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub channel_group: Option<GroupId>,
+	/// Badge GUIDs (`client_badges`), in display order.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub badges: Vec<String>,
+	/// Icon id (`client_icon_id`); 0: none.
+	#[serde(default, skip_serializing_if = "is_zero_u32")]
+	pub icon: u32,
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub recording: bool,
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub priority_speaker: bool,
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub channel_commander: bool,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub database_id: Option<u64>,
+}
+
+/// Badge GUIDs of a `client_badges` value
+/// (`Overwolf=0:badges=<guid>,<guid>`).
+pub fn parse_badges(value: &str) -> Vec<String> {
+	value
+		.split(':')
+		.filter_map(|part| part.strip_prefix("badges="))
+		.flat_map(|list| list.split(','))
+		.map(str::trim)
+		.filter(|g| !g.is_empty())
+		.map(str::to_owned)
+		.collect()
+}
+
+/// How a group's name is shown next to its members.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupNamingMode {
+	#[default]
+	None,
+	/// Before the nickname: `[Admin] Alice`.
+	Before,
+	/// After the nickname: `Alice [Admin]`.
+	After,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupType {
+	/// For new virtual servers; nobody is a member.
+	Template,
+	#[default]
+	Regular,
+	/// ServerQuery clients.
+	Query,
+}
+
+/// A server or channel group.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupInfo {
+	pub id: GroupId,
+	pub name: String,
+	/// Icon id; 0: none.
+	#[serde(default, skip_serializing_if = "is_zero_u32")]
+	pub icon: u32,
+	/// Display order: lower first, then by id.
+	#[serde(default)]
+	pub sort_id: i32,
+	#[serde(default)]
+	pub naming_mode: GroupNamingMode,
+	#[serde(default)]
+	pub group_type: GroupType,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +192,11 @@ pub struct Presence {
 	pub server_name: String,
 	pub channels: BTreeMap<ChannelId, ChannelInfo>,
 	pub clients: BTreeMap<ClientId, ClientInfo>,
+	/// What the source knows about the server (a voice connection: all of
+	/// it; other sources: nothing).
+	pub server: ServerDetails,
+	pub server_groups: BTreeMap<GroupId, GroupInfo>,
+	pub channel_groups: BTreeMap<GroupId, GroupInfo>,
 }
 
 impl Presence {
@@ -95,7 +205,21 @@ impl Presence {
 			server_name: s.server_name,
 			channels: s.channels.into_iter().map(|c| (c.id, c)).collect(),
 			clients: s.clients.into_iter().map(|c| (c.id, c)).collect(),
+			..Self::default()
 		}
+	}
+
+	/// The client with this unique id, if present (the first of several
+	/// connections with the same identity).
+	pub fn client_by_uid(&self, uid: &str) -> Option<&ClientInfo> {
+		self.clients.values().find(|c| c.uid.as_deref() == Some(uid))
+	}
+
+	/// Groups in display order (sort id, then id).
+	pub fn sorted_groups(groups: &BTreeMap<GroupId, GroupInfo>) -> Vec<&GroupInfo> {
+		let mut sorted: Vec<_> = groups.values().collect();
+		sorted.sort_by_key(|g| (g.sort_id, g.id));
+		sorted
 	}
 
 	pub fn snapshot(&self) -> PresenceSnapshot {
@@ -212,6 +336,40 @@ mod tests {
 		}
 		assert_eq!(state, new);
 		assert!(new.diff(&new).is_empty());
+	}
+
+	#[test]
+	fn badges_and_groups() {
+		assert_eq!(
+			parse_badges(
+				"Overwolf=0:badges=c9e97536-5a2d-4c8e-a135-af404587a472,450f81c1-ab41-4211-a338-222fa94ed157"
+			),
+			["c9e97536-5a2d-4c8e-a135-af404587a472", "450f81c1-ab41-4211-a338-222fa94ed157"]
+		);
+		assert!(parse_badges("").is_empty());
+		assert!(parse_badges("Overwolf=1").is_empty());
+		let group = |id, sort_id| GroupInfo { id, sort_id, ..Default::default() };
+		let groups = BTreeMap::from([(1, group(1, 20)), (2, group(2, 10)), (3, group(3, 10))]);
+		let order: Vec<_> = Presence::sorted_groups(&groups).iter().map(|g| g.id).collect();
+		assert_eq!(order, [2, 3, 1]);
+		let mut alice = cl(1, "Alice", 1);
+		alice.uid = Some("A=".into());
+		let p = presence(vec![ch(1, "Lobby")], vec![alice, cl(2, "Bob", 1)]);
+		assert_eq!(p.client_by_uid("A=").map(|c| c.id), Some(1));
+		assert!(p.client_by_uid("B=").is_none());
+	}
+
+	#[test]
+	fn old_json_without_new_fields() {
+		let c: ClientInfo =
+			serde_json::from_str(r#"{"id":1,"nickname":"a","channel":2,"away":""}"#).unwrap();
+		assert_eq!(c.away.as_deref(), Some(""));
+		assert_eq!((c.talk_power, c.avatar.as_ref(), c.badges.len()), (0, None, 0));
+		// Defaults stay off the wire.
+		assert_eq!(
+			serde_json::to_string(&cl(1, "a", 2)).unwrap(),
+			r#"{"id":1,"nickname":"a","channel":2,"is_query":false,"input_muted":false,"output_muted":false}"#
+		);
 	}
 
 	#[test]

@@ -23,6 +23,12 @@
 #  11. stream (TeamSpeak 6 only): a viewer watches a synthetic VP8 + Opus stream
 #  12. late stream (TeamSpeak 6 only): a viewer that connects after the stream
 #      started finds it (requeststreaminfo) and watches it
+#  13. the engine's voice features (voelinctl engine): upload a file and
+#      post its link in chat, another client lists the channel's files and
+#      downloads the linked file (compared byte for byte), the file is
+#      deleted; an avatar set by one client is fetched by another (MD5
+#      checked); poke, private message and offline message round trips; a
+#      friend is seen online; a blocked contact's poke arrives flagged
 #
 # Usage: scripts/it-smoke.sh [ts3|ts6]...   (default: both)
 # Env:   VOELINCTL=path/to/voelinctl, TSGW=path/to/tsgw (default: builds both
@@ -352,6 +358,114 @@ directory_check() {
 	grep -E "^watching|^received" "$viewer_out"
 }
 
+# A voice session through the engine: voelinctl engine <addr> <args>.
+eng() {
+	local addr=$1
+	shift
+	"$VOELINCTL" engine "$addr" "$@"
+}
+
+# The unique id the server knows an identity by (TeamSpeak 6: another hash).
+server_uid() {
+	local svc=$1 id=$2 field=uid
+	[[ $svc == ts6 ]] && field=uid6
+	"$VOELINCTL" identity show --identity "$id" | awk -v f="$field:" '$1 == f { print $2 }'
+}
+
+# Run a background listener, then the action; both must succeed.
+roundtrip() {
+	local what=$1 listen_log=$2 listener_cmd=$3 action_cmd=$4
+	eval "$listener_cmd" >"$listen_log" 2>&1 &
+	local listener=$!
+	sleep 3
+	if ! eval "$action_cmd" >"$STATE_DIR/action.log" 2>&1; then
+		cat "$STATE_DIR/action.log" "$listen_log"
+		fail "$what: the action failed"
+	fi
+	if ! wait "$listener"; then
+		cat "$listen_log" "$STATE_DIR/action.log"
+		fail "$what: not received"
+	fi
+}
+
+# Files, avatars, pokes, private and offline messages, contacts through the
+# engine (voelinctl engine).
+engine_voice_check() {
+	local svc=$1 addr=$2 admin_id="$STATE_DIR/$svc-admin.json"
+	local user="$STATE_DIR/voice-user.json" other="$STATE_DIR/voice-other.json"
+	[[ -f "$user" ]] || "$VOELINCTL" identity new --out "$user" >/dev/null
+	[[ -f "$other" ]] || "$VOELINCTL" identity new --out "$other" >/dev/null
+	local t="$$-$RANDOM" dir="$STATE_DIR/files-$svc"
+	rm -rf "$dir" && mkdir -p "$dir/in"
+
+	# Files: the admin uploads (guests may not) and links the file in chat;
+	# a reader downloads it from the link; a guest lists it; it is deleted.
+	head -c 1500000 /dev/urandom >"$dir/smoke-$t.bin"
+	roundtrip "file link" "$dir/reader.log" \
+		"eng $addr --nick file-reader --seconds 25 listen --fetch-links $dir/in" \
+		"eng $addr --identity $admin_id --nick file-sharer --seconds 20 files upload $dir/smoke-$t.bin --share --overwrite"
+	cmp "$dir/smoke-$t.bin" "$dir/in/smoke-$t.bin" || fail "the downloaded file differs"
+	grep -E "^file link|^transfer 7 done" "$dir/reader.log"
+	if ! eng "$addr" --nick file-lister --seconds 20 files ls --channel 1 --path / \
+		--expect "smoke-$t.bin" >"$dir/ls.log" 2>&1; then
+		cat "$dir/ls.log"
+		fail "the file is not listed"
+	fi
+	grep "smoke-$t.bin" "$dir/ls.log"
+	eng "$addr" --identity "$admin_id" --nick file-sharer --seconds 20 files rm --channel 1 \
+		"/smoke-$t.bin" >/dev/null || fail "could not delete the file"
+
+	# Avatar: set by one client (kept by the server), fetched by another.
+	printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==' |
+		base64 -d >"$dir/avatar.png"
+	local md5
+	md5=$(md5sum "$dir/avatar.png" | cut -d' ' -f1)
+	eng "$addr" --identity "$user" --nick avatar-owner-$t --seconds 20 avatar set "$dir/avatar.png" \
+		>"$dir/avatar-set.log" 2>&1 || { cat "$dir/avatar-set.log"; fail "could not set the avatar"; }
+	roundtrip "avatar" "$dir/avatar-owner.log" \
+		"eng $addr --identity $user --nick avatar-owner-$t --seconds 10 listen --expect never-$t || true" \
+		"eng $addr --nick avatar-fetcher --seconds 12 avatar wait --nick avatar-owner-$t --md5 $md5"
+	grep "^avatar avatar-owner-$t" "$STATE_DIR/action.log"
+
+	# Poke and private message from one guest to another.
+	roundtrip "poke" "$dir/poke.log" \
+		"eng $addr --identity $user --nick poke-target-$t --seconds 15 listen --expect poke-$t" \
+		"eng $addr --nick poker --seconds 10 poke --to poke-target-$t --message poke-$t"
+	grep "^poke from" "$dir/poke.log"
+	roundtrip "private message" "$dir/dm.log" \
+		"eng $addr --identity $user --nick dm-target-$t --seconds 15 listen --expect dm-$t" \
+		"eng $addr --nick dm-sender --seconds 10 dm --to dm-target-$t --message dm-$t"
+	grep "^chat private" "$dir/dm.log"
+
+	# Offline message: the admin writes (guests may not), the user reads
+	# and deletes it.
+	local uid
+	uid=$(server_uid "$svc" "$user")
+	eng "$addr" --identity "$admin_id" --nick mailer --seconds 15 offline send --to-uid "$uid" \
+		--subject "smoke $t" --message "offline-$t" >"$dir/offline-send.log" 2>&1 ||
+		{ cat "$dir/offline-send.log"; fail "could not send the offline message"; }
+	if ! eng "$addr" --identity "$user" --nick mail-reader --seconds 15 offline read \
+		--expect "offline-$t" --delete >"$dir/offline-read.log" 2>&1; then
+		cat "$dir/offline-read.log"
+		fail "the offline message did not arrive"
+	fi
+	grep "offline-$t" "$dir/offline-read.log"
+
+	# Contacts: a friend seen online; a blocked contact's poke flagged.
+	local db="$dir/contacts.db"
+	eng "$addr" --db "$db" contacts set "$uid" --relation friend --nickname friend >/dev/null
+	eng "$addr" --db "$db" contacts set "$(server_uid "$svc" "$other")" --relation blocked >/dev/null
+	roundtrip "friend presence" "$dir/friend.log" \
+		"eng $addr --identity $user --nick friend-$t --seconds 10 listen --expect never-$t || true" \
+		"eng $addr --db $db --nick friend-watcher --seconds 10 contacts ls --expect-online $uid"
+	grep "^friend" "$STATE_DIR/action.log" | tail -1
+	roundtrip "blocked poke" "$dir/blocked.log" \
+		"eng $addr --db $db --set privacy.block_mode=flag --nick blocker-$t --seconds 15 listen --expect '(blocked)'" \
+		"eng $addr --identity $other --nick blocked-poker --seconds 10 poke --to blocker-$t --message blocked-$t"
+	grep "^poke from" "$dir/blocked.log"
+	rm -rf "$dir"
+}
+
 for svc in "${SERVERS[@]}"; do
 	port=${PORTS[$svc]:?unknown server $svc}
 	addr="127.0.0.1:$port"
@@ -370,6 +484,7 @@ for svc in "${SERVERS[@]}"; do
 	presence_check "$addr" "${QUERY[$svc]}"
 	relay_check "$addr" "${QUERY[$svc]}"
 	gateway_check "$svc" "$addr"
+	engine_voice_check "$svc" "$addr"
 	if [[ $svc == ts6 ]]; then
 		stream_check "$addr"
 		stream_late_check "$addr"

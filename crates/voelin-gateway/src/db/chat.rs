@@ -25,6 +25,7 @@ fn entry_from_row(r: &Row) -> rusqlite::Result<HistoryEntry> {
 			author_id: None,
 			text: r.get(5)?,
 			via_relay: true,
+			blocked: false,
 		},
 		topic_id: r.get(6)?,
 		rev: r.get(7)?,
