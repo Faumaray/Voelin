@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use base64::Engine as _;
 use futures::prelude::*;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::AbortHandle;
@@ -861,7 +862,17 @@ impl Voice {
 				self.send(cmd, Pending::OfflineGet { request, id, message: None })?;
 			}
 			VoiceCmd::OfflineAdd { request, to_uid, subject, text } => {
-				let uid = tsclientlib::UidBuf(to_uid.into_bytes());
+				// The command carries the unique id's bytes (base64 on the wire).
+				let bytes = base64::engine::general_purpose::STANDARD
+					.decode(to_uid.trim())
+					.map_err(|_| anyhow::anyhow!("offline message: invalid unique id {to_uid:?}"));
+				let uid = match bytes {
+					Ok(bytes) => tsclientlib::UidBuf(bytes),
+					Err(e) => {
+						self.link.done(request, Err(e.to_string()));
+						return Ok(());
+					}
+				};
 				let cmd = c2s::OutOfflineMessageAddMessage::new(&mut std::iter::once(
 					c2s::OutOfflineMessageAddPart {
 						client_uid: std::borrow::Cow::Borrowed(uid.as_ref()),

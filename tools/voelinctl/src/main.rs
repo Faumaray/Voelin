@@ -252,7 +252,11 @@ fn run_identity(command: IdentityCommand) -> Result<()> {
 			let id = identity::load(&path)?;
 			println!("uid:   {}", identity::uid(&id));
 			println!("level: {}", id.level());
-			println!("omega: {}", id.key().to_pub().to_ts());
+			let omega = id.key().to_pub().to_ts();
+			// TeamSpeak 6 servers know the identity by another unique id.
+			let ids = voelin_gateway_proto::UniqueIds::from_omega(&omega);
+			println!("uid6:  {}", ids.ts6);
+			println!("omega: {omega}");
 			Ok(())
 		}
 	}

@@ -207,8 +207,12 @@ pub enum ContactsCommand {
 	Rm {
 		uid: String,
 	},
-	/// Print the contacts, and friends' presence while connected.
-	Ls,
+	/// Connect, print the contacts and friends' presence.
+	Ls {
+		/// Succeed once this friend (unique id) is seen online.
+		#[arg(long)]
+		expect_online: Option<String>,
+	},
 }
 
 /// What the action waits for.
@@ -241,7 +245,7 @@ pub async fn run(args: EngineArgs) -> Result<()> {
 
 	// Contacts need no server.
 	if let EngineAction::Contacts { command } = &args.action
-		&& !matches!(command, ContactsCommand::Ls)
+		&& !matches!(command, ContactsCommand::Ls { .. })
 	{
 		let result = contacts(&engine, command, &mut events, deadline).await;
 		engine.history().flush();
@@ -400,11 +404,12 @@ impl Runner<'_> {
 				}
 			}
 			Event::Poke { from_name, message, blocked, .. } => {
-				println!(
+				let line = format!(
 					"poke from {from_name}: {message}{}",
 					if blocked { " (blocked)" } else { "" }
 				);
-				return Ok(self.expected(&message));
+				println!("{line}");
+				return Ok(self.expected(&line));
 			}
 			Event::Chat { session: SESSION, message } => {
 				println!(
@@ -441,7 +446,7 @@ impl Runner<'_> {
 				if let EngineAction::Dm { message: sent, .. } = &self.args.action {
 					return Ok(private && message.text == *sent);
 				}
-				return Ok(private && self.expected(&message.text));
+				return Ok(self.expected(&message.text));
 			}
 			Event::AvatarReady { client_uid, path, hash, .. } => {
 				let nick = self
@@ -467,7 +472,10 @@ impl Runner<'_> {
 					return Ok(true);
 				}
 			}
-			Event::IconReady { icon, path, .. } => println!("icon {icon} {}", path.display()),
+			Event::IconReady { icon, path, .. } => {
+				println!("icon {icon} {}", path.display());
+				return Ok(self.expected(&format!("icon {icon}")));
+			}
 			Event::OfflineMessages { result, .. } => {
 				let list = result.map_err(|e| anyhow::anyhow!("messagelist: {e}"))?;
 				println!("offline inbox n={}", list.len());
@@ -524,6 +532,12 @@ impl Runner<'_> {
 					.map(|s| format!("{} as {} in {}", s.server_name, s.nickname, s.channel_name))
 					.collect();
 				println!("friend {uid}: [{}]", spots.join(", "));
+				if let EngineAction::Contacts {
+					command: ContactsCommand::Ls { expect_online: Some(want) },
+				} = &self.args.action
+				{
+					return Ok(*want == uid && !sessions.is_empty());
+				}
 			}
 			Event::ServerDetails { details, .. } => {
 				println!(
@@ -682,9 +696,12 @@ impl Runner<'_> {
 					self.send(Command::ListOfflineMessages { session, request: 1 });
 				}
 			},
-			EngineAction::Contacts { .. } => {
+			EngineAction::Contacts { command } => {
 				for c in self.engine.contacts() {
 					println!("contact {} {:?} {:?}", c.uid, c.relation, c.nickname);
+				}
+				if matches!(command, ContactsCommand::Ls { expect_online: None }) {
+					self.finish_at = Some(Instant::now() + Duration::from_secs(2));
 				}
 			}
 			EngineAction::Listen { .. } => {}
@@ -729,15 +746,10 @@ async fn contacts(
 	events: &mut tokio::sync::broadcast::Receiver<Event>,
 	deadline: Instant,
 ) -> Result<()> {
-	// The stored contacts are loaded first.
-	let _ = timeout_at(deadline, async {
-		while let Ok(e) = events.recv().await {
-			if matches!(e, Event::ContactsChanged { .. }) {
-				break;
-			}
-		}
-	})
-	.await;
+	// The stored contacts are loaded first (on the database thread).
+	let history = engine.history();
+	tokio::task::spawn_blocking(move || history.flush()).await?;
+	while events.try_recv().is_ok() {}
 	match command {
 		ContactsCommand::Set { uid, relation, nickname, note } => {
 			let relation = match relation.as_str() {
@@ -754,7 +766,7 @@ async fn contacts(
 			engine.send(Command::SetContact { contact: Box::new(contact) });
 		}
 		ContactsCommand::Rm { uid } => engine.send(Command::RemoveContact { uid: uid.clone() }),
-		ContactsCommand::Ls => {}
+		ContactsCommand::Ls { .. } => {}
 	}
 	let changed = timeout_at(deadline, async {
 		while let Ok(e) = events.recv().await {
@@ -768,6 +780,7 @@ async fn contacts(
 	.ok()
 	.flatten()
 	.context("no contacts update")?;
+	println!("contacts n={}", changed.len());
 	for c in changed.iter() {
 		println!("contact {} {:?} {:?} {:?}", c.uid, c.relation, c.nickname, c.note);
 	}
