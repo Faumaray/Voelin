@@ -13,7 +13,7 @@
 use std::collections::VecDeque;
 use std::ffi::c_int;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::layout::{self, HwFramesFields};
 use super::sys::{self, FrameHead, PacketHead, Ptr, Rational, cstr};
@@ -451,6 +451,9 @@ struct Session {
 	/// No packet came out yet: the first one starts the stream, so it is a
 	/// keyframe even where the wrapper does not flag it (rav1e).
 	first_packet: bool,
+	/// When it was opened (bitrate increases reopen at most every
+	/// [`REOPEN_FOR_BITRATE`]).
+	opened: Instant,
 	timestamps: Timestamps,
 	nv12: bool,
 }
@@ -474,6 +477,11 @@ impl Drop for Session {
 		}
 	}
 }
+
+/// How long a session runs before a bitrate increase of half or more
+/// reopens it (a keyframe) on backends that cannot change the bitrate
+/// running; smaller increases wait for the next keyframe.
+const REOPEN_FOR_BITRATE: Duration = Duration::from_secs(5);
 
 /// When to recreate the session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -630,6 +638,7 @@ impl FfmpegEncoder {
 			packet: std::ptr::null_mut(),
 			last_pts: None,
 			first_packet: true,
+			opened: Instant::now(),
 			timestamps: Timestamps::new(),
 			nv12: self.spec.input != Input::Yuv420p,
 		};
@@ -1177,7 +1186,9 @@ impl VideoEncoder for FfmpegEncoder {
 	fn set_bitrate(&mut self, bps: u32) -> Result<()> {
 		let bps = bps.max(1);
 		self.config.bitrate_bps = bps;
-		let Some((ctx, running)) = self.session.as_ref().map(|s| (s.ctx, s.bitrate)) else {
+		let Some((ctx, running, opened)) =
+			self.session.as_ref().map(|s| (s.ctx, s.bitrate, s.opened))
+		else {
 			return Ok(());
 		};
 		if running == bps {
@@ -1197,6 +1208,13 @@ impl VideoEncoder for FfmpegEncoder {
 			}
 		} else if u64::from(bps) * 2 < u64::from(running) {
 			// Congestion: waiting for a keyframe would keep overshooting.
+			self.reinit = Reinit::Now;
+		} else if u64::from(bps) * 2 > u64::from(running) * 3
+			&& opened.elapsed() >= REOPEN_FOR_BITRATE
+		{
+			// Much more room (the estimate ramping up after the start): a
+			// screen that never asks for a keyframe would otherwise keep
+			// the start bitrate.
 			self.reinit = Reinit::Now;
 		} else {
 			self.reinit = self.reinit.max(Reinit::AtKeyframe);

@@ -229,6 +229,32 @@ fn unusable_backends_fail_cleanly() {
 	}
 }
 
+/// A backend whose wrapper cannot change the bitrate running (libaom here,
+/// VA-API alike) waits for the next keyframe, but reopens at once when the
+/// target falls below half.
+#[test]
+fn bitrate_changes_without_live_reconfiguration() {
+	if ffmpeg().is_none() || !available("libaom-av1") {
+		return;
+	}
+	let screen = SyntheticScreen::new(W, H);
+	let config = EncoderConfig { fps: 30, bitrate_bps: 1_000_000, ..EncoderConfig::default() };
+	let mut encoder = FfmpegEncoder::new("libaom-av1", config).unwrap();
+	let mut key = |encoder: &mut FfmpegEncoder, n: u64, force: bool| {
+		encoder.encode(&screen.frame(n, 30), force).unwrap().iter().any(|f| f.keyframe)
+	};
+	assert!(key(&mut encoder, 0, false));
+	assert!(!key(&mut encoder, 1, false));
+	encoder.set_bitrate(800_000).unwrap();
+	assert!(!key(&mut encoder, 2, false), "a small change waits for a keyframe");
+	encoder.set_bitrate(300_000).unwrap();
+	assert!(key(&mut encoder, 3, false), "congestion: at once");
+	encoder.set_bitrate(400_000).unwrap();
+	assert!(!key(&mut encoder, 4, false));
+	assert!(key(&mut encoder, 5, true));
+	assert!(!key(&mut encoder, 6, false));
+}
+
 /// DMA-BUF import is for VA-API encoders and NV12 buffers; anything else is
 /// refused as unavailable, so the caller maps the buffer instead.
 #[cfg(target_os = "linux")]

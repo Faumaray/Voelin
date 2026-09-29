@@ -324,8 +324,10 @@ the software encoders above are used as before.
   are skipped; alternatives are tried in order.
 - Runtime changes: x264, NVENC and Quick Sync take bitrate changes on the
   running encoder (FFmpeg's wrappers compare `b` / `maxrate` / `bufsize`
-  before each frame); the others reopen at the next keyframe, or at once
-  when the target falls below half (congestion). A new frame rate or size
+  before each frame); the others reopen at the next keyframe, at once
+  when the target falls below half (congestion), and when it rose by half
+  or more and the session is 5 s old (the estimate ramping up after the
+  start would otherwise never reach the encoder). A new frame rate or size
   opens a new session (keyframe); the old one is flushed first, so frames an
   encoder with a delay still held come out.
 - Buffers: per session one software `AVFrame` (`av_frame_get_buffer`,
