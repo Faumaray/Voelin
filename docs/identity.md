@@ -99,9 +99,10 @@ contents.
 
 The `Checksum` row is `SHA1` over the concatenation of the other rows' `value`
 blobs in ascending numeric `key` order — 20 bytes, no key, no length prefixes.
-It is an integrity check the client writes, verified here only as a warning:
-Voelin never writes these files, so it cannot invalidate one, and a
-user-edited database with a stale checksum is still worth importing from.
+It is an integrity check the client writes. Voelin does not verify it: it never
+writes these files, so it cannot invalidate one, and refusing to import from a
+database whose checksum a third-party tool left stale would help nobody. A key
+that does not parse is rejected on its own merits.
 
 `AccountData/Account` in the TeamSpeak 6 database is the myTeamSpeak account
 record, not an identity — see [research/myteamspeak.md](research/myteamspeak.md).

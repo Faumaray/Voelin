@@ -24,8 +24,11 @@ media-desktop = ["media", "voelin-media/default"]
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
+dirs = "6"
 futures = "0.3"
 md5 = "0.8"
+# Reading the official clients' settings.db when importing identities.
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

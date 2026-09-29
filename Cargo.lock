@@ -9096,8 +9096,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "dirs",
  "futures",
  "md5",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
