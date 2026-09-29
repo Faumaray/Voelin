@@ -463,6 +463,8 @@ export global Bridge {
     callback set-h264(bool);
     callback download-h264();
     callback appearance-changed(AppearanceForm);
+    // The members panel was dragged to another width (pixels).
+    callback panel-resized(float);
     callback open-client(int) -> bool;
     callback client-audio-changed(ClientAudio);
     callback set-crash-reports(bool);
@@ -478,6 +480,8 @@ export global Bridge {
 export global Images {
     // A Twemoji by key ("1f600", "1f468-200d-1f4bb"); empty if unknown.
     pure callback emoji(string) -> image;
+    // The characters of a Twemoji key, to react with or to insert.
+    pure callback emoji-text(string) -> string;
 }
 
 // One emoji of the picker. `text` is what picking it inserts.

@@ -5,7 +5,9 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, StreamItem, MemberItem } from "../bridge.slint";
 import { Nav } from "../nav.slint";
-import { Icon, Button, ButtonKind, IconButton, Avatar, Status, LiveBadge, Chip, SectionHeader, SpeakingBars, Slider, Spinner, ListView, ScrollView } from "../components/index.slint";
+import { Icon, Button, ButtonKind, IconButton, Avatar, Status, LiveBadge, Chip, Select, SectionHeader, SpeakingBars, Slider, Spinner, TextField, ListView, ScrollView } from "../components/index.slint";
+import { MemberRow, GroupHeader } from "members.slint";
+import { MessageRow } from "chat.slint";
 
 // A stream card: the streamer, the title, watch / show / leave.
 component StreamCard inherits Rectangle {
@@ -88,82 +90,6 @@ component StreamCard inherits Rectangle {
     }
 }
 
-// A person in our channel.
-component MemberRow inherits Rectangle {
-    in property <MemberItem> member;
-    height: 48px * Theme.font-scale;
-    border-radius: Theme.radius-md;
-    background: area.has-hover ? Theme.surface-3 : transparent;
-    accessible-role: AccessibleRole.list-item;
-    accessible-label: member.name;
-    accessible-description: member.status;
-    accessible-action-default => { Nav.open-client(member.id); }
-    area := TouchArea {
-        enabled: !member.myself;
-        mouse-cursor: MouseCursor.pointer;
-        clicked => { Nav.open-client(member.id); }
-    }
-    HorizontalLayout {
-        padding-left: Theme.space-2;
-        padding-right: Theme.space-2;
-        spacing: Theme.space-3;
-        VerticalLayout {
-            alignment: center;
-            Avatar {
-                size: 34px;
-                initials: member.initials;
-                tint: member.tint;
-                speaking: member.talking;
-                status: member.away ? Status.idle : member.sound-off ? Status.dnd : Status.online;
-                label: member.name;
-            }
-        }
-        VerticalLayout {
-            alignment: center;
-            horizontal-stretch: 1;
-            HorizontalLayout {
-                spacing: Theme.space-2;
-                Text {
-                    text: member.name;
-                    color: member.myself ? Theme.accent-text : Theme.name-text;
-                    font-weight: Theme.weight-medium;
-                    overflow: elide;
-                }
-                if member.streaming: VerticalLayout {
-                    alignment: center;
-                    LiveBadge { }
-                }
-            }
-            HorizontalLayout {
-                spacing: Theme.space-2;
-                Text {
-                    text: member.status;
-                    color: member.talking ? Theme.success : Theme.text-muted;
-                    font-size: Theme.font-sm;
-                    overflow: elide;
-                }
-                if member.talking: SpeakingBars {
-                    width: 12px;
-                    height: 12px;
-                    y: (parent.height - self.height) / 2;
-                }
-            }
-        }
-        if member.muted: Icon {
-            source: Icons.mic-off;
-            size: 16px;
-            tint: Theme.danger;
-            y: (parent.height - self.height) / 2;
-        }
-        if member.sound-off: Icon {
-            source: Icons.headphone-off;
-            size: 16px;
-            tint: Theme.danger;
-            y: (parent.height - self.height) / 2;
-        }
-    }
-}
-
 // The right panel of a server: who is in our channel, the streams there,
 // and requests to watch ours.
 export component StreamsPanel inherits VerticalLayout {
@@ -199,8 +125,13 @@ export component StreamsPanel inherits VerticalLayout {
             width: sv.visible-width;
             spacing: Theme.space-2;
             alignment: start;
-            for member in Bridge.members: MemberRow {
-                member: member;
+            for member in Bridge.members: VerticalLayout {
+                if member.first-in-group: GroupHeader {
+                    member: member;
+                }
+                MemberRow {
+                    member: member;
+                }
             }
             if Bridge.streams-available: VerticalLayout {
                 padding-top: Theme.space-4;
@@ -258,11 +189,9 @@ export component StreamsPanel inherits VerticalLayout {
     }
 }
 
-// The stream we watch: title bar, picture, player controls.
-export component StreamViewer inherits Rectangle {
+// The player: title bar, picture and controls (no chat).
+component StreamPlayer inherits Rectangle {
     background: Theme.dark ? #03060f : #0b1330;
-    accessible-role: AccessibleRole.groupbox;
-    accessible-label: @tr("Stream viewer");
     VerticalLayout {
         // Title bar.
         Rectangle {
@@ -302,9 +231,45 @@ export component StreamViewer inherits Rectangle {
                         overflow: elide;
                     }
                 }
-                if !Bridge.viewer-ended: VerticalLayout {
+                // How long we have been watching, and how many others do.
+                if !Bridge.viewer-ended: HorizontalLayout {
+                    spacing: Theme.space-3;
                     alignment: center;
-                    LiveBadge { large: true; }
+                    if Bridge.viewer-elapsed != "": HorizontalLayout {
+                        spacing: Theme.space-2;
+                        Icon {
+                            source: Icons.clock;
+                            size: 14px;
+                            tint: Theme.text-muted;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        Text {
+                            text: Bridge.viewer-elapsed;
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-sm;
+                            vertical-alignment: center;
+                        }
+                    }
+                    if Bridge.viewer-count > 0: HorizontalLayout {
+                        spacing: Theme.space-2;
+                        Icon {
+                            source: Icons.eye;
+                            size: 14px;
+                            tint: Theme.text-muted;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        Text {
+                            text: Bridge.viewer-count;
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-sm;
+                            vertical-alignment: center;
+                            accessible-label: @tr("viewers");
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        LiveBadge { large: true; }
+                    }
                 }
             }
         }
@@ -345,13 +310,16 @@ export component StreamViewer inherits Rectangle {
                 padding-left: Theme.space-4;
                 padding-right: Theme.space-4;
                 spacing: Theme.space-3;
-                Icon {
-                    source: Bridge.viewer-volume > 0 ? Icons.volume-2 : Icons.volume-x;
-                    tint: Theme.text-secondary;
+                IconButton {
+                    icon: Bridge.viewer-volume > 0 ? Icons.volume-2 : Icons.volume-x;
+                    label: Bridge.viewer-volume > 0 ? @tr("Mute") : @tr("Unmute");
+                    size: 30px;
+                    icon-size: Theme.icon-sm;
                     y: (parent.height - self.height) / 2;
+                    clicked => { Bridge.set-stream-volume(Bridge.viewer-volume > 0 ? 0 : 100); }
                 }
                 Slider {
-                    width: 140px;
+                    width: 120px;
                     horizontal-stretch: 0;
                     y: (parent.height - self.height) / 2;
                     minimum: 0;
@@ -369,24 +337,33 @@ export component StreamViewer inherits Rectangle {
                     color: Theme.text-secondary;
                     font-size: Theme.font-sm;
                 }
-                if !Bridge.viewer-ended: HorizontalLayout {
-                    spacing: Theme.space-2;
-                    Rectangle {
-                        width: 8px;
-                        height: 8px;
-                        y: (parent.height - self.height) / 2;
-                        border-radius: 4px;
-                        background: Theme.live;
-                    }
-                    Text {
-                        text: @tr("LIVE");
-                        color: Theme.text;
-                        font-size: Theme.font-sm;
-                        font-weight: Theme.weight-semibold;
-                        vertical-alignment: center;
-                    }
+                // Simulcast layers the streamer offers; "Auto" follows the
+                // bandwidth estimate.
+                if Bridge.viewer-qualities.length > 1: Select {
+                    width: 150px;
+                    horizontal-stretch: 0;
+                    y: (parent.height - self.height) / 2;
+                    icon: Icons.sliders-horizontal;
+                    label: @tr("Quality");
+                    model: Bridge.viewer-qualities;
+                    current-index <=> Bridge.viewer-quality;
+                    enabled: !Bridge.viewer-ended;
+                    selected(_) => { Bridge.set-stream-quality(Bridge.viewer-quality); }
+                }
+                if Bridge.viewer-quality == 0 && Bridge.viewer-quality-detail != "": Text {
+                    text: Bridge.viewer-quality-detail;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    vertical-alignment: center;
                 }
                 Rectangle { horizontal-stretch: 1; }
+                IconButton {
+                    icon: Icons.external-link;
+                    label: Bridge.viewer-popped ? @tr("Back to the window") : @tr("Pop out");
+                    checked: Bridge.viewer-popped;
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Bridge.viewer-popped = !Bridge.viewer-popped; }
+                }
                 IconButton {
                     icon: Bridge.viewer-fullscreen ? Icons.minimize-2 : Icons.maximize;
                     label: Bridge.viewer-fullscreen ? @tr("Exit full screen") : @tr("Full screen");
@@ -410,6 +387,114 @@ export component StreamViewer inherits Rectangle {
                     clicked => { Bridge.leave-stream(); }
                 }
             }
+        }
+    }
+}
+
+// The chat beside the player: the current chat's messages and a composer.
+component StreamChat inherits Rectangle {
+    background: Theme.surface;
+    Rectangle {
+        x: 0;
+        width: 1px;
+        background: Theme.border;
+    }
+    VerticalLayout {
+        Rectangle {
+            height: 44px;
+            HorizontalLayout {
+                padding-left: Theme.space-4;
+                padding-right: Theme.space-3;
+                spacing: Theme.space-2;
+                Icon {
+                    source: Icons.message-square;
+                    size: Theme.icon-sm;
+                    tint: Theme.text-secondary;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length ? Bridge.tabs[Bridge.current-tab].title : @tr("Chat");
+                    color: Theme.text;
+                    font-weight: Theme.weight-semibold;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+            }
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Theme.border;
+            }
+        }
+        ListView {
+            vertical-stretch: 1;
+            accessible-label: @tr("Messages");
+            for line in Bridge.messages: MessageRow {
+                line: line;
+                actions: false;
+            }
+        }
+        HorizontalLayout {
+            padding: Theme.space-3;
+            Rectangle {
+                min-height: 40px;
+                border-radius: Theme.radius-lg;
+                background: Theme.surface-2;
+                border-width: 1px;
+                border-color: field.has-focus ? Theme.accent : Theme.border;
+                HorizontalLayout {
+                    padding-left: Theme.space-4;
+                    padding-right: Theme.space-2;
+                    field := TextField {
+                        text <=> Nav.draft;
+                        bare: true;
+                        placeholder: @tr("Message");
+                        label: @tr("Message");
+                        accepted(text) => {
+                            if text != "" {
+                                Bridge.send-message(text);
+                                self.clear();
+                            }
+                        }
+                    }
+                    IconButton {
+                        icon: Icons.send;
+                        label: @tr("Send");
+                        round: true;
+                        enabled: field.text != "";
+                        tint: field.text != "" ? Theme.on-accent : Theme.text-muted;
+                        filled: field.text != "";
+                        y: (parent.height - self.height) / 2;
+                        clicked => {
+                            if field.text != "" {
+                                Bridge.send-message(field.text);
+                                field.clear();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The stream we watch: the player, with the chat beside it when there is
+// room (and not in full screen).
+export component StreamViewer inherits Rectangle {
+    background: Theme.dark ? #03060f : #0b1330;
+    // Reading our own width here would loop through the layout, so the
+    // phone breakpoint (a setting) decides.
+    property <bool> with-chat: !Bridge.viewer-fullscreen && !Nav.narrow;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: @tr("Stream viewer");
+    HorizontalLayout {
+        StreamPlayer {
+            horizontal-stretch: 1;
+        }
+        if root.with-chat: StreamChat {
+            width: Nav.right-panel-width + 40px;
+            horizontal-stretch: 0;
         }
     }
 }

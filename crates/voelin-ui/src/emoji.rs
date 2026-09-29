@@ -253,7 +253,7 @@ fn key_of(cps: &[u32]) -> String {
 
 /// The characters of an archive key, with U+FE0F after a lone character
 /// that is text by default, so other clients show an emoji too.
-fn text_of(key: &str) -> String {
+pub fn text_of(key: &str) -> String {
 	let cps: Vec<u32> = key.split('-').filter_map(|p| u32::from_str_radix(p, 16).ok()).collect();
 	let mut text: String = cps.iter().filter_map(|&cp| char::from_u32(cp)).collect();
 	if cps.len() == 1 && !emoji_presentation(cps[0]) {

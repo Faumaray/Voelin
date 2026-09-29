@@ -288,6 +288,8 @@ pub(crate) struct Models {
 	pub pins: Rc<VecModel<PinItem>>,
 	pub topics: Rc<VecModel<TopicItem>>,
 	pub topic_messages: Rc<VecModel<ChatLine>>,
+	/// The quality choices of the watched stream.
+	pub qualities: Rc<VecModel<slint::SharedString>>,
 	/// Shown when there is no chat.
 	pub no_chat: Rc<VecModel<ChatLine>>,
 }
@@ -304,6 +306,7 @@ impl Models {
 			pins: Rc::default(),
 			topics: Rc::default(),
 			topic_messages: Rc::default(),
+			qualities: Rc::default(),
 			no_chat: Rc::default(),
 		};
 		bridge.set_servers(ModelRc::from(models.servers.clone()));
@@ -315,6 +318,7 @@ impl Models {
 		bridge.set_pins(ModelRc::from(models.pins.clone()));
 		bridge.set_topics(ModelRc::from(models.topics.clone()));
 		bridge.set_topic_messages(ModelRc::from(models.topic_messages.clone()));
+		bridge.set_viewer_qualities(ModelRc::from(models.qualities.clone()));
 		bridge.set_messages(ModelRc::from(models.no_chat.clone()));
 		models
 	}

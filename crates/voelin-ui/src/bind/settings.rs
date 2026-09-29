@@ -27,6 +27,9 @@ pub(super) fn wire(ui: &MainWindow) {
 	bridge.on_download_h264(|| {
 		with_app(|app| app.download_h264());
 	});
+	bridge.on_panel_resized(|width| {
+		with_app(|app| app.panel_resized(width));
+	});
 	bridge.on_appearance_changed(|form| {
 		with_app(|app| app.appearance_changed(&form));
 	});
