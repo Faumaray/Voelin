@@ -240,7 +240,7 @@ fn bitrate_changes_without_live_reconfiguration() {
 	let screen = SyntheticScreen::new(W, H);
 	let config = EncoderConfig { fps: 30, bitrate_bps: 1_000_000, ..EncoderConfig::default() };
 	let mut encoder = FfmpegEncoder::new("libaom-av1", config).unwrap();
-	let mut key = |encoder: &mut FfmpegEncoder, n: u64, force: bool| {
+	let key = |encoder: &mut FfmpegEncoder, n: u64, force: bool| {
 		encoder.encode(&screen.frame(n, 30), force).unwrap().iter().any(|f| f.keyframe)
 	};
 	assert!(key(&mut encoder, 0, false));
