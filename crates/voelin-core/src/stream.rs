@@ -77,6 +77,18 @@ impl StreamSink {
 		self.live.load(Ordering::Relaxed) && self.tx.send(StreamInput::Frame(frame)).is_ok()
 	}
 
+	/// Send one video frame encoded in `codec`: only viewers whose answer
+	/// chose `codec` get it.
+	pub fn send_video(&self, frame: EncodedFrame, codec: VideoCodec) -> bool {
+		self.live.load(Ordering::Relaxed)
+			&& self.tx.send(StreamInput::VideoFrame(frame, codec)).is_ok()
+	}
+
+	/// Whether a viewer's answer chose `codec`.
+	pub fn has_video_codec(&self, codec: VideoCodec) -> bool {
+		self.feedback.has_codec(codec)
+	}
+
 	/// Whether a viewer asked for a keyframe of any layer since the last
 	/// call (or [`take_layer_keyframes`](Self::take_layer_keyframes)).
 	pub fn take_keyframe_request(&self) -> bool {
@@ -141,6 +153,8 @@ pub(crate) enum StreamInput {
 	/// SRTP profile order of new connections.
 	SrtpProfiles(Vec<SrtpProfile>),
 	Frame(EncodedFrame),
+	/// A video frame for the viewers that chose its codec.
+	VideoFrame(EncodedFrame, VideoCodec),
 	Notification(StreamNotification),
 	RequestFailed(Request, String),
 	/// Clients on the server: channel and `client_is_streaming`.
@@ -266,6 +280,10 @@ impl StreamTask {
 			}
 			StreamInput::Frame(frame) => {
 				self.streams.write_frame(&frame);
+				Ok(())
+			}
+			StreamInput::VideoFrame(frame, codec) => {
+				self.streams.write_frame_in(&frame, Some(codec));
 				Ok(())
 			}
 			StreamInput::Notification(n) => {

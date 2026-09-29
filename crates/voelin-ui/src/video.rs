@@ -11,9 +11,10 @@ use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 use tokio::runtime::Handle;
 use tracing::warn;
 use voelin_core::media::voelin_media::capture::SourceId;
-use voelin_core::media::voelin_media::{Codecs, VideoFrame, convert};
+use voelin_core::media::voelin_media::{Codec, Codecs, EncoderReport, VideoFrame, convert};
 use voelin_core::media::{
-	self, Latest, LocalPreview, Streamer, StreamerConfig, Viewer, peer_config, stream_codec,
+	self, EncoderPreference, Latest, LocalPreview, Streamer, StreamerConfig, Viewer, peer_config,
+	preferred_codec, stream_codec,
 };
 use voelin_core::stream::PeerConfig;
 use voelin_core::{Engine, StreamSink};
@@ -56,6 +57,10 @@ pub(crate) struct Video {
 	openh264_dir: PathBuf,
 	#[cfg(not(target_os = "android"))]
 	h264: openh264::State,
+	/// Which encoders to use and the configured stream codec (`None`:
+	/// automatic), from the settings.
+	encoder: EncoderPreference,
+	codec: Option<Codec>,
 	/// Sources of the share dialog, by index.
 	sources: Vec<(SourceId, String)>,
 }
@@ -67,6 +72,8 @@ impl Video {
 		#[allow(unused_mut, reason = "set_h264 does nothing on Android")]
 		let mut video = Self {
 			codecs: Arc::new(Codecs::new()),
+			encoder: EncoderPreference::default(),
+			codec: None,
 			#[cfg(not(target_os = "android"))]
 			openh264_dir: data_dir.join("openh264"),
 			#[cfg(not(target_os = "android"))]
@@ -78,9 +85,32 @@ impl Video {
 		video
 	}
 
-	/// `base` with the codecs this machine can encode and decode.
-	pub fn peer_config(&self, base: PeerConfig) -> PeerConfig {
+	/// `base` with the codecs this machine can encode and decode: the stream
+	/// codec (configured, or the encoder preference's first) offered first.
+	pub fn peer_config(&self, mut base: PeerConfig) -> PeerConfig {
+		if let Some(codec) = preferred_codec(&self.codecs, self.codec) {
+			base.video_codecs = vec![media::video_codec(codec)];
+		}
 		peer_config(&self.codecs, base)
+	}
+
+	/// Use other encoders (`stream.hardware_acceleration`,
+	/// `stream.encoder_backend`) and stream codec (`stream.codec`, `None`:
+	/// automatic). A running share follows through
+	/// `Streamer::reconfigure` with `StreamerConfigUpdate::encoder`.
+	#[allow(dead_code, reason = "for the settings page")]
+	pub fn set_encoder_preference(&mut self, encoder: EncoderPreference, codec: Option<Codec>) {
+		let mut codecs = (*self.codecs).clone();
+		codecs.set_preference(encoder.clone());
+		self.codecs = Arc::new(codecs);
+		self.encoder = encoder;
+		self.codec = codec;
+	}
+
+	/// Every encoder backend, what works and why the rest does not.
+	#[allow(dead_code, reason = "for the integrations page")]
+	pub fn encoder_report(&self) -> EncoderReport {
+		self.codecs.report()
 	}
 
 	/// Whether H.264 works, and a line for the settings page.
@@ -109,7 +139,7 @@ impl Video {
 			use openh264::State;
 			if !enabled {
 				self.h264 = State::Off;
-				self.codecs = Arc::new(Codecs::new());
+				self.codecs = Arc::new(Codecs::new().with_preference(self.encoder.clone()));
 				return;
 			}
 			if matches!(self.h264, State::Loaded(_) | State::Downloading) {
@@ -125,7 +155,8 @@ impl Video {
 	#[cfg(not(target_os = "android"))]
 	fn loaded(&mut self, library: openh264::OpenH264) {
 		self.h264 = openh264::State::Loaded(library.path().to_owned());
-		self.codecs = Arc::new(Codecs::new().with_openh264(library));
+		self.codecs =
+			Arc::new(Codecs::new().with_openh264(library).with_preference(self.encoder.clone()));
 	}
 
 	/// Download Cisco's OpenH264 (only on the user's request). `done` runs
@@ -229,6 +260,7 @@ impl Video {
 			fps: options.fps,
 			bitrate_kbps: options.bitrate_kbps,
 			codec,
+			encoder: self.encoder.clone(),
 			audio: options.audio,
 			restore_token: options.restore_token,
 			..StreamerConfig::default()

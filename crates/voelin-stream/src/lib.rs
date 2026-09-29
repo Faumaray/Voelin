@@ -12,6 +12,7 @@
 pub mod discovery;
 pub mod dtls;
 pub mod feedback;
+pub mod h264;
 pub mod layer;
 pub mod peer;
 pub mod proto;
@@ -23,6 +24,7 @@ pub mod stun;
 pub use discovery::{ClientState, StreamLookup};
 pub use dtls::SrtpProfile;
 pub use feedback::LayerFeedback;
+pub use h264::H264Profile;
 pub use layer::{LayerId, LayerSet, LayerSpec};
 pub use peer::{MediaFrame, OfferOptions, Peer, PeerConfig, PeerError, PeerEvent, VideoCodec};
 pub use proto::{LeaveReason, StreamInfo, StreamKind, StreamNotification, StreamSetup};

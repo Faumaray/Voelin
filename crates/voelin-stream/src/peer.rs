@@ -32,6 +32,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, trace, warn};
 
 use crate::dtls::{self, NegotiatedProfile, SrtpProfile};
+use crate::h264::{self, H264Profile};
 use crate::layer::LayerSpec;
 use crate::stun;
 
@@ -46,10 +47,12 @@ pub enum VideoCodec {
 	Vp9,
 	H264,
 	Av1,
+	/// HEVC: offered last, for peers that take nothing else.
+	H265,
 }
 
 impl VideoCodec {
-	pub const ALL: [Self; 4] = [Self::Vp8, Self::Vp9, Self::H264, Self::Av1];
+	pub const ALL: [Self; 5] = [Self::Vp8, Self::Vp9, Self::H264, Self::Av1, Self::H265];
 
 	pub fn from_codec(c: Codec) -> Option<Self> {
 		match c {
@@ -57,6 +60,7 @@ impl VideoCodec {
 			Codec::Vp9 => Some(Self::Vp9),
 			Codec::H264 => Some(Self::H264),
 			Codec::Av1 => Some(Self::Av1),
+			Codec::H265 => Some(Self::H265),
 			_ => None,
 		}
 	}
@@ -72,7 +76,19 @@ impl VideoCodec {
 			Self::Vp9 => "VP9",
 			Self::H264 => "H264",
 			Self::Av1 => "AV1",
+			Self::H265 => "H265",
 		}
+	}
+
+	/// Bit of this codec in a set of codecs ([`crate::LayerFeedback`]).
+	pub fn bit(self) -> u8 {
+		1 << Self::ALL.iter().position(|c| *c == self).unwrap_or(0)
+	}
+}
+
+impl std::fmt::Display for VideoCodec {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(self.sdp_name())
 	}
 }
 
@@ -107,6 +123,10 @@ pub struct PeerConfig {
 	/// simulcast leaves the peer unable to send video. Official TeamSpeak
 	/// viewers get a plain offer and one layer at a time.
 	pub simulcast: bool,
+	/// H.264 `profile-level-id` of the offer: Constrained High at the level
+	/// the stream needs ([`set_h264_format`](Self::set_h264_format)); level
+	/// 3.1 by default.
+	pub h264_profile_level_id: u32,
 }
 
 impl Default for PeerConfig {
@@ -121,6 +141,7 @@ impl Default for PeerConfig {
 			srtp_profiles: SrtpProfile::DEFAULT_ORDER.to_vec(),
 			bandwidth_estimation: true,
 			simulcast: false,
+			h264_profile_level_id: H264_CONSTRAINED_HIGH,
 		}
 	}
 }
@@ -133,6 +154,21 @@ impl PeerConfig {
 			stun_servers: Vec::new(),
 			..Self::default()
 		}
+	}
+
+	/// Offer H.264 in `profile` at the level a `width` x `height` stream at
+	/// `fps` and `bitrate` bit/s needs (at least 3.1, see
+	/// [`crate::h264::offer_profile_level_id`]).
+	pub fn set_h264_format(
+		&mut self,
+		profile: H264Profile,
+		width: u32,
+		height: u32,
+		fps: u32,
+		bitrate: u64,
+	) {
+		self.h264_profile_level_id =
+			h264::offer_profile_level_id(profile, width, height, fps, bitrate);
 	}
 }
 
@@ -190,6 +226,9 @@ pub enum PeerEvent {
 	/// The answer accepted RID simulcast: video goes out per layer with
 	/// these RIDs ([`Peer::write_rid`]).
 	Simulcast(Vec<Rid>),
+	/// The video codec the answer chose (streamer side): the viewer's first
+	/// one. Video written to this peer must be in it.
+	VideoCodec(VideoCodec),
 	/// The connection is gone.
 	Closed,
 }
@@ -422,11 +461,12 @@ fn build_rtc(
 					112.into(),
 					Some(113.into()),
 					true,
-					H264_CONSTRAINED_HIGH,
+					config.h264_profile_level_id,
 				);
 				c
 			}
 			VideoCodec::Av1 => rtc_config.enable_av1(true),
+			VideoCodec::H265 => rtc_config.enable_h265(true),
 		};
 	}
 	dtls::build_rtc(rtc_config, &config.srtp_profiles)
@@ -798,6 +838,18 @@ impl Task {
 				let _ = self.events.send(PeerEvent::Simulcast(rids.clone()));
 			}
 		}
+		// The codec video is written in (see `find_writer`).
+		if let Some((mid, pt)) = self.find_writer(MediaKind::Video) {
+			self.writers.insert(MediaKind::Video, (mid, pt));
+			let codec = self.rtc.writer(mid).and_then(|w| {
+				let params = w.payload_params().find(|p| p.pt() == pt)?;
+				VideoCodec::from_codec(params.spec().codec)
+			});
+			if let Some(codec) = codec {
+				debug!(%codec, "the answer chose");
+				let _ = self.events.send(PeerEvent::VideoCodec(codec));
+			}
+		}
 		Ok(())
 	}
 
@@ -870,6 +922,41 @@ mod tests {
 			PeerConfig { accept_video_codecs: vec![VideoCodec::Vp8], ..PeerConfig::loopback() };
 		let (_peer, answer) = Peer::answer(&vp8_only, &offer).await.unwrap();
 		assert_eq!(offered_video_codecs(&answer), [VideoCodec::Vp8], "{answer}");
+	}
+
+	/// Several codecs offered: the streamer learns which one each viewer's
+	/// answer chose; H.264 carries the level the stream needs.
+	#[tokio::test]
+	async fn streamer_learns_the_answered_codec() {
+		let mut streamer = PeerConfig {
+			video_codecs: vec![VideoCodec::Vp8, VideoCodec::H264, VideoCodec::H265],
+			..PeerConfig::loopback()
+		};
+		streamer.set_h264_format(H264Profile::ConstrainedHigh, 1920, 1080, 60, 8_000_000);
+		let (mut peer, offer) = Peer::offer(&streamer, "s").await.unwrap();
+		assert!(offer.contains("profile-level-id=640c2a"), "{offer}");
+		assert!(offer.contains("H265/90000"), "{offer}");
+		let viewers = [
+			(vec![VideoCodec::Vp8, VideoCodec::H264], VideoCodec::Vp8),
+			(vec![VideoCodec::H264], VideoCodec::H264),
+			(vec![VideoCodec::H265], VideoCodec::H265),
+		];
+		for (accept, expected) in viewers {
+			let (mut streamer_peer, offer) = Peer::offer(&streamer, "s").await.unwrap();
+			let config = PeerConfig { accept_video_codecs: accept, ..PeerConfig::loopback() };
+			let (_viewer, answer) = Peer::answer(&config, &offer).await.unwrap();
+			streamer_peer.accept_answer(&answer).await.unwrap();
+			let codec = loop {
+				match streamer_peer.next_event().await.unwrap() {
+					PeerEvent::VideoCodec(codec) => break codec,
+					PeerEvent::Closed => panic!("closed"),
+					_ => {}
+				}
+			};
+			assert_eq!(codec, expected);
+		}
+		peer.close();
+		while peer.next_event().await.is_some() {}
 	}
 
 	/// The SDP lines that make up the media description (not the random ids,

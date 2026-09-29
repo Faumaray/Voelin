@@ -14,6 +14,7 @@
 //!   (hardware, or Google's software VP8 / VP9 / H.264)
 
 use std::fmt;
+use std::sync::Arc;
 use std::str::FromStr;
 
 use crate::frame::VideoFrame;
@@ -406,9 +407,10 @@ impl Candidate {
 /// hardware (H.264, AV1, VP9, VP8, HEVC; FFmpeg's or MediaCodec) > VP8
 /// (libvpx) > H.264 (x264 and OpenH264 through FFmpeg, then Cisco's
 /// OpenH264) > VP9 (libvpx, costly in software) > AV1 (SVT-AV1, rav1e,
-/// libaom through FFmpeg).
+/// libaom through FFmpeg). Cheap to clone: the factories are shared.
+#[derive(Clone)]
 pub struct Codecs {
-	factories: Vec<Box<dyn hw::EncoderFactory>>,
+	factories: Vec<Arc<dyn hw::EncoderFactory>>,
 	#[cfg(feature = "openh264")]
 	openh264: Option<h264::OpenH264>,
 	preference: EncoderPreference,
@@ -436,7 +438,7 @@ impl Codecs {
 	/// Cisco's library needs [`Codecs::with_openh264`].
 	pub fn new() -> Self {
 		Self {
-			factories: hw::probe(),
+			factories: hw::probe().into_iter().map(Arc::from).collect(),
 			#[cfg(feature = "openh264")]
 			openh264: None,
 			preference: EncoderPreference::default(),
@@ -479,6 +481,11 @@ impl Codecs {
 
 	pub fn preference(&self) -> &EncoderPreference {
 		&self.preference
+	}
+
+	/// Whether `backend` is a hardware encoder here.
+	pub fn is_hardware(&self, backend: EncoderBackend) -> bool {
+		self.factories.iter().any(|f| f.backend() == backend && f.is_hardware())
 	}
 
 	fn has_openh264(&self) -> bool {
@@ -825,11 +832,11 @@ mod tests {
 	fn encoder_preference() {
 		let mut codecs = Codecs::builtin();
 		codecs.factories = vec![
-			Box::new(Fake("x264", Codec::H264, false)),
-			Box::new(Fake("vp8_gpu", Codec::Vp8, true)),
-			Box::new(Fake("h264_gpu", Codec::H264, true)),
-			Box::new(Fake("hevc_gpu", Codec::H265, true)),
-			Box::new(Fake("av1_sw", Codec::Av1, false)),
+			Arc::new(Fake("x264", Codec::H264, false)),
+			Arc::new(Fake("vp8_gpu", Codec::Vp8, true)),
+			Arc::new(Fake("h264_gpu", Codec::H264, true)),
+			Arc::new(Fake("hevc_gpu", Codec::H265, true)),
+			Arc::new(Fake("av1_sw", Codec::Av1, false)),
 		];
 		let names = |preference: EncoderPreference| -> Vec<&'static str> {
 			codecs.encoders_for(&preference).iter().map(|(_, b)| b.name()).collect()
