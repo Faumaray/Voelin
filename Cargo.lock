@@ -9182,6 +9182,8 @@ dependencies = [
  "reqwest",
  "rtrb",
  "rustix 1.1.5",
+ "serde",
+ "serde_json",
  "sha2 0.10.9",
  "str0m",
  "thiserror 2.0.21",
