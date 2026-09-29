@@ -9169,10 +9169,12 @@ dependencies = [
 name = "voelin-media"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "ashpd",
  "bzip2",
  "criterion",
  "dav1d",
+ "image",
  "libloading",
  "libvpx-native-sys",
  "memmap2",

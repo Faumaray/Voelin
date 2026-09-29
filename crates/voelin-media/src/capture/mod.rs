@@ -38,7 +38,7 @@ pub mod playback;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod portal;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
-mod pw;
+pub(crate) mod pw;
 pub mod synthetic;
 #[cfg(windows)]
 pub mod windows;
