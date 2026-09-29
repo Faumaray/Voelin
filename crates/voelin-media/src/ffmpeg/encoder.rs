@@ -18,6 +18,7 @@ use std::time::Duration;
 use super::layout::{self, HwFramesFields};
 use super::sys::{self, FrameHead, PacketHead, Ptr, Rational, cstr};
 use super::{Ffmpeg, take_log};
+use crate::capture::{DmaBufRef, drm_fourcc};
 use crate::codec::hw::EncoderFactory;
 use crate::codec::{
 	Codec, ContentHint, EncodedChunk, EncodedFrame, EncoderBackend, EncoderConfig, H264Profile,
@@ -493,6 +494,8 @@ pub struct FfmpegEncoder {
 	reinit: Reinit,
 	/// VA-API only offers the low-power entry point for this codec.
 	low_power: bool,
+	/// `AVFrame.hw_frames_ctx` was checked on a surface of this encoder.
+	dmabuf_checked: bool,
 }
 
 impl FfmpegEncoder {
@@ -505,7 +508,15 @@ impl FfmpegEncoder {
 		})?;
 		let ffmpeg = Ffmpeg::get()
 			.map_err(|e| Error::CodecUnavailable { codec: spec.codec, reason: e.to_owned() })?;
-		Ok(Self { ffmpeg, spec, config, session: None, reinit: Reinit::No, low_power: false })
+		Ok(Self {
+			ffmpeg,
+			spec,
+			config,
+			session: None,
+			reinit: Reinit::No,
+			low_power: false,
+			dmabuf_checked: false,
+		})
 	}
 
 	pub fn spec(&self) -> &'static BackendSpec {
@@ -873,13 +884,16 @@ impl FfmpegEncoder {
 		Ok(keyframe)
 	}
 
-	fn encode_i420(
+	/// The session for a `width` x `height` frame, opened anew when the size
+	/// changed or a reinit is due; whether the frame must be a keyframe.
+	fn prepare(
 		&mut self,
-		frame: &VideoFrame,
+		width: u32,
+		height: u32,
 		force_keyframe: bool,
 		out: &mut dyn FnMut(EncodedChunk<'_>),
-	) -> Result<()> {
-		let (w, h) = Self::coded_size(frame.width, frame.height);
+	) -> Result<(Session, bool)> {
+		let (w, h) = Self::coded_size(width, height);
 		let mut force = force_keyframe;
 		let reopen = match &self.session {
 			None => true,
@@ -902,10 +916,152 @@ impl FfmpegEncoder {
 			self.reinit = Reinit::No;
 			force = true;
 		}
-		let mut session = self.session.take().expect("opened above");
+		Ok((self.session.take().expect("opened above"), force))
+	}
+
+	fn encode_i420(
+		&mut self,
+		frame: &VideoFrame,
+		force_keyframe: bool,
+		out: &mut dyn FnMut(EncodedChunk<'_>),
+	) -> Result<()> {
+		let (mut session, force) = self.prepare(frame.width, frame.height, force_keyframe, out)?;
 		let result = self.encode_in(&mut session, frame, force, out);
 		self.session = Some(session);
 		result
+	}
+
+	/// Encode a frame that is still in a DMA-BUF, without a copy: the buffer
+	/// becomes a VA-API surface (`av_hwframe_map` of a DRM PRIME frame) that
+	/// the encoder reads directly.
+	///
+	/// VA-API backends and NV12 buffers only: the RGB frames screen capture
+	/// delivers first need a colour conversion on the GPU (VA-API video
+	/// processing), which is not implemented. Anything else fails with
+	/// `Error::CodecUnavailable`; callers then map the buffer and use
+	/// [`encode_with`](VideoEncoder::encode_with). The buffer must stay
+	/// unchanged until this frame's packet came out (the encoder reads it
+	/// asynchronously, one frame deep).
+	pub fn encode_dmabuf(
+		&mut self,
+		frame: &DmaBufRef,
+		force_keyframe: bool,
+		out: &mut dyn FnMut(EncodedChunk<'_>),
+	) -> Result<()> {
+		if !self.spec.is_vaapi() {
+			return Err(self.unavailable(format!("{} does not import DMA-BUFs", self.spec.name)));
+		}
+		if frame.fourcc != drm_fourcc(b"NV12") || frame.plane_count != 2 {
+			return Err(self.unavailable(
+				"only NV12 DMA-BUFs are imported (RGB needs GPU colour conversion)".into(),
+			));
+		}
+		if Self::coded_size(frame.width, frame.height) != (frame.width, frame.height) {
+			return Err(self.unavailable("odd frame size".into()));
+		}
+		let refs = self.ffmpeg.frame_refs.clone().map_err(|e| self.unavailable(e))?;
+		let drm_prime =
+			self.ffmpeg.pix.drm_prime.ok_or_else(|| self.unavailable("no DRM PRIME".into()))?;
+		let vaapi = self.ffmpeg.pix.vaapi.ok_or_else(|| self.unavailable("no VA-API".into()))?;
+		let (mut session, force) = self.prepare(frame.width, frame.height, force_keyframe, out)?;
+		let result = self.import_and_send(&mut session, frame, force, refs, drm_prime, vaapi, out);
+		self.session = Some(session);
+		result
+	}
+
+	#[allow(clippy::too_many_arguments)] // the parts of one import
+	fn import_and_send(
+		&mut self,
+		session: &mut Session,
+		frame: &DmaBufRef,
+		force: bool,
+		refs: layout::FrameRefs,
+		drm_prime: c_int,
+		vaapi: c_int,
+		out: &mut dyn FnMut(EncodedChunk<'_>),
+	) -> Result<()> {
+		let api = &self.ffmpeg.api;
+		if !self.dmabuf_checked {
+			// The table's AVFrame.hw_frames_ctx must be where FFmpeg puts
+			// the pool of a surface it allocates.
+			// SAFETY: `hw` is our frame, the pool the session's.
+			let ok = unsafe {
+				let ret = (api.av_hwframe_get_buffer)(session.pool, session.hw, 0);
+				let ok = ret >= 0 && layout::check_hw_frames_ctx(session.hw, session.pool, refs);
+				(api.av_frame_unref)(session.hw);
+				ok
+			};
+			if !ok {
+				return Err(self.unavailable("AVFrame.hw_frames_ctx check failed".into()));
+			}
+			self.dmabuf_checked = true;
+		}
+		let mut descriptor =
+			sys::DrmFrameDescriptor { nb_objects: 1, nb_layers: 1, ..Default::default() };
+		descriptor.objects[0] =
+			sys::DrmObject { fd: frame.fd, size: frame.size, format_modifier: frame.modifier };
+		descriptor.layers[0].format = frame.fourcc;
+		descriptor.layers[0].nb_planes = frame.plane_count as c_int;
+		for (plane, &(offset, pitch)) in
+			descriptor.layers[0].planes.iter_mut().zip(&frame.planes[..frame.plane_count])
+		{
+			*plane =
+				sys::DrmPlane { object_index: 0, offset: offset as isize, pitch: pitch as isize };
+		}
+		let pts =
+			self.stamp(session, frame.timestamp, (frame.timestamp.as_micros() * 9 / 100) as u64);
+		// SAFETY: the descriptor lives in a buffer the source frame owns
+		// (buf[0], checked offset), so FFmpeg can keep it while mapped; the
+		// destination frame gets a reference to the pool at the checked
+		// hw_frames_ctx offset; av_frame_free / av_frame_unref release both.
+		unsafe {
+			let mut buffer = (api.av_buffer_allocz)(std::mem::size_of::<sys::DrmFrameDescriptor>());
+			let mut src = (api.av_frame_alloc)();
+			if buffer.is_null() || src.is_null() {
+				(api.av_buffer_unref)(&mut buffer);
+				(api.av_frame_free)(&mut src);
+				return Err(self.unavailable("out of memory".into()));
+			}
+			let data = (*buffer.cast::<sys::BufferRefHead>()).data;
+			data.cast::<sys::DrmFrameDescriptor>().write(descriptor);
+			let head = src.cast::<FrameHead>();
+			(*head).format = drm_prime;
+			(*head).width = frame.width as c_int;
+			(*head).height = frame.height as c_int;
+			(*head).data[0] = data;
+			layout::write::<Ptr>(src, refs.buf, buffer);
+			let dst = session.hw;
+			(*dst.cast::<FrameHead>()).format = vaapi;
+			layout::write::<Ptr>(dst, refs.hw_frames_ctx, (api.av_buffer_ref)(session.pool));
+			let ret = (api.av_hwframe_map)(dst, src, sys::HWFRAME_MAP_READ);
+			(api.av_frame_free)(&mut src);
+			if ret < 0 {
+				(api.av_frame_unref)(dst);
+				return Err(self.error("DMA-BUF import", ret));
+			}
+			let pict_type = if force { sys::PICTURE_TYPE_I } else { sys::PICTURE_TYPE_NONE };
+			layout::write::<i64>(dst, self.ffmpeg.frame.pts, pts);
+			layout::write::<c_int>(dst, self.ffmpeg.frame.pict_type, pict_type);
+			let result = self.send(session, dst, out);
+			(api.av_frame_unref)(dst);
+			result.map(|_| ())
+		}
+	}
+
+	/// The pts of a frame taken at `timestamp`: frame numbers at the
+	/// session's rate (its time base), strictly increasing; remembered with
+	/// the 90 kHz time for the packets.
+	fn stamp(&self, session: &mut Session, timestamp: Duration, pts_90khz: u64) -> i64 {
+		let exact = timestamp.as_secs_f64() * f64::from(session.fps);
+		let mut pts = exact.round() as i64;
+		if let Some(last) = session.last_pts
+			&& pts <= last
+		{
+			pts = last + 1;
+		}
+		session.last_pts = Some(pts);
+		session.timestamps.push(pts, pts_90khz);
+		pts
 	}
 
 	fn encode_in(
@@ -917,16 +1073,7 @@ impl FfmpegEncoder {
 	) -> Result<()> {
 		let api = &self.ffmpeg.api;
 		self.fill(session, frame)?;
-		// Frame numbers at the session's rate, strictly increasing.
-		let exact = frame.timestamp.as_secs_f64() * f64::from(session.fps);
-		let mut pts = exact.round() as i64;
-		if let Some(last) = session.last_pts
-			&& pts <= last
-		{
-			pts = last + 1;
-		}
-		session.last_pts = Some(pts);
-		session.timestamps.push(pts, frame.pts_90khz());
+		let pts = self.stamp(session, frame.timestamp, frame.pts_90khz());
 		let fields = self.ffmpeg.frame;
 		let pict_type = if force { sys::PICTURE_TYPE_I } else { sys::PICTURE_TYPE_NONE };
 		let input = if session.hw.is_null() {
@@ -981,6 +1128,16 @@ impl FfmpegEncoder {
 		drop(session);
 		flushed?;
 		Ok((packets, keyframe))
+	}
+}
+
+impl Drop for FfmpegEncoder {
+	/// Ends the stream properly (SVT-AV1 complains otherwise); the frames
+	/// still inside are dropped.
+	fn drop(&mut self) {
+		if let Some(mut session) = self.session.take() {
+			let _ = self.send(&mut session, std::ptr::null_mut(), &mut |_| {});
+		}
 	}
 }
 

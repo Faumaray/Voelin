@@ -65,7 +65,6 @@ pub struct Ffmpeg {
 	/// `AVCodecContext.hw_frames_ctx`.
 	pub(crate) codec_hw_frames: Result<usize, String>,
 	/// `AVFrame.buf[0]` / `hw_frames_ctx`.
-	#[allow(dead_code)] // for the DMA-BUF import
 	pub(crate) frame_refs: Result<FrameRefs, String>,
 	pub(crate) pix: PixFmts,
 	info: LibraryInfo,

@@ -227,6 +227,8 @@ api! {
 	) -> c_int;
 	fn av_buffer_ref(buf: Ptr) -> Ptr;
 	fn av_buffer_unref(buf: *mut Ptr);
+	// `size` is an `int` up to libavutil 56: passed in the same register.
+	fn av_buffer_allocz(size: usize) -> Ptr;
 	fn av_hwdevice_find_type_by_name(name: *const c_char) -> c_int;
 	fn av_hwdevice_ctx_create(
 		device: *mut Ptr,

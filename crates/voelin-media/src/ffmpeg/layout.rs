@@ -376,7 +376,6 @@ pub fn frame_refs(api: &Api, yuv420p: c_int) -> Result<FrameRefs, String> {
 /// # Safety
 /// `frame` must be a live AVFrame of this release, `pool` a live buffer
 /// reference.
-#[allow(dead_code)] // for the DMA-BUF import
 pub unsafe fn check_hw_frames_ctx(frame: Ptr, pool: Ptr, refs: FrameRefs) -> bool {
 	// SAFETY: guaranteed by the caller; the offset is inside AVFrame.
 	unsafe {

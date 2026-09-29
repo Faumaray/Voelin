@@ -110,6 +110,54 @@ pub trait FrameSink: Send {
 	/// One frame. Its pixels are only valid during the call. Returns
 	/// `false` when no more frames are wanted; the backend then stops.
 	fn frame(&mut self, frame: FrameRef<'_>) -> bool;
+
+	/// Whether the sink takes frames that are still in a DMA-BUF (GPU
+	/// memory) through [`dmabuf`](Self::dmabuf), e.g. for a VA-API encoder
+	/// that imports them without a copy
+	/// (`ffmpeg::FfmpegEncoder::encode_dmabuf`). Backends that capture into
+	/// DMA-BUFs (the portal) then offer the buffer before mapping it.
+	fn accepts_dmabuf(&self) -> bool {
+		false
+	}
+
+	/// A frame in a DMA-BUF, valid during the call. `None`: not taken, the
+	/// backend maps it and calls [`frame`](Self::frame); `Some(more)` as the
+	/// result of `frame`.
+	fn dmabuf(&mut self, frame: &DmaBufRef) -> Option<bool> {
+		let _ = frame;
+		None
+	}
+}
+
+/// `fourcc_code(a, b, c, d)` of `drm_fourcc.h`.
+pub const fn drm_fourcc(code: &[u8; 4]) -> u32 {
+	code[0] as u32 | (code[1] as u32) << 8 | (code[2] as u32) << 16 | (code[3] as u32) << 24
+}
+
+/// `DRM_FORMAT_MOD_LINEAR`.
+pub const DRM_MOD_LINEAR: u64 = 0;
+/// `DRM_FORMAT_MOD_INVALID`: the driver's implicit layout.
+pub const DRM_MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
+
+/// A captured frame still in a DMA-BUF: one buffer object (a file
+/// descriptor borrowed for the call) with one plane per `planes` entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DmaBufRef {
+	pub width: u32,
+	pub height: u32,
+	/// As [`VideoFrame::timestamp`].
+	pub timestamp: Duration,
+	/// DRM format (`drm_fourcc(b"XR24")` for BGRx, `b"NV12"`, ...).
+	pub fourcc: u32,
+	/// DRM format modifier (tiling); [`DRM_MOD_LINEAR`] for rows in memory
+	/// order.
+	pub modifier: u64,
+	pub fd: i32,
+	/// Size of the buffer object in bytes.
+	pub size: usize,
+	/// `(offset, stride)` of each plane in the buffer object.
+	pub planes: [(usize, usize); 4],
+	pub plane_count: usize,
 }
 
 /// Keeps frames of a source for a frame-rate cap, by their timestamps, so

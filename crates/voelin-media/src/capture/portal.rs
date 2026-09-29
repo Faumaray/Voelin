@@ -34,7 +34,8 @@ use tracing::{debug, warn};
 use crate::capture::dmabuf::DmaBufMap;
 use crate::capture::pw::{PwThread, pod, serialize};
 use crate::capture::{
-	BoxFuture, CaptureOptions, CaptureSource, FrameSink, QueueSink, ScreenCapture, SourceId,
+	BoxFuture, CaptureOptions, CaptureSource, DRM_MOD_LINEAR, DmaBufRef, FrameSink, QueueSink,
+	ScreenCapture, SourceId, drm_fourcc,
 };
 use crate::frame::{FrameRef, PixelsRef, PlaneRef, VideoFrame};
 use crate::queue::FrameReceiver;
@@ -524,8 +525,8 @@ fn process(stream: &pw::stream::Stream, state: &mut VideoState) {
 	}
 	let Some(mut buffer) = stream.dequeue_buffer() else { return };
 	let Some(format) = state.format else { return };
-	if format.modifier.is_some_and(|m| m != MODIFIER_LINEAR) {
-		// Tiled: the CPU cannot read it (we never offer that).
+	if format.modifier.is_some_and(|m| m != MODIFIER_LINEAR) && !state.sink.accepts_dmabuf() {
+		// Tiled: the CPU cannot read it (we only offer LINEAR).
 		return;
 	}
 	let timestamp = state.started.elapsed();
@@ -563,6 +564,38 @@ fn process(stream: &pw::stream::Stream, state: &mut VideoState) {
 	if state.logged != Some(is_dmabuf) {
 		state.logged = Some(is_dmabuf);
 		debug!(dmabuf = is_dmabuf, "screen capture buffers");
+	}
+	// A sink that imports DMA-BUFs (a VA-API encoder) gets the buffer as it
+	// is, without a mapping or copy.
+	if is_dmabuf && state.sink.accepts_dmabuf() {
+		let raw = data.as_raw();
+		let fourcc = match format.format {
+			VideoFormat::BGRx => drm_fourcc(b"XR24"),
+			VideoFormat::BGRA => drm_fourcc(b"AR24"),
+			VideoFormat::RGBx => drm_fourcc(b"XB24"),
+			_ => drm_fourcc(b"AB24"),
+		};
+		let frame = DmaBufRef {
+			width: format.width,
+			height: format.height,
+			timestamp,
+			fourcc,
+			modifier: format.modifier.map_or(DRM_MOD_LINEAR, |m| m as u64),
+			fd: data.fd(),
+			size: (raw.mapoffset + raw.maxsize) as usize,
+			planes: [(raw.mapoffset as usize + offset, stride), (0, 0), (0, 0), (0, 0)],
+			plane_count: 1,
+		};
+		if let Some(more) = state.sink.dmabuf(&frame) {
+			if !more && let Some(mainloop) = state.mainloop.upgrade() {
+				mainloop.quit();
+			}
+			return;
+		}
+	}
+	if format.modifier.is_some_and(|m| m != MODIFIER_LINEAR) {
+		// Tiled and not taken as it is: nothing the CPU can read.
+		return;
 	}
 	let started = Instant::now();
 	let more = if is_dmabuf {

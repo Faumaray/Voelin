@@ -228,3 +228,30 @@ fn unusable_backends_fail_cleanly() {
 		assert!(encoder.encode(&frame, true).is_err(), "{} passed now", status.spec.name);
 	}
 }
+
+/// DMA-BUF import is for VA-API encoders and NV12 buffers; anything else is
+/// refused as unavailable, so the caller maps the buffer instead.
+#[cfg(target_os = "linux")]
+#[test]
+fn dmabuf_import_is_refused_cleanly() {
+	use voelin_media::capture::{DRM_MOD_LINEAR, DmaBufRef, drm_fourcc};
+	if ffmpeg().is_none() {
+		return;
+	}
+	let frame = DmaBufRef {
+		width: W,
+		height: H,
+		timestamp: Duration::ZERO,
+		fourcc: drm_fourcc(b"XR24"),
+		modifier: DRM_MOD_LINEAR,
+		fd: -1,
+		size: (W * H * 4) as usize,
+		planes: [(0, (W * 4) as usize), (0, 0), (0, 0), (0, 0)],
+		plane_count: 1,
+	};
+	for name in ["libx264", "h264_vaapi"] {
+		let mut encoder = FfmpegEncoder::new(name, EncoderConfig::default()).unwrap();
+		let err = encoder.encode_dmabuf(&frame, true, &mut |_| {}).unwrap_err();
+		assert!(matches!(err, voelin_media::Error::CodecUnavailable { .. }), "{name}: {err}");
+	}
+}
