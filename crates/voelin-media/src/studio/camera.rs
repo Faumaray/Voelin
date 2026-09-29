@@ -617,7 +617,7 @@ mod pipewire_camera {
 					mainloop.quit();
 				}
 			})
-			.param_changed(|_, state, id, param| {
+			.param_changed(|stream, state, id, param| {
 				let Some(param) = param else { return };
 				if id != pw::spa::param::ParamType::Format.as_raw() {
 					return;
@@ -635,6 +635,11 @@ mod pipewire_camera {
 				let size = info.size();
 				debug!(format = ?info.format(), size.width, size.height, "camera format");
 				state.format = Some((info.format(), size.width, size.height));
+				// Only buffers the CPU can read: a camera node may otherwise
+				// hand out DMA-BUFs, which this path cannot map.
+				if let Err(e) = use_memory_buffers(stream) {
+					warn!("camera buffers: {e}");
+				}
 			})
 			.process(process)
 			.register()
@@ -653,52 +658,70 @@ mod pipewire_camera {
 		Ok((stream, listener))
 	}
 
-	/// One offer per pixel format: the wanted size (or any) and up to `fps`.
+	/// Ask for buffers in memory the CPU can read.
+	fn use_memory_buffers(stream: &pw::stream::Stream) -> std::result::Result<(), String> {
+		let types = (1 << pw::spa::sys::SPA_DATA_MemPtr) | (1 << pw::spa::sys::SPA_DATA_MemFd);
+		let buffers = serialize(Value::Object(Object {
+			type_: SpaTypes::ObjectParamBuffers.as_raw(),
+			id: pw::spa::param::ParamType::Buffers.as_raw(),
+			properties: vec![pw::spa::pod::Property {
+				key: pw::spa::sys::SPA_PARAM_BUFFERS_dataType,
+				flags: pw::spa::pod::PropertyFlags::empty(),
+				value: Value::Int(types),
+			}],
+		}))?;
+		stream.update_params(&mut [pod(&buffers)?]).map_err(|e| e.to_string())
+	}
+
+	/// The offers, best first: every pixel format at the wanted size, then
+	/// every pixel format at any size. A camera has a handful of fixed
+	/// sizes, and PipeWire takes the first offer that fits, so the exact
+	/// size has to come before the range or a range's smallest size wins.
 	fn enum_formats(
 		size: Option<(u32, u32)>,
 		fps: u32,
 	) -> std::result::Result<Vec<Vec<u8>>, String> {
+		let (w, h) = size.unwrap_or((1280, 720));
+		let exact = Rectangle { width: w.max(2), height: h.max(2) };
 		let mut formats = Vec::new();
-		for format in FORMATS {
-			let mut properties = vec![
-				property!(FormatProperties::MediaType, Id, MediaType::Video),
-				property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
-				property!(FormatProperties::VideoFormat, Id, format),
-			];
-			properties.push(match size {
-				Some((w, h)) => property!(
-					FormatProperties::VideoSize,
+		for fixed in [true, false] {
+			for format in FORMATS {
+				let mut properties = vec![
+					property!(FormatProperties::MediaType, Id, MediaType::Video),
+					property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
+					property!(FormatProperties::VideoFormat, Id, format),
+				];
+				properties.push(if fixed {
+					property!(FormatProperties::VideoSize, Rectangle, exact)
+				} else {
+					property!(
+						FormatProperties::VideoSize,
+						Choice,
+						Range,
+						Rectangle,
+						exact,
+						Rectangle { width: 1, height: 1 },
+						Rectangle { width: 16384, height: 16384 }
+					)
+				});
+				// Any rate the camera has, preferring the wanted one: a
+				// camera offers fixed rates (often only 30), and
+				// `FramePacer` brings whatever we get down to `fps`.
+				properties.push(property!(
+					FormatProperties::VideoFramerate,
 					Choice,
 					Range,
-					Rectangle,
-					Rectangle { width: w.max(2), height: h.max(2) },
-					Rectangle { width: 1, height: 1 },
-					Rectangle { width: 16384, height: 16384 }
-				),
-				None => property!(
-					FormatProperties::VideoSize,
-					Choice,
-					Range,
-					Rectangle,
-					Rectangle { width: 1280, height: 720 },
-					Rectangle { width: 1, height: 1 },
-					Rectangle { width: 16384, height: 16384 }
-				),
-			});
-			properties.push(property!(
-				FormatProperties::VideoFramerate,
-				Choice,
-				Range,
-				Fraction,
-				Fraction { num: fps, denom: 1 },
-				Fraction { num: 1, denom: 1 },
-				Fraction { num: fps.max(1), denom: 1 }
-			));
-			formats.push(serialize(Value::Object(Object {
-				type_: SpaTypes::ObjectParamFormat.as_raw(),
-				id: pw::spa::param::ParamType::EnumFormat.as_raw(),
-				properties,
-			}))?);
+					Fraction,
+					Fraction { num: fps, denom: 1 },
+					Fraction { num: 0, denom: 1 },
+					Fraction { num: 1000, denom: 1 }
+				));
+				formats.push(serialize(Value::Object(Object {
+					type_: SpaTypes::ObjectParamFormat.as_raw(),
+					id: pw::spa::param::ParamType::EnumFormat.as_raw(),
+					properties,
+				}))?);
+			}
 		}
 		Ok(formats)
 	}
@@ -896,6 +919,35 @@ mod tests {
 		assert_eq!(Pixel::from_fourcc(u32::from_le_bytes(*b"XR24")), Some(Pixel::Bgrx));
 		assert_eq!(Pixel::from_fourcc(u32::from_le_bytes(*b"ZZZZ")), None);
 		assert_eq!(Pixel::Nv12.label(), "NV12");
+	}
+
+	/// The first real camera, through PipeWire. Needs a camera and a
+	/// PipeWire daemon, so it is not part of the normal run:
+	/// `cargo test -p voelin-media --lib real_camera -- --ignored --nocapture`.
+	#[tokio::test]
+	#[ignore = "needs a camera and PipeWire"]
+	async fn a_real_camera_delivers() {
+		let Some(camera) = list().into_iter().find(|c| c.backend != "synthetic") else {
+			panic!("no camera on this machine");
+		};
+		let feed = Arc::new(Feed::new());
+		let capture = Capture::start(&camera.id, None, 15, feed.clone()).await.unwrap();
+		let started = std::time::Instant::now();
+		while feed.delivered() < 3 && started.elapsed() < Duration::from_secs(20) {
+			tokio::time::sleep(Duration::from_millis(50)).await;
+		}
+		println!(
+			"{} through {}: {} frames at {:?}, error {:?}",
+			camera.name,
+			capture.backend(),
+			feed.delivered(),
+			feed.size(),
+			feed.error()
+		);
+		assert!(feed.delivered() >= 3, "only {} frames", feed.delivered());
+		let frame = feed.take().expect("a frame");
+		assert!(frame.width > 0 && frame.height > 0);
+		frame.validate().unwrap();
 	}
 
 	#[tokio::test]
