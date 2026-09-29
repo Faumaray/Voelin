@@ -46,11 +46,14 @@ services:
       TSSERVER_QUERY_SSH_ENABLED: 1
       TSSERVER_QUERY_HTTP_ENABLED: 1
       TSSERVER_QUERY_ALLOW_LIST: /etc/tsserver/query_ip_allowlist.txt
+      # Clients connect to the port the server announces, so it must be the
+      # published one (30033 is the TS3 server's).
+      TSSERVER_FILE_TRANSFER_PORT: 30034
     ports:
       - "9988:9987/udp"   # voice (mapped to 9988 so both servers can run)
       - "10022:10022"     # SSH ServerQuery
       - "10080:10080"     # HTTP WebQuery
-      - "30034:30033"     # file transfer
+      - "30034:30034"     # file transfer: the server announces its own port
     volumes:
       - ts6-data:/var/tsserver
       - ./query_ip_allowlist.txt:/etc/tsserver/query_ip_allowlist.txt:ro

@@ -181,13 +181,18 @@ pub fn single_value_deserializer(field: &Field, rust_type: &str) -> String {
 				panic!("Unknown original time type {} found.", field.type_s);
 			}
 		}
+		// Voelin patch: TeamSpeak 6 sends some times (e.g. `datetime` of
+		// `notifyfilelist`) in milliseconds; seconds past 10^11 (year 5138)
+		// are taken as milliseconds.
 		"OffsetDateTime" => format!(
-			"OffsetDateTime::from_unix_timestamp(
-				val.parse().map_err(|e| ParseError::ParseInt {{
+			"OffsetDateTime::from_unix_timestamp({{
+				let t: i64 = val.parse().map_err(|e| ParseError::ParseInt {{
 					arg: \"{}\",
 					value: val.to_string(),
 					source: e,
-				}})?).map_err(|e| ParseError::ParseDate {{
+				}})?;
+				if t.unsigned_abs() >= 100_000_000_000 {{ t / 1000 }} else {{ t }}
+			}}).map_err(|e| ParseError::ParseDate {{
 					arg: \"{}\",
 					value: val.to_string(),
 					source: e,
