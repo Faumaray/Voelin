@@ -20,4 +20,9 @@ The first release is in preparation.
   optional H.264 through Cisco's OpenH264, AV1 decoding).
 - `tsgw`: companion gateway for server admins (presence, channel chat
   relay, history).
+- Chat history: messages are kept on the device and, with a gateway, what
+  was said while away appears when a chat opens; scrolling back loads older
+  messages from the gateway. The same message seen twice (over voice and
+  through the gateway) is shown once. Settings: `chat.store_history`,
+  `chat.history_page`, `chat.dedupe_tolerance_ms`, `chat.retention_days`.
 - Opt-in local crash reports; third-party notices in the About page.

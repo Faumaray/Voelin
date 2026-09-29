@@ -2,15 +2,27 @@
 
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tsclientlib::Identity;
 
 use crate::{Error, Result};
 
-/// Schema migrations; entry `i` upgrades from version `i` to `i + 1`.
-const MIGRATIONS: &[&str] = &[r#"
+/// A schema migration: SQL, or code for what SQL alone cannot do.
+enum Migration {
+	Sql(&'static str),
+	Code(fn(&rusqlite::Transaction) -> rusqlite::Result<()>),
+}
+
+/// Schema migrations; entry `i` upgrades from version `i` to `i + 1`
+/// (`PRAGMA user_version`). Add new ones at the end; never change one that
+/// shipped.
+const MIGRATIONS: &[Migration] =
+	&[Migration::Sql(SCHEMA_1), Migration::Code(crate::chat::migrate_2)];
+
+/// Version 1: identities, bookmarks, settings and a first chat cache.
+pub(crate) const SCHEMA_1: &str = r#"
 	CREATE TABLE identities (
 		id INTEGER PRIMARY KEY,
 		name TEXT NOT NULL,
@@ -38,7 +50,7 @@ const MIGRATIONS: &[&str] = &[r#"
 		text TEXT NOT NULL
 	);
 	CREATE INDEX messages_by_target ON messages (server_uid, target, id);
-"#];
+"#;
 
 /// A stored identity, without its private key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,42 +116,8 @@ impl Bookmark {
 	}
 }
 
-/// Where a chat message was posted.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ChatTarget {
-	Server,
-	Channel(u64),
-	/// Private chat with the client of this unique id.
-	Private(String),
-}
-
-impl ChatTarget {
-	fn key(&self) -> String {
-		match self {
-			ChatTarget::Server => "server".into(),
-			ChatTarget::Channel(cid) => format!("channel/{cid}"),
-			ChatTarget::Private(uid) => format!("private/{uid}"),
-		}
-	}
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StoredMessage {
-	/// Assigned by the store; used for paging.
-	pub id: i64,
-	pub server_uid: String,
-	pub target: ChatTarget,
-	/// Unix timestamp in seconds.
-	pub ts: i64,
-	pub author_uid: Option<String>,
-	pub author_name: String,
-	/// Received through a gateway/query relay instead of our own connection.
-	pub via_relay: bool,
-	pub text: String,
-}
-
 pub struct Store {
-	db: Connection,
+	pub(crate) db: Connection,
 }
 
 impl Store {
@@ -167,17 +145,34 @@ impl Store {
 		Self::init(Connection::open_in_memory()?)
 	}
 
-	fn init(db: Connection) -> Result<Self> {
+	fn init(mut db: Connection) -> Result<Self> {
 		// Statements run through `prepare_cached` are parsed once per connection.
 		db.set_prepared_statement_cache_capacity(64);
 		db.pragma_update(None, "foreign_keys", true)?;
-		let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-		for (i, migration) in MIGRATIONS.iter().enumerate().skip(version as usize) {
-			db.execute_batch(migration)?;
-			db.pragma_update(None, "user_version", i as i64 + 1)?;
+		// Each migration with its version bump in one write transaction: a
+		// second connection that opens the file at the same time (the
+		// settings writer, the chat history) waits, then sees the new version.
+		loop {
+			let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+			let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+			let Some(migration) = MIGRATIONS.get(version as usize) else { break };
+			match migration {
+				Migration::Sql(sql) => tx.execute_batch(sql)?,
+				Migration::Code(migrate) => migrate(&tx)?,
+			}
+			tx.pragma_update(None, "user_version", version + 1)?;
+			tx.commit()?;
 		}
 		Ok(Self { db })
 	}
+
+	/// The schema version (number of migrations applied).
+	pub fn schema_version(&self) -> Result<i64> {
+		Ok(self.db.pragma_query_value(None, "user_version", |r| r.get(0))?)
+	}
+
+	/// The number of schema migrations this version knows.
+	pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
 	// Identities
 
@@ -329,63 +324,6 @@ impl Store {
 		tx.commit()?;
 		Ok(())
 	}
-
-	// Chat cache
-
-	pub fn add_message(&self, msg: &StoredMessage) -> Result<i64> {
-		self.db.execute(
-			"INSERT INTO messages (server_uid, target, ts, author_uid, author_name, via_relay, text)
-			 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-			params![
-				msg.server_uid,
-				msg.target.key(),
-				msg.ts,
-				msg.author_uid,
-				msg.author_name,
-				msg.via_relay,
-				msg.text
-			],
-		)?;
-		Ok(self.db.last_insert_rowid())
-	}
-
-	/// Up to `limit` messages older than `before` (message id), oldest first.
-	pub fn history(
-		&self,
-		server_uid: &str,
-		target: &ChatTarget,
-		before: Option<i64>,
-		limit: usize,
-	) -> Result<Vec<StoredMessage>> {
-		let mut stmt = self.db.prepare(
-			"SELECT id, ts, author_uid, author_name, via_relay, text FROM messages
-			 WHERE server_uid = ?1 AND target = ?2 AND id < ?3
-			 ORDER BY id DESC LIMIT ?4",
-		)?;
-		let rows = stmt.query_map(
-			params![server_uid, target.key(), before.unwrap_or(i64::MAX), limit as i64],
-			|r| {
-				Ok(StoredMessage {
-					id: r.get(0)?,
-					server_uid: server_uid.to_string(),
-					target: target.clone(),
-					ts: r.get(1)?,
-					author_uid: r.get(2)?,
-					author_name: r.get(3)?,
-					via_relay: r.get(4)?,
-					text: r.get(5)?,
-				})
-			},
-		)?;
-		let mut messages = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-		messages.reverse();
-		Ok(messages)
-	}
-
-	/// Delete cached messages older than `ts` (Unix seconds).
-	pub fn prune_messages(&self, ts: i64) -> Result<usize> {
-		Ok(self.db.execute("DELETE FROM messages WHERE ts < ?1", [ts])?)
-	}
 }
 
 #[cfg(test)]
@@ -455,33 +393,6 @@ mod tests {
 		assert_eq!(all, [("a".to_owned(), "1".to_owned()), ("b".to_owned(), "\"x\"".to_owned())]);
 		assert!(store.delete_setting("a").unwrap());
 		assert!(!store.delete_setting("a").unwrap());
-	}
-
-	#[test]
-	fn chat_history_pages() {
-		let store = Store::open_in_memory().unwrap();
-		let target = ChatTarget::Channel(5);
-		for i in 0..10 {
-			store
-				.add_message(&StoredMessage {
-					id: 0,
-					server_uid: "srv".into(),
-					target: target.clone(),
-					ts: 1000 + i,
-					author_uid: None,
-					author_name: "a".into(),
-					via_relay: i % 2 == 0,
-					text: format!("m{i}"),
-				})
-				.unwrap();
-		}
-		let last = store.history("srv", &target, None, 3).unwrap();
-		let texts: Vec<_> = last.iter().map(|m| m.text.as_str()).collect();
-		assert_eq!(texts, ["m7", "m8", "m9"]);
-		let older = store.history("srv", &target, Some(last[0].id), 3).unwrap();
-		assert_eq!(older.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), ["m4", "m5", "m6"]);
-		assert!(store.history("srv", &ChatTarget::Server, None, 3).unwrap().is_empty());
-		assert_eq!(store.prune_messages(1005).unwrap(), 5);
 	}
 
 	#[test]

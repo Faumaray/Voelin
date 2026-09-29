@@ -35,6 +35,13 @@ object Native {
     @JvmStatic
     external fun onSystemAudio(samples: FloatArray, count: Int, channels: Int, timestampNs: Long): Boolean
 
+    /**
+     * `count` interleaved 48 kHz float samples for mixer input `id`
+     * (Bridge.startAudioInput). Returns false when it is no longer wanted.
+     */
+    @JvmStatic
+    external fun onAudioInput(id: Long, samples: FloatArray, count: Int, channels: Int): Boolean
+
     /** "Disconnect" in the voice notification. */
     @JvmStatic
     external fun onDisconnectVoice()

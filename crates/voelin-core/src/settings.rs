@@ -1061,8 +1061,126 @@ pub static STREAM_PERMISSIONS: Key<StreamPermissions> = Key::new(
 	StreamPermissions::default,
 );
 
+/// Keep chat history in the client database. Off: messages seen from now
+/// on are kept in memory only (for this run), nothing is read from or
+/// written to the database.
+pub static CHAT_STORE_HISTORY: Key<bool> =
+	Key::new("chat.store_history", Kind::Bool, "Keep chat history on this device.", || true);
+
+/// Messages per history page: shown when a chat opens, fetched per step
+/// when scrolling back, and per request while syncing with a gateway.
+/// 0: everything at once. No maximum.
+pub static CHAT_HISTORY_PAGE: Key<u32> = Key::new(
+	"chat.history_page",
+	Kind::UInt { min: 0 },
+	"Messages per chat history page (0: all at once).",
+	|| 100,
+);
+
+/// How far apart (ms) two copies of a message from different sources may
+/// be stamped and still count as one message (e.g. live over voice and
+/// again from the gateway). No maximum.
+pub static CHAT_DEDUPE_TOLERANCE_MS: Key<u64> = Key::new(
+	"chat.dedupe_tolerance_ms",
+	Kind::UInt { min: 0 },
+	"Time difference (ms) within which two copies of a message are one.",
+	|| 5000,
+);
+
+/// Delete stored chat messages older than this many days (pinned ones
+/// stay); 0 keeps everything.
+pub static CHAT_RETENTION_DAYS: Key<u32> = Key::new(
+	"chat.retention_days",
+	Kind::UInt { min: 0 },
+	"Delete stored chat messages older than this many days (0: keep all).",
+	|| 0,
+);
+
+/// What an audio source of our stream captures, as stored; see
+/// [`AudioSourceSetting`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AudioSourceKindSetting {
+	/// Everything that plays except Voelin itself (voices, watched streams).
+	Desktop,
+	/// One application: by `name` (application name or executable; the
+	/// package on Android), found again when it restarts, or by `pid`
+	/// (valid while that process runs).
+	App {
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		name: Option<String>,
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		pid: Option<u32>,
+	},
+	/// The application of the shared window, where the platform tells
+	/// (X11, Windows).
+	Window,
+	/// Our microphone after noise suppression and gain control.
+	Microphone,
+	/// A test tone.
+	Synthetic {
+		#[serde(default = "default_tone")]
+		frequency: u32,
+	},
+}
+
+fn default_tone() -> u32 {
+	440
+}
+
+fn unity() -> f32 {
+	1.0
+}
+
+/// One audio source mixed into our stream. The serde form:
+/// `{"kind": "desktop"}`, `{"kind": "app", "name": "firefox", "gain": 0.5}`,
+/// `{"kind": "microphone", "muted": true}`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AudioSourceSetting {
+	#[serde(flatten)]
+	pub kind: AudioSourceKindSetting,
+	/// Linear gain (1: unchanged), any value >= 0.
+	#[serde(default = "unity")]
+	pub gain: f32,
+	#[serde(default)]
+	pub muted: bool,
+}
+
+impl AudioSourceSetting {
+	pub fn new(kind: AudioSourceKindSetting) -> Self {
+		Self { kind, gain: 1.0, muted: false }
+	}
+}
+
+#[allow(clippy::ptr_arg)] // a validation of `Key<Vec<_>>` is `fn(&Vec<_>)`
+fn valid_audio_sources(sources: &Vec<AudioSourceSetting>) -> Result<(), String> {
+	for (i, source) in sources.iter().enumerate() {
+		if !(source.gain.is_finite() && source.gain >= 0.0) {
+			return Err(format!("source {i}: gain must be a number >= 0"));
+		}
+		if let AudioSourceKindSetting::App { name, pid } = &source.kind
+			&& name.as_deref().is_none_or(|n| n.trim().is_empty())
+			&& pid.is_none()
+		{
+			return Err(format!("source {i}: an app needs a name or a pid"));
+		}
+	}
+	Ok(())
+}
+
+/// Audio sources mixed into our stream (read when a stream starts; a
+/// running stream follows through `media::Streamer::reconfigure`). Empty:
+/// the stream has no audio.
+pub static STREAM_AUDIO_SOURCES: Key<Vec<AudioSourceSetting>> = Key::new(
+	"stream.audio_sources",
+	Kind::Json,
+	"Audio sources mixed into our stream (desktop, app, window, microphone).",
+	|| vec![AudioSourceSetting::new(AudioSourceKindSetting::Desktop)],
+)
+.validated(valid_audio_sources);
+
 /// The keys every [`Settings`] knows from the start.
-pub fn builtin_keys() -> [&'static dyn Setting; 11] {
+pub fn builtin_keys() -> [&'static dyn Setting; 16] {
 	[
 		&CRASH_REPORTS,
 		&AUDIO,
@@ -1075,6 +1193,11 @@ pub fn builtin_keys() -> [&'static dyn Setting; 11] {
 		&STREAM_SRTP_PROFILES,
 		&STREAM_HARDWARE_ACCELERATION,
 		&STREAM_PERMISSIONS,
+		&CHAT_STORE_HISTORY,
+		&CHAT_HISTORY_PAGE,
+		&CHAT_DEDUPE_TOLERANCE_MS,
+		&CHAT_RETENTION_DAYS,
+		&STREAM_AUDIO_SOURCES,
 	]
 }
 
@@ -1127,6 +1250,10 @@ mod tests {
 		);
 		assert!(s.get(&STREAM_HARDWARE_ACCELERATION));
 		assert_eq!(s.get(&STREAM_ENCODER_BACKEND), "auto");
+		assert!(s.get(&CHAT_STORE_HISTORY));
+		assert_eq!(s.get(&CHAT_HISTORY_PAGE), 100);
+		assert_eq!(s.get(&CHAT_DEDUPE_TOLERANCE_MS), 5000);
+		assert_eq!(s.get(&CHAT_RETENTION_DAYS), 0);
 		assert_eq!(s.source("stream.fps"), Some(Source::Default));
 		let names: Vec<_> = s.keys().iter().map(|k| k.name()).collect();
 		assert!(names.contains(&"stream.permissions") && names.contains(&"audio"));
@@ -1187,6 +1314,57 @@ mod tests {
 		s.set_json("stream.fps", json!(1000)).unwrap();
 		s.set(&STREAM_BITRATE_KBPS, u32::MAX).unwrap();
 		assert_eq!(s.get(&STREAM_BITRATE_KBPS), u32::MAX);
+	}
+
+	#[test]
+	fn audio_sources() {
+		let s = Settings::in_memory();
+		assert_eq!(
+			s.get(&STREAM_AUDIO_SOURCES),
+			[AudioSourceSetting::new(AudioSourceKindSetting::Desktop)]
+		);
+		assert_eq!(
+			s.get_json("stream.audio_sources"),
+			Some(json!([{"kind": "desktop", "gain": 1.0, "muted": false}]))
+		);
+		s.set_json(
+			"stream.audio_sources",
+			json!([
+				{"kind": "desktop", "gain": 0.5},
+				{"kind": "app", "name": "firefox"},
+				{"kind": "app", "pid": 4242, "muted": true},
+				{"kind": "window"},
+				{"kind": "microphone", "gain": 2},
+				{"kind": "synthetic"}
+			]),
+		)
+		.unwrap();
+		let sources = s.get(&STREAM_AUDIO_SOURCES);
+		assert_eq!(sources.len(), 6);
+		assert_eq!(sources[0].gain, 0.5);
+		assert_eq!(
+			sources[1].kind,
+			AudioSourceKindSetting::App { name: Some("firefox".into()), pid: None }
+		);
+		assert!(sources[2].muted);
+		assert_eq!(
+			sources[4],
+			AudioSourceSetting {
+				gain: 2.0,
+				..AudioSourceSetting::new(AudioSourceKindSetting::Microphone)
+			}
+		);
+		assert_eq!(sources[5].kind, AudioSourceKindSetting::Synthetic { frequency: 440 });
+		let invalid =
+			|r: Result<(), SettingsError>| matches!(r, Err(SettingsError::Invalid { .. }));
+		assert!(invalid(s.set_json("stream.audio_sources", json!([{"kind": "app"}]))));
+		assert!(invalid(
+			s.set_json("stream.audio_sources", json!([{"kind": "desktop", "gain": -1}]))
+		));
+		assert!(invalid(s.set_json("stream.audio_sources", json!([{"kind": "speakers"}]))));
+		// No sources: no audio.
+		s.set_json("stream.audio_sources", json!([])).unwrap();
+		assert!(s.get(&STREAM_AUDIO_SOURCES).is_empty());
 	}
 
 	#[test]

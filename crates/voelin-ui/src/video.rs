@@ -13,8 +13,8 @@ use tracing::warn;
 use voelin_core::media::voelin_media::capture::SourceId;
 use voelin_core::media::voelin_media::{Codec, Codecs, EncoderReport, VideoFrame, convert};
 use voelin_core::media::{
-	self, EncoderPreference, Latest, LocalPreview, Streamer, StreamerConfig, Viewer, peer_config,
-	preferred_codec, stream_codec,
+	self, AudioSourceSpec, EncoderPreference, Latest, LocalPreview, Streamer, StreamerConfig,
+	Viewer, peer_config, preferred_codec, stream_codec,
 };
 use voelin_core::stream::PeerConfig;
 use voelin_core::{Engine, StreamSink};
@@ -262,6 +262,7 @@ impl Video {
 			codec,
 			encoder: self.encoder.clone(),
 			audio: options.audio,
+			audio_sources: options.audio_sources,
 			restore_token: options.restore_token,
 			..StreamerConfig::default()
 		};
@@ -332,6 +333,8 @@ pub(crate) struct CaptureRequest {
 	pub fps: u32,
 	pub bitrate_kbps: u32,
 	pub audio: bool,
+	/// Mixed into the stream's audio (`stream.audio_sources`).
+	pub audio_sources: Vec<AudioSourceSpec>,
 	pub restore_token: Option<String>,
 }
 
@@ -356,7 +359,7 @@ impl Capture {
 	}
 
 	pub fn audio_error(&self) -> Option<String> {
-		self.streamer.audio_error().map(str::to_owned)
+		self.streamer.audio_error()
 	}
 
 	/// The portal's token for this choice, to keep.

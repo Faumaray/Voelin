@@ -33,6 +33,9 @@ pub mod external;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod pipewire_audio;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
+pub mod pipewire_links;
+pub mod playback;
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod portal;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 mod pw;

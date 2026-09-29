@@ -14,6 +14,9 @@
 //!   test source, X11 (feature `x11`), the Wayland ScreenCast portal and
 //!   PipeWire system audio (feature `pipewire`), and Windows Graphics Capture
 //!   plus WASAPI loopback on Windows
+//! - [`mix`]: the stream's audio mixer ([`mix::StreamMixer`]): any number
+//!   of sources at their own pace and rate into 48 kHz stereo, with gains,
+//!   mutes, a soft limiter and lock-free meters
 //! - [`queue`]: the bounded, drop-oldest channel capture backends deliver on
 //! - the streaming path: [`workers`] (a fork-join pool that allocates
 //!   nothing per job), [`pool`] (recycled I420 frames), [`handoff`]
@@ -32,6 +35,7 @@ pub mod convert;
 pub mod ffmpeg;
 pub mod frame;
 pub mod handoff;
+pub mod mix;
 pub mod pool;
 pub mod queue;
 pub mod scale;

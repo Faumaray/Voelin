@@ -42,6 +42,8 @@ the admin grants them to the guest query group.
 |---|---|
 | Server chat | Voice connection: `targetmode=3`. Without one: gateway or own query session (`servernotifyregister event=textserver`) |
 | Channel chat without joining | Relay pool (`voelin-observer`): invisible query sessions sit in channels and relay both ways; posts appear as `[Nick] text` |
+| Chat history | Every message a session sees is stored on the device (`voelin-store`); a gateway's stored history fills in what the device missed (sync by revision, paging by time) |
+| Pins, reactions, topics, events, stream directory, activity | Gateway features (`tsgw`), driven through `Command::Gateway` / `Event::Gateway` |
 | Voice | tsproto UDP transport, Opus (`opus2`), echo cancellation / noise suppression (sonora), own jitter buffer, cpal / AAudio |
 | Invisible presence | Gateway presence stream (snapshot + deltas from query events) or direct query; `channelsubscribeall` when voice-connected |
 | Screen share with sound | TS6 stream signalling (`voelin-stream`), str0m WebRTC, per-platform capture and codecs (`voelin-media`) |
@@ -64,10 +66,10 @@ fuzz/                cargo-fuzz targets
 | `voelin-query` | ServerQuery codec and transports: raw TCP, SSH (russh), HTTP WebQuery | done |
 | `voelin-observer` | Presence tracker + chat relay pool over `voelin-query` | done |
 | `voelin-gateway-proto`, `voelin-gateway` (`tsgw`) | Companion service for server admins: identity-challenge auth, permission-mirroring authorization, presence stream, chat relay, SQLite history, WebSocket + JSON (`tsgw.v1+json`) | done |
-| `voelin-store` | Identities, bookmarks, settings, chat cache, secrets (keyring / Android Keystore) | done |
+| `voelin-store` | Identities, bookmarks, settings, chat history (dedupe, paging, sync cursors), secrets (keyring / Android Keystore); versioned schema | done |
 | `voelin-audio` | Capture/playback, Opus, echo cancellation, resampling, jitter buffer, mixer, VAD/push-to-talk | v0 (no AEC yet) |
 | `voelin-stream` | TS6 stream commands, JSON signalling, str0m peer connections, host/STUN candidates, streamer/viewer sessions, frame-source seam | sessions + transport |
-| `voelin-core` | Engine: runtime, per-server sessions, merge of voice/gateway/query sources, event bus, command API, audio settings and volumes, streams on TS6; `media` module (capture → encoder → stream, stream → decoder) | done |
+| `voelin-core` | Engine: runtime, per-server sessions, merge of voice/gateway/query sources, event bus, command API, chat history, the gateway's features, audio settings and volumes, streams on TS6; `media` module (capture → encoder → stream, stream → decoder) | done |
 | `voelin-ui` | Slint UI and the desktop binary: streams panel, viewer, share dialog, audio / hotkey / codec settings | done (desktop) |
 | `voelin-media` | Screen and system-audio capture backends (PipeWire portal, X11, Windows Graphics Capture, Android MediaProjection), video codecs | done (desktop hardware encoders planned; MediaCodec not run on a device yet) |
 | `voelin-platform` | Global hotkeys, notifications, paths, crash reports, notices | done |
@@ -81,6 +83,67 @@ voice (after subscribing to all channels) > gateway > query. Channel chat uses
 the native command only when voice-connected *and* in that channel, otherwise the
 gateway, otherwise a local query relay. UI states: `Offline`,
 `Observing (Gateway|Query)` (invisible), `Connecting`, `Connected`.
+
+## Chat history
+
+Every chat message a session sees is stored in the client database
+(`voelin-store::chat`, table `messages`) under the server's unique id: live
+over voice, pushed by the gateway, read by a query relay, or sent by us
+(stored at once, as `local`). The unique id comes from the voice connection
+(the server's key: base64 SHA-1 on TeamSpeak 3, SHA-256 on 6, the same value
+as `virtualserver_unique_identifier`) or the gateway's `hello`; the database
+remembers it for the bookmark's address and gateway URL (`server_aliases`),
+so a chat shows its stored messages before any source has connected.
+Query-only sessions, which learn no id, keep history under the query address.
+
+Rows carry `ts_ms`, the author, the text, the source that delivered them
+first, and, once the gateway's copy is known, its stable id (`remote_id`,
+unique per server and chat), revision, topic, pin and reactions. A message
+often arrives twice (over voice and from the gateway); the store merges the
+copies into one row: by gateway id, else by the text without a relay's
+`[nick] ` prefix, the author (unique id, the relay prefix naming the other
+copy's author, or the nickname without unique ids) and a time difference of
+at most `chat.dedupe_tolerance_ms` (default 5 s), between different sources
+only (a person saying the same thing twice stays two messages).
+
+`voelin-core::history` runs the database on a writer thread: live messages
+are queued without waiting, writes that queue up go into one transaction,
+statements are cached. When a chat opens (and whenever a source of the
+session connects), the engine emits the newest `chat.history_page` stored
+messages (`Event::ChatHistory`, source `Local`), then, with a gateway that
+keeps history, syncs the chat: the first time the gateway's latest page,
+afterwards `sync` from the chat's revision cursor (`chat_cursors`), which
+returns new messages and messages whose pin, reactions or topic changed,
+page after page until done (`Gateway` batches; the last one may be empty).
+`Command::LoadOlderHistory` pages back: the gateway's page before that time
+is fetched and merged first, then the stored page is emitted, so gaps (times
+this device was offline) fill in as the user scrolls. Live messages and
+changes come as `Live` batches. The UI keeps each chat as a list keyed by
+the local id and ordered by `(ts_ms, id)`, and upserts every batch. Without
+a gateway only `Local` batches come: the UI labels the chat "only messages
+seen by this device".
+
+Settings: `chat.store_history` (off: memory only, negative ids),
+`chat.history_page` (0: everything), `chat.dedupe_tolerance_ms`,
+`chat.retention_days` (0: keep everything; pinned messages stay). No limit
+is built in.
+
+## Gateway features in the engine
+
+The session's gateway source runs on the typed client
+(`voelin-gateway-proto`, feature `client`): presence and relayed chat as
+before, plus the extensions. After login the engine enables the chat
+extension pushes and subscribes to events, the stream directory and the
+activity feed when the gateway offers them. `Command::Gateway` carries a
+`GatewayRequest` (pins, reactions, topics and topic history, events with
+RSVP, the stream directory, activity, permissions, runtime configuration and
+permission rules); answers and pushes come as `Event::Gateway` with a
+`GatewayUpdate` (`Done`/`Failed` for requests without data or refused ones,
+`Connected`/`Capabilities`/`Disconnected` for what the gateway offers).
+Messages in answers and pushes are stored first, so the UI gets them with
+local ids. The contract is in the module docs of `voelin_core::gateway` and
+`voelin_core::history`; `voelinctl gateway --engine` drives it from the
+command line.
 
 ## Streams
 
@@ -148,7 +211,13 @@ at its start. `voelin-stream::discovery` follows the clients' channels and
 streaming flags (`Streams::update_clients`), and looks up streams nobody
 announced to us with `requeststreaminfo clid=<streamer>`
 ([research/ts6-late-join.md](research/ts6-late-join.md)). The lookup is a
-`StreamLookup` trait, so another directory (a gateway's) can be added.
+`StreamLookup` trait. The session's gateway directory is the second one:
+its registered entries (stream id, streamer) go to the stream task, which
+adds those of streamers in our channel that still stream
+(`Streams::discovered`), so a stream is found even when the server's lookup
+does not answer. Our own stream registers itself in the directory when it
+goes live (title, kind, channel, client), updates its viewer count, and is
+removed when it ends.
 
 ## Settings
 
@@ -161,7 +230,8 @@ key); writes notify subscribers and go to SQLite on a writer thread. The
 engine holds one (`Engine::settings`, `Command::AttachSettings`), takes
 `Command::SetSetting` / `ResetSetting` and reports `Event::SettingChanged`.
 The UI opens it on its database and registers its own keys (`ui`,
-`client_playback`); the stream keys (`stream.*`) are defined in the core.
+`client_playback`); the stream keys (`stream.*`) and chat keys (`chat.*`)
+are defined in the core, which reads them on every use.
 
 ## Milestones
 

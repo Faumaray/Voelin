@@ -40,17 +40,81 @@ pub struct GatewayArgs {
 	/// Exit successfully when a client with this nickname is present.
 	#[arg(long)]
 	pub expect_client: Option<String>,
+
+	// Through the engine (voelin-core), as the app uses the gateway.
+	/// Run an engine session instead of a raw connection: chat history,
+	/// requests, the stream directory. Prints one line per event.
+	#[arg(long)]
+	pub engine: bool,
+	/// Chat history database (engine; default: in memory).
+	#[arg(long, requires = "engine")]
+	pub db: Option<PathBuf>,
+	/// Also connect voice to this server address with the same identity (engine).
+	#[arg(long, requires = "engine")]
+	pub voice: Option<String>,
+	/// Voice nickname (engine).
+	#[arg(long, default_value = "voelinctl", requires = "engine")]
+	pub nick: String,
+	/// Stream media over 127.0.0.1 only (engine, both ends on this machine).
+	#[arg(long, requires = "engine")]
+	pub loopback: bool,
+	/// Open a chat and print its history (engine): `server`, `channel:<cid>`
+	/// or `private:<uid>`. Repeatable.
+	#[arg(long = "chat", requires = "engine")]
+	pub chat: Vec<String>,
+	/// Page back this many times in each `--chat` (engine).
+	#[arg(long, default_value_t = 0, requires = "engine")]
+	pub older: u32,
+	/// A gateway request as JSON, sent after login (engine), e.g.
+	/// `{"config_get":{"key":"relay.pinned_channels"}}`, `"config_list"`,
+	/// `{"perm_set":{"action":"pin","rule":{"everyone":true}}}`. Repeatable.
+	#[arg(long = "request", requires = "engine")]
+	pub request: Vec<String>,
+	/// Post, pin, react, start a topic from the post, post into it and read
+	/// it back in this chat, checking each step (engine).
+	#[arg(long, requires = "engine")]
+	pub roundtrip: Option<String>,
+	/// With `--voice` (TeamSpeak 6): stream synthetic frames this long; the
+	/// stream registers itself in the gateway's directory (engine).
+	#[arg(long, requires = "voice")]
+	pub stream_seconds: Option<u64>,
+	/// Title of that stream.
+	#[arg(long, default_value = "voelinctl", requires = "stream_seconds")]
+	pub stream_title: String,
+	/// With `--voice`: watch the stream of this client once it is found
+	/// (from the server or the gateway's directory) (engine).
+	#[arg(long, requires = "voice")]
+	pub watch_streamer: Option<String>,
+	/// Exit successfully once this many video frames of the watched stream arrived.
+	#[arg(long, requires = "watch_streamer")]
+	pub expect_frames: Option<u64>,
+	/// An engine setting, e.g. `chat.history_page=20`. Repeatable.
+	#[arg(long = "set", value_name = "KEY=VALUE", requires = "engine")]
+	pub set: Vec<String>,
 }
 
-fn parse_target(s: &str) -> Result<ChatTarget> {
+pub fn parse_target(s: &str) -> Result<ChatTarget> {
 	match s.split_once(':') {
 		None if s == "server" => Ok(ChatTarget::Server),
 		Some(("channel", cid)) => Ok(ChatTarget::Channel(cid.parse().context("channel id")?)),
-		_ => bail!("target must be `server` or `channel:<cid>`, got {s:?}"),
+		Some(("private", uid)) => Ok(ChatTarget::Private(uid.to_owned())),
+		_ => bail!("target must be `server`, `channel:<cid>` or `private:<uid>`, got {s:?}"),
+	}
+}
+
+/// [`parse_target`] back.
+pub fn target_name(target: &ChatTarget) -> String {
+	match target {
+		ChatTarget::Server => "server".into(),
+		ChatTarget::Channel(cid) => format!("channel:{cid}"),
+		ChatTarget::Private(uid) => format!("private:{uid}"),
 	}
 }
 
 pub async fn run(args: GatewayArgs) -> Result<()> {
+	if args.engine {
+		return crate::engine::run(args).await;
+	}
 	let identity = crate::identity::load(&args.identity)?;
 	let mut request = args.url.as_str().into_client_request()?;
 	request
