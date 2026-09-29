@@ -71,6 +71,10 @@ windows-capture = "2.0.1"
 
 [dev-dependencies]
 criterion = "0.8"
+# The H.264 `profile-level-id` the signalling offers, to check it against the
+# SPS the encoders really emit (`tests/ffmpeg.rs`). No cycle: voelin-stream
+# does not depend on this crate.
+voelin-stream = { path = "../voelin-stream" }
 # Logs of integration tests (`RUST_LOG`).
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }

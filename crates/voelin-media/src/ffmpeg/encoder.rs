@@ -189,6 +189,61 @@ const X264_PRESETS: [&str; 10] = [
 const PROFILE_H264_HIGH: i64 = 100;
 const PROFILE_H264_CONSTRAINED_BASELINE: i64 = 66 | 1 << 9;
 
+/// H.264 level limits (ITU-T H.264 Table A-1): `level_idc`, macroblocks per
+/// second, macroblocks per frame, bitrate in kbit/s for Baseline (High
+/// allows 1.25 times that).
+const H264_LEVELS: [(i64, u64, u64, u64); 19] = [
+	(10, 1_485, 99, 64),
+	(11, 3_000, 396, 192),
+	(12, 6_000, 396, 384),
+	(13, 11_880, 396, 768),
+	(20, 11_880, 396, 2_000),
+	(21, 19_800, 792, 4_000),
+	(22, 20_250, 1_620, 4_000),
+	(30, 40_500, 1_620, 10_000),
+	(31, 108_000, 3_600, 14_000),
+	(32, 216_000, 5_120, 20_000),
+	(40, 245_760, 8_192, 20_000),
+	(41, 245_760, 8_192, 50_000),
+	(42, 522_240, 8_704, 50_000),
+	(50, 589_824, 22_080, 135_000),
+	(51, 983_040, 36_864, 240_000),
+	(52, 2_073_600, 36_864, 240_000),
+	(60, 4_177_920, 139_264, 240_000),
+	(61, 8_355_840, 139_264, 480_000),
+	(62, 16_711_680, 139_264, 800_000),
+];
+
+/// The lowest `level_idc` whose limits hold this stream, or the highest
+/// level defined if none does.
+///
+/// The signalling offers the same level to the viewer
+/// (`voelin_stream::h264::level_idc`, which this mirrors — a test pins the
+/// two together). It has to be told to the encoder, because wrappers that
+/// pick a level themselves pick a generous one: AMF writes level 4.2 into
+/// the SPS of a 720p30 stream whose offer says 3.1, and a decoder set up
+/// from that offer may refuse it.
+fn h264_level(profile: H264Profile, width: u32, height: u32, fps: u32, bitrate: u32) -> i64 {
+	let (mbs_w, mbs_h) = (u64::from(width.div_ceil(16)), u64::from(height.div_ceil(16)));
+	let frame = mbs_w * mbs_h;
+	let rate = frame * u64::from(fps.max(1));
+	let factor = match profile {
+		H264Profile::ConstrainedHigh => 1250,
+		H264Profile::ConstrainedBaseline => 1000,
+	};
+	H264_LEVELS
+		.iter()
+		.find(|&&(_, max_rate, max_frame, max_kbps)| {
+			rate <= max_rate
+				&& frame <= max_frame
+				// Neither side may exceed sqrt(8 * MaxFS) macroblocks.
+				&& mbs_w * mbs_w <= 8 * max_frame
+				&& mbs_h * mbs_h <= 8 * max_frame
+				&& u64::from(bitrate) <= max_kbps * factor
+		})
+		.map_or(H264_LEVELS[H264_LEVELS.len() - 1].0, |l| l.0)
+}
+
 /// The backend's realtime settings (besides size, format, time base and
 /// rate, which every backend gets).
 fn settings(spec: &BackendSpec, config: &EncoderConfig, low_power: bool) -> Vec<Setting> {
@@ -687,6 +742,16 @@ impl FfmpegEncoder {
 		];
 		if !self.spec.is_hardware() {
 			list.push(generic("threads", self.config.threads_for(width, height)));
+		}
+		if self.spec.codec == Codec::H264 {
+			// The level the signalling offers, so the SPS cannot claim a
+			// higher one than the viewer's decoder was set up for. Both
+			// targets: the wrappers that have a private `level` read that
+			// one, the rest `AVCodecContext.level`.
+			let level =
+				h264_level(self.config.h264_profile, width, height, fps, bitrate).to_string();
+			list.push(generic("level", &level));
+			list.push(Setting { values: vec![level], ..opt("level", &[]) });
 		}
 		list.extend(settings(self.spec, &self.config, low_power));
 		for setting in &list {
@@ -1398,6 +1463,48 @@ mod tests {
 			t.push(i, i as u64);
 		}
 		assert_eq!(t.pending.len(), 64, "bounded");
+	}
+
+	/// [`h264_level`] must agree with the level the signalling offers
+	/// (`voelin_stream::h264::level_idc`) for every stream, or the SPS and
+	/// the SDP would disagree again. Two copies of ITU-T Table A-1, pinned
+	/// to each other: this crate cannot depend on voelin-stream (it is the
+	/// lower one), and voelin-stream must not pull in the codecs.
+	#[test]
+	fn levels_agree_with_the_signalling() {
+		for (w, h) in [
+			(320u32, 240u32),
+			(640, 360),
+			(1280, 720),
+			(1920, 1080),
+			(2560, 1440),
+			(3840, 2160),
+			(4096, 64),
+			(16384, 16384),
+		] {
+			for fps in [1u32, 15, 30, 60, 120] {
+				for kbps in [200u32, 4_000, 8_000, 30_000] {
+					for (mine, theirs) in [
+						(H264Profile::ConstrainedHigh, voelin_stream::H264Profile::ConstrainedHigh),
+						(
+							H264Profile::ConstrainedBaseline,
+							voelin_stream::H264Profile::ConstrainedBaseline,
+						),
+					] {
+						let bitrate = kbps * 1000;
+						let ours = h264_level(mine, w, h, fps, bitrate);
+						let signalled =
+							voelin_stream::h264::level_idc(theirs, w, h, fps, u64::from(bitrate));
+						assert_eq!(
+							ours,
+							i64::from(signalled),
+							"{w}x{h}@{fps} {kbps}k {mine:?}: encoder level {ours}, offer \
+							 {signalled}"
+						);
+					}
+				}
+			}
+		}
 	}
 
 	#[test]
