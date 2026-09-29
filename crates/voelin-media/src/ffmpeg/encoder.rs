@@ -1316,6 +1316,9 @@ pub struct BackendStatus {
 	pub spec: &'static BackendSpec,
 	/// `Ok` if it encoded the test frame, else why not.
 	pub available: std::result::Result<(), String>,
+	/// How long its self-test took (the probe runs them in parallel, so the
+	/// startup cost is the slowest one).
+	pub took: Duration,
 }
 
 /// Size of the self-test frame.
@@ -1341,42 +1344,195 @@ fn in_build(ffmpeg: &Ffmpeg, name: &str) -> bool {
 	!unsafe { (ffmpeg.api.avcodec_find_encoder_by_name)(name.as_ptr()) }.is_null()
 }
 
+/// PCI vendor of a GPU, as `/sys/class/drm/*/device/vendor` gives it.
+#[cfg(target_os = "linux")]
+mod vendor {
+	pub const AMD: u32 = 0x1002;
+	pub const NVIDIA: u32 = 0x10de;
+	pub const INTEL: u32 = 0x8086;
+}
+
+/// The PCI vendors of this machine's DRM render nodes, read once; empty if
+/// `/sys/class/drm` says nothing (a container without it, say), which is
+/// taken as "unknown" and skips nothing.
+#[cfg(target_os = "linux")]
+fn drm_vendors() -> &'static [u32] {
+	static VENDORS: OnceLock<Vec<u32>> = OnceLock::new();
+	VENDORS.get_or_init(|| {
+		let Ok(entries) = std::fs::read_dir("/sys/class/drm") else { return Vec::new() };
+		let mut found: Vec<u32> = entries
+			.flatten()
+			.filter(|e| e.file_name().to_string_lossy().starts_with("renderD"))
+			.filter_map(|e| std::fs::read_to_string(e.path().join("device/vendor")).ok())
+			.filter_map(|text| u32::from_str_radix(text.trim().trim_start_matches("0x"), 16).ok())
+			.collect();
+		found.sort_unstable();
+		found.dedup();
+		found
+	})
+}
+
+/// Sends the process's standard error to a temporary file while it lives,
+/// and logs whatever landed there when it is dropped.
+///
+/// FFmpeg's own messages already go to `tracing` (see
+/// [`Ffmpeg::capture_log`](super::Ffmpeg::capture_log)), but the libraries
+/// behind the encoders write to the descriptor themselves and cannot be
+/// asked not to: SVT-AV1 prints a build banner and its allocation totals,
+/// AMD's AMF runtime prints `GetProperty(...) not found` warnings, and Mesa
+/// prints a `RADV_PERFTEST` deprecation notice when AMF brings up Vulkan.
+/// Opening every encoder at startup meant about thirty such lines on every
+/// run of the app.
+///
+/// This moves the descriptor, so anything else the process writes to
+/// standard error meanwhile lands in the file too and comes back as one
+/// `debug` record. `VOELIN_FFMPEG_PROBE_STDERR=1` leaves it alone.
+struct QuietStderr {
+	#[cfg(unix)]
+	saved: std::os::fd::OwnedFd,
+	#[cfg(unix)]
+	file: std::path::PathBuf,
+}
+
+impl QuietStderr {
+	#[cfg(unix)]
+	fn start() -> Option<Self> {
+		use std::os::fd::AsFd;
+
+		if std::env::var_os("VOELIN_FFMPEG_PROBE_STDERR").is_some() {
+			return None;
+		}
+		let file =
+			std::env::temp_dir().join(format!("voelin-encoder-probe-{}.log", std::process::id()));
+		let sink = std::fs::File::create(&file).ok()?;
+		let stderr = std::io::stderr();
+		let saved = rustix::io::dup(stderr.as_fd()).ok()?;
+		// Anything already buffered belongs on the real descriptor.
+		let _ = std::io::Write::flush(&mut std::io::stderr());
+		rustix::stdio::dup2_stderr(sink.as_fd()).ok()?;
+		Some(Self { saved, file })
+	}
+
+	#[cfg(not(unix))]
+	fn start() -> Option<Self> {
+		None
+	}
+}
+
+#[cfg(unix)]
+impl Drop for QuietStderr {
+	fn drop(&mut self) {
+		use std::os::fd::AsFd;
+
+		let _ = std::io::Write::flush(&mut std::io::stderr());
+		let _ = rustix::stdio::dup2_stderr(self.saved.as_fd());
+		if let Ok(text) = std::fs::read_to_string(&self.file) {
+			let text = text.trim();
+			if !text.is_empty() {
+				tracing::debug!(target: "ffmpeg", "the encoder libraries wrote:\n{text}");
+			}
+		}
+		let _ = std::fs::remove_file(&self.file);
+	}
+}
+
+/// Whether the hardware `spec` needs can be in this machine at all.
+///
+/// A self-test of a family whose vendor is absent still costs 0.4-1.7 s of
+/// driver initialisation before it fails (measured here: `av1_nvenc` 1.7 s,
+/// `vp9_qsv` 1.2 s), and the probe's wall time is its slowest test. Nothing
+/// is skipped when the vendors cannot be read, so an unusual setup only
+/// pays the time it used to.
+fn vendor_may_be_present(spec: &BackendSpec) -> std::result::Result<(), String> {
+	#[cfg(target_os = "linux")]
+	{
+		let vendors = drm_vendors();
+		if vendors.is_empty() {
+			return Ok(());
+		}
+		let (wanted, what) = match spec.family() {
+			"nvenc" => (vendor::NVIDIA, "no NVIDIA GPU"),
+			"qsv" => (vendor::INTEL, "no Intel GPU"),
+			"amf" => (vendor::AMD, "no AMD GPU"),
+			_ => return Ok(()),
+		};
+		// NVIDIA's driver can run without a DRM node (`nvidia-drm.modeset=0`).
+		if wanted == vendor::NVIDIA && std::path::Path::new("/dev/nvidiactl").exists() {
+			return Ok(());
+		}
+		if !vendors.contains(&wanted) {
+			return Err(format!("{what} in this machine"));
+		}
+	}
+	let _ = spec;
+	Ok(())
+}
+
 /// Every backend with its self-test result (run once per process, the
 /// backends in parallel). Empty without FFmpeg.
+///
+/// A backend whose vendor is not in the machine is not opened at all
+/// ([`vendor_may_be_present`]): its driver would spend up to 1.7 s failing,
+/// and the probe costs as much as its slowest test.
 pub fn probe() -> &'static [BackendStatus] {
 	static PROBE: OnceLock<Vec<BackendStatus>> = OnceLock::new();
 	PROBE.get_or_init(|| {
 		let Ok(ffmpeg) = Ffmpeg::get() else { return Vec::new() };
+		let started = Instant::now();
+		let quiet = QuietStderr::start();
 		let statuses: Vec<BackendStatus> = std::thread::scope(|scope| {
 			let tests: Vec<_> = BACKENDS
 				.iter()
 				.map(|spec| {
-					let present = in_build(ffmpeg, spec.name);
-					let test = present.then(|| scope.spawn(move || test_backend(spec)));
-					(spec, test)
+					let absent = vendor_may_be_present(spec).err();
+					let present = absent.is_none() && in_build(ffmpeg, spec.name);
+					let test = present.then(|| {
+						scope.spawn(move || {
+							let started = Instant::now();
+							(test_backend(spec), started.elapsed())
+						})
+					});
+					(spec, absent, test)
 				})
 				.collect();
 			tests
 				.into_iter()
-				.map(|(spec, test)| BackendStatus {
-					spec,
-					available: match test {
-						None => Err("not in this FFmpeg build".into()),
-						Some(handle) => {
-							handle.join().unwrap_or_else(|_| Err("the self-test panicked".into()))
-						}
-					},
+				.map(|(spec, absent, test)| {
+					let (available, took) = match test {
+						None => (
+							Err(absent.unwrap_or_else(|| "not in this FFmpeg build".into())),
+							Duration::ZERO,
+						),
+						Some(handle) => handle.join().unwrap_or_else(|_| {
+							(Err("the self-test panicked".into()), Duration::ZERO)
+						}),
+					};
+					BackendStatus { spec, available, took }
 				})
 				.collect()
 		});
+		// Standard error comes back (and what the libraries wrote is logged)
+		// before our own report.
+		drop(quiet);
 		for status in &statuses {
 			match &status.available {
-				Ok(()) => tracing::info!(backend = status.spec.name, "FFmpeg encoder available"),
-				Err(e) => {
-					tracing::debug!(backend = status.spec.name, "FFmpeg encoder unusable: {e}")
-				}
+				Ok(()) => tracing::info!(
+					backend = status.spec.name,
+					ms = status.took.as_millis() as u64,
+					"FFmpeg encoder available"
+				),
+				Err(e) => tracing::debug!(
+					backend = status.spec.name,
+					ms = status.took.as_millis() as u64,
+					"FFmpeg encoder unusable: {e}"
+				),
 			}
 		}
+		tracing::info!(
+			ms = started.elapsed().as_millis() as u64,
+			tested = statuses.iter().filter(|s| !s.took.is_zero()).count(),
+			"FFmpeg encoders probed"
+		);
 		statuses
 	})
 }
