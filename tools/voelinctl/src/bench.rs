@@ -423,7 +423,13 @@ fn bench(args: BenchArgs) -> Result<()> {
 		let frames = b.frames - a.frames;
 		output_frames += frames;
 		let spec = layers.iter().find(|l| l.id == *id);
-		let size = spec.map_or((width, height), |l| l.output_size(width, height));
+		let layer_stats = stats.layers.iter().find(|l| l.id == *id);
+		// What was really encoded: with a real source the size comes from the
+		// capture, not from --res.
+		let size = match layer_stats.filter(|l| l.width > 0) {
+			Some(l) => (l.width, l.height),
+			None => spec.map_or((width, height), |l| l.output_size(width, height)),
+		};
 		let dropped = |s: &Sample| s.dropped.iter().find(|d| d.0 == *id).map_or(0, |d| d.1);
 		let layer = stats.layers.iter().find(|l| l.id == *id);
 		println!(
