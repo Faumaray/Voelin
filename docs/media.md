@@ -607,7 +607,8 @@ has not run on Windows yet.
 | Answer's codec reported to the streamer, H.264 level in the offer, HEVC offered | `voelin-stream` `peer::tests::streamer_learns_the_answered_codec`, `h264::tests` | tested (str0m on loopback) |
 | x264 / SVT-AV1 / libaom in the streamer pipeline | `voelinctl stream bench --encoder ...` | 720p30: x264 8.7 ms per frame, SVT-AV1 1.3 ms, libaom 37 ms; 1.1 allocations per encoded frame |
 | Hardware encoders (VA-API, NVENC, Quick Sync, AMF, Media Foundation, VideoToolbox), DMA-BUF import | – | compile only (no GPU here); the Windows code type-checks for `x86_64-pc-windows-gnu` |
-| Several codecs against official TeamSpeak viewers | – | not tested live |
+| Offer [VP9, VP8], a viewer that decodes only VP8 → its own VP8 encoder, VP9 idle, pictures decoded | `voelin-core/tests/media_live.rs` `ts6_viewer_gets_the_codec_it_chose` (`VOELIN_LIVE=1`) | tested against the TeamSpeak 6 dev server (our client on both ends) |
+| Several codecs against official TeamSpeak viewers | – | not tested (no official client here) |
 | Test pattern → VP8 → decoder, rectangle position and colour | `voelin-core` `media::tests::local_preview_decodes_the_pattern` | tested |
 | Test pattern → two engine stream tasks → str0m peers on loopback → decoder | `voelin-core` `stream::tests::test_pattern_through_stream_tasks` | tested |
 | Stream audio (RTP time → jitter buffer ids, volume, end) | `voelin-core` `audio::tests::stream_audio_with_volume`, stream task test | tested |
