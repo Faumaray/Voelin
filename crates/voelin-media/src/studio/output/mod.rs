@@ -7,7 +7,8 @@
 //! - [`record`]: a file, WebM or Matroska ([`ebml`])
 //! - [`replay`]: the last few seconds in memory (spilling to disk), written
 //!   out as a clip without re-encoding
-//! - `whip`: WHIP (WebRTC-HTTP ingestion) to a broadcast service
+//! - [`whip`]: WHIP (WebRTC-HTTP ingestion) to a broadcast service (feature
+//!   `whip`)
 //! - [`rtmp`]: the seam for RTMP, which will go through the FFmpeg loader
 //!
 //! A sink never stalls the encoder: [`OutputSink::write`] returns an error
@@ -21,6 +22,8 @@ pub mod ebml;
 pub mod record;
 pub mod replay;
 pub mod rtmp;
+#[cfg(feature = "whip")]
+pub mod whip;
 
 /// Which stream a packet belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

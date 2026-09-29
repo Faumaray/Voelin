@@ -33,6 +33,9 @@ pipewire = ["dep:ashpd", "dep:pipewire", "dep:memmap2", "dep:rustix"]
 wlroots = ["dep:wayland-client", "dep:wayland-protocols", "dep:wayland-protocols-wlr", "dep:memmap2", "dep:rustix"]
 # Conversion between `Codec` and `str0m::format::Codec`.
 str0m = ["dep:str0m"]
+# The studio's WHIP output: a WebRTC session (str0m) set up over HTTP. Needs
+# str0m's crypto provider, the same one voelin-stream uses.
+whip = ["str0m", "str0m/aws-lc-rs", "dep:reqwest"]
 v4l = []
 
 [dependencies]
