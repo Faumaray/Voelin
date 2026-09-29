@@ -60,6 +60,8 @@ pub enum SourceId {
 	Portal,
 	/// The synthetic test pattern.
 	Synthetic,
+	/// The Stream Studio's composite ([`crate::studio::StudioCapture`]).
+	Studio,
 }
 
 /// A source as shown in a picker.

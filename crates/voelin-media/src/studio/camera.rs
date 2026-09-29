@@ -29,6 +29,8 @@ use crate::Result;
 use crate::capture::synthetic::SyntheticScreen;
 use crate::capture::{CaptureOptions, ScreenCapture, SourceId};
 use crate::studio::compose::Feed;
+use crate::studio::scene::Background;
+use crate::studio::segment::BackgroundFilter;
 use crate::studio::source::FeedSink;
 
 /// The id of the camera that is always available: the test pattern.
@@ -147,6 +149,7 @@ impl Capture {
 		size: Option<(u32, u32)>,
 		fps: u32,
 		feed: Arc<Feed>,
+		background: Background,
 	) -> Result<Self> {
 		let fps = fps.max(1);
 		let wanted = match device.trim() {
@@ -160,8 +163,12 @@ impl Capture {
 			let (w, h) = size.unwrap_or((1280, 720));
 			let mut screen = SyntheticScreen::new(w.max(2), h.max(2));
 			let options = CaptureOptions { fps, cursor: false, ..CaptureOptions::default() };
-			let sink = Box::new(FeedSink::new(feed, Arc::new(AtomicU32::new(fps))));
-			screen.start_sink(&SourceId::Synthetic, &options, sink).await?;
+			let mut sink = FeedSink::new(feed, Arc::new(AtomicU32::new(fps)));
+			if background.needs_mask() {
+				sink = sink
+					.with_background(BackgroundFilter::with_default_segmenter(background.clone()));
+			}
+			screen.start_sink(&SourceId::Synthetic, &options, Box::new(sink)).await?;
 			return Ok(Self {
 				backend: "synthetic",
 				device: wanted,
@@ -172,13 +179,14 @@ impl Capture {
 		}
 		#[cfg(all(target_os = "linux", feature = "pipewire"))]
 		{
-			let stream = pipewire_camera::Stream::start(&wanted, size, fps, feed).await?;
+			let stream =
+				pipewire_camera::Stream::start(&wanted, size, fps, feed, background).await?;
 			debug!(device = %wanted, "camera through PipeWire");
 			Ok(Self { backend: "pipewire", device: wanted, screen: None, stream: Some(stream) })
 		}
 		#[cfg(not(all(target_os = "linux", feature = "pipewire")))]
 		{
-			let _ = (size, feed);
+			let _ = (size, feed, background);
 			Err(crate::Error::CaptureUnavailable {
 				backend: BACKEND,
 				reason: format!("no camera backend for {wanted:?} in this build"),
@@ -472,6 +480,8 @@ mod pipewire_camera {
 	use crate::frame::{FrameRef, PixelsRef, PlaneRef};
 	use crate::pool::FramePool;
 	use crate::studio::compose::Feed;
+	use crate::studio::scene::Background;
+	use crate::studio::segment::BackgroundFilter;
 	use crate::studio::source::deliver;
 	use crate::{Error, Result};
 
@@ -503,16 +513,17 @@ mod pipewire_camera {
 			size: Option<(u32, u32)>,
 			fps: u32,
 			feed: Arc<Feed>,
+			background: Background,
 		) -> Result<Self> {
 			// The daemon first: it needs no dialog. A sandbox refuses it, and
 			// then the portal's connection is the only way in.
-			let direct = connect(None, device, size, fps, feed.clone());
+			let direct = connect(None, device, size, fps, feed.clone(), background.clone());
 			match direct {
 				Ok(thread) => Ok(Self { backend: "pipewire", _thread: thread }),
 				Err(direct) => {
 					debug!("PipeWire cameras: {direct}; asking the camera portal");
 					let fd = portal_fd().await?;
-					let thread = connect(Some(fd), device, size, fps, feed)?;
+					let thread = connect(Some(fd), device, size, fps, feed, background)?;
 					Ok(Self { backend: "portal", _thread: thread })
 				}
 			}
@@ -555,19 +566,21 @@ mod pipewire_camera {
 		size: Option<(u32, u32)>,
 		fps: u32,
 		feed: Arc<Feed>,
+		background: Background,
 	) -> Result<PwThread> {
 		let device = device.to_owned();
 		PwThread::spawn("voelin-camera", fd, move |core, mainloop| {
 			// No target node: the session manager connects the stream to the
 			// default camera. Picking one of several by `api.v4l2.path`
 			// needs a registry round trip and is not done yet.
-			camera_stream(core, mainloop, None, &device, size, fps, feed)
+			camera_stream(core, mainloop, None, &device, size, fps, feed, background)
 		})
 		.map_err(|e| Error::Capture { backend: BACKEND, message: e })
 	}
 
 	struct State {
 		feed: Arc<Feed>,
+		filter: Option<BackgroundFilter>,
 		pool: FramePool,
 		pacer: FramePacer,
 		started: Instant,
@@ -586,6 +599,7 @@ mod pipewire_camera {
 		size: Option<(u32, u32)>,
 		fps: u32,
 		feed: Arc<Feed>,
+		background: Background,
 	) -> std::result::Result<Parts, String> {
 		let props = pw::properties::properties! {
 			*pw::keys::MEDIA_TYPE => "Video",
@@ -596,6 +610,9 @@ mod pipewire_camera {
 			.map_err(|e| format!("PipeWire stream: {e}"))?;
 		let state = State {
 			feed,
+			filter: background
+				.needs_mask()
+				.then(|| BackgroundFilter::with_default_segmenter(background)),
 			pool: FramePool::new(),
 			pacer: FramePacer::new(Some(fps)),
 			started: Instant::now(),
@@ -795,7 +812,7 @@ mod pipewire_camera {
 			other => return packed(state, other, width, height, stride, bytes, timestamp),
 		};
 		let frame = FrameRef { width, height, timestamp, pixels };
-		deliver(&mut state.pool, &state.feed, &frame)
+		deliver(&mut state.pool, &state.feed, &frame, state.filter.as_mut())
 	}
 
 	/// YUY2 / UYVY / RGB / BGR straight into a pooled RGBA frame.
@@ -868,6 +885,9 @@ mod pipewire_camera {
 				}
 			}
 		}
+		if let Some(filter) = state.filter.as_mut() {
+			filter.apply(target)?;
+		}
 		state.feed.put(slot.clone());
 		Ok(())
 	}
@@ -931,7 +951,8 @@ mod tests {
 			panic!("no camera on this machine");
 		};
 		let feed = Arc::new(Feed::new());
-		let capture = Capture::start(&camera.id, None, 15, feed.clone()).await.unwrap();
+		let capture =
+			Capture::start(&camera.id, None, 15, feed.clone(), Background::Keep).await.unwrap();
 		let started = std::time::Instant::now();
 		while feed.delivered() < 3 && started.elapsed() < Duration::from_secs(20) {
 			tokio::time::sleep(Duration::from_millis(50)).await;
@@ -953,7 +974,9 @@ mod tests {
 	#[tokio::test]
 	async fn the_synthetic_camera_delivers() {
 		let feed = Arc::new(Feed::new());
-		let capture = Capture::start(SYNTHETIC, Some((64, 48)), 30, feed.clone()).await.unwrap();
+		let capture = Capture::start(SYNTHETIC, Some((64, 48)), 30, feed.clone(), Background::Keep)
+			.await
+			.unwrap();
 		assert_eq!(capture.backend(), "synthetic");
 		assert_eq!(capture.device(), SYNTHETIC);
 		let started = std::time::Instant::now();

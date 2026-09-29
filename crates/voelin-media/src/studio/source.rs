@@ -29,7 +29,8 @@ use crate::frame::{FrameData, FrameRef, PixelFormat, PixelsRef, Plane, VideoFram
 use crate::pool::FramePool;
 use crate::studio::camera;
 use crate::studio::compose::Feed;
-use crate::studio::scene::{Align, Colour, SourceKind};
+use crate::studio::scene::{Align, Background, Colour, SourceKind};
+use crate::studio::segment::BackgroundFilter;
 use crate::{Error, Result};
 
 /// The UI's font, for text sources without one of their own. The same file
@@ -175,6 +176,8 @@ pub struct FeedSink {
 	fps: Arc<AtomicU32>,
 	pacer: FramePacer,
 	rate: u32,
+	/// Background replacement, if this source has any.
+	filter: Option<BackgroundFilter>,
 }
 
 impl FeedSink {
@@ -182,7 +185,21 @@ impl FeedSink {
 	/// capturing.
 	pub fn new(feed: Arc<Feed>, fps: Arc<AtomicU32>) -> Self {
 		let rate = fps.load(Ordering::Relaxed).max(1);
-		Self { feed, pool: FramePool::new(), fps, pacer: FramePacer::new(Some(rate)), rate }
+		Self {
+			feed,
+			pool: FramePool::new(),
+			fps,
+			pacer: FramePacer::new(Some(rate)),
+			rate,
+			filter: None,
+		}
+	}
+
+	/// Replace the background of every frame; see
+	/// [`crate::studio::segment`].
+	pub fn with_background(mut self, filter: BackgroundFilter) -> Self {
+		self.filter = Some(filter);
+		self
 	}
 
 	fn follow_rate(&mut self) -> u32 {
@@ -213,7 +230,7 @@ impl FrameSink for FeedSink {
 			return false;
 		}
 		self.pacer.keep(frame.timestamp);
-		match deliver(&mut self.pool, &self.feed, &frame) {
+		match deliver(&mut self.pool, &self.feed, &frame, self.filter.as_mut()) {
 			Ok(()) => true,
 			Err(e) => {
 				warn!("cannot take a studio source frame: {e}");
@@ -224,13 +241,22 @@ impl FrameSink for FeedSink {
 	}
 }
 
-/// Copy `frame` into a pooled frame and publish it.
-pub fn deliver(pool: &mut FramePool, feed: &Feed, frame: &FrameRef<'_>) -> Result<()> {
+/// Copy `frame` into a pooled frame, replace its background if `filter` says
+/// so, and publish it.
+pub fn deliver(
+	pool: &mut FramePool,
+	feed: &Feed,
+	frame: &FrameRef<'_>,
+	filter: Option<&mut BackgroundFilter>,
+) -> Result<()> {
 	frame.validate()?;
 	let (width, height) = (frame.width, frame.height);
 	let row = width as usize * 4;
+	// Background replacement works on RGBA, so a filtered BGRA source is
+	// converted rather than copied.
+	let filtering = filter.as_ref().is_some_and(|f| f.mode().needs_mask());
 	let format = match frame.pixels {
-		PixelsRef::Bgra(_) => PixelFormat::Bgra,
+		PixelsRef::Bgra(_) if !filtering => PixelFormat::Bgra,
 		// I420, NV12 and the rest become RGBA.
 		_ => PixelFormat::Rgba,
 	};
@@ -241,12 +267,20 @@ pub fn deliver(pool: &mut FramePool, feed: &Feed, frame: &FrameRef<'_>) -> Resul
 		return Err(Error::InvalidFrame("the studio source pool is not packed".into()));
 	};
 	match frame.pixels {
-		PixelsRef::Bgra(src) | PixelsRef::Rgba(src) => {
+		PixelsRef::Rgba(src) => {
+			for y in 0..height as usize {
+				plane.data[y * plane.stride..][..row].copy_from_slice(src.row(y, row));
+			}
+		}
+		PixelsRef::Bgra(src) if !filtering => {
 			for y in 0..height as usize {
 				plane.data[y * plane.stride..][..row].copy_from_slice(src.row(y, row));
 			}
 		}
 		_ => crate::convert::to_rgba_ref(frame, &mut plane.data, plane.stride)?,
+	}
+	if filtering && let Some(filter) = filter {
+		filter.apply(target)?;
 	}
 	feed.put(slot.clone());
 	Ok(())
@@ -287,6 +321,8 @@ fn screen_backend(name: Option<&str>) -> Result<Box<dyn ScreenCapture>> {
 pub struct Input {
 	pub feed: Arc<Feed>,
 	kind: SourceKind,
+	/// What the frames' background should become, shared with the filter.
+	background: Background,
 	fps: Arc<AtomicU32>,
 	/// Stopped when dropped.
 	screen: Option<Box<dyn ScreenCapture>>,
@@ -300,12 +336,13 @@ impl Input {
 	/// cannot start has its reason in [`Feed::error`] and draws nothing.
 	///
 	/// Must run on a Tokio runtime for the portal kinds (they talk D-Bus).
-	pub async fn start(kind: SourceKind, fps: u32) -> Self {
+	pub async fn start(kind: SourceKind, fps: u32, background: Background) -> Self {
 		let feed = Arc::new(Feed::new());
 		let mut input = Self {
 			feed: feed.clone(),
 			fps: Arc::new(AtomicU32::new(fps.max(1))),
 			kind,
+			background,
 			screen: None,
 			camera: None,
 			restore_token: None,
@@ -339,8 +376,14 @@ impl Input {
 			}
 			SourceKind::Camera { device, size, fps, .. } => {
 				let rate = fps.unwrap_or_else(|| self.fps.load(Ordering::Relaxed));
-				let capture =
-					camera::Capture::start(device, *size, rate, self.feed.clone()).await?;
+				let capture = camera::Capture::start(
+					device,
+					*size,
+					rate,
+					self.feed.clone(),
+					self.background.clone(),
+				)
+				.await?;
 				debug!(device = %capture.backend(), "studio camera");
 				self.camera = Some(capture);
 			}
@@ -357,7 +400,13 @@ impl Input {
 					cursor,
 					..CaptureOptions::default()
 				};
-				let sink = Box::new(FeedSink::new(self.feed.clone(), self.fps.clone()));
+				let mut sink = FeedSink::new(self.feed.clone(), self.fps.clone());
+				if self.background.needs_mask() {
+					sink = sink.with_background(BackgroundFilter::with_default_segmenter(
+						self.background.clone(),
+					));
+				}
+				let sink: Box<dyn FrameSink> = Box::new(sink);
 				match kind {
 					SourceKind::Pattern { size } => {
 						let mut screen = SyntheticScreen::new(size.0.max(2), size.1.max(2));
@@ -386,6 +435,11 @@ impl Input {
 
 	pub fn kind(&self) -> &SourceKind {
 		&self.kind
+	}
+
+	/// What its frames' background becomes.
+	pub fn background(&self) -> &Background {
+		&self.background
 	}
 
 	/// Frame-rate cap; the capture follows without restarting.
@@ -503,7 +557,8 @@ mod tests {
 
 	#[tokio::test]
 	async fn the_test_pattern_and_static_kinds_feed() {
-		let input = Input::start(SourceKind::Pattern { size: (64, 48) }, 30).await;
+		let input =
+			Input::start(SourceKind::Pattern { size: (64, 48) }, 30, Background::Keep).await;
 		let started = std::time::Instant::now();
 		while input.feed.delivered() == 0 && started.elapsed() < Duration::from_secs(5) {
 			tokio::time::sleep(Duration::from_millis(10)).await;
@@ -515,14 +570,22 @@ mod tests {
 		assert!(matches!(frame.data, FrameData::Bgra(_) | FrameData::Rgba(_)));
 		input.set_fps(5);
 
-		let colour =
-			Input::start(SourceKind::Colour { colour: Colour::rgb(4, 5, 6), size: (8, 8) }, 30)
-				.await;
+		let colour = Input::start(
+			SourceKind::Colour { colour: Colour::rgb(4, 5, 6), size: (8, 8) },
+			30,
+			Background::Keep,
+		)
+		.await;
 		assert_eq!(colour.feed.delivered(), 1, "drawn once");
 		assert_eq!(pixel(&colour.feed.take().unwrap(), 0, 0), [4, 5, 6, 255]);
 
 		// A broken source reports and draws nothing.
-		let broken = Input::start(SourceKind::Image { path: "/nonexistent.png".into() }, 30).await;
+		let broken = Input::start(
+			SourceKind::Image { path: "/nonexistent.png".into() },
+			30,
+			Background::Keep,
+		)
+		.await;
 		assert!(broken.feed.error().is_some());
 		assert!(broken.feed.take().is_none());
 	}
