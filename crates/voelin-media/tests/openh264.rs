@@ -21,7 +21,7 @@ fn missing_library_is_a_clear_error() {
 	assert!(err.to_string().contains("OpenH264 library not found"), "{err}");
 
 	// Without a library, H.264 is neither decodable nor encodable.
-	let codecs = Codecs::new();
+	let codecs = Codecs::builtin();
 	assert!(!codecs.decoders().contains(&Codec::H264));
 	assert!(!codecs.encoder_codecs().contains(&Codec::H264));
 	let err = codecs.new_decoder(Codec::H264).err().unwrap();
@@ -52,7 +52,7 @@ fn sps_profile(data: &[u8]) -> Option<u8> {
 }
 
 fn roundtrip(library: OpenH264) {
-	let codecs = Codecs::new().with_openh264(library.clone());
+	let codecs = Codecs::builtin().with_openh264(library.clone());
 	assert_eq!(codecs.decoders().last(), Some(&Codec::H264));
 	assert!(codecs.encoders().contains(&(Codec::H264, EncoderBackend::OpenH264)));
 

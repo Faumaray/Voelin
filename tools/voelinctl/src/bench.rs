@@ -12,7 +12,7 @@ use clap::{Args, Subcommand};
 use voelin_core::media::voelin_media::capture::SourceId;
 use voelin_core::media::voelin_media::capture::synthetic::Pattern;
 use voelin_core::media::voelin_media::{Codec, Codecs};
-use voelin_core::media::{MediaSink, Streamer, StreamerConfig};
+use voelin_core::media::{EncoderPreference, MediaSink, Streamer, StreamerConfig, preferred_codec};
 use voelin_stream::{EncodedFrame, LayerId, LayerSet, LayerSpec, MediaKind};
 
 use crate::alloc;
@@ -29,6 +29,24 @@ enum StreamTool {
 	/// test pattern without a server; print per-stage and per-layer numbers
 	/// and heap allocations per frame.
 	Bench(BenchArgs),
+	/// List the video encoders: the FFmpeg libraries found, every backend
+	/// with its self-test result (or why it cannot be used), and the order
+	/// the streamer would use them in.
+	Encoders(EncodersArgs),
+}
+
+#[derive(Args, Debug)]
+struct EncodersArgs {
+	/// Encoder choice to rank by: `auto`, `software` or a backend name (as
+	/// the setting `stream.encoder_backend`).
+	#[arg(long, default_value = "auto")]
+	encoder: String,
+	/// Rank without hardware encoders (`stream.hardware_acceleration` off).
+	#[arg(long)]
+	no_hardware: bool,
+	/// Cisco's OpenH264 library, to list it as well.
+	#[arg(long)]
+	openh264: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -43,9 +61,17 @@ struct BenchArgs {
 	/// as real screen content) or `simple` (a flat background).
 	#[arg(long, default_value = "desktop")]
 	pattern: String,
-	/// Video codec: vp8, vp9 or h264 (needs --openh264).
-	#[arg(long, default_value = "vp8")]
-	codec: String,
+	/// Video codec: vp8, vp9, h264, av1 or h265 [default: the codec of
+	/// --encoder if named, else the first the encoder choice gives].
+	#[arg(long)]
+	codec: Option<String>,
+	/// Encoder: `auto`, `software` or a backend name from `voelinctl stream
+	/// encoders` (`h264_vaapi`, `libx264`, `libsvtav1`, ...).
+	#[arg(long, default_value = "auto")]
+	encoder: String,
+	/// No hardware encoders unless named with --encoder.
+	#[arg(long)]
+	no_hardware: bool,
 	/// A simulcast layer, e.g. `scale=0.5,bitrate=1500k,fps=15` (keys: id,
 	/// scale, size=WxH, fps, bitrate, max, min, rid; bitrates in bit/s with
 	/// k/M suffixes); repeatable. Without it: one layer at --bitrate.
@@ -68,7 +94,58 @@ struct BenchArgs {
 pub fn run(args: StreamToolArgs) -> Result<()> {
 	match args.command {
 		StreamTool::Bench(args) => bench(args),
+		StreamTool::Encoders(args) => encoders(args),
 	}
+}
+
+/// `Codecs` with the encoder choice of the arguments.
+fn codecs_for(encoder: &str, no_hardware: bool, openh264: Option<&PathBuf>) -> Result<Codecs> {
+	let preference =
+		EncoderPreference { hardware: !no_hardware, backend: encoder.parse().unwrap_or_default() };
+	let mut codecs = Codecs::new().with_preference(preference);
+	if let Some(path) = openh264 {
+		let library = voelin_core::media::voelin_media::codec::h264::OpenH264::load(path)
+			.context("OpenH264")?;
+		codecs = codecs.with_openh264(library);
+	}
+	Ok(codecs)
+}
+
+fn encoders(args: EncodersArgs) -> Result<()> {
+	let codecs = codecs_for(&args.encoder, args.no_hardware, args.openh264.as_ref())?;
+	let report = codecs.report();
+	match &report.ffmpeg {
+		Ok(text) => println!("{text}"),
+		Err(e) => println!("FFmpeg: not used ({e})"),
+	}
+	match &report.zero_copy {
+		Ok(()) => println!("zero-copy DMA-BUF import: available"),
+		Err(e) => println!("zero-copy DMA-BUF import: no ({e})"),
+	}
+	println!();
+	println!("{:<18} {:<5} {:<17} {:<8} {:<5} status", "encoder", "codec", "api", "kind", "rank");
+	let mut list = report.encoders.clone();
+	// Usable ones first, in the order the streamer tries them per codec.
+	list.sort_by_key(|e| (e.status.is_err(), e.rank.unwrap_or(usize::MAX), e.codec.name()));
+	for e in &list {
+		let status = match &e.status {
+			Ok(()) if e.rank.is_none() => "ok (only when named)".to_owned(),
+			Ok(()) => "ok".to_owned(),
+			Err(reason) => reason.clone(),
+		};
+		println!(
+			"{:<18} {:<5} {:<17} {:<8} {:<5} {status}",
+			e.name,
+			e.codec.name(),
+			e.api,
+			if e.hardware { "hardware" } else { "software" },
+			e.rank.map_or("-".to_owned(), |r| r.to_string()),
+		);
+	}
+	let order: Vec<String> =
+		codecs.encoders().iter().map(|(codec, backend)| format!("{codec} {backend}")).collect();
+	println!("\nstreamer order: {}", order.join(", "));
+	Ok(())
 }
 
 /// Frames and bytes the sink got for one layer.
@@ -220,13 +297,18 @@ fn bench(args: BenchArgs) -> Result<()> {
 		"simple" => Pattern::Simple,
 		other => bail!("unknown pattern {other:?}: desktop or simple"),
 	};
-	let codec: Codec = args.codec.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
-	let mut codecs = Codecs::new();
-	if let Some(path) = &args.openh264 {
-		let library = voelin_core::media::voelin_media::codec::h264::OpenH264::load(path)
-			.context("OpenH264")?;
-		codecs = codecs.with_openh264(library);
-	}
+	let codecs = codecs_for(&args.encoder, args.no_hardware, args.openh264.as_ref())?;
+	let codec: Codec = match &args.codec {
+		Some(codec) => codec.parse().map_err(|e| anyhow::anyhow!("{e}"))?,
+		None => {
+			// The named encoder's codec, else the first of the choice.
+			let named = codecs.encoders().into_iter().find(|(_, b)| b.name() == args.encoder);
+			match named {
+				Some((codec, _)) => codec,
+				None => preferred_codec(&codecs, None).context("no video encoder")?,
+			}
+		}
+	};
 	let layers = args
 		.layers
 		.iter()
@@ -242,6 +324,7 @@ fn bench(args: BenchArgs) -> Result<()> {
 		fps: args.fps,
 		bitrate_kbps: args.bitrate,
 		codec,
+		encoder: codecs.preference().clone(),
 		audio: false,
 		layers: layers.clone(),
 		..StreamerConfig::default()
@@ -253,10 +336,13 @@ fn bench(args: BenchArgs) -> Result<()> {
 		keyframe: AtomicBool::new(true),
 	});
 	streamer.attach(sink.clone());
+	let backend = streamer.stats().layers.first().and_then(|l| l.backend);
 	println!(
-		"{width}x{height} {} test pattern at {} fps, {codec}, {} layer(s), {} s after {} s warm-up",
+		"{width}x{height} {} test pattern at {} fps, {codec} ({}), {} layer(s), {} s after {} s \
+		 warm-up",
 		args.pattern,
 		args.fps,
+		backend.map_or("?".to_owned(), |b| b.to_string()),
 		ids.len(),
 		args.seconds,
 		args.warmup

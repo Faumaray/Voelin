@@ -8,7 +8,8 @@
 //! - [`codec`]: [`VideoEncoder`] / [`VideoDecoder`] traits, codec preference
 //!   and the backends: libvpx (VP8/VP9, feature `vpx`), Cisco's OpenH264
 //!   loaded at runtime (H.264, feature `openh264`), dav1d (AV1 decoding,
-//!   feature `av1`)
+//!   feature `av1`), and FFmpeg loaded at runtime ([`ffmpeg`], feature
+//!   `ffmpeg`: hardware encoders, x264, SVT-AV1, ...)
 //! - [`capture`]: [`ScreenCapture`] and [`AudioCapture`] with a synthetic
 //!   test source, X11 (feature `x11`), the Wayland ScreenCast portal and
 //!   PipeWire system audio (feature `pipewire`), and Windows Graphics Capture
@@ -30,6 +31,8 @@
 pub mod capture;
 pub mod codec;
 pub mod convert;
+#[cfg(feature = "ffmpeg")]
+pub mod ffmpeg;
 pub mod frame;
 pub mod handoff;
 pub mod mix;
@@ -40,8 +43,9 @@ pub mod workers;
 
 pub use capture::{AudioCapture, CaptureOptions, CaptureSource, ScreenCapture, SourceId};
 pub use codec::{
-	Codec, Codecs, ContentHint, EncodedChunk, EncodedFrame, EncoderBackend, EncoderConfig,
-	VideoDecoder, VideoEncoder,
+	BackendChoice, Codec, Codecs, ContentHint, EncodedChunk, EncodedFrame, EncoderBackend,
+	EncoderConfig, EncoderInfo, EncoderPreference, EncoderReport, H264Profile, VideoDecoder,
+	VideoEncoder,
 };
 pub use frame::{
 	AudioBuffer, FrameData, FrameRef, PixelFormat, PixelsRef, Plane, PlaneRef, VideoFrame,

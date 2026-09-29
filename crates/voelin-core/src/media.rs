@@ -53,6 +53,7 @@ use voelin_media::mix::{
 pub use voelin_media::mix::{Level, SourceState};
 use voelin_media::scale::Pyramid;
 use voelin_media::{Codec, Codecs, ContentHint, EncoderConfig, FrameRef, VideoEncoder, VideoFrame};
+pub use voelin_media::{EncoderBackend, EncoderPreference};
 use voelin_stream::{
 	EncodedFrame, FrameSource, Frequency, LayerId, LayerSet, LayerSpec, MediaFrame, MediaKind,
 	MediaTime, PeerConfig, VideoCodec,
@@ -101,6 +102,7 @@ pub fn media_codec(codec: VideoCodec) -> Codec {
 		VideoCodec::Vp9 => Codec::Vp9,
 		VideoCodec::H264 => Codec::H264,
 		VideoCodec::Av1 => Codec::Av1,
+		VideoCodec::H265 => Codec::H265,
 	}
 }
 
@@ -111,6 +113,7 @@ pub fn video_codec(codec: Codec) -> VideoCodec {
 		Codec::Vp9 => VideoCodec::Vp9,
 		Codec::H264 => VideoCodec::H264,
 		Codec::Av1 => VideoCodec::Av1,
+		Codec::H265 => VideoCodec::H265,
 	}
 }
 
@@ -122,14 +125,75 @@ pub fn stream_codec(codecs: &Codecs, config: &PeerConfig) -> Option<Codec> {
 }
 
 /// `config` adjusted to what `codecs` can do: viewers accept only codecs we
-/// decode, and a streamer offers only the codec it encodes (every viewer
-/// gets the same frames, and a viewer picks from the offer).
+/// decode; a streamer offers its stream codec ([`stream_codec`]) first, then
+/// [`offer_codecs`]. Viewers answer with the first they decode, and the
+/// [`Streamer`] encodes each layer once per codec its viewers chose.
 pub fn peer_config(codecs: &Codecs, mut config: PeerConfig) -> PeerConfig {
 	config.accept_video_codecs = codecs.decoders().into_iter().map(video_codec).collect();
 	if let Some(codec) = stream_codec(codecs, &config) {
-		config.video_codecs = vec![video_codec(codec)];
+		config.video_codecs = offer_codecs(codecs, codec).into_iter().map(video_codec).collect();
 	}
 	config
+}
+
+/// What a streamer with `primary` as its stream codec offers, in order:
+/// `primary`, the codecs of hardware encoders, VP8 through libvpx (every
+/// TeamSpeak client decodes it), and HEVC last (for peers that take nothing
+/// else). Other software encoders are only ever the stream codec, so no
+/// viewer's answer starts one of them on top of it.
+pub fn offer_codecs(codecs: &Codecs, primary: Codec) -> Vec<Codec> {
+	let mut offer = vec![primary];
+	let mut hevc = false;
+	for (codec, backend) in codecs.encoders() {
+		let cheap = codecs.is_hardware(backend)
+			|| (codec == Codec::Vp8 && backend == voelin_media::EncoderBackend::Libvpx);
+		if !cheap || offer.contains(&codec) {
+			continue;
+		}
+		if codec == Codec::H265 {
+			hevc = true;
+		} else {
+			offer.push(codec);
+		}
+	}
+	if hevc && primary != Codec::H265 {
+		offer.push(Codec::H265);
+	}
+	offer
+}
+
+/// The encoder preference of the settings `stream.hardware_acceleration`
+/// and `stream.encoder_backend`.
+pub fn encoder_preference(settings: &crate::settings::Settings) -> voelin_media::EncoderPreference {
+	use crate::settings::{STREAM_ENCODER_BACKEND, STREAM_HARDWARE_ACCELERATION};
+	voelin_media::EncoderPreference {
+		hardware: settings.get(&STREAM_HARDWARE_ACCELERATION),
+		backend: settings.get(&STREAM_ENCODER_BACKEND).parse().unwrap_or_default(),
+	}
+}
+
+/// The stream codec: `configured` if we can encode it, else the first codec
+/// of the encoder preference (hardware first when enabled; VP8 through
+/// libvpx without hardware), never HEVC (offered last only). Put it first in
+/// `PeerConfig::video_codecs` before [`peer_config`].
+pub fn preferred_codec(codecs: &Codecs, configured: Option<Codec>) -> Option<Codec> {
+	let encodable = codecs.encoder_codecs();
+	configured
+		.filter(|c| encodable.contains(c))
+		.or_else(|| encodable.into_iter().find(|c| *c != Codec::H265))
+}
+
+/// The codec of the setting `stream.codec`; `None` for `auto` (see
+/// [`preferred_codec`]).
+pub fn configured_codec(settings: &crate::settings::Settings) -> Option<Codec> {
+	use crate::settings::{CodecChoice, STREAM_CODEC};
+	match settings.get(&STREAM_CODEC) {
+		CodecChoice::Auto => None,
+		CodecChoice::Vp8 => Some(Codec::Vp8),
+		CodecChoice::Vp9 => Some(Codec::Vp9),
+		CodecChoice::H264 => Some(Codec::H264),
+		CodecChoice::Av1 => Some(Codec::Av1),
+	}
 }
 
 /// Monitors and windows of this session's capture backend. The portal (on
@@ -172,11 +236,36 @@ pub trait MediaSink: Send + Sync {
 		let _ = layer;
 		None
 	}
+
+	/// Send one video frame encoded in `codec`: it goes to the viewers whose
+	/// answer chose `codec`.
+	fn send_video(&self, frame: EncodedFrame, codec: Codec) -> bool {
+		let _ = codec;
+		self.send(frame)
+	}
+
+	/// Adds to `out` the video codecs the viewers chose; none (the default)
+	/// means only the stream codec is sent.
+	fn video_codecs(&self, out: &mut Vec<Codec>) {
+		let _ = out;
+	}
 }
 
 impl MediaSink for StreamSink {
 	fn send(&self, frame: EncodedFrame) -> bool {
 		StreamSink::send(self, frame)
+	}
+
+	fn send_video(&self, frame: EncodedFrame, codec: Codec) -> bool {
+		StreamSink::send_video(self, frame, video_codec(codec))
+	}
+
+	fn video_codecs(&self, out: &mut Vec<Codec>) {
+		for codec in VideoCodec::ALL {
+			if self.has_video_codec(codec) {
+				out.push(media_codec(codec));
+			}
+		}
 	}
 
 	fn take_keyframe_request(&self) -> bool {
@@ -397,6 +486,8 @@ pub struct StreamerConfig {
 	pub bitrate_kbps: u32,
 	/// The codec of our offer, see [`stream_codec`].
 	pub codec: Codec,
+	/// Which encoders to use ([`encoder_preference`] of the settings).
+	pub encoder: EncoderPreference,
 	/// Send audio: [`audio_sources`](Self::audio_sources) mixed.
 	pub audio: bool,
 	/// Audio sources mixed into the stream (any number); empty: the
@@ -424,6 +515,7 @@ impl Default for StreamerConfig {
 			fps: 30,
 			bitrate_kbps: 4608,
 			codec: Codec::Vp8,
+			encoder: EncoderPreference::default(),
 			audio: true,
 			audio_sources: Vec::new(),
 			cursor: true,
@@ -457,6 +549,9 @@ pub struct StreamerConfigUpdate {
 	pub bitrate_kbps: Option<u32>,
 	/// Another codec: new encoders, starting with keyframes.
 	pub codec: Option<Codec>,
+	/// Other encoders (hardware on or off, another backend): new encoders
+	/// for every codec, starting with keyframes.
+	pub encoder: Option<EncoderPreference>,
 	/// Another set of layers (`Some(vec![])`: back to a single layer). Layers
 	/// keep their encoder when their id stays; new ids get new encoders.
 	pub layers: Option<Vec<LayerSpec>>,
@@ -489,6 +584,11 @@ pub struct LayerStats {
 	pub threads: u32,
 	/// The encoder's speed setting (libvpx `cpu-used`), if it has one.
 	pub speed: Option<i32>,
+	/// The encoder of the stream codec (`libvpx`, `h264_vaapi`, ...).
+	pub backend: Option<EncoderBackend>,
+	/// The codecs this layer is encoded in: the stream codec, and those
+	/// viewers chose instead (each with its own encoder).
+	pub codecs: Vec<Codec>,
 }
 
 /// What a [`Streamer`] has done so far. Rates are over the last second.
@@ -555,6 +655,9 @@ struct Layer {
 	target: AtomicU64,
 	/// `cpu-used`, or `i64::MIN`.
 	speed: AtomicI64,
+	/// The stream codec's encoder and every codec encoded (for stats).
+	backend: Mutex<Option<EncoderBackend>>,
+	codecs: Mutex<Vec<Codec>>,
 }
 
 impl Layer {
@@ -578,6 +681,8 @@ impl Layer {
 			size: AtomicU64::new(0),
 			target: AtomicU64::new(spec.bitrate),
 			speed: AtomicI64::new(i64::MIN),
+			backend: Mutex::new(None),
+			codecs: Mutex::new(Vec::new()),
 		}
 	}
 
@@ -603,6 +708,7 @@ struct Settings {
 	fps: u32,
 	bitrate_kbps: u32,
 	codec: Codec,
+	encoder: EncoderPreference,
 	layers: Vec<LayerSpec>,
 }
 
@@ -650,6 +756,11 @@ struct Shared {
 	keyframes: Mutex<LayerSet>,
 	settings: Mutex<Option<Settings>>,
 	rates: Mutex<Rates>,
+	/// For encoders of the codecs viewers chose besides the stream codec,
+	/// created by the encoder threads when a viewer needs one.
+	encoders: Mutex<Option<(Codecs, EncoderPreference)>>,
+	/// Bumped when `encoders` changes: those encoders are made again.
+	encoders_generation: AtomicU64,
 }
 
 impl Shared {
@@ -700,21 +811,28 @@ fn cores() -> u32 {
 	voelin_media::codec::encoder_cpus()
 }
 
-fn new_encoder(
-	codecs: &Codecs,
-	codec: Codec,
-	spec: &LayerSpec,
-	fps: u32,
-	threads: u32,
-) -> Result<Box<dyn VideoEncoder>, MediaError> {
-	let config = EncoderConfig {
+fn encoder_config(spec: &LayerSpec, fps: u32, threads: u32) -> EncoderConfig {
+	EncoderConfig {
 		fps: layer_fps(spec, fps),
 		bitrate_bps: spec.bitrate.clamp(1, u64::from(u32::MAX)) as u32,
 		content: ContentHint::Screen,
 		threads,
 		..EncoderConfig::default()
-	};
-	Ok(codecs.new_encoder(codec, config)?)
+	}
+}
+
+fn new_encoder(
+	codecs: &Codecs,
+	codec: Codec,
+	preference: &EncoderPreference,
+	spec: &LayerSpec,
+	fps: u32,
+	threads: u32,
+) -> Result<Box<dyn VideoEncoder>, MediaError> {
+	let config = encoder_config(spec, fps, threads);
+	let encoder = codecs.new_encoder_preferring(codec, config, preference)?;
+	debug!(layer = spec.id, %codec, backend = %encoder.backend(), "video encoder");
+	Ok(encoder)
 }
 
 /// Capture and encoding for our stream. Frames are captured from the start
@@ -771,9 +889,10 @@ impl Streamer {
 		let split = thread_split(&layers, cores());
 		let mut ready = Vec::new();
 		for (spec, threads) in layers.iter().zip(split) {
-			let encoder = new_encoder(codecs, config.codec, spec, fps, threads)?;
+			let encoder = new_encoder(codecs, config.codec, &config.encoder, spec, fps, threads)?;
 			ready.push((Arc::new(Layer::new(spec, fps, threads)), encoder));
 		}
+		*lock(&shared.encoders) = Some((codecs.clone(), config.encoder.clone()));
 		for (layer, encoder) in ready {
 			streamer.spawn_encoder(layer, encoder)?;
 		}
@@ -781,6 +900,7 @@ impl Streamer {
 			fps,
 			bitrate_kbps: config.bitrate_kbps,
 			codec: config.codec,
+			encoder: config.encoder.clone(),
 			layers: config.layers.clone(),
 		});
 		streamer.threads.push(spawn("voelin-stream-stats", {
@@ -847,15 +967,16 @@ impl Streamer {
 		Ok(())
 	}
 
-	/// Change frame rate, bitrate, codec, layers or audio sources while
-	/// streaming, without restarting the capture; applies from the next
-	/// frame. A new codec gets new encoders, which start with a keyframe;
-	/// new layers get new encoders; removed layers stop. Fails without
-	/// changing anything if an encoder cannot be created. Audio sources
-	/// that cannot capture (e.g. an application that is not running by pid)
-	/// do not fail the update: their [`AudioSourceStats::error`] says why.
-	/// Audio sources on a streamer started without audio start the audio
-	/// track.
+	/// Change frame rate, bitrate, codec, encoders, layers or audio
+	/// sources while streaming, without restarting the capture; applies
+	/// from the next frame. A new codec or encoder preference gets new
+	/// encoders (the stream codec's at once, those of codecs viewers chose
+	/// on their next frame), which start with a keyframe; new layers get
+	/// new encoders; removed layers stop. Fails without changing anything
+	/// if an encoder cannot be created. Audio sources that cannot capture
+	/// (e.g. an application that is not running by pid) do not fail the
+	/// update: their [`AudioSourceStats::error`] says why. Audio sources on
+	/// a streamer started without audio start the audio track.
 	pub fn reconfigure(
 		&self,
 		codecs: &Codecs,
@@ -868,11 +989,12 @@ impl Streamer {
 			fps: update.fps.unwrap_or(settings.fps).max(1),
 			bitrate_kbps: update.bitrate_kbps.unwrap_or(settings.bitrate_kbps),
 			codec: update.codec.unwrap_or(settings.codec),
+			encoder: update.encoder.unwrap_or_else(|| settings.encoder.clone()),
 			layers: update.layers.unwrap_or_else(|| settings.layers.clone()),
 		};
 		let specs = next.effective_layers();
 		check_layers(&specs)?;
-		let codec_changed = next.codec != old_codec;
+		let codec_changed = next.codec != old_codec || next.encoder != settings.encoder;
 		let current: Vec<Arc<Layer>> = lock(&self.shared.layers).clone();
 		// Create every encoder before changing anything.
 		let split = thread_split(&specs, cores());
@@ -880,8 +1002,14 @@ impl Streamer {
 		for (spec, &threads) in specs.iter().zip(&split) {
 			let existing = current.iter().any(|l| l.id == spec.id);
 			if !existing || codec_changed {
-				created.push((spec.id, new_encoder(codecs, next.codec, spec, next.fps, threads)?));
+				let encoder =
+					new_encoder(codecs, next.codec, &next.encoder, spec, next.fps, threads)?;
+				created.push((spec.id, encoder));
 			}
+		}
+		if codec_changed {
+			*lock(&self.shared.encoders) = Some((codecs.clone(), next.encoder.clone()));
+			self.shared.encoders_generation.fetch_add(1, Ordering::Relaxed);
 		}
 		self.shared.fps.store(next.fps, Ordering::Relaxed);
 		let mut layers = Vec::with_capacity(specs.len());
@@ -1022,6 +1150,8 @@ impl Streamer {
 					bitrate: l.target.load(Ordering::Relaxed),
 					threads: l.threads,
 					speed: (speed != i64::MIN).then_some(speed as i32),
+					backend: *lock(&l.backend),
+					codecs: lock(&l.codecs).clone(),
 				}
 			})
 			.collect();
@@ -1432,35 +1562,168 @@ impl Drop for Ingest {
 	}
 }
 
-/// One layer's encoder thread.
-fn encode_loop(shared: &Shared, layer: &Layer, mut encoder: Box<dyn VideoEncoder>) {
-	// A requested keyframe the encoder has not produced yet (rate control
-	// may skip a frame).
-	let mut keyframe_due = false;
+/// One encoder of a layer: its keyframe and bitrate state.
+struct LayerEncoder {
+	codec: Codec,
+	/// `None`: creating it failed (not retried until it is needed anew).
+	encoder: Option<Box<dyn VideoEncoder>>,
+	/// A requested keyframe the encoder has not produced yet (rate control
+	/// may skip a frame).
+	keyframe_due: bool,
+	/// The bitrate and frame rate it was last set to.
+	bitrate: u64,
+	fps: u32,
+}
+
+impl LayerEncoder {
+	fn new(encoder: Box<dyn VideoEncoder>, fps: u32) -> Self {
+		Self { codec: encoder.codec(), encoder: Some(encoder), keyframe_due: true, bitrate: 0, fps }
+	}
+
+	/// Encode `frame` and hand the frames to `sink`; follows the layer's
+	/// target bitrate and frame rate first.
+	fn encode(
+		&mut self,
+		shared: &Shared,
+		layer: &Layer,
+		sink: &dyn MediaSink,
+		frame: &VideoFrame,
+		requested: bool,
+		target: u64,
+	) {
+		let codec = self.codec;
+		let Some(encoder) = &mut self.encoder else { return };
+		if target.abs_diff(self.bitrate) * 100 > self.bitrate {
+			match encoder.set_bitrate(target.min(u64::from(u32::MAX)) as u32) {
+				Ok(()) => self.bitrate = target,
+				Err(e) => warn!(layer = layer.id, %codec, "cannot change the bitrate: {e}"),
+			}
+		}
+		let want_fps = layer.fps.load(Ordering::Relaxed);
+		if want_fps != self.fps && encoder.set_fps(want_fps).is_ok() {
+			self.fps = want_fps;
+		}
+		let force = requested || self.keyframe_due;
+		let mut produced_keyframe = false;
+		let result = encoder.encode_with(frame, force, &mut |chunk| {
+			produced_keyframe |= chunk.keyframe;
+			let encoded = EncodedFrame {
+				kind: MediaKind::Video,
+				time: MediaTime::from_90khz(chunk.pts_90khz),
+				// The one allocation per encoded frame.
+				data: Arc::from(chunk.data),
+				layer: layer.id,
+				keyframe: chunk.keyframe,
+			};
+			if sink.send_video(encoded, codec) {
+				layer.frames.fetch_add(1, Ordering::Relaxed);
+				layer.keyframes.fetch_add(u64::from(chunk.keyframe), Ordering::Relaxed);
+				layer.bytes.fetch_add(chunk.data.len() as u64, Ordering::Relaxed);
+				shared.video_frames.fetch_add(1, Ordering::Relaxed);
+			}
+		});
+		match result {
+			Ok(()) => self.keyframe_due = force && !produced_keyframe,
+			Err(e) => {
+				warn!(layer = layer.id, %codec, "video encoding failed: {e}");
+				self.keyframe_due = force;
+				shared.set_error(e);
+			}
+		}
+	}
+}
+
+/// An encoder of `codec` for `layer` (a codec a viewer chose), with the
+/// streamer's current codecs and preference.
+fn extra_encoder(shared: &Shared, layer: &Layer, codec: Codec) -> Option<Box<dyn VideoEncoder>> {
+	let guard = lock(&shared.encoders);
+	let (codecs, preference) = guard.as_ref()?;
+	let spec = lock(&layer.spec).clone();
+	let config = encoder_config(&spec, layer.fps.load(Ordering::Relaxed), layer.threads);
+	match codecs.new_encoder_preferring(codec, config, preference) {
+		Ok(encoder) => {
+			debug!(layer = layer.id, %codec, backend = %encoder.backend(), "encoder for viewers");
+			Some(encoder)
+		}
+		Err(e) => {
+			warn!(layer = layer.id, %codec, "no encoder for viewers of this codec: {e}");
+			None
+		}
+	}
+}
+
+/// One layer's encoder thread: the stream codec's encoder, plus one per
+/// other codec the sink's viewers chose (created when a viewer needs it,
+/// dropped when none does).
+fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
+	let fps = layer.fps.load(Ordering::Relaxed);
+	let mut primary = LayerEncoder::new(encoder, fps);
+	// The first frame is a keyframe anyway; no need to insist.
+	primary.keyframe_due = false;
+	primary.bitrate = layer.bitrate.load(Ordering::Relaxed);
+	*lock(&layer.backend) = primary.encoder.as_ref().map(|e| e.backend());
+	let mut extra: Vec<LayerEncoder> = Vec::new();
+	let mut wanted: Vec<Codec> = Vec::new();
+	let mut generation = shared.encoders_generation.load(Ordering::Relaxed);
+	// Whether the stream codec was encoded for the last frame.
+	let mut primary_on = true;
 	// The last picture, and when it came: a static screen sends no frames,
 	// so keyframe requests are answered by encoding it again.
 	let mut last: Option<(Arc<VideoFrame>, Instant)> = None;
-	let mut bitrate = layer.bitrate.load(Ordering::Relaxed);
-	let mut fps = layer.fps.load(Ordering::Relaxed);
-	layer.speed.store(encoder.speed().map_or(i64::MIN, i64::from), Ordering::Relaxed);
+	layer.speed.store(
+		primary.encoder.as_ref().and_then(|e| e.speed()).map_or(i64::MIN, i64::from),
+		Ordering::Relaxed,
+	);
 	while !shared.stopped() && !layer.stopped() {
 		let frame = layer.inbox.wait_timeout(POLL);
 		if let Some(next) = lock(&layer.next_encoder).take() {
 			// Another codec: its first frame is a keyframe anyway.
-			encoder = next;
-			bitrate = 0;
-			keyframe_due = true;
+			*lock(&layer.backend) = Some(next.backend());
+			primary = LayerEncoder::new(next, primary.fps);
 		}
 		let Some(sink) = shared.sink() else { continue };
 		shared.poll_keyframes(&*sink);
+		// The codecs viewers chose; none known: the stream codec.
+		wanted.clear();
+		sink.video_codecs(&mut wanted);
+		let now = shared.encoders_generation.load(Ordering::Relaxed);
+		if now != generation {
+			generation = now;
+			extra.clear();
+		}
+		extra.retain(|e| wanted.contains(&e.codec));
+		for &codec in &wanted {
+			if codec != primary.codec && !extra.iter().any(|e| e.codec == codec) {
+				let fps = layer.fps.load(Ordering::Relaxed);
+				extra.push(match extra_encoder(shared, layer, codec) {
+					Some(encoder) => LayerEncoder::new(encoder, fps),
+					None => {
+						LayerEncoder { codec, encoder: None, keyframe_due: false, bitrate: 0, fps }
+					}
+				});
+			}
+		}
+		let primary_wanted = wanted.is_empty() || wanted.contains(&primary.codec);
+		if primary_wanted && !primary_on {
+			// Frames were skipped: the next one must stand alone.
+			primary.keyframe_due = true;
+		}
+		primary_on = primary_wanted;
+		{
+			let mut codecs = lock(&layer.codecs);
+			codecs.clear();
+			codecs.extend(primary_on.then_some(primary.codec));
+			codecs.extend(extra.iter().filter(|e| e.encoder.is_some()).map(|e| e.codec));
+		}
 		let requested = layer.keyframe.swap(false, Ordering::Relaxed);
-		let force = requested || keyframe_due;
+		let due = primary_on && primary.keyframe_due
+			|| extra.iter().any(|e| e.keyframe_due && e.encoder.is_some());
 		let frame = match frame {
 			Some(frame) => {
 				last = Some((frame.clone(), Instant::now()));
 				frame
 			}
-			None if force => {
+			None if requested || due => {
 				let Some((frame, at)) = &last else {
 					layer.keyframe.store(requested, Ordering::Relaxed);
 					continue;
@@ -1477,50 +1740,21 @@ fn encode_loop(shared: &Shared, layer: &Layer, mut encoder: Box<dyn VideoEncoder
 			max => max,
 		};
 		let target = sink.layer_bitrate(layer.id).unwrap_or(configured).clamp(1, cap);
-		if target.abs_diff(bitrate) * 100 > bitrate {
-			match encoder.set_bitrate(target.min(u64::from(u32::MAX)) as u32) {
-				Ok(()) => {
-					bitrate = target;
-					layer.target.store(target, Ordering::Relaxed);
-				}
-				Err(e) => warn!(layer = layer.id, "cannot change the bitrate: {e}"),
-			}
-		}
-		let want_fps = layer.fps.load(Ordering::Relaxed);
-		if want_fps != fps && encoder.set_fps(want_fps).is_ok() {
-			fps = want_fps;
-		}
 		let started = Instant::now();
-		let mut produced_keyframe = false;
-		let result = encoder.encode_with(&frame, force, &mut |chunk| {
-			produced_keyframe |= chunk.keyframe;
-			let encoded = EncodedFrame {
-				kind: MediaKind::Video,
-				time: MediaTime::from_90khz(chunk.pts_90khz),
-				// The one allocation per encoded frame.
-				data: Arc::from(chunk.data),
-				layer: layer.id,
-				keyframe: chunk.keyframe,
-			};
-			if sink.send(encoded) {
-				layer.frames.fetch_add(1, Ordering::Relaxed);
-				layer.keyframes.fetch_add(u64::from(chunk.keyframe), Ordering::Relaxed);
-				layer.bytes.fetch_add(chunk.data.len() as u64, Ordering::Relaxed);
-				shared.video_frames.fetch_add(1, Ordering::Relaxed);
-			}
-		});
+		if primary_on {
+			primary.encode(shared, layer, &*sink, &frame, requested, target);
+			layer.target.store(primary.bitrate, Ordering::Relaxed);
+		}
+		for encoder in &mut extra {
+			encoder.encode(shared, layer, &*sink, &frame, requested, target);
+		}
 		layer.encode_ns.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 		layer.encoded.fetch_add(1, Ordering::Relaxed);
 		layer.size.store(u64::from(frame.width) << 32 | u64::from(frame.height), Ordering::Relaxed);
-		layer.speed.store(encoder.speed().map_or(i64::MIN, i64::from), Ordering::Relaxed);
-		match result {
-			Ok(()) => keyframe_due = force && !produced_keyframe,
-			Err(e) => {
-				warn!(layer = layer.id, "video encoding failed: {e}");
-				keyframe_due = force;
-				shared.set_error(e);
-			}
-		}
+		layer.speed.store(
+			primary.encoder.as_ref().and_then(|e| e.speed()).map_or(i64::MIN, i64::from),
+			Ordering::Relaxed,
+		);
 	}
 }
 
@@ -1746,6 +1980,11 @@ pub fn is_keyframe(codec: Codec, data: &[u8]) -> bool {
 		Codec::Vp9 => vp9_is_keyframe(data),
 		Codec::H264 => h264_nal_types(data).any(|t| t == 5 || t == 7),
 		Codec::Av1 => av1_has_sequence_header(data).unwrap_or(true),
+		// IRAP pictures (16-23) or a VPS / SPS in front of one.
+		Codec::H265 => data
+			.windows(4)
+			.filter_map(|w| (w[..3] == [0, 0, 1]).then_some((w[3] >> 1) & 0x3f))
+			.any(|t| (16..=23).contains(&t) || t == 32 || t == 33),
 	}
 }
 
@@ -2207,6 +2446,10 @@ mod tests {
 		assert!(is_keyframe(Codec::Av1, &[0x12, 0x00, 0x0a, 0x01, 0xff]));
 		assert!(!is_keyframe(Codec::Av1, &[0x12, 0x00, 0x32, 0x01, 0xff]));
 		assert!(is_keyframe(Codec::Av1, &[0x12, 0x05]), "truncated: let the decoder try");
+		// HEVC: a VPS (type 32) or an IDR (19) starts one, a trailing picture not.
+		assert!(is_keyframe(Codec::H265, &[0, 0, 1, 0x40, 0x01]));
+		assert!(is_keyframe(Codec::H265, &[0, 0, 0, 1, 0x26, 0x01]));
+		assert!(!is_keyframe(Codec::H265, &[0, 0, 1, 0x02, 0x01]));
 	}
 
 	#[test]
@@ -2222,14 +2465,125 @@ mod tests {
 	#[cfg(feature = "media-desktop")]
 	#[test]
 	fn peer_config_follows_codecs() {
-		let codecs = Codecs::new();
+		let codecs = Codecs::builtin();
 		let config = peer_config(&codecs, PeerConfig::default());
 		assert_eq!(config.video_codecs, [VideoCodec::Vp8]);
 		assert!(config.accept_video_codecs.contains(&VideoCodec::Vp8));
 		assert!(!config.accept_video_codecs.contains(&VideoCodec::H264), "no OpenH264 loaded");
 		assert_eq!(stream_codec(&codecs, &config), Some(Codec::Vp8));
-		let h264_only = PeerConfig { video_codecs: vec![VideoCodec::H264], ..config };
+		let h264_only = PeerConfig { video_codecs: vec![VideoCodec::H264], ..config.clone() };
 		assert_eq!(stream_codec(&codecs, &h264_only), None);
+		// VP9 as the stream codec: VP8 (cheap) is offered after it, nothing
+		// else in software.
+		let vp9 = PeerConfig { video_codecs: vec![VideoCodec::Vp9], ..config };
+		let vp9 = peer_config(&codecs, vp9);
+		assert_eq!(vp9.video_codecs, [VideoCodec::Vp9, VideoCodec::Vp8]);
+		assert_eq!(stream_codec(&codecs, &vp9), Some(Codec::Vp9));
+		// With FFmpeg's software encoders, still only VP8 besides the stream
+		// codec.
+		let all = Codecs::new();
+		let offer = offer_codecs(&all, Codec::Vp8);
+		for codec in &offer[1..] {
+			let backend = all.encoders().into_iter().find(|(c, _)| c == codec).unwrap().1;
+			assert!(all.is_hardware(backend), "{codec} offered in software");
+		}
+		if all.encoder_codecs().contains(&Codec::H264) && !offer.contains(&Codec::H264) {
+			assert_eq!(offer_codecs(&all, Codec::H264)[..2], [Codec::H264, Codec::Vp8]);
+		}
+	}
+
+	/// A sink whose viewers chose `codecs`; keeps every video frame with its
+	/// codec.
+	#[derive(Default)]
+	struct CodecSink {
+		codecs: Mutex<Vec<Codec>>,
+		frames: Mutex<Vec<(Codec, EncodedFrame)>>,
+		keyframe: AtomicBool,
+	}
+
+	impl MediaSink for CodecSink {
+		fn send(&self, _: EncodedFrame) -> bool {
+			true
+		}
+
+		fn send_video(&self, frame: EncodedFrame, codec: Codec) -> bool {
+			lock(&self.frames).push((codec, frame));
+			true
+		}
+
+		fn take_keyframe_request(&self) -> bool {
+			self.keyframe.swap(false, Ordering::Relaxed)
+		}
+
+		fn video_codecs(&self, out: &mut Vec<Codec>) {
+			out.extend(lock(&self.codecs).iter());
+		}
+	}
+
+	/// Viewers that chose another codec get their own encoder per layer,
+	/// made when they come and dropped when they go; the stream codec is
+	/// skipped while nobody takes it.
+	#[cfg(feature = "media-desktop")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn an_encoder_per_codec_viewers_chose() {
+		let codecs = Codecs::builtin();
+		let config = StreamerConfig {
+			source: SourceId::Synthetic,
+			synthetic_size: (160, 120),
+			audio: false,
+			..StreamerConfig::default()
+		};
+		let streamer = Streamer::start(&codecs, config).await.unwrap();
+		let sink = Arc::new(CodecSink::default());
+		streamer.attach(sink.clone());
+		let wait_for = |codec: Codec, count: usize| {
+			let sink = sink.clone();
+			async move {
+				let deadline = Instant::now() + Duration::from_secs(10);
+				loop {
+					let n = lock(&sink.frames).iter().filter(|(c, _)| *c == codec).count();
+					if n >= count {
+						return;
+					}
+					assert!(Instant::now() < deadline, "no {codec} frames");
+					tokio::time::sleep(Duration::from_millis(20)).await;
+				}
+			}
+		};
+		// Nobody chose yet: the stream codec.
+		wait_for(Codec::Vp8, 3).await;
+		// A VP9 viewer as well.
+		*lock(&sink.codecs) = vec![Codec::Vp8, Codec::Vp9];
+		wait_for(Codec::Vp9, 5).await;
+		assert_eq!(streamer.stats().layers[0].codecs, [Codec::Vp8, Codec::Vp9]);
+		let vp9: Vec<EncodedFrame> = lock(&sink.frames)
+			.iter()
+			.filter(|(c, _)| *c == Codec::Vp9)
+			.map(|(_, f)| f.clone())
+			.collect();
+		assert!(is_keyframe(Codec::Vp9, &vp9[0].data), "the first VP9 frame is a keyframe");
+		let mut decoder = codecs.new_decoder(Codec::Vp9).unwrap();
+		for frame in &vp9 {
+			let picture = decoder.decode(&frame.data).unwrap().expect("a picture");
+			assert_eq!((picture.width, picture.height), (160, 120));
+		}
+		// Only VP9 viewers left: VP8 stops.
+		*lock(&sink.codecs) = vec![Codec::Vp9];
+		tokio::time::sleep(Duration::from_millis(300)).await;
+		let before = lock(&sink.frames).iter().filter(|(c, _)| *c == Codec::Vp8).count();
+		wait_for(Codec::Vp9, vp9.len() + 10).await;
+		let after = lock(&sink.frames).iter().filter(|(c, _)| *c == Codec::Vp8).count();
+		assert_eq!(before, after, "VP8 is not encoded for nobody");
+		assert_eq!(streamer.stats().layers[0].codecs, [Codec::Vp9]);
+		assert_eq!(streamer.stats().layers[0].backend, Some(EncoderBackend::Libvpx));
+		// Another encoder preference: new encoders, the stream goes on.
+		let update = StreamerConfigUpdate {
+			encoder: Some(EncoderPreference { hardware: false, ..EncoderPreference::default() }),
+			..StreamerConfigUpdate::default()
+		};
+		streamer.reconfigure(&codecs, update).unwrap();
+		let count = lock(&sink.frames).iter().filter(|(c, _)| *c == Codec::Vp9).count();
+		wait_for(Codec::Vp9, count + 5).await;
 	}
 
 	/// The test pattern through VP8 and back, without a network: pictures

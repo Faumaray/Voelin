@@ -9173,6 +9173,7 @@ dependencies = [
  "bzip2",
  "criterion",
  "dav1d",
+ "libloading",
  "libvpx-native-sys",
  "memmap2",
  "ndk 0.9.0",

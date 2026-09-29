@@ -40,7 +40,7 @@ use crate::discovery::{ClientState, Discovery, StreamLookup};
 use crate::dtls::SrtpProfile;
 use crate::feedback::LayerFeedback;
 use crate::layer::{LayerId, LayerSet, LayerSpec};
-use crate::peer::{MediaFrame, OfferOptions, Peer, PeerConfig, PeerEvent};
+use crate::peer::{MediaFrame, OfferOptions, Peer, PeerConfig, PeerEvent, VideoCodec};
 use crate::proto::{self, LeaveReason, StreamInfo, StreamNotification, StreamSetup};
 use crate::signal::Signal;
 use crate::source::EncodedFrame;
@@ -146,6 +146,9 @@ pub struct ViewerInfo {
 	pub estimate: Option<u64>,
 	/// The SRTP profile of the connection, once DTLS is done.
 	pub srtp_profile: Option<SrtpProfile>,
+	/// The video codec the viewer's answer chose (it gets video in that
+	/// codec).
+	pub codec: Option<VideoCodec>,
 }
 
 /// What happens to our own stream.
@@ -542,6 +545,8 @@ struct ViewerSlot {
 	/// The latest bandwidth estimate of the connection (bit/s).
 	estimate: Option<u64>,
 	srtp_profile: Option<SrtpProfile>,
+	/// The video codec its answer chose.
+	codec: Option<VideoCodec>,
 }
 
 impl ViewerSlot {
@@ -554,6 +559,7 @@ impl ViewerSlot {
 			rids: None,
 			estimate: None,
 			srtp_profile: None,
+			codec: None,
 		}
 	}
 
@@ -648,6 +654,7 @@ impl StreamerSession {
 				layer: (v.peer.is_some() && v.rids.is_none()).then_some(v.choice.layer),
 				estimate: v.estimate,
 				srtp_profile: v.srtp_profile,
+				codec: v.codec,
 			})
 			.collect()
 	}
@@ -792,6 +799,7 @@ impl StreamerSession {
 					slot.peer = Some(peer);
 					slot.state = ViewerState::Connecting;
 					slot.choice = LayerChoice::new(layer);
+					slot.codec = None;
 					slot.rids = None;
 					slot.estimate = None;
 					slot.srtp_profile = None;
@@ -930,6 +938,18 @@ impl StreamerSession {
 	/// Send an encoded frame: audio to every connected viewer, video to the
 	/// viewers of its layer (with its RID to peers with RID simulcast).
 	pub fn write_frame(&mut self, frame: &EncodedFrame, out: &mut Outbox) {
+		self.write_frame_in(frame, None, out);
+	}
+
+	/// [`write_frame`](Self::write_frame) for video encoded in `codec`
+	/// (`None`: whatever the viewers negotiated): only viewers whose answer
+	/// chose that codec get it.
+	pub fn write_frame_in(
+		&mut self,
+		frame: &EncodedFrame,
+		codec: Option<VideoCodec>,
+		out: &mut Outbox,
+	) {
 		let (kind, time, layer) = (frame.kind, frame.time, frame.layer);
 		let rid = match kind {
 			MediaKind::Video => self.layers.index(layer).and_then(|i| self.layers.rids[i]),
@@ -942,6 +962,11 @@ impl StreamerSession {
 			};
 			if kind == MediaKind::Audio {
 				peer.write(kind, time, frame.data.clone());
+				continue;
+			}
+			if let (Some(codec), Some(negotiated)) = (codec, slot.codec)
+				&& codec != negotiated
+			{
 				continue;
 			}
 			match &slot.rids {
@@ -1062,6 +1087,11 @@ impl StreamerSession {
 					slot.rids = Some(rids);
 				}
 			}
+			PeerEvent::VideoCodec(codec) => {
+				debug!(viewer = viewer.0, %codec, "viewer's video codec");
+				slot.codec = Some(codec);
+				self.emit_viewers(out);
+			}
 			PeerEvent::Media(_) | PeerEvent::LayerMedia { .. } => {}
 			PeerEvent::Closed => {
 				// The viewer may ask for a new offer (`reconnect`); it stays
@@ -1173,6 +1203,10 @@ impl StreamerSession {
 	}
 
 	fn emit_viewers(&mut self, out: &mut Outbox) {
+		// Every change of the viewers comes through here: the encoders learn
+		// which codecs are needed now.
+		self.feedback
+			.set_codecs(self.viewers.values().filter(|v| v.peer.is_some()).filter_map(|v| v.codec));
 		self.last_viewers_event = Some(Instant::now());
 		out.event(StreamEvent::Streamer(StreamerEvent::Viewers(self.viewers())));
 	}
@@ -1409,7 +1443,8 @@ impl ViewerSession {
 			PeerEvent::KeyframeRequest
 			| PeerEvent::LayerKeyframeRequest(_)
 			| PeerEvent::BitrateEstimate(_)
-			| PeerEvent::Simulcast(_) => {}
+			| PeerEvent::Simulcast(_)
+			| PeerEvent::VideoCodec(_) => {}
 			PeerEvent::Closed => {
 				if self.peer.take().is_none() {
 					return;
@@ -1524,8 +1559,15 @@ impl Streams {
 	/// Send an encoded frame of our stream: audio to every connected viewer,
 	/// video to the viewers of its layer.
 	pub fn write_frame(&mut self, frame: &EncodedFrame) {
+		self.write_frame_in(frame, None);
+	}
+
+	/// [`write_frame`](Self::write_frame) of video encoded in `codec`: to
+	/// the viewers that negotiated it (see
+	/// [`StreamerSession::write_frame_in`]).
+	pub fn write_frame_in(&mut self, frame: &EncodedFrame, codec: Option<VideoCodec>) {
 		if let Some(s) = self.streamer.as_mut().filter(|s| !s.is_ended()) {
-			s.write_frame(frame, &mut self.out);
+			s.write_frame_in(frame, codec, &mut self.out);
 		}
 	}
 

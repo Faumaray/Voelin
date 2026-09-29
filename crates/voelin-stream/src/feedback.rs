@@ -1,5 +1,6 @@
 //! Feedback from the stream sessions to the encoders of our stream's layers:
-//! keyframe requests and bitrate targets per [`LayerId`].
+//! keyframe requests and bitrate targets per [`LayerId`], and the video
+//! codecs the viewers negotiated.
 //!
 //! [`LayerFeedback`] is shared between the stream session (which writes) and
 //! encoder threads (which read every frame). Both sides only use atomics;
@@ -9,9 +10,10 @@
 
 use std::array;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU64, Ordering};
 
 use crate::layer::{LayerId, LayerSet};
+use crate::peer::VideoCodec;
 
 /// Words of the keyframe bitmap: one bit per layer id.
 const WORDS: usize = (LayerId::MAX as usize + 1) / 64;
@@ -30,6 +32,8 @@ pub struct LayerFeedback {
 	top: AtomicU16,
 	/// Bitrate targets (bit/s, 0: none) in chunks of [`CHUNK`] layer ids.
 	bitrates: Box<[OnceLock<Box<[AtomicU64]>>]>,
+	/// [`VideoCodec::bit`]s of the codecs connected viewers negotiated.
+	codecs: AtomicU8,
 }
 
 impl Default for LayerFeedback {
@@ -51,6 +55,7 @@ impl LayerFeedback {
 			summary: array::from_fn(|_| AtomicU64::new(0)),
 			top: AtomicU16::new(0),
 			bitrates: (0..=LayerId::MAX as usize / CHUNK).map(|_| OnceLock::new()).collect(),
+			codecs: AtomicU8::new(0),
 		}
 	}
 
@@ -122,6 +127,22 @@ impl LayerFeedback {
 		let bitrate = chunk[usize::from(layer) % CHUNK].load(Ordering::Relaxed);
 		(bitrate != 0).then_some(bitrate)
 	}
+
+	/// The video codecs the viewers negotiated.
+	pub fn set_codecs(&self, codecs: impl IntoIterator<Item = VideoCodec>) {
+		let bits = codecs.into_iter().fold(0, |bits, c| bits | c.bit());
+		self.codecs.store(bits, Ordering::Relaxed);
+	}
+
+	/// Whether a viewer negotiated `codec`.
+	pub fn has_codec(&self, codec: VideoCodec) -> bool {
+		self.codecs.load(Ordering::Relaxed) & codec.bit() != 0
+	}
+
+	/// Whether any viewer negotiated a codec yet.
+	pub fn has_codecs(&self) -> bool {
+		self.codecs.load(Ordering::Relaxed) != 0
+	}
 }
 
 #[cfg(test)]
@@ -159,5 +180,16 @@ mod tests {
 		assert_eq!(f.bitrate(300), None);
 		f.set_bitrate(3, None);
 		assert_eq!(f.bitrate(3), None);
+	}
+
+	#[test]
+	fn codecs() {
+		let f = LayerFeedback::new();
+		assert!(!f.has_codecs());
+		f.set_codecs([VideoCodec::Vp8, VideoCodec::H265, VideoCodec::Vp8]);
+		assert!(f.has_codec(VideoCodec::Vp8) && f.has_codec(VideoCodec::H265));
+		assert!(!f.has_codec(VideoCodec::H264));
+		f.set_codecs([]);
+		assert!(!f.has_codecs());
 	}
 }

@@ -16,14 +16,14 @@ use tsclientlib::{ClientId, Connection, MessageHandle, StreamItem};
 use voelin_core::media::voelin_media::capture::SourceId;
 use voelin_core::media::voelin_media::{Codecs, VideoFrame, convert};
 use voelin_core::media::{
-	CaptureBackend, EncodedSource, Latest, Streamer, StreamerConfig, VideoPipeline, peer_config,
-	stream_codec,
+	CaptureBackend, EncodedSource, EncoderPreference, Latest, Streamer, StreamerConfig,
+	VideoPipeline, peer_config, preferred_codec, stream_codec, video_codec,
 };
 use voelin_model::ServerFlavor;
 use voelin_stream::{
-	ClientState, EndReason, FrameSource, LayerId, LayerSpec, MediaKind, Output, PeerConfig,
-	Request, SrtpProfile, StreamEvent, StreamInfo, StreamNotification, StreamSetup, StreamerEvent,
-	StreamerOptions, Streams, SyntheticSource, VideoCodec, ViewerInfo, WatchEvent,
+	ClientState, EndReason, FrameSource, H264Profile, LayerId, LayerSpec, MediaKind, Output,
+	PeerConfig, Request, SrtpProfile, StreamEvent, StreamInfo, StreamNotification, StreamSetup,
+	StreamerEvent, StreamerOptions, Streams, SyntheticSource, VideoCodec, ViewerInfo, WatchEvent,
 };
 
 #[derive(Args, Debug, Clone)]
@@ -96,6 +96,17 @@ pub enum StreamCommand {
 		/// bitrate, no encoder) instead of capturing.
 		#[arg(long, conflicts_with_all = ["source", "synthetic"])]
 		placeholder: bool,
+		/// Video codec: vp8, vp9, h264, av1 [default: the first the encoder
+		/// choice gives: hardware first, else VP8].
+		#[arg(long)]
+		codec: Option<String>,
+		/// Encoder: `auto`, `software` or a backend name from `voelinctl
+		/// stream encoders`.
+		#[arg(long, default_value = "auto")]
+		encoder: String,
+		/// No hardware encoders unless named with --encoder.
+		#[arg(long)]
+		no_hardware: bool,
 	},
 	/// List the streams in our channel.
 	List {
@@ -141,19 +152,54 @@ pub async fn run(con: &mut Connection, args: &StreamArgs) -> Result<()> {
 	if !args.srtp.is_empty() {
 		config.srtp_profiles = parse_srtp(&args.srtp)?;
 	}
-	if let StreamCommand::Start { simulcast, placeholder, .. } = &args.command {
+	let mut codecs = Codecs::new();
+	if let StreamCommand::Start {
+		simulcast,
+		placeholder,
+		codec,
+		encoder,
+		no_hardware,
+		synthetic,
+		size,
+		fps,
+		bitrate,
+		..
+	} = &args.command
+	{
 		config.simulcast = *simulcast;
+		codecs.set_preference(EncoderPreference {
+			hardware: !no_hardware,
+			backend: encoder.parse().unwrap_or_default(),
+		});
 		if *placeholder {
 			// The placeholder frames are VP8.
 			config.video_codecs = vec![VideoCodec::Vp8];
+		} else {
+			let configured = match codec {
+				Some(codec) => Some(codec.parse().map_err(|e| anyhow::anyhow!("{e}"))?),
+				None => None,
+			};
+			if let Some(codec) = preferred_codec(&codecs, configured) {
+				config.video_codecs = vec![video_codec(codec)];
+			}
+			if *synthetic {
+				let (w, h) = parse_size(size)?;
+				let bitrate = u64::from(*bitrate) * 1000;
+				config.set_h264_format(H264Profile::ConstrainedHigh, w, h, *fps, bitrate);
+			}
 		}
 	}
 	// Offer the codec we encode, accept what we decode.
-	let codecs = Arc::new(Codecs::new());
-	let config = match &args.command {
+	let codecs = Arc::new(codecs);
+	let mut config = match &args.command {
 		StreamCommand::Start { placeholder: true, .. } => config,
 		_ => peer_config(&codecs, config),
 	};
+	if matches!(args.command, StreamCommand::Start { .. }) {
+		// Frames go out through a `FrameSource`, which does not tell codecs
+		// apart: offer the stream codec alone.
+		config.video_codecs.truncate(1);
+	}
 	let codec = stream_codec(&codecs, &config);
 	let mut driver = Driver { streams: Streams::new(own, config), pending: HashMap::new() };
 	driver.sync_clients(con)?;
@@ -169,8 +215,8 @@ pub async fn run(con: &mut Connection, args: &StreamArgs) -> Result<()> {
 			bitrate,
 			no_audio,
 			layers,
-			simulcast: _,
 			placeholder,
+			..
 		} => {
 			let mut layers = layers.clone();
 			number_layers(&mut layers);
@@ -203,13 +249,16 @@ pub async fn run(con: &mut Connection, args: &StreamArgs) -> Result<()> {
 					fps: *fps,
 					bitrate_kbps: *bitrate,
 					codec,
+					encoder: codecs.preference().clone(),
 					audio: !no_audio,
 					synthetic_size: parse_size(size)?,
 					layers: layers.clone(),
 					..StreamerConfig::default()
 				};
 				let streamer = Streamer::start(&codecs, config).await.context("capture")?;
-				println!("capturing with {} ({codec})", streamer.backend());
+				let backend = streamer.stats().layers.first().and_then(|l| l.backend);
+				let backend = backend.map_or("?".to_owned(), |b| b.to_string());
+				println!("capturing with {} ({codec} through {backend})", streamer.backend());
 				if let Some(e) = streamer.audio_error() {
 					println!("audio: {e}");
 				}

@@ -20,7 +20,11 @@ MediaTime::new(frame.pts_90khz, Frequency::NINETY_KHZ), data)`), and received
 | `EncodedFrame { data, keyframe, pts_90khz }` | one frame for `Peer::write` |
 | `VideoDecoder` | `decode(&[u8]) -> Option<VideoFrame>` (timestamp zero; the caller knows the RTP time) |
 | `EncoderConfig { fps, bitrate_bps, keyframe_interval, content, threads, speed }` | resolution follows the frames; a size change restarts with a keyframe; `threads` is a maximum (0: all CPUs but one), still capped at one per 320x240 pixels; `speed: None` adapts libvpx `cpu-used` to the encode time |
-| `Codecs` | `new()`, `with_openh264(lib)`, `decoders()` (viewer order), `encoders()` / `encoder_codecs()` (streamer order), `new_decoder(codec)`, `new_encoder(codec, config)`, `pick_encoder(&accepted)` |
+| `Codecs` | `new()` (probes FFmpeg / MediaCodec once per process), `builtin()` (compiled-in codecs only), `with_openh264(lib)`, `with_preference(EncoderPreference)` / `set_preference`, `decoders()` (viewer order), `encoders()` / `encoder_codecs()` (streamer order under the preference), `encoders_for(&pref)`, `new_decoder(codec)`, `new_encoder(codec, config)`, `new_encoder_preferring(codec, config, &pref)`, `new_encoder_with(codec, backend, config)`, `pick_encoder(&accepted)`, `is_hardware(backend)`, `report()`; cheap to clone |
+| `EncoderPreference { hardware, backend: BackendChoice }` | settings `stream.hardware_acceleration` and `stream.encoder_backend` (`auto`, `software`, or a backend name such as `h264_vaapi`, `libx264`, `libvpx`, `openh264`) |
+| `EncoderReport { ffmpeg, zero_copy, encoders: Vec<EncoderInfo> }` | for the UI: FFmpeg's release and path (or why none), whether DMA-BUF import works, and per backend `name`, `api`, `codec`, `hardware`, `status` (self-test result or why it cannot be used) and `rank` under the current preference |
+| `EncoderBackend` | `Libvpx`, `OpenH264`, `Ffmpeg("h264_vaapi")`, `Hardware("mediacodec")`; `name()` is the settings spelling |
+| `ffmpeg::{Ffmpeg, probe, FfmpegEncoder, BACKENDS}` | FFmpeg loaded at runtime (feature `ffmpeg`), see [FFmpeg encoders](#ffmpeg-encoders-loaded-at-runtime) |
 | `ScreenCapture` | `sources()`, `start_sink(&SourceId, &CaptureOptions, Box<dyn FrameSink>)` (frames borrowed from the capture buffer, on the backend's thread), `start(..)` (copies into a queue), `stop()`; async: the portal asks the user |
 | `FrameSink` | `max_fps()` (may change while capturing), `wants(timestamp)` (asked before anything is mapped or copied), `frame(FrameRef) -> bool` |
 | `FramePacer` | frame-rate cap by timestamps, evenly spaced |
@@ -51,7 +55,7 @@ while let Some(frame) = frames.recv().await {
 
 Feature `media` of voelin-core builds the module with whatever voelin-media backends
 are enabled (on Android: MediaCodec and the app's capture source);
-`media-desktop` adds voelin-media's default backends (libvpx, OpenH264, X11,
+`media-desktop` adds voelin-media's default backends (libvpx, OpenH264, FFmpeg, X11,
 PipeWire). The desktop app and voelinctl use `media-desktop`, the Android app
 `media`. Codecs are always chosen through `Codecs`, so each build uses its own.
 
@@ -94,16 +98,29 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   `max_bitrate`), else its configured bitrate; libvpx changes it in place
   without a keyframe.
 - `Streamer::reconfigure(&codecs, StreamerConfigUpdate { fps, bitrate_kbps,
-  codec, layers, audio_sources })` applies from the next frame without restarting the
+  codec, encoder, layers, audio_sources })` applies from the next frame without restarting the
   capture: encoders are created first (an error changes nothing), layers
   keep their encoder when their id stays, new ids get threads, removed ones
-  stop, a new codec swaps every encoder (first frame a keyframe), and the
+  stop, a new codec or encoder preference (`encoder`: hardware on/off, another
+  backend) swaps every encoder (first frame a keyframe), and the
   frame-rate cap reaches the capture backend (X11 and the test pattern
   retime, the portal renegotiates the rate with the compositor).
+- One encoder per codec viewers chose: the offer lists several codecs (see
+  `peer_config` below), the streamer's peer reports the codec each answer
+  chose (`PeerEvent::VideoCodec`), and the session sends a video frame only
+  to viewers of its codec (`StreamerSession::write_frame_in`) and tells the
+  encoders which codecs are wanted (`LayerFeedback::set_codecs`,
+  `MediaSink::video_codecs`). Each layer's encoder thread keeps the stream
+  codec's encoder and makes one more per other wanted codec when a viewer
+  needs it (with the streamer's current `Codecs` and preference), drops it
+  when none does, and skips the stream codec while nobody takes it; frames
+  go out through `MediaSink::send_video(frame, codec)`. Sinks that do not
+  tell codecs apart (`EncodedSource`, a `FrameSource`) get the stream codec
+  only, so their offers must list it alone (`voelinctl stream start` does).
 - `stats()`: `StreamerStats` with capture fps, convert time and threads,
   dropped frames, codec, and per layer (`LayerStats`) size, frames,
-  keyframes, dropped, fps, kbit/s, encode time, target bitrate, threads
-  and encoder speed; the audio mix's level and limiter gain, and per audio
+  keyframes, dropped, fps, kbit/s, encode time, target bitrate, threads,
+  encoder speed, the stream codec's `backend` and the `codecs` encoded; the audio mix's level and limiter gain, and per audio
   source (`AudioSourceStats`) level, state, latency, underruns and why it
   captures nothing, if so. Counters are atomics; rates are computed once a
   second, and a one-line summary is logged every 5 s at debug level
@@ -112,8 +129,20 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   WGC), `Portal`, `X11`, `Wlroots`; `name()` / `FromStr` use the settings
   spellings `auto`, `portal`, `x11`, `wlroots`.
 - `peer_config(&codecs, config)` makes a viewer accept only what we decode
-  and a streamer offer only the codec it encodes (VP8 unless changed): all
-  viewers get the same frames, and a viewer picks from the offer.
+  and a streamer offer its stream codec (the first of `config.video_codecs`
+  it can encode) followed by `offer_codecs`: the codecs of hardware
+  encoders, VP8 through libvpx (every TeamSpeak client decodes it), and HEVC
+  last. Other software encoders (x264, SVT-AV1, libvpx VP9, ...) are only
+  ever the stream codec, so a viewer's answer never starts an expensive
+  second encoder. Answers keep the offer's order, so viewers take the stream
+  codec when they decode it. `preferred_codec(&codecs, configured)` picks the
+  stream codec: `stream.codec` if encodable, else the preference's first
+  (hardware first when enabled, VP8 in software; never HEVC);
+  `encoder_preference(&settings)` and `configured_codec(&settings)` read the
+  settings. H.264 is offered as Constrained High at the level the stream
+  needs (`PeerConfig::set_h264_format(profile, width, height, fps, bitrate)`:
+  macroblocks per second and per frame, and bitrate, per H.264 Table A-1;
+  never below 3.1, the level offered before).
 - `VideoPipeline` decodes on its own thread. It starts at a keyframe, and
   after a lost frame (`contiguous == false`, a lagging frame bus, a queue
   longer than 30 frames) or a decoder error it skips to the next keyframe,
@@ -195,16 +224,144 @@ e.g. calls).
 ## Codecs
 
 Preference: a viewer accepts VP9 > VP8 > AV1 > H.264; a streamer encodes with
-hardware > VP8 (libvpx) > H.264 (OpenH264) > VP9 (libvpx, expensive in
-software). `Codecs` filters both lists by what is compiled in and loaded.
+hardware (H.264 > AV1 > VP9 > VP8 > HEVC) > VP8 (libvpx) > H.264 (x264 and
+OpenH264 through FFmpeg, then Cisco's OpenH264) > VP9 (libvpx, expensive in
+software) > AV1 (SVT-AV1, libaom through FFmpeg). `Codecs` filters both lists
+by what is compiled in, loaded and passed its self-test, and applies the
+`EncoderPreference`: `auto` (hardware first unless
+`stream.hardware_acceleration` is off), `software` (no hardware), or a named
+backend first for the codecs it encodes (even hardware with acceleration
+off), the automatic order after it.
 
 | Backend | Feature | Encode | Decode | Library |
 |---|---|---|---|---|
 | libvpx | `vpx` (default) | VP8, VP9 | VP8, VP9 | system libvpx (1.14 tested), dynamically linked; bindings from `libvpx-native-sys` (pre-generated, no bindgen) |
 | OpenH264 | `openh264` (default) | H.264 Constrained High / Baseline | H.264 | Cisco's prebuilt binary, loaded at runtime |
 | dav1d | `av1` | – | AV1 | system libdav1d >= 1.3 (1.4.1 tested) |
-| hardware | – | not yet | – | `codec::hw::HardwareEncoderFactory`; VA-API and Media Foundation stubs report nothing (TODO) |
-| MediaCodec (Android) | – | H.264, VP8, VP9 | VP8, VP9, H.264, AV1 | the device's default codec per type through the NDK (`ndk` crate); a hardware encoder factory named `mediacodec` |
+| FFmpeg | `ffmpeg` (default; off on Android) | H.264, HEVC, AV1, VP9, VP8 in hardware; H.264 (x264, OpenH264), AV1 (SVT-AV1, libaom, rav1e) in software | – | the system's (or `VOELIN_FFMPEG_DIR`'s) libavcodec / libavutil, any major version, loaded at runtime; see below |
+| MediaCodec (Android) | – | H.264, VP8, VP9 | VP8, VP9, H.264, AV1 | the device's default codec per type through the NDK (`ndk` crate); an encoder factory named `mediacodec` |
+
+HEVC (`Codec::H265`): str0m packetizes and depacketizes H.265, so it can be
+negotiated; it is offered last and only when a hardware encoder has it, i.e.
+used only by a peer that takes none of the other codecs. There is no HEVC
+decoder, so viewers never accept it.
+
+### FFmpeg encoders, loaded at runtime
+
+`crate::ffmpeg` (feature `ffmpeg`) uses whatever FFmpeg is installed; it is
+never linked or shipped. Without it, or when a backend fails its self-test,
+the software encoders above are used as before.
+
+- Finding it: `VOELIN_FFMPEG_DIR` (only that directory; its libavutil and
+  libswresample are loaded first so libavcodec's dependencies resolve
+  there), else the system: `libavcodec.so.N` for N from 80 down to 54 and
+  `libavcodec.so`, then whatever `ldconfig -p` lists (Linux);
+  `avcodec-N.dll` next to the executable or on `PATH` (Windows);
+  `libavcodec.N.dylib` on the library path, Homebrew (`/opt/homebrew/lib`,
+  `/usr/local/lib`) and MacPorts (`/opt/local/lib`) (macOS). No version is
+  refused. libavutil's functions come from the libavutil libavcodec itself
+  loaded (through its handle; on Windows the already loaded DLL), so the two
+  always match; libavformat of the same major is opened if present (for RTMP
+  output later). `VOELIN_FFMPEG=0` disables FFmpeg. Only functions are
+  looked up by name (`sys.rs`); FFmpeg's warnings and errors go to
+  `tracing` (target `ffmpeg`) and into the self-test's failure reasons.
+- ABI across major versions: every codec setting goes through AVOptions
+  (`av_opt_set*`: `video_size`, `pixel_format`, `time_base`, `b`,
+  `maxrate`, `bufsize`, `g`, `bf`, `threads`, colour properties, `profile`
+  and each encoder's private options), frames and packets are allocated by
+  FFmpeg, and of `AVFrame` / `AVPacket` only the leading fields are read or
+  written (`data[8]`, `linesize[8]`, `width`, `height`, `format`; `pts`,
+  `data`, `size`, `flags`), unchanged since FFmpeg 0.9 / 2.1. Fields without
+  an accessor are found and checked at runtime (`layout.rs`):
+  `AVFrame.pict_type` and `pts` (after `format`, with or without
+  `key_frame`, which libavutil 60 removed; a fresh frame must read NONE,
+  {0, 1}, `AV_NOPTS_VALUE` in exactly one layout), `AVCodecContext.hw_frames_ctx`
+  (for VA-API; located from the offsets `av_opt_find` reports for its
+  neighbours `hwaccel_flags` and `err_detect` / `extra_hw_frames` (libavcodec
+  61+) or `max_pixels` (up to 60), and NULL in a new context),
+  `AVHWFramesContext` `format`, `sw_format`, `width`, `height`,
+  `initial_pool_size` (with or without `internal`, which libavutil 59
+  removed; `device_ctx` and both formats checked in a new context), and for
+  the DMA-BUF import `AVFrame.buf[0]` and `hw_frames_ctx` (a table per
+  libavutil major 56-60 on 64-bit, newer majors tried with the newest entry;
+  `buf[0]` checked on a real frame at load, `hw_frames_ctx` on the first
+  surface). The layouts were compiled from the headers of FFmpeg 4.4, 5.1,
+  6.1, 7.1 and 8.0. A failed check disables only what needs the field
+  (VA-API, or the import) and says why (`LibraryInfo::hw_frames`,
+  `dmabuf_import`, the report).
+- Backends (`ffmpeg::BACKENDS`, FFmpeg's encoder names, also the names in
+  `stream.encoder_backend`): H.264 `h264_nvenc`, `h264_amf`, `h264_vaapi`,
+  `h264_qsv`, `h264_videotoolbox`, `h264_mf`, software `libx264`,
+  `libopenh264`; HEVC `hevc_nvenc`, `hevc_amf`, `hevc_vaapi`, `hevc_qsv`,
+  `hevc_videotoolbox`, `hevc_mf`; AV1 `av1_nvenc`, `av1_amf`, `av1_vaapi`,
+  `av1_qsv`, software `libsvtav1`, `librav1e`, `libaom-av1`; VP9
+  `vp9_vaapi`, `vp9_qsv`; VP8 `vp8_vaapi`. `ffmpeg::probe()` runs each one
+  present in the build once per process (in parallel): one 320x240 frame,
+  forced keyframe, flushed; a backend that gives no keyframe packet is
+  skipped with FFmpeg's reason ("Cannot load libcuda.so.1", "no DRM render
+  node", "not in this FFmpeg build", ...). rav1e holds about 20 frames
+  before its first packet even in low-latency mode (measured, rav1e 0.7), so
+  it is used only when named.
+- Realtime settings: no B-frames, no lookahead, keyframes only at the start
+  and on request (a GOP of 2^30 frames, or what each wrapper takes as
+  unlimited: 65535 for Quick Sync, 0 for AMF and VideoToolbox, 2^29 for
+  rav1e; `keyframe_interval` if set) with forced IDR (`pict_type` I,
+  `forced-idr`), CBR (`maxrate` = `b`, a one-second buffer; SVT-AV1 `rc=2`),
+  time base 1/fps (hardware rate control budgets per frame from it; pts are
+  frame numbers from the capture timestamps), BT.601 limited range. Per
+  family: x264 `veryfast` (`EncoderConfig::speed` picks another preset),
+  `zerolatency`, no scene cuts; NVENC `p2` (`llhp` on old releases), tune
+  `ull`, `zerolatency`, `delay 0`; Quick Sync `veryfast`, `async_depth 1`,
+  `low_delay_brc`, scenario display remoting; AMF usage `ultralowlatency`,
+  quality `speed`, SPS/PPS with every IDR; VA-API `rc_mode CBR`,
+  `async_depth 1`, `low_power` retried when the normal entry point fails;
+  VideoToolbox `realtime`, `prio_speed`; Media Foundation hardware MFT,
+  scenario display remoting; SVT-AV1 preset 10, `pred-struct=1` (low
+  delay), no lookahead or scene detection; libaom `usage realtime`,
+  `cpu-used 8`, `lag-in-frames 0`, `row-mt`, screen tuning. H.264 is High
+  without B-frames (Constrained High, what TeamSpeak decodes) or Constrained
+  Baseline (`EncoderConfig::h264_profile`). Options a release does not know
+  are skipped; alternatives are tried in order.
+- Runtime changes: x264, NVENC and Quick Sync take bitrate changes on the
+  running encoder (FFmpeg's wrappers compare `b` / `maxrate` / `bufsize`
+  before each frame); the others reopen at the next keyframe, at once
+  when the target falls below half (congestion), and when it rose by half
+  or more and the session is 5 s old (the estimate ramping up after the
+  start would otherwise never reach the encoder). A new frame rate or size
+  opens a new session (keyframe); the old one is flushed first, so frames an
+  encoder with a delay still held come out.
+- Buffers: per session one software `AVFrame` (`av_frame_get_buffer`,
+  written after `av_frame_make_writable`, NV12 interleaved where the backend
+  wants it) and one `AVPacket`, reused; packets are handed out borrowed
+  (`encode_with`). VA-API frames come from a surface pool
+  (`av_hwframe_ctx_init`, surfaces allocated on demand and recycled) filled
+  with `av_hwframe_transfer_data`; the device is `VOELIN_VAAPI_DEVICE` or the
+  first `/dev/dri/renderD*`, shared by all encoders. Odd sizes are cropped to
+  even ones. The streamer's steady state is 1.1 heap allocations per encoded
+  frame with x264 or SVT-AV1, as with libvpx (`voelinctl stream bench`).
+- Zero-copy (Linux): `FfmpegEncoder::encode_dmabuf(&DmaBufRef, ...)` maps a
+  DRM PRIME frame onto a VA-API surface (`av_hwframe_map`) that the encoder
+  reads without a copy, for NV12 buffers. Screen capture delivers RGB
+  (BGRx), which needs a colour conversion on the GPU first (VA-API video
+  processing); that step is not implemented, so RGB buffers are refused and
+  mapped for the CPU path as before. The capture side has the hook
+  (`FrameSink::accepts_dmabuf` / `dmabuf`: the portal offers a buffer before
+  mapping it and would pass tiled ones through), but no sink accepts yet
+  and the portal still negotiates LINEAR buffers only; offering tiled
+  modifiers needs the encoder's import modifiers. Untested on a GPU.
+
+Installing FFmpeg (runtime libraries only, no `-dev` packages):
+
+| OS | |
+|---|---|
+| Debian / Ubuntu | `apt install libavcodec60` (Ubuntu 24.04; Debian 12: `libavcodec59`); VA-API drivers: `intel-media-va-driver` / `mesa-va-drivers`; NVENC needs the NVIDIA driver (`libcuda.so.1`); x264 comes with Ubuntu's libavcodec |
+| Fedora | `dnf install ffmpeg-libs` from RPM Fusion (Fedora's own `ffmpeg-free` lacks x264 and some hardware encoders) |
+| Arch | `pacman -S ffmpeg` |
+| Windows | a shared build (e.g. gyan.dev or BtbN "shared"): put `avcodec-*.dll`, `avutil-*.dll` and their neighbours next to the executable, on `PATH`, or in `VOELIN_FFMPEG_DIR` |
+| macOS | `brew install ffmpeg` (VideoToolbox is always there) |
+
+`voelinctl stream encoders` lists what was found, every backend's self-test
+result and the order the streamer uses them in.
 
 On Android, `codec::mediacodec` uses byte-buffer mode on both sides, so it
 takes and returns `VideoFrame`s like the software codecs. Encoders get NV12
@@ -240,8 +397,9 @@ change the bitrate at runtime. The other modules with `unsafe` code, each
 with SAFETY comments: the X11 and wlroots shared-memory mappings
 (`capture/x11/shm.rs`, `capture/wlroots.rs`), the DMA-BUF mapping and sync
 ioctl (`capture/dmabuf.rs`), the lifetime-erased job of the worker pool
-(`workers.rs`), the `Arc` raw pointers of the handoff (`handoff.rs`), and
-the `Send` wrapper in `codec/mediacodec.rs`.
+(`workers.rs`), the `Arc` raw pointers of the handoff (`handoff.rs`), the
+`Send` wrapper in `codec/mediacodec.rs`, and the FFmpeg bindings
+(`ffmpeg/sys.rs`, `layout.rs`, `mod.rs`, `encoder.rs`).
 
 The OpenH264 encoder has no safe runtime bitrate change in the `openh264`
 crate, so `set_bitrate` recreates it (the next frame is an IDR). It enables
@@ -342,6 +500,9 @@ their own (x11rb reply buffers; the Android provider hands owned frames).
 ```sh
 # The real pipeline on the test pattern, no server:
 voelinctl stream bench --res 1920x1080 --fps 60 --codec vp8 --seconds 10
+# Any encoder (see `voelinctl stream encoders`); --no-hardware for software:
+voelinctl stream bench --res 1280x720 --encoder libx264
+voelinctl stream bench --res 1280x720 --encoder h264_vaapi
 voelinctl stream bench --res 2560x1440 --fps 30 \
     --layer scale=1,bitrate=6M --layer scale=0.5,bitrate=1500k,fps=30 \
     --layer size=640x360,bitrate=400k,fps=15
@@ -390,14 +551,18 @@ Linux (Debian/Ubuntu packages): `libvpx-dev` (feature `vpx`),
 PipeWire bindings run bindgen), `pkg-config`, and `libdav1d-dev` for
 `--features av1`. X11 capture is pure Rust (x11rb) and needs no packages.
 Tests of X11 capture need an X server: `xvfb`, run with `xvfb-run -a cargo
-test -p voelin-media` (skipped without `DISPLAY`).
+test -p voelin-media` (skipped without `DISPLAY`). FFmpeg needs nothing at
+build time (feature `ffmpeg` only adds `libloading`); its tests run with the
+runtime libraries installed (`libavcodec60` on Ubuntu 24.04) and are
+skipped without them; `VOELIN_OPENH264_LIB` lets them decode x264's output
+with Cisco's OpenH264, `--features av1` AV1 with dav1d.
 
 Windows: libvpx is not found through pkg-config there. Install it (e.g.
 `vcpkg install libvpx:x64-windows`) and set `VPX_LIB_DIR`, `VPX_INCLUDE_DIR`
 and `VPX_VERSION`, or build without the `vpx` feature. The Windows capture
 code is type-checked on Linux (`cargo clippy -p voelin-media --target
-x86_64-pc-windows-gnu --no-default-features --features openh264`) but has not
-run on Windows yet.
+x86_64-pc-windows-gnu --no-default-features --features openh264,ffmpeg`) but
+has not run on Windows yet.
 
 ## Licenses
 
@@ -414,6 +579,8 @@ run on Windows yet.
 | `criterion` | Apache-2.0 OR MIT | benchmarks only (dev-dependency) |
 | `ashpd`, `pipewire`, `libspa` / libpipewire | MIT | libpipewire is dynamic |
 | `windows-capture`, `wasapi`, `windows` | MIT (`windows`: MIT OR Apache-2.0) | Windows only |
+| FFmpeg (libavcodec, libavutil, libavformat) | LGPL-2.1+ (GPL-2+ in builds with x264 and other GPL parts) | the user's installed libraries, loaded at runtime; never linked or shipped |
+| `libloading` | ISC | opens FFmpeg (and OpenH264, through the `openh264` crate) |
 | `bzip2` / `libbz2-rs-sys` | MIT OR Apache-2.0 / bzip2-1.0.6 | unpacks the OpenH264 download; `bzip2-1.0.6` is allowed in `deny.toml` |
 
 ## Verification status
@@ -434,7 +601,16 @@ run on Windows yet.
 | Portal / PipeWire error paths (no bus, bus without portal, no daemon) | unit tests, manual probe | tested |
 | Portal capture (shared memory and DMA-BUF), PipeWire video and audio streams | – | compiles only (no portal or PipeWire daemon here) |
 | Windows Graphics Capture, WASAPI | – | type-checked for `x86_64-pc-windows-gnu` only |
-| Hardware encoders | – | stubs |
+| FFmpeg loader: sonames, missing FFmpeg, layout checks on a real release | `ffmpeg::sys` / `ffmpeg` unit tests; mirrors compared with offsets compiled from the 4.4-8.0 headers | tested (FFmpeg 6.1.1 on Ubuntu 24.04) |
+| FFmpeg software encoders → our decoders: x264 → OpenH264, SVT-AV1 / rav1e / libaom → dav1d (PSNR > 28 dB, keyframes at start and on request, timestamps, bitrate change, size change, odd sizes, Constrained High / Baseline) | `tests/ffmpeg.rs` (`VOELIN_OPENH264_LIB`, `--features av1`) | tested |
+| Self-test failures (NVENC without CUDA, Quick Sync without a session, VA-API without a render node, encoders not in the build) | `tests/ffmpeg.rs`, `voelinctl stream encoders` | tested: each fails alone with FFmpeg's reason |
+| Encoder preference (auto, software, named, hardware off), report ranks | `codec::tests::encoder_preference` | tested |
+| An encoder per codec viewers chose (made, dropped, stream codec skipped, preference change) | `voelin-core` `media::tests::an_encoder_per_codec_viewers_chose` | tested |
+| Answer's codec reported to the streamer, H.264 level in the offer, HEVC offered | `voelin-stream` `peer::tests::streamer_learns_the_answered_codec`, `h264::tests` | tested (str0m on loopback) |
+| x264 / SVT-AV1 / libaom in the streamer pipeline | `voelinctl stream bench --encoder ...` | 720p30: x264 8.7 ms per frame, SVT-AV1 1.3 ms, libaom 37 ms; 1.1 allocations per encoded frame |
+| Hardware encoders (VA-API, NVENC, Quick Sync, AMF, Media Foundation, VideoToolbox), DMA-BUF import | – | compile only (no GPU here); the Windows code type-checks for `x86_64-pc-windows-gnu` |
+| Offer [VP9, VP8], a viewer that decodes only VP8 → its own VP8 encoder, VP9 idle, pictures decoded | `voelin-core/tests/media_live.rs` `ts6_viewer_gets_the_codec_it_chose` (`VOELIN_LIVE=1`) | tested against the TeamSpeak 6 dev server (our client on both ends) |
+| Several codecs against official TeamSpeak viewers | – | not tested (no official client here) |
 | Test pattern → VP8 → decoder, rectangle position and colour | `voelin-core` `media::tests::local_preview_decodes_the_pattern` | tested |
 | Test pattern → two engine stream tasks → str0m peers on loopback → decoder | `voelin-core` `stream::tests::test_pattern_through_stream_tasks` | tested |
 | Stream audio (RTP time → jitter buffer ids, volume, end) | `voelin-core` `audio::tests::stream_audio_with_volume`, stream task test | tested |
