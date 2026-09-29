@@ -1002,7 +1002,8 @@ impl Streamer {
 		for (spec, &threads) in specs.iter().zip(&split) {
 			let existing = current.iter().any(|l| l.id == spec.id);
 			if !existing || codec_changed {
-				let encoder = new_encoder(codecs, next.codec, &next.encoder, spec, next.fps, threads)?;
+				let encoder =
+					new_encoder(codecs, next.codec, &next.encoder, spec, next.fps, threads)?;
 				created.push((spec.id, encoder));
 			}
 		}
@@ -1696,7 +1697,9 @@ fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 				let fps = layer.fps.load(Ordering::Relaxed);
 				extra.push(match extra_encoder(shared, layer, codec) {
 					Some(encoder) => LayerEncoder::new(encoder, fps),
-					None => LayerEncoder { codec, encoder: None, keyframe_due: false, bitrate: 0, fps },
+					None => {
+						LayerEncoder { codec, encoder: None, keyframe_due: false, bitrate: 0, fps }
+					}
 				});
 			}
 		}
@@ -2553,8 +2556,11 @@ mod tests {
 		*lock(&sink.codecs) = vec![Codec::Vp8, Codec::Vp9];
 		wait_for(Codec::Vp9, 5).await;
 		assert_eq!(streamer.stats().layers[0].codecs, [Codec::Vp8, Codec::Vp9]);
-		let vp9: Vec<EncodedFrame> =
-			lock(&sink.frames).iter().filter(|(c, _)| *c == Codec::Vp9).map(|(_, f)| f.clone()).collect();
+		let vp9: Vec<EncodedFrame> = lock(&sink.frames)
+			.iter()
+			.filter(|(c, _)| *c == Codec::Vp9)
+			.map(|(_, f)| f.clone())
+			.collect();
 		assert!(is_keyframe(Codec::Vp9, &vp9[0].data), "the first VP9 frame is a keyframe");
 		let mut decoder = codecs.new_decoder(Codec::Vp9).unwrap();
 		for frame in &vp9 {

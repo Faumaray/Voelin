@@ -14,8 +14,8 @@
 //!   (hardware, or Google's software VP8 / VP9 / H.264)
 
 use std::fmt;
-use std::sync::Arc;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use crate::frame::VideoFrame;
 use crate::{Error, Result};

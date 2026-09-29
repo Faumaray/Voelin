@@ -1205,9 +1205,8 @@ impl StreamerSession {
 	fn emit_viewers(&mut self, out: &mut Outbox) {
 		// Every change of the viewers comes through here: the encoders learn
 		// which codecs are needed now.
-		self.feedback.set_codecs(
-			self.viewers.values().filter(|v| v.peer.is_some()).filter_map(|v| v.codec),
-		);
+		self.feedback
+			.set_codecs(self.viewers.values().filter(|v| v.peer.is_some()).filter_map(|v| v.codec));
 		self.last_viewers_event = Some(Instant::now());
 		out.event(StreamEvent::Streamer(StreamerEvent::Viewers(self.viewers())));
 	}

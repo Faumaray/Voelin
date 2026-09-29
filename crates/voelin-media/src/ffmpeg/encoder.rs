@@ -1089,6 +1089,7 @@ fn test_backend(spec: &'static BackendSpec) -> std::result::Result<(), String> {
 		Ok((_, false)) => Err("the test frame did not come out as a keyframe".into()),
 		Ok(_) => Ok(()),
 		Err(Error::CodecUnavailable { reason, .. }) => Err(reason),
+		Err(Error::Encoder { message, .. }) => Err(message),
 		Err(e) => Err(e.to_string()),
 	}
 }
