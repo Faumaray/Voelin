@@ -358,6 +358,11 @@ pub fn run(options: RunOptions) -> Result<()> {
 
 	// VOELIN_DATA_DIR isolates the database; the other development
 	// switches are in dev.rs.
+	// A host that names the data directory (Android) has no platform cache
+	// directory either: avatars and icons go next to the database.
+	if let Some(dir) = &options.data_dir {
+		engine.send(Command::AttachCache(dir.join("images")));
+	}
 	let dir: PathBuf = match (options.data_dir, std::env::var_os("VOELIN_DATA_DIR")) {
 		(Some(dir), _) => dir,
 		(None, Some(dir)) => dir.into(),
