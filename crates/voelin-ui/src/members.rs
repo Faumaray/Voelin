@@ -11,6 +11,22 @@ use crate::settings::ClientPlayback;
 use crate::vm;
 
 impl App {
+	/// `VOELIN_OPEN=member`: the card of the first person that is not us.
+	pub(crate) fn open_first_member(&mut self) {
+		let Some(view) = self.view() else { return };
+		let own = view.state.own_client;
+		let mut others: Vec<u16> = view
+			.presence
+			.members(view.state.own_channel.unwrap_or_default())
+			.filter(|c| Some(c.id) != own)
+			.map(|c| c.id)
+			.collect();
+		others.sort_unstable();
+		if let Some(id) = others.first().copied() {
+			self.open_member(i32::from(id));
+		}
+	}
+
 	/// Open the card of a client (`-1` closes it).
 	pub(crate) fn open_member(&mut self, client: i32) {
 		if let Some(view) = self.view_mut() {

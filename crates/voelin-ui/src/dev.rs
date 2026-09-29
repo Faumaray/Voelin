@@ -25,12 +25,19 @@ use std::time::Duration;
 
 use anyhow::Result;
 use slint::ComponentHandle;
+use voelin_core::gateway::Pin;
 use voelin_core::stream::{StreamInfo, StreamKind};
-use voelin_core::{Event, ObserveState, SessionState, Source, VoiceState};
-use voelin_model::{ChannelInfo, ChatMessage, ChatTarget, ClientInfo, Presence, ServerFlavor};
-use voelin_store::Bookmark;
+use voelin_core::{
+	Event, GatewayUpdate, HistoryMessage, HistorySource, ObserveState, SessionState, Source,
+	VoiceState,
+};
+use voelin_gateway_proto::{ReactionCount, TopicInfo, UserRef, feature};
+use voelin_model::{
+	ChannelInfo, ChatMessage, ChatTarget, ClientInfo, GroupInfo, Presence, ServerFlavor,
+};
+use voelin_store::{Bookmark, MessageSource};
 
-use crate::app::{App, MainWindow, MobileTab, Nav, Page, SettingsSection, with_app};
+use crate::app::{App, Bridge, MainWindow, MobileTab, Nav, Page, SettingsSection, with_app};
 
 /// The switches read at start.
 #[derive(Clone, Debug, Default)]
@@ -104,6 +111,7 @@ fn mobile_tab(name: &str) -> MobileTab {
 /// Timers that must live while the window runs.
 pub(crate) struct Running {
 	_screenshot: Option<slint::Timer>,
+	_resize: Option<slint::Timer>,
 }
 
 /// Apply the switches once the app is set up.
@@ -137,11 +145,43 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 			"panel" => nav.set_right_panel_open(true),
 			"no-panel" => nav.set_right_panel_open(false),
 			"tab" => nav.set_mobile_tab(mobile_tab(arg)),
+			"voice" => nav.set_voice_grid(true),
+			"pins" => nav.invoke_show_pins(true),
+			"topics" => nav.invoke_show_topics(true),
+			"topic" => {
+				with_app(|app| app.open_topic(arg.parse().unwrap_or(1)));
+			}
+			"member" => {
+				with_app(|app| app.open_first_member());
+			}
+			"watch" => {
+				with_app(|app| app.watch_first_stream());
+			}
+			"popout" => {
+				with_app(|app| app.watch_first_stream());
+				ui.global::<Bridge>().set_viewer_popped(true);
+			}
 			// Opened once connected (settings_page.rs).
 			"client" => {}
 			other => eprintln!("VOELIN_OPEN: unknown screen {other:?}"),
 		}
 	}
+	// The size set before the window opened can be overruled while it lays
+	// out, so ask again shortly before the picture is taken.
+	let resize = switches.window_size.map(|(w, h)| {
+		let weak = ui.as_weak();
+		let timer = slint::Timer::default();
+		timer.start(
+			slint::TimerMode::SingleShot,
+			Duration::from_millis(switches.screenshot_delay * 1000 / 2),
+			move || {
+				if let Some(ui) = weak.upgrade() {
+					ui.window().set_size(slint::LogicalSize::new(w, h));
+				}
+			},
+		);
+		timer
+	});
 	let screenshot = switches.screenshot.clone().map(|path| {
 		let weak = ui.as_weak();
 		let timer = slint::Timer::default();
@@ -159,7 +199,7 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 		);
 		timer
 	});
-	Running { _screenshot: screenshot }
+	Running { _screenshot: screenshot, _resize: resize }
 }
 
 fn save_screenshot(ui: &MainWindow, path: &std::path::Path) -> Result<()> {
@@ -241,14 +281,48 @@ fn demo_ui(app: &mut App) {
 	clients[4].input_muted = true;
 	clients[7].away = Some("brb".into());
 	clients[8].output_muted = true;
+	// Groups, badges and descriptions, as the members panel shows them.
+	clients[0].server_groups = vec![GROUP_MOD];
+	clients[0].talk_power = 75;
+	clients[0].description = Some("Raid lead. Ask me about the Tuesday runs.".into());
+	clients[1].server_groups = vec![GROUP_ADMIN];
+	clients[1].talk_power = 100;
+	clients[1].priority_speaker = true;
+	clients[1].description = Some("Streaming most evenings.".into());
+	clients[2].server_groups = vec![GROUP_MOD];
+	clients[2].channel_commander = true;
+	clients[2].talk_power = 75;
+	clients[3].server_groups = vec![GROUP_MEMBER];
+	clients[3].recording = true;
+	clients[4].server_groups = vec![GROUP_MEMBER];
+	clients[5].server_groups = vec![GROUP_MEMBER];
+	clients[6].server_groups = vec![GROUP_GUEST];
+	clients[7].server_groups = vec![GROUP_GUEST];
 	for c in clients {
 		p.clients.insert(c.id, c);
 	}
 
+	let group = |id: u64, sort_id: i32, name: &str| GroupInfo {
+		id,
+		name: name.into(),
+		icon: 0,
+		sort_id,
+		..Default::default()
+	};
 	let flavor = ServerFlavor::from_version_string("6.0.0-beta13.1 [Build: 1]");
 	let capabilities = flavor.capabilities();
 	let events = [
 		Event::ServerInfo { session, name: "Nightfall Guild".into(), flavor, capabilities },
+		Event::Groups {
+			session,
+			server_groups: Arc::new(vec![
+				group(GROUP_ADMIN, 10, "Server Admin"),
+				group(GROUP_MOD, 20, "Moderator"),
+				group(GROUP_MEMBER, 30, "Member"),
+				group(GROUP_GUEST, 40, "Guest"),
+			]),
+			channel_groups: Arc::new(Vec::new()),
+		},
 		Event::Presence { session, presence: Arc::new(p) },
 		Event::State {
 			session,
@@ -257,7 +331,26 @@ fn demo_ui(app: &mut App) {
 				presence_source: Some(Source::Voice),
 				own_channel: Some(2),
 				own_client: Some(1),
+				// The engine keeps history for a server it knows, so the
+				// chat is driven by `Event::ChatHistory` like a real one.
+				server_uid: Some("demo-server".into()),
 				..Default::default()
+			},
+		},
+		// A gateway with everything the chat screens need.
+		Event::Gateway {
+			session,
+			update: GatewayUpdate::Connected {
+				gateway_id: "demo".into(),
+				server_uid: "demo-server".into(),
+				server_name: "Nightfall Guild".into(),
+				uid: "demo-1".into(),
+				capabilities: vec![
+					feature::HISTORY.into(),
+					feature::PINS.into(),
+					feature::REACTIONS.into(),
+					feature::TOPICS.into(),
+				],
 			},
 		},
 		Event::Talking { session, client: 3, talking: true },
@@ -281,61 +374,257 @@ fn demo_ui(app: &mut App) {
 	for event in events {
 		app.handle_event(event);
 	}
-	let now = chrono::Utc::now().timestamp_millis();
-	let lines = [
-		(
-			DEMO,
-			ChatTarget::Channel(2),
-			"Nova",
-			"Beautiful morning for a game. Who's up for a session later? ☀️",
-			0,
-			false,
-		),
-		(DEMO, ChatTarget::Channel(2), "Kairo", "Definitely! I'll be on after lunch.", 4, false),
-		(DEMO, ChatTarget::Channel(2), "Kairo", "Bringing snacks 🍕🍩", 4, false),
-		(
-			DEMO,
-			ChatTarget::Channel(2),
-			"Mira",
-			"Working on a new video today — here's a sneak peek soon! 🎬",
-			7,
-			false,
-		),
-		(
-			DEMO,
-			ChatTarget::Channel(2),
-			"Lumen",
-			"Going live in Chill Zone — exploring the Lands Between. Come hang! 🔥🗡️",
-			48,
-			false,
-		),
-		(DEMO, ChatTarget::Channel(2), "dex", "🎉🎉", 50, false),
-		(
-			DEMO,
-			ChatTarget::Channel(2),
-			"Ari",
-			"Anyone want to run some co-op later? 👀 Posting from the web.",
-			55,
-			true,
-		),
-		(DEMO, ChatTarget::Server, "Talon", "Server restart tonight at 23:00.", 20, false),
-		(DEMO + 1, ChatTarget::Server, "Ivy", "Welcome to the lounge!", 30, false),
-		(DEMO + 1, ChatTarget::Server, "Ivy", "New channel for artists 🎨", 31, false),
-	];
-	for (id, target, author, text, minute, relay) in lines {
-		let message = ChatMessage {
-			target,
-			author_name: author.into(),
-			author_uid: None,
-			author_id: None,
-			text: text.into(),
-			ts_ms: now - (60 - minute) * 60_000,
-			via_relay: relay,
-			blocked: false,
-		};
-		app.add_message(id, message);
-	}
+	demo_chat(app, session);
 	// No toast over the screenshots.
 	app.set_status("");
 	app.refresh_all();
+}
+
+/// Server group ids of the sample server.
+const GROUP_ADMIN: u64 = 6;
+const GROUP_MOD: u64 = 7;
+const GROUP_MEMBER: u64 = 8;
+const GROUP_GUEST: u64 = 9;
+
+/// A file link as TeamSpeak clients post it.
+fn file_link(channel: u64, name: &str, size: u64) -> String {
+	voelin_model::FileRef {
+		channel,
+		path: "/".into(),
+		name: name.into(),
+		size: Some(size),
+		..Default::default()
+	}
+	.to_bbcode()
+}
+
+/// One sample message: chat, author, its client, text, how many minutes
+/// ago, relayed, reactions, pinned, and the topic it belongs to.
+type SampleLine =
+	(i64, &'static str, u16, String, i64, bool, Vec<ReactionCount>, bool, Option<i64>);
+
+/// The sample chats, as stored messages with reactions, pins and topics.
+fn demo_chat(app: &mut App, session: u64) {
+	let now = chrono::Utc::now().timestamp_millis();
+	let react =
+		|emoji: &str, count: u32, me: bool| ReactionCount { emoji: emoji.into(), count, me };
+	let lines: Vec<SampleLine> = vec![
+		(
+			DEMO,
+			"Nova",
+			1,
+			"Beautiful morning for a game. Who's up for a session later? ☀️".into(),
+			60,
+			false,
+			vec![react("👍", 3, false), react("☀️", 1, true)],
+			false,
+			None,
+		),
+		(
+			DEMO,
+			"Kairo",
+			3,
+			"Definitely! I'll be on after lunch.".into(),
+			56,
+			false,
+			Vec::new(),
+			false,
+			None,
+		),
+		(DEMO, "Kairo", 3, "Bringing snacks 🍕🍩".into(), 56, false, Vec::new(), false, None),
+		(
+			DEMO,
+			"Mira",
+			4,
+			format!(
+				"Route for tonight, print it out: {}",
+				file_link(2, "raid-route.pdf", 2_411_724)
+			),
+			40,
+			false,
+			vec![react("🎉", 5, true)],
+			true,
+			None,
+		),
+		(
+			DEMO,
+			"Nova",
+			1,
+			"Reminder: raid starts 20:00 sharp, bring elixirs.".into(),
+			30,
+			false,
+			Vec::new(),
+			true,
+			Some(1),
+		),
+		(
+			DEMO,
+			"Lumen",
+			2,
+			"Going live in Chill Zone — exploring the Lands Between. Come hang! 🔥🗡️".into(),
+			12,
+			false,
+			vec![react("🔥", 8, false)],
+			false,
+			None,
+		),
+		(DEMO, "dex", 5, "🎉🎉".into(), 10, false, Vec::new(), false, None),
+		(
+			DEMO,
+			"Ari",
+			0,
+			"Anyone want to run some co-op later? 👀 Posting from the web.".into(),
+			5,
+			true,
+			Vec::new(),
+			false,
+			None,
+		),
+		(DEMO + 1, "Ivy", 0, "Welcome to the lounge!".into(), 30, false, Vec::new(), false, None),
+		(
+			DEMO + 1,
+			"Ivy",
+			0,
+			"New channel for artists 🎨".into(),
+			29,
+			false,
+			Vec::new(),
+			false,
+			None,
+		),
+	];
+	let mut id = 1;
+	let mut pinned: Vec<HistoryMessage> = Vec::new();
+	for (chat, author, client, text, ago, relay, reactions, pin, topic) in lines {
+		let target = if chat == DEMO { ChatTarget::Channel(2) } else { ChatTarget::Server };
+		let message = HistoryMessage {
+			id,
+			message: ChatMessage {
+				target: target.clone(),
+				author_name: author.into(),
+				author_uid: Some(format!("demo-{client}")),
+				author_id: (client > 0).then_some(client),
+				text,
+				ts_ms: now - ago * 60_000,
+				via_relay: relay,
+				blocked: false,
+			},
+			source: MessageSource::Voice,
+			remote_id: Some(id),
+			topic_id: topic,
+			reactions,
+			pinned: pin,
+			rev: 1,
+		};
+		if pin {
+			pinned.push(message.clone());
+		}
+		app.handle_event(Event::ChatHistory {
+			session: if chat == DEMO { session } else { session + 1 },
+			target,
+			messages: vec![message],
+			source: HistorySource::Gateway,
+			complete: false,
+		});
+		id += 1;
+	}
+	// A server chat besides the channel chat.
+	app.handle_event(Event::ChatHistory {
+		session,
+		target: ChatTarget::Server,
+		messages: vec![HistoryMessage {
+			id: 100,
+			message: ChatMessage {
+				target: ChatTarget::Server,
+				author_name: "Talon".into(),
+				author_uid: Some("demo-6".into()),
+				author_id: Some(6),
+				text: "Server restart tonight at 23:00.".into(),
+				ts_ms: now - 40 * 60_000,
+				via_relay: false,
+				blocked: false,
+			},
+			source: MessageSource::Voice,
+			remote_id: Some(100),
+			topic_id: None,
+			reactions: Vec::new(),
+			pinned: false,
+			rev: 1,
+		}],
+		source: HistorySource::Gateway,
+		complete: true,
+	});
+	// The gateway's answers for the drawers (no gateway runs in demo mode).
+	let by = |name: &str| UserRef { uid: format!("demo-{name}"), name: name.into() };
+	app.handle_event(Event::Gateway {
+		session,
+		update: GatewayUpdate::Pins {
+			target: ChatTarget::Channel(2),
+			pins: pinned
+				.into_iter()
+				.map(|message| Pin {
+					ts_ms: message.message.ts_ms + 60_000,
+					by: by("Nova"),
+					message,
+				})
+				.collect(),
+		},
+	});
+	let topic = |id: i64, title: &str, count: u64, ago: i64| TopicInfo {
+		id,
+		target: ChatTarget::Channel(2),
+		title: title.into(),
+		creator: by("Nova"),
+		created_ms: now - 5 * 86_400_000,
+		root_message_id: Some(5),
+		last_activity_ms: now - ago * 60_000,
+		message_count: count,
+		archived: false,
+	};
+	app.handle_event(Event::Gateway {
+		session,
+		update: GatewayUpdate::Topics {
+			target: ChatTarget::Channel(2),
+			topics: vec![
+				topic(1, "Tonight's raid", 14, 3),
+				topic(2, "Build ideas for the new patch", 42, 95),
+				topic(3, "Server rules", 6, 2880),
+			],
+		},
+	});
+	app.handle_event(Event::Gateway {
+		session,
+		update: GatewayUpdate::TopicHistory {
+			target: ChatTarget::Channel(2),
+			topic: 1,
+			messages: (0..4)
+				.map(|i| HistoryMessage {
+					id: 200 + i,
+					message: ChatMessage {
+						target: ChatTarget::Channel(2),
+						author_name: ["Nova", "Kairo", "Mira", "dex"][i as usize].into(),
+						author_uid: Some(format!("demo-{}", [1, 3, 4, 5][i as usize])),
+						author_id: Some([1, 3, 4, 5][i as usize]),
+						text: [
+							"Reminder: raid starts 20:00 sharp, bring elixirs.",
+							"I can tank if nobody else wants to.",
+							"Recording it again, say if you would rather not be in it.",
+							"Bringing the good soup 🍲",
+						][i as usize]
+							.into(),
+						ts_ms: now - (20 - i * 4) * 60_000,
+						via_relay: false,
+						blocked: false,
+					},
+					source: MessageSource::Gateway,
+					remote_id: Some(200 + i),
+					topic_id: Some(1),
+					reactions: Vec::new(),
+					pinned: false,
+					rev: 1,
+				})
+				.collect(),
+			has_more: false,
+		},
+	});
 }

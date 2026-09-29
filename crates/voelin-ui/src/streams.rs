@@ -603,6 +603,19 @@ impl App {
 		self.refresh_streams();
 	}
 
+	/// `VOELIN_OPEN=watch`: watch the first stream of our channel.
+	pub(crate) fn watch_first_stream(&mut self) {
+		let Some(id) = self.view().and_then(|v| {
+			v.streams
+				.iter()
+				.find(|s| v.state.own_client != Some(s.streamer.0))
+				.map(|s| s.id.clone())
+		}) else {
+			return;
+		};
+		self.watch_stream(id);
+	}
+
 	/// The local test stream in the viewer (`VOELIN_DEMO_STREAM`).
 	pub(crate) fn start_demo(&mut self) {
 		self.leave_stream();
