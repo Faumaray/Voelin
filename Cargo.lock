@@ -9309,6 +9309,7 @@ dependencies = [
  "dirs",
  "futures",
  "futures-util",
+ "md5",
  "png",
  "serde_json",
  "tokio",
