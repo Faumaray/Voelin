@@ -639,6 +639,33 @@ scaling cost 0.16-0.30 ms per frame at these sizes and are not the
 bottleneck. The per-layer "threads" the bench prints is the CPU budget the
 layer was given, not what a hardware encoder uses — it encodes on the GPU.
 
+### Wayland screen capture, measured
+
+Same machine, a 2560x1440 Wayland desktop through the ScreenCast portal,
+`h264_vaapi` at 60 fps and 12 Mbit/s, `voelinctl stream bench --source
+portal`. This path had never been run against a real compositor.
+
+| buffers | capture fps | convert + scale | cpu cores | dropped |
+|---|---|---|---|---|
+| DMA-BUF (LINEAR), as first written | – | – | – | every frame |
+| DMA-BUF (LINEAR), mapping fixed | 60.0 | 11.95 ms | 19.54 | 0 |
+| shared memory | 59.9 | 0.27 ms | 0.41 | 0 |
+| what it does now (switches by itself) | 60.1 | 0.30 ms | 0.55 | 0 |
+
+The first row is the bug behind the low frame rates on Wayland: the mapping
+length was taken from `mapoffset + maxsize`, which describe a mapping that
+only shared memory has, while a DMA-BUF's size lives in its buffer object and
+this compositor leaves both fields 0. Every map was refused and nothing was
+ever delivered.
+
+The second row is why shared memory is the right choice on a discrete GPU:
+the CPU reads its memory uncached, so the same conversion costs 44 times the
+time and 48 times the CPU. `SLOW_DMABUF_NS_PER_PIXEL` exists for exactly
+this, but at 6.0 ns per pixel it never fired against the DMA-BUF path's
+3.24; it now sits between the two measurements. Zero-copy is the real answer
+for this hardware — the buffer would never be read by the CPU at all — but
+that needs the GPU colour conversion that is still missing.
+
 Build profiles: the dev profile builds the media hot path (yuv,
 voelin-media, str0m, x11rb-protocol, pipewire, wayland-client, ...) with
 `opt-level = 3`; release builds use fat LTO with one codegen unit.
@@ -698,7 +725,7 @@ has not run on Windows yet.
 | Simulcast layers (sizes, fps caps, per-layer keyframes), reconfigure (codec, layers, fps) | `voelin-core` `media::tests::simulcast_layers_and_reconfigure` | tested |
 | Portal DMA-BUF negotiation | unit test of the offered formats | compiles and formats parse; no compositor with the portal here |
 | Portal / PipeWire error paths (no bus, bus without portal, no daemon) | unit tests, manual probe | tested |
-| Portal capture (shared memory and DMA-BUF), PipeWire video and audio streams | `voelinctl stream bench --source portal` | not measured: the portal dialog was not accepted within the 60 s deadline, and the run failed cleanly instead of hanging. The path itself is untested on a real compositor |
+| Portal capture (shared memory and DMA-BUF), PipeWire video and audio streams | `voelinctl stream bench --source portal` on a 2560x1440 Wayland desktop | tested: it delivered no frames at all (the DMA-BUF mapping length), and the DMA-BUF path cost 19.5 cores where shared memory costs 0.41. Both fixed; 1440p60 now runs on 0.55 cores (see the table above). Portal audio is still untested |
 | Windows Graphics Capture, WASAPI | – | type-checked for `x86_64-pc-windows-gnu` only |
 | FFmpeg loader: sonames, missing FFmpeg, layout checks on a real release | `ffmpeg::sys` / `ffmpeg` unit tests; mirrors compared with offsets compiled from the 4.4-9.0 headers | tested (FFmpeg 6.1.1 on Ubuntu 24.04; FFmpeg 9.0.1 / libavutil 61 / libavcodec 63 on Arch, every offset compared with that release's own headers) |
 | FFmpeg software encoders → our decoders: x264 → OpenH264, SVT-AV1 / rav1e / libaom → dav1d (PSNR > 28 dB, keyframes at start and on request, timestamps, bitrate change, size change, odd sizes, Constrained High / Baseline) | `tests/ffmpeg.rs` (`VOELIN_OPENH264_LIB`, `--features av1`) | tested |
