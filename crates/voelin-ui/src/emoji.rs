@@ -294,6 +294,12 @@ pub fn key_for(grapheme: &str) -> Option<String> {
 	archive.contains(&bare).then_some(bare)
 }
 
+/// The archive key of the first emoji in `text` (a reaction's emoji, which
+/// may be any string).
+pub fn first_key(text: &str) -> Option<String> {
+	text.graphemes(true).find_map(key_for)
+}
+
 /// A piece of text: plain, or one emoji (`emoji` is its key).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Run {

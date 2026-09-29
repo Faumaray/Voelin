@@ -8,6 +8,7 @@ mod dev;
 mod emoji;
 mod hotkey;
 mod images;
+mod members;
 mod servers;
 mod settings;
 mod settings_page;

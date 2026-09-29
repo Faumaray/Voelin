@@ -270,6 +270,9 @@ impl App {
 			own_channel: view.state.own_channel,
 			own_client: view.state.own_client,
 			filter: &self.tree_filter,
+			avatars: &view.avatars,
+			icons: &view.icons,
+			groups: &view.server_groups,
 		};
 		vm::list::sync(&self.models.tree, &vm::tree::rows(&input));
 		let members = if view.state.voice == VoiceState::Connected {

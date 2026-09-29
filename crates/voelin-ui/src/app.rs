@@ -19,8 +19,10 @@ use tokio::runtime::Runtime;
 use tracing::warn;
 use voelin_core::settings::{AUDIO, CRASH_REPORTS, Settings};
 use voelin_core::stream::StreamInfo;
-use voelin_core::{AudioSettings, Command, Engine, Event, SessionState, VoiceState};
-use voelin_model::{Capabilities, ChannelId, ChatTarget, Presence};
+use voelin_core::{
+	AudioSettings, Command, Engine, Event, History, HistoryMessage, SessionState, VoiceState,
+};
+use voelin_model::{Capabilities, ChannelId, ChatTarget, GroupInfo, Presence};
 use voelin_platform::crash;
 use voelin_store::{Bookmark, MemorySecrets, Secrets, Store};
 
@@ -107,20 +109,76 @@ impl Secrets for FallbackSecrets {
 	}
 }
 
+/// A message of a chat with the handle the UI knows it by: the engine's
+/// local ids are 64 bit, a Slint `int` is not.
+pub(crate) struct Msg {
+	pub key: i32,
+	pub message: HistoryMessage,
+}
+
 /// A chat of a session: its lines are the model the chat view shows while
 /// the tab is selected, so a new message is one row appended.
 pub(crate) struct Tab {
 	pub target: ChatTarget,
 	pub title: String,
 	pub lines: Rc<VecModel<ChatLine>>,
-	/// The last message, for grouping the next one.
+	/// The messages, oldest first, by `(ts_ms, id)`.
+	pub messages: Vec<Msg>,
+	/// Live messages of a session that keeps no history (no server unique
+	/// id yet): grouped from the message before, without ids.
 	pub last: Option<Previous>,
 	pub unread: i32,
+	/// Nothing older exists as far as the engine can tell.
+	pub complete: bool,
+	/// A gateway page arrived: the chat is not only what we saw.
+	pub synced: bool,
+	/// An older page was asked for.
+	pub loading: bool,
+	/// The next message handle.
+	next_key: i32,
+	/// The pins of this chat, once asked for.
+	pub pins: Vec<crate::chat::PinRow>,
+	pub pins_loaded: bool,
+	/// The gateway topics of this chat, and the open one with its messages.
+	pub topics: Vec<voelin_gateway_proto::TopicInfo>,
+	pub topics_loaded: bool,
+	pub topic: Option<i64>,
+	pub topic_messages: Vec<Msg>,
+	/// The message jumped to from the pins.
+	pub marked: Option<i64>,
 }
 
 impl Tab {
 	pub fn new(target: ChatTarget, title: String) -> Self {
-		Self { target, title, lines: Rc::new(VecModel::default()), last: None, unread: 0 }
+		Self {
+			target,
+			title,
+			lines: Rc::new(VecModel::default()),
+			messages: Vec::new(),
+			last: None,
+			unread: 0,
+			complete: false,
+			synced: false,
+			loading: false,
+			next_key: 1,
+			pins: Vec::new(),
+			pins_loaded: false,
+			topics: Vec::new(),
+			topics_loaded: false,
+			topic: None,
+			topic_messages: Vec::new(),
+			marked: None,
+		}
+	}
+
+	/// A handle for a message that has none yet.
+	pub fn take_key(&mut self) -> i32 {
+		self.next_key += 1;
+		self.next_key
+	}
+
+	pub fn message(&self, key: i32) -> Option<&HistoryMessage> {
+		self.messages.iter().chain(&self.topic_messages).find(|m| m.key == key).map(|m| &m.message)
 	}
 }
 
@@ -139,6 +197,21 @@ pub(crate) struct SessionView {
 	pub streams: Vec<StreamInfo>,
 	/// Clients whose stored volume was sent for this voice connection.
 	pub applied_playback: HashSet<u16>,
+	/// Avatar pictures in the engine's cache, by unique id
+	/// ([`Event::AvatarReady`]).
+	pub avatars: HashMap<String, PathBuf>,
+	/// Icons in the engine's cache, by icon id ([`Event::IconReady`]).
+	pub icons: HashMap<u32, PathBuf>,
+	/// The server groups in display order ([`Event::Groups`]).
+	pub server_groups: Vec<GroupInfo>,
+	/// What the session's gateway offers (`voelin_gateway_proto::feature`).
+	pub gateway_caps: Vec<String>,
+	/// The client whose member card is open.
+	pub member_card: Option<u16>,
+	/// Downloads started from chat, by transfer id.
+	pub downloads: HashMap<u64, crate::chat::Download>,
+	/// The next transfer id.
+	pub next_transfer: u64,
 }
 
 impl Default for SessionView {
@@ -154,6 +227,13 @@ impl Default for SessionView {
 			focused_own_channel: false,
 			streams: Vec::new(),
 			applied_playback: HashSet::new(),
+			avatars: HashMap::new(),
+			icons: HashMap::new(),
+			server_groups: Vec::new(),
+			gateway_caps: Vec::new(),
+			member_card: None,
+			downloads: HashMap::new(),
+			next_transfer: 1,
 		}
 	}
 }
@@ -176,6 +256,24 @@ impl SessionView {
 	pub fn unread(&self) -> i32 {
 		self.tabs.iter().map(|t| t.unread).sum()
 	}
+
+	/// The session's gateway offers this feature
+	/// (`voelin_gateway_proto::feature`).
+	pub fn gateway_has(&self, feature: &str) -> bool {
+		self.gateway_caps.iter().any(|c| c == feature)
+	}
+
+	/// The chat history is kept by the engine (it knows the server): its
+	/// messages come with ids, reactions and pins.
+	pub fn has_history(&self) -> bool {
+		self.state.server_uid.is_some()
+	}
+
+	/// The avatar picture of a client, if the engine fetched one.
+	pub fn avatar(&self, client: u16) -> Option<&PathBuf> {
+		let uid = self.presence.clients.get(&client)?.uid.as_deref()?;
+		self.avatars.get(uid)
+	}
 }
 
 /// The models the Bridge shows, created once and updated row by row
@@ -187,6 +285,9 @@ pub(crate) struct Models {
 	pub tabs: Rc<VecModel<ChatTab>>,
 	pub streams: Rc<VecModel<StreamItem>>,
 	pub viewers: Rc<VecModel<ViewerItem>>,
+	pub pins: Rc<VecModel<PinItem>>,
+	pub topics: Rc<VecModel<TopicItem>>,
+	pub topic_messages: Rc<VecModel<ChatLine>>,
 	/// Shown when there is no chat.
 	pub no_chat: Rc<VecModel<ChatLine>>,
 }
@@ -200,6 +301,9 @@ impl Models {
 			tabs: Rc::default(),
 			streams: Rc::default(),
 			viewers: Rc::default(),
+			pins: Rc::default(),
+			topics: Rc::default(),
+			topic_messages: Rc::default(),
 			no_chat: Rc::default(),
 		};
 		bridge.set_servers(ModelRc::from(models.servers.clone()));
@@ -208,6 +312,9 @@ impl Models {
 		bridge.set_tabs(ModelRc::from(models.tabs.clone()));
 		bridge.set_streams(ModelRc::from(models.streams.clone()));
 		bridge.set_share_viewers(ModelRc::from(models.viewers.clone()));
+		bridge.set_pins(ModelRc::from(models.pins.clone()));
+		bridge.set_topics(ModelRc::from(models.topics.clone()));
+		bridge.set_topic_messages(ModelRc::from(models.topic_messages.clone()));
 		bridge.set_messages(ModelRc::from(models.no_chat.clone()));
 		models
 	}
@@ -236,6 +343,8 @@ pub(crate) struct App {
 	pub inputs: DeviceChoices,
 	pub outputs: DeviceChoices,
 	pub playback: ClientPlaybackMap,
+	/// The engine's contacts, by unique id ([`Event::ContactsChanged`]).
+	pub contacts: HashMap<String, voelin_core::Contact>,
 	/// The client in the volume dialog: session, client id, unique id.
 	pub playback_dialog: Option<(i64, u16, Option<String>)>,
 	pub mic_test: bool,
@@ -260,6 +369,9 @@ pub(crate) struct App {
 	pub open_client_pending: bool,
 	/// The notices are in the About page's model.
 	pub notices_loaded: bool,
+	/// Files being uploaded to a channel from the composer: session,
+	/// channel and name, so the link can be posted when they are up.
+	pub uploads: HashMap<u64, (i64, u64, String)>,
 }
 
 thread_local! {
@@ -370,6 +482,12 @@ pub fn run(options: RunOptions) -> Result<()> {
 	};
 	let store =
 		Store::open(&dir.join("client.db")).context("failed to open the client database")?;
+	// Chat history and contacts live in the client database; without this
+	// the engine would keep them for this run only.
+	match History::open(&dir.join("client.db")) {
+		Ok(history) => engine.send(Command::AttachHistory(history)),
+		Err(e) => warn!(%e, "chat history is not stored this time"),
+	}
 	let identity = match store.identities()?.first() {
 		Some(entry) => store.identity(entry.id)?,
 		None => {
@@ -429,6 +547,7 @@ pub fn run(options: RunOptions) -> Result<()> {
 		inputs: DeviceChoices::default(),
 		outputs: DeviceChoices::default(),
 		playback,
+		contacts: HashMap::new(),
 		playback_dialog: None,
 		mic_test: false,
 		ptt,
@@ -443,6 +562,7 @@ pub fn run(options: RunOptions) -> Result<()> {
 		autoshare: switches.autoshare,
 		open_client_pending: switches.open_client,
 		notices_loaded: false,
+		uploads: HashMap::new(),
 	};
 	APP.with(|a| *a.borrow_mut() = Some(app));
 	crate::bind::wire(&ui);
@@ -662,7 +782,47 @@ impl App {
 			Event::MicrophoneTestError { message } => {
 				self.set_status(format!("Microphone test: {message}"))
 			}
-			Event::Chat { session, message } => self.add_message(session as i64, message),
+			// Only for sessions the engine keeps no history for (it does not
+			// know the server yet): those get ids and reactions instead.
+			Event::Chat { session, message } => {
+				let id = session as i64;
+				if !self.sessions.entry(id).or_default().has_history() {
+					self.add_message(id, message);
+				}
+			}
+			Event::ChatHistory { session, target, messages, source, complete } => {
+				self.history_batch(session as i64, &target, messages, source, complete);
+			}
+			Event::Gateway { session, update } => self.gateway_update(session as i64, update),
+			Event::Groups { session, server_groups, .. } => {
+				let view = self.sessions.entry(session as i64).or_default();
+				view.server_groups = (*server_groups).clone();
+				if self.current == Some(session as i64) {
+					self.refresh_tree();
+				}
+			}
+			Event::AvatarReady { session, client_uid, path, .. } => {
+				let view = self.sessions.entry(session as i64).or_default();
+				view.avatars.insert(client_uid, path);
+				if self.current == Some(session as i64) {
+					self.refresh_tree();
+					self.refresh_chat();
+				}
+			}
+			Event::IconReady { session, icon, path } => {
+				let view = self.sessions.entry(session as i64).or_default();
+				view.icons.insert(icon, path);
+				if self.current == Some(session as i64) {
+					self.refresh_tree();
+				}
+			}
+			Event::Transfer { session, transfer, state } => {
+				self.transfer_progress(session as i64, transfer, state);
+			}
+			Event::ContactsChanged { contacts } => {
+				self.contacts = contacts.iter().map(|c| (c.uid.clone(), c.clone())).collect();
+				self.refresh_member_card();
+			}
 			// The sample sessions of VOELIN_DEMO_UI are unknown to the engine.
 			Event::Error { .. } if self.demo_ui => {}
 			Event::Error { message, .. } => self.set_status(message),

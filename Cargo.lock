@@ -9297,6 +9297,7 @@ dependencies = [
  "unicode-segmentation",
  "voelin-audio",
  "voelin-core",
+ "voelin-gateway-proto",
  "voelin-model",
  "voelin-platform",
  "voelin-query",

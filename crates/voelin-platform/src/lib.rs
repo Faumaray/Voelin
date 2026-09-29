@@ -3,12 +3,14 @@
 //! - [`hotkey`]: global push-to-talk hotkeys with press and release events
 //!   (xdg-desktop-portal on Wayland, XInput2 on X11, a keyboard hook on
 //!   Windows)
+//! - [`files`]: asking the user for a file (xdg-desktop-portal)
 //! - [`notify`]: desktop notifications
 //! - [`paths`]: data, config, cache and state directories
 //! - [`crash`]: opt-in local crash reports (panic hook)
 //! - [`notices`]: third-party notices for the About page
 
 pub mod crash;
+pub mod files;
 pub mod hotkey;
 pub mod notices;
 pub mod notify;
