@@ -101,6 +101,21 @@ pub fn usage_text() -> String {
 	})
 }
 
+/// A picture the engine put in its cache (avatars, group and client icons),
+/// decoded once and kept by its path.
+pub fn file(path: &std::path::Path) -> Image {
+	let key = path.to_string_lossy();
+	CACHE
+		.with(|c| {
+			c.borrow_mut().get_or_load(&key, || {
+				let image = Image::load_from_path(path).ok()?;
+				let size = image.size();
+				Some((image, size.width as usize * size.height as usize * 4))
+			})
+		})
+		.unwrap_or_default()
+}
+
 /// A Twemoji by key; an empty image if there is none.
 pub fn emoji(key: &str) -> Image {
 	if key.is_empty() {

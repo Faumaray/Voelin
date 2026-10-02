@@ -39,17 +39,20 @@ export struct TreeItem {
     // Avatar of a client.
     initials: string,
     tint: color,
+    // The client's avatar picture, empty without one.
+    avatar: image,
     // Channels: clients inside, and the limit (-1: none).
     members: int,
     max-members: int,
 }
 
-// A client in our channel, for the members panel.
+// A client in our channel, for the members panel and the voice grid.
 export struct MemberItem {
     id: int,
     name: string,
     initials: string,
     tint: color,
+    avatar: image,
     talking: bool,
     muted: bool,
     sound-off: bool,
@@ -58,6 +61,44 @@ export struct MemberItem {
     myself: bool,
     // "Speaking", "Streaming", "Away", ...
     status: string,
+    // The away message, empty without one.
+    away-message: string,
+    // The server group the row is sorted under, and its icon.
+    group: string,
+    group-icon: image,
+    // The first row of its group draws the group header.
+    first-in-group: bool,
+    // Badges: a crown for the server's admin groups.
+    admin: bool,
+    priority: bool,
+    commander: bool,
+    recording: bool,
+    // `client_talk_power`; shown when the channel needs it.
+    talk-power: int,
+}
+
+// The member card over a member row: everything about one client and what
+// can be done with them.
+export struct MemberCard {
+    open: bool,
+    id: int,
+    name: string,
+    initials: string,
+    tint: color,
+    avatar: image,
+    status: string,
+    description: string,
+    // Server groups, one per line.
+    groups: [string],
+    country: string,
+    talk-power: int,
+    friend: bool,
+    blocked: bool,
+    // Local playback, in percent.
+    volume: float,
+    muted: bool,
+    // The client has a unique id, so contacts and private chats work.
+    known: bool,
 }
 
 export struct ChatTab {
@@ -80,7 +121,35 @@ export struct TextRun {
     emoji: string,
 }
 
+// One emoji under a message, with how many put it there.
+export struct ReactionItem {
+    // The Twemoji key of the first emoji in `text` ("1f389"), for the image.
+    key: string,
+    text: string,
+    count: int,
+    // We reacted with it.
+    me: bool,
+}
+
+// A file linked in a message (`ChatMessage::file_refs`).
+export struct FileItem {
+    name: string,
+    // "2.4 MB", or what the transfer is doing.
+    detail: string,
+    // Index of the link in the message (what `download-file` takes).
+    index: int,
+    // "", "running", "done", "failed"
+    state: string,
+    // 0 … 1 while it downloads.
+    progress: float,
+    // A picture, so the icon differs.
+    picture: bool,
+}
+
 export struct ChatLine {
+    // A handle for this message in its chat, stable while the chat is open
+    // (the engine's ids do not fit a Slint int).
+    key: int,
     author: string,
     text: string,
     time: string,
@@ -94,6 +163,36 @@ export struct ChatLine {
     continued: bool,
     initials: string,
     tint: color,
+    avatar: image,
+    // From a blocked contact.
+    blocked: bool,
+    pinned: bool,
+    reactions: [ReactionItem],
+    files: [FileItem],
+    // The gateway knows this message: it can be pinned, reacted to and
+    // made into a topic.
+    remote: bool,
+    // The topic it belongs to, "" outside a topic.
+    topic: string,
+    // Highlighted after jumping to it from the pins.
+    marked: bool,
+}
+
+// A pinned message in the pins drawer.
+export struct PinItem {
+    line: ChatLine,
+    // "pinned by Nova · 12:04"
+    by: string,
+}
+
+// A gateway topic (thread).
+export struct TopicItem {
+    id: int,
+    title: string,
+    creator: string,
+    // "12 messages · 3 min ago"
+    detail: string,
+    archived: bool,
 }
 
 export struct BookmarkForm {
@@ -199,6 +298,26 @@ export global Bridge {
     in property <[ChatTab]> tabs;
     in-out property <int> current-tab: 0;
     in property <[ChatLine]> messages;
+    // Older messages can still be loaded in the current chat.
+    in property <bool> more-history;
+    in property <bool> loading-history;
+    // The current chat holds only what this device saw (no gateway sync).
+    in property <bool> local-history;
+    // Features of the session's gateway: hide what is missing.
+    in property <bool> has-pins;
+    in property <bool> has-reactions;
+    in property <bool> has-topics;
+    // The pins drawer.
+    in property <[PinItem]> pins;
+    in property <bool> pins-loading;
+    // The topics drawer, and the open topic.
+    in property <[TopicItem]> topics;
+    in property <bool> topics-loading;
+    in-out property <int> current-topic: -1;
+    in property <string> topic-title;
+    in property <[ChatLine]> topic-messages;
+    // The member card over the members panel.
+    in-out property <MemberCard> member-card;
     in property <string> status-text;
     // Unread messages in all chats of the current server.
     in property <int> unread-total;
@@ -242,6 +361,16 @@ export global Bridge {
     in property <bool> viewer-ended;
     in-out property <float> viewer-volume: 100;
     in property <bool> viewer-fullscreen;
+    // The viewer fills the window without the shell ("pop out").
+    in-out property <bool> viewer-popped;
+    // "12:34" since the stream was joined.
+    in property <string> viewer-elapsed;
+    in property <int> viewer-count;
+    // Simulcast layers the streamer offers, "Auto" first.
+    in property <[string]> viewer-qualities;
+    in-out property <int> viewer-quality: 0;
+    // What "Auto" picked ("720p · 2.4 Mbit/s").
+    in property <string> viewer-quality-detail;
 
     // Settings.
     in property <[string]> input-devices;
@@ -284,6 +413,27 @@ export global Bridge {
     callback select-tab(int);
     callback close-tab(int);
     callback send-message(string);
+    // The page before the oldest shown message.
+    callback load-older();
+    // A message of the current chat, by its `key`.
+    callback react(int, string);
+    callback pin(int, bool);
+    callback download-file(int, int);
+    // Attach a file to the current channel chat (opens a file chooser).
+    callback attach-file();
+    // Pins drawer.
+    callback open-pins();
+    callback jump-to-pin(int);
+    // Topics drawer: load them, open one (-1 closes), post into the open
+    // one, start one from a message (by its `key`).
+    callback open-topics();
+    callback open-topic(int);
+    callback send-topic-message(string);
+    callback create-topic(int, string);
+    // The member card: open it for a client (-1 closes it).
+    callback open-member(int);
+    callback member-action(string);
+    callback member-volume(float);
     callback set-input-muted(bool);
     callback set-output-muted(bool);
     callback push-to-talk(bool);
@@ -302,6 +452,8 @@ export global Bridge {
     callback leave-stream();
     callback set-stream-volume(float);
     callback toggle-fullscreen();
+    // A simulcast layer of the watched stream (0: Auto).
+    callback set-stream-quality(int);
 
     callback open-settings();
     callback close-settings();
@@ -311,6 +463,8 @@ export global Bridge {
     callback set-h264(bool);
     callback download-h264();
     callback appearance-changed(AppearanceForm);
+    // The members panel was dragged to another width (pixels).
+    callback panel-resized(float);
     callback open-client(int) -> bool;
     callback client-audio-changed(ClientAudio);
     callback set-crash-reports(bool);
@@ -326,6 +480,8 @@ export global Bridge {
 export global Images {
     // A Twemoji by key ("1f600", "1f468-200d-1f4bb"); empty if unknown.
     pure callback emoji(string) -> image;
+    // The characters of a Twemoji key, to react with or to insert.
+    pure callback emoji-text(string) -> string;
 }
 
 // One emoji of the picker. `text` is what picking it inserts.

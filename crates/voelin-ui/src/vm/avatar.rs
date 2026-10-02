@@ -24,6 +24,12 @@ pub fn initials(name: &str) -> String {
 	letters.to_uppercase()
 }
 
+/// A picture from the engine's cache (an avatar, a group icon), decoded
+/// once; an empty image when there is none.
+pub fn image(path: Option<&std::path::PathBuf>) -> slint::Image {
+	path.map(|p| crate::images::file(p)).unwrap_or_default()
+}
+
 /// A stable colour for a name (FNV-1a).
 pub fn tint(name: &str) -> Color {
 	let mut hash: u32 = 0x811c_9dc5;

@@ -1,8 +1,9 @@
 //! The channel tree and the members of our channel.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
-use voelin_model::{ChannelId, ClientInfo, Presence, TreeRow, tree_rows};
+use voelin_model::{ChannelId, ClientInfo, GroupInfo, Presence, TreeRow, tree_rows};
 
 use crate::app::{MemberItem, TreeItem};
 use crate::settings::ClientPlaybackMap;
@@ -19,6 +20,42 @@ pub struct TreeInput<'a> {
 	/// Search text: only matching channels and clients (and the channels
 	/// above them) are shown. Empty: everything.
 	pub filter: &'a str,
+	/// Avatar pictures in the engine's cache, by unique id.
+	pub avatars: &'a HashMap<String, PathBuf>,
+	/// Icons in the engine's cache, by icon id (group icons).
+	pub icons: &'a HashMap<u32, PathBuf>,
+	/// The server groups in display order; members are grouped by the
+	/// first one each client is in.
+	pub groups: &'a [GroupInfo],
+}
+
+impl TreeInput<'_> {
+	fn avatar(&self, client: &ClientInfo) -> slint::Image {
+		avatar::image(client.uid.as_ref().and_then(|uid| self.avatars.get(uid)))
+	}
+
+	/// The group a client is sorted under: the first of its server groups
+	/// in display order.
+	fn group_of(&self, client: &ClientInfo) -> Option<&GroupInfo> {
+		self.groups.iter().find(|g| client.server_groups.contains(&g.id))
+	}
+}
+
+/// "Speaking", "Away: brb", "Muted", …
+pub fn status_of(client: &ClientInfo, talking: bool) -> String {
+	if talking {
+		"Speaking".to_owned()
+	} else if client.streaming == Some(true) {
+		"Streaming".to_owned()
+	} else if let Some(message) = &client.away {
+		if message.is_empty() { "Away".to_owned() } else { format!("Away: {message}") }
+	} else if client.output_muted {
+		"Sound off".to_owned()
+	} else if client.input_muted {
+		"Muted".to_owned()
+	} else {
+		"Listening".to_owned()
+	}
 }
 
 fn talking(input: &TreeInput, client: &ClientInfo) -> bool {
@@ -66,6 +103,7 @@ pub fn rows(input: &TreeInput) -> Vec<TreeItem> {
 					myself: input.own_client == Some(client.id),
 					initials: avatar::initials(&client.nickname).into(),
 					tint: avatar::tint(&client.nickname),
+					avatar: input.avatar(client),
 					..Default::default()
 				}
 			}
@@ -105,40 +143,59 @@ pub fn stats(p: &Presence) -> String {
 	format!("{online} online · {channels} {}", if channels == 1 { "channel" } else { "channels" })
 }
 
-/// The clients in our channel, for the members panel, by name.
+/// Names of server groups whose members wear the crown (the server's
+/// admins). TeamSpeak has no flag for it, so the usual names are matched.
+fn is_admin_group(name: &str) -> bool {
+	let lower = name.to_lowercase();
+	["admin", "owner", "operator", "moderator", "leiter"].iter().any(|w| lower.contains(w))
+}
+
+/// The clients in our channel, grouped by server group (in the server's
+/// display order) and by name inside a group.
 pub fn members(input: &TreeInput) -> Vec<MemberItem> {
 	let Some(channel) = input.own_channel else { return Vec::new() };
 	let mut clients: Vec<&ClientInfo> = input.presence.members(channel).collect();
-	clients.sort_by_key(|c| c.nickname.to_lowercase());
+	clients.sort_by_key(|c| {
+		let group = input.group_of(c);
+		(
+			group.map_or(i32::MAX, |g| g.sort_id),
+			group.map_or(String::new(), |g| g.name.clone()),
+			c.nickname.to_lowercase(),
+		)
+	});
+	let mut previous: Option<String> = None;
 	clients
 		.into_iter()
 		.map(|c| {
 			let talking = talking(input, c);
-			let status = if talking {
-				"Speaking".to_owned()
-			} else if c.streaming == Some(true) {
-				"Streaming".to_owned()
-			} else if let Some(message) = &c.away {
-				if message.is_empty() { "Away".to_owned() } else { format!("Away: {message}") }
-			} else if c.output_muted {
-				"Sound off".to_owned()
-			} else if c.input_muted {
-				"Muted".to_owned()
-			} else {
-				"Listening".to_owned()
-			};
+			let group = input.group_of(c);
+			let name = group.map(|g| g.name.clone()).unwrap_or_default();
+			let first = previous.as_deref() != Some(name.as_str());
+			previous = Some(name.clone());
 			MemberItem {
 				id: c.id as i32,
 				name: c.nickname.clone().into(),
 				initials: avatar::initials(&c.nickname).into(),
 				tint: avatar::tint(&c.nickname),
+				avatar: input.avatar(c),
 				talking,
 				muted: c.input_muted,
 				sound_off: c.output_muted,
 				away: c.away.is_some(),
 				streaming: c.streaming == Some(true),
 				myself: input.own_client == Some(c.id),
-				status: status.into(),
+				status: status_of(c, talking).into(),
+				away_message: c.away.clone().unwrap_or_default().into(),
+				group: name.into(),
+				group_icon: avatar::image(
+					group.map(|g| g.icon).filter(|i| *i != 0).and_then(|i| input.icons.get(&i)),
+				),
+				first_in_group: first,
+				admin: group.is_some_and(|g| is_admin_group(&g.name)),
+				priority: c.priority_speaker,
+				commander: c.channel_commander,
+				recording: c.recording,
+				talk_power: c.talk_power,
 			}
 		})
 		.collect()
@@ -178,12 +235,21 @@ mod tests {
 		p
 	}
 
+	/// Empty caches and no groups, for the tests below.
+	#[derive(Default)]
+	struct Extras {
+		avatars: HashMap<String, PathBuf>,
+		icons: HashMap<u32, PathBuf>,
+		groups: Vec<GroupInfo>,
+	}
+
 	fn input<'a>(
 		p: &'a Presence,
 		talking: &'a HashSet<u16>,
 		collapsed: &'a HashSet<ChannelId>,
 		playback: &'a ClientPlaybackMap,
 		filter: &'a str,
+		extras: &'a Extras,
 	) -> TreeInput<'a> {
 		TreeInput {
 			presence: p,
@@ -193,6 +259,9 @@ mod tests {
 			own_channel: Some(2),
 			own_client: Some(11),
 			filter,
+			avatars: &extras.avatars,
+			icons: &extras.icons,
+			groups: &extras.groups,
 		}
 	}
 
@@ -200,7 +269,8 @@ mod tests {
 	fn tree_rows_and_counts() {
 		let p = presence();
 		let (t, c, pb) = (HashSet::from([11]), HashSet::new(), ClientPlaybackMap::new());
-		let rows = rows(&input(&p, &t, &c, &pb, ""));
+		let e = Extras::default();
+		let rows = rows(&input(&p, &t, &c, &pb, "", &e));
 		let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
 		assert_eq!(names, ["Lobby", "Alice", "Games", "bob", "Chess", "Carol"]);
 		assert_eq!((rows[0].members, rows[0].max_members), (1, -1));
@@ -214,10 +284,11 @@ mod tests {
 	fn search_keeps_parents() {
 		let p = presence();
 		let (t, c, pb) = (HashSet::new(), HashSet::new(), ClientPlaybackMap::new());
-		let rows = rows(&input(&p, &t, &c, &pb, "car"));
+		let e = Extras::default();
+		let rows = rows(&input(&p, &t, &c, &pb, "car", &e));
 		let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
 		assert_eq!(names, ["Games", "Chess", "Carol"]);
-		let rows = super::rows(&input(&p, &t, &c, &pb, "LOBBY"));
+		let rows = super::rows(&input(&p, &t, &c, &pb, "LOBBY", &e));
 		assert_eq!(rows.len(), 1);
 	}
 
@@ -227,8 +298,34 @@ mod tests {
 		p.clients.get_mut(&12).unwrap().channel = 2;
 		p.clients.get_mut(&12).unwrap().away = Some(String::new());
 		let (t, c, pb) = (HashSet::new(), HashSet::new(), ClientPlaybackMap::new());
-		let members = members(&input(&p, &t, &c, &pb, ""));
+		let e = Extras::default();
+		let members = members(&input(&p, &t, &c, &pb, "", &e));
 		let names: Vec<_> = members.iter().map(|m| (m.name.as_str(), m.status.as_str())).collect();
 		assert_eq!(names, [("bob", "Listening"), ("Carol", "Away")]);
+	}
+
+	#[test]
+	fn members_are_grouped_by_server_group() {
+		let mut p = presence();
+		p.clients.get_mut(&12).unwrap().channel = 2;
+		p.clients.get_mut(&12).unwrap().server_groups = vec![6];
+		p.clients.get_mut(&11).unwrap().server_groups = vec![7];
+		let group = |id, sort_id, name: &str| GroupInfo {
+			id,
+			name: name.into(),
+			icon: 0,
+			sort_id,
+			..Default::default()
+		};
+		let e = Extras {
+			groups: vec![group(6, 10, "Server Admin"), group(7, 20, "Guest")],
+			..Default::default()
+		};
+		let (t, c, pb) = (HashSet::new(), HashSet::new(), ClientPlaybackMap::new());
+		let members = members(&input(&p, &t, &c, &pb, "", &e));
+		let rows: Vec<_> =
+			members.iter().map(|m| (m.name.as_str(), m.group.as_str(), m.first_in_group)).collect();
+		assert_eq!(rows, [("Carol", "Server Admin", true), ("bob", "Guest", true)]);
+		assert!(members[0].admin && !members[1].admin);
 	}
 }

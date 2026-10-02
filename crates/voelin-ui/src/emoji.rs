@@ -253,7 +253,7 @@ fn key_of(cps: &[u32]) -> String {
 
 /// The characters of an archive key, with U+FE0F after a lone character
 /// that is text by default, so other clients show an emoji too.
-fn text_of(key: &str) -> String {
+pub fn text_of(key: &str) -> String {
 	let cps: Vec<u32> = key.split('-').filter_map(|p| u32::from_str_radix(p, 16).ok()).collect();
 	let mut text: String = cps.iter().filter_map(|&cp| char::from_u32(cp)).collect();
 	if cps.len() == 1 && !emoji_presentation(cps[0]) {
@@ -292,6 +292,12 @@ pub fn key_for(grapheme: &str) -> Option<String> {
 	// Some ZWJ sequences are named without their U+FE0F.
 	let bare = key_of(&cps.iter().copied().filter(|&cp| cp != 0xFE0F).collect::<Vec<_>>());
 	archive.contains(&bare).then_some(bare)
+}
+
+/// The archive key of the first emoji in `text` (a reaction's emoji, which
+/// may be any string).
+pub fn first_key(text: &str) -> Option<String> {
+	text.graphemes(true).find_map(key_for)
 }
 
 /// A piece of text: plain, or one emoji (`emoji` is its key).

@@ -1,11 +1,13 @@
-//! Chat lines.
+//! Chat lines: one [`ChatLine`] per message, with its reactions and the
+//! files it links.
 
 use std::rc::Rc;
 
-use slint::{ModelRc, VecModel};
-use voelin_model::ChatMessage;
+use slint::{Image, ModelRc, VecModel};
+use voelin_core::HistoryMessage;
+use voelin_model::{ChatMessage, FileRef};
 
-use crate::app::{ChatLine, TextRun};
+use crate::app::{ChatLine, FileItem, ReactionItem, TextRun};
 use crate::emoji;
 use crate::vm::avatar;
 
@@ -30,50 +32,169 @@ impl Previous {
 	}
 }
 
+/// What a line needs besides the message itself.
+#[derive(Default)]
+pub struct LineCtx {
+	/// The message's handle in its chat.
+	pub key: i32,
+	/// The author's avatar picture.
+	pub avatar: Image,
+	/// The gateway takes reactions and pins for this chat.
+	pub gateway: bool,
+	/// Highlighted (jumped to from the pins).
+	pub marked: bool,
+	/// The topic the message belongs to, when it should be shown.
+	pub topic: String,
+	/// The state of the downloads started from this message, by link index.
+	pub downloads: Vec<(usize, FileItem)>,
+}
+
 fn time_of(ts_ms: i64) -> String {
 	chrono::DateTime::from_timestamp_millis(ts_ms)
 		.map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string())
 		.unwrap_or_default()
 }
 
-/// The line of a message; `previous` is the line before it in the chat.
+/// "2.4 MB", "912 kB", "48 B".
+pub fn size_text(bytes: u64) -> String {
+	const UNITS: [(u64, &str); 3] = [(1 << 30, "GB"), (1 << 20, "MB"), (1 << 10, "kB")];
+	for (unit, name) in UNITS {
+		if bytes >= unit {
+			return format!("{:.1} {name}", bytes as f64 / unit as f64);
+		}
+	}
+	format!("{bytes} B")
+}
+
+/// The text without the file links that became cards.
+fn without_links(text: &str, files: &[FileRef]) -> String {
+	let mut out = text.to_owned();
+	for file in files {
+		for pattern in [
+			format!("[URL={}]{}[/URL]", file.url, file.name),
+			format!("[URL={}]", file.url),
+			format!("[url={}]", file.url),
+			file.url.clone(),
+		] {
+			out = out.replace(&pattern, "");
+		}
+	}
+	out.replace("[/URL]", "").replace("[/url]", "").trim().to_owned()
+}
+
+fn runs_model(runs: &[emoji::Run]) -> ModelRc<TextRun> {
+	ModelRc::from(Rc::new(VecModel::from(
+		runs.iter()
+			.map(|r| TextRun {
+				text: r.text.clone().into(),
+				emoji: r.emoji.clone().unwrap_or_default().into(),
+			})
+			.collect::<Vec<_>>(),
+	)))
+}
+
+/// The line of a stored message; `previous` is the line before it.
+pub fn history_line(
+	message: &HistoryMessage,
+	previous: Option<&Previous>,
+	ctx: &LineCtx,
+) -> ChatLine {
+	let files = message.message.file_refs();
+	let mut line = line_of(&message.message, previous, ctx, &files);
+	line.pinned = message.pinned;
+	line.remote = ctx.gateway && message.remote_id.is_some();
+	line.reactions = ModelRc::from(Rc::new(VecModel::from(
+		message
+			.reactions
+			.iter()
+			.map(|r| ReactionItem {
+				key: emoji::first_key(&r.emoji).unwrap_or_default().into(),
+				text: r.emoji.clone().into(),
+				count: r.count as i32,
+				me: r.me,
+			})
+			.collect::<Vec<_>>(),
+	)));
+	line
+}
+
+/// The line of a message the engine keeps no history for (no ids, no
+/// reactions).
 pub fn line(message: &ChatMessage, previous: Option<&Previous>) -> ChatLine {
+	let files = message.file_refs();
+	line_of(message, previous, &LineCtx::default(), &files)
+}
+
+fn line_of(
+	message: &ChatMessage,
+	previous: Option<&Previous>,
+	ctx: &LineCtx,
+	files: &[FileRef],
+) -> ChatLine {
 	let continued = previous.is_some_and(|p| {
 		p.author == message.author_name
 			&& p.relayed == message.via_relay
 			&& (0..GROUP_MS).contains(&(message.ts_ms - p.ts_ms))
 	});
-	let runs = emoji::runs(&message.text);
+	let text =
+		if files.is_empty() { message.text.clone() } else { without_links(&message.text, files) };
+	let runs = emoji::runs(&text);
 	let jumbo = runs.as_deref().is_some_and(emoji::is_jumbo);
-	let runs_model = match &runs {
-		Some(runs) => ModelRc::from(Rc::new(VecModel::from(
-			runs.iter()
-				.map(|r| TextRun {
-					text: r.text.clone().into(),
-					emoji: r.emoji.clone().unwrap_or_default().into(),
-				})
-				.collect::<Vec<_>>(),
-		))),
-		None => ModelRc::default(),
-	};
+	let cards: Vec<FileItem> = files
+		.iter()
+		.enumerate()
+		.map(|(i, f)| {
+			let mut item = FileItem {
+				name: f.name.clone().into(),
+				detail: f.size.map(size_text).unwrap_or_default().into(),
+				index: i as i32,
+				picture: is_picture(&f.name),
+				..Default::default()
+			};
+			// A download of this link shows its progress instead of the size.
+			if let Some((_, running)) = ctx.downloads.iter().find(|(index, _)| *index == i) {
+				item.detail = running.detail.clone();
+				item.state = running.state.clone();
+				item.progress = running.progress;
+			}
+			item
+		})
+		.collect();
 	ChatLine {
+		key: ctx.key,
 		author: message.author_name.clone().into(),
-		text: message.text.clone().into(),
+		text: text.clone().into(),
 		time: time_of(message.ts_ms).into(),
 		relayed: message.via_relay,
-		runs: runs_model,
+		runs: runs.as_deref().map(runs_model).unwrap_or_default(),
 		rich: runs.is_some(),
 		jumbo,
 		continued,
 		initials: avatar::initials(&message.author_name).into(),
 		tint: avatar::tint(&message.author_name),
+		avatar: ctx.avatar.clone(),
+		blocked: message.blocked,
+		pinned: false,
+		reactions: ModelRc::default(),
+		files: ModelRc::from(Rc::new(VecModel::from(cards))),
+		remote: false,
+		topic: ctx.topic.clone().into(),
+		marked: ctx.marked,
 	}
+}
+
+fn is_picture(name: &str) -> bool {
+	let lower = name.to_ascii_lowercase();
+	[".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"].iter().any(|e| lower.ends_with(e))
 }
 
 #[cfg(test)]
 mod tests {
 	use slint::Model;
+	use voelin_core::HistoryMessage;
+	use voelin_gateway_proto::ReactionCount;
 	use voelin_model::ChatTarget;
+	use voelin_store::MessageSource;
 
 	use super::*;
 
@@ -87,6 +208,19 @@ mod tests {
 			ts_ms,
 			via_relay: false,
 			blocked: false,
+		}
+	}
+
+	fn stored(message: ChatMessage) -> HistoryMessage {
+		HistoryMessage {
+			id: 1,
+			message,
+			source: MessageSource::Voice,
+			remote_id: Some(7),
+			topic_id: None,
+			reactions: vec![ReactionCount { emoji: "🎉".into(), count: 2, me: true }],
+			pinned: true,
+			rev: 1,
 		}
 	}
 
@@ -111,5 +245,36 @@ mod tests {
 		assert_eq!(rich.runs.row_count(), 2);
 		assert_eq!(rich.runs.row_data(1).unwrap().emoji, "1f389");
 		assert!(line(&message("A", "🎉", 0), None).jumbo);
+	}
+
+	#[test]
+	fn reactions_and_pins() {
+		let ctx = LineCtx { key: 4, gateway: true, ..Default::default() };
+		let line = history_line(&stored(message("A", "hi", 0)), None, &ctx);
+		assert!(line.pinned && line.remote && line.key == 4);
+		assert_eq!(line.reactions.row_count(), 1);
+		let r = line.reactions.row_data(0).unwrap();
+		assert_eq!((r.key.as_str(), r.count, r.me), ("1f389", 2, true));
+		// Without a gateway nothing can be pinned or reacted to.
+		let plain = history_line(&stored(message("A", "hi", 0)), None, &LineCtx::default());
+		assert!(!plain.remote);
+	}
+
+	#[test]
+	fn file_cards_leave_the_text() {
+		let url = "ts3file://plan.pdf?channel=2&path=/&filename=plan.pdf&isDir=0&size=2048";
+		let text = format!("here you go [URL={url}]plan.pdf[/URL] 🎉");
+		let line = line(&message("A", &text, 0), None);
+		assert_eq!(line.files.row_count(), 1);
+		let file = line.files.row_data(0).unwrap();
+		assert_eq!((file.name.as_str(), file.detail.as_str()), ("plan.pdf", "2.0 kB"));
+		assert!(!line.text.contains("ts3file"), "{}", line.text);
+		assert!(line.text.starts_with("here you go"));
+	}
+
+	#[test]
+	fn sizes() {
+		assert_eq!(size_text(48), "48 B");
+		assert_eq!(size_text(2 << 20), "2.0 MB");
 	}
 }

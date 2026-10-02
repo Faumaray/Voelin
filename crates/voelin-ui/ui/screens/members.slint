@@ -1,0 +1,577 @@
+// The members panel: who is in our voice channel, grouped by server group,
+// with a card for one person; and the voice channel as a grid of tiles.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Bridge, MemberItem } from "../bridge.slint";
+import { Nav } from "../nav.slint";
+import { Icon, IconButton, Button, ButtonKind, Avatar, Status, LiveBadge, Chip, Divider, Slider, SpeakingBars, Tooltip, ListView } from "../components/index.slint";
+
+// Crown, priority speaker, channel commander, recording.
+component MemberBadges inherits HorizontalLayout {
+    in property <MemberItem> member;
+    in property <length> size: 14px;
+    spacing: 3px;
+    if member.admin: Icon {
+        source: Icons.crown;
+        size: root.size;
+        tint: Theme.gold;
+        accessible-role: AccessibleRole.image;
+        accessible-label: @tr("server admin");
+    }
+    if member.priority: Icon {
+        source: Icons.star;
+        size: root.size;
+        tint: Theme.accent-text;
+        accessible-role: AccessibleRole.image;
+        accessible-label: @tr("priority speaker");
+    }
+    if member.commander: Icon {
+        source: Icons.flag;
+        size: root.size;
+        tint: Theme.info;
+        accessible-role: AccessibleRole.image;
+        accessible-label: @tr("channel commander");
+    }
+    if member.recording: Icon {
+        source: Icons.record;
+        size: root.size;
+        tint: Theme.danger;
+        accessible-role: AccessibleRole.image;
+        accessible-label: @tr("recording");
+    }
+}
+
+// The header above the first member of a server group.
+export component GroupHeader inherits HorizontalLayout {
+    in property <MemberItem> member;
+    padding-top: Theme.space-4;
+    padding-bottom: Theme.space-1;
+    padding-left: Theme.space-2;
+    spacing: Theme.space-2;
+    if member.group-icon.width > 0: Image {
+        width: 14px;
+        height: 14px;
+        source: member.group-icon;
+        y: (parent.height - self.height) / 2;
+    }
+    if member.group-icon.width == 0: Icon {
+        source: member.admin ? Icons.shield-check : Icons.users;
+        size: 13px;
+        tint: Theme.text-muted;
+        y: (parent.height - self.height) / 2;
+    }
+    Text {
+        text: member.group != "" ? member.group : @tr("Others");
+        color: Theme.text-muted;
+        font-size: Theme.font-xs;
+        font-weight: Theme.weight-semibold;
+        letter-spacing: 0.4px;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+        overflow: elide;
+    }
+}
+
+// One person in the panel.
+export component MemberRow inherits Rectangle {
+    in property <MemberItem> member;
+    height: 48px * Theme.font-scale;
+    border-radius: Theme.radius-md;
+    background: Bridge.member-card.open && Bridge.member-card.id == member.id ? Theme.accent-soft
+        : area.has-hover ? Theme.surface-3 : transparent;
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: member.name;
+    accessible-description: member.status;
+    accessible-action-default => { Bridge.open-member(member.id); }
+    area := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { Bridge.open-member(member.id); }
+    }
+    HorizontalLayout {
+        padding-left: Theme.space-2;
+        padding-right: Theme.space-2;
+        spacing: Theme.space-3;
+        VerticalLayout {
+            alignment: center;
+            Avatar {
+                size: 34px;
+                initials: member.initials;
+                tint: member.tint;
+                image: member.avatar;
+                speaking: member.talking;
+                crown: member.admin;
+                status: member.away ? Status.idle : member.sound-off ? Status.dnd : Status.online;
+                label: member.name;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                Text {
+                    text: member.name;
+                    color: member.myself ? Theme.accent-text : Theme.name-text;
+                    font-weight: Theme.weight-medium;
+                    overflow: elide;
+                }
+                MemberBadges {
+                    member: member;
+                    y: (parent.height - self.height) / 2;
+                }
+                if member.streaming: VerticalLayout {
+                    alignment: center;
+                    LiveBadge { }
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                Text {
+                    text: member.status;
+                    color: member.talking ? Theme.success : Theme.text-muted;
+                    font-size: Theme.font-sm;
+                    overflow: elide;
+                }
+                if member.talking: SpeakingBars {
+                    width: 12px;
+                    height: 12px;
+                    y: (parent.height - self.height) / 2;
+                }
+            }
+        }
+        if member.talk-power > 0: Text {
+            text: member.talk-power;
+            color: Theme.text-muted;
+            font-size: Theme.font-xs;
+            vertical-alignment: center;
+            accessible-label: @tr("talk power");
+        }
+        if member.muted: Icon {
+            source: Icons.mic-off;
+            size: 16px;
+            tint: Theme.danger;
+            y: (parent.height - self.height) / 2;
+        }
+        if member.sound-off: Icon {
+            source: Icons.headphone-off;
+            size: 16px;
+            tint: Theme.danger;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+}
+
+// Everything about one person, over the panel.
+export component MemberCardPopup inherits Rectangle {
+    property <length> card-width: 300px;
+    width: root.card-width;
+    height: card.preferred-height;
+    background: Theme.surface-3;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.border-strong;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: Bridge.member-card.name;
+    // Clicks inside stay inside.
+    TouchArea { }
+    card := VerticalLayout {
+        padding: Theme.space-4;
+        spacing: Theme.space-3;
+        HorizontalLayout {
+            spacing: Theme.space-3;
+            Avatar {
+                size: 52px;
+                initials: Bridge.member-card.initials;
+                tint: Bridge.member-card.tint;
+                image: Bridge.member-card.avatar;
+                label: Bridge.member-card.name;
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                spacing: 2px;
+                Text {
+                    text: Bridge.member-card.name;
+                    color: Theme.text;
+                    font-size: Theme.font-lg;
+                    font-weight: Theme.weight-semibold;
+                    overflow: elide;
+                }
+                Text {
+                    text: Bridge.member-card.status;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-sm;
+                    overflow: elide;
+                }
+            }
+            IconButton {
+                icon: Icons.x;
+                label: @tr("Close");
+                size: 26px;
+                icon-size: Theme.icon-sm;
+                clicked => { Bridge.open-member(-1); }
+            }
+        }
+        if Bridge.member-card.description != "": Text {
+            text: Bridge.member-card.description;
+            color: Theme.text-secondary;
+            font-size: Theme.font-sm;
+            wrap: word-wrap;
+        }
+        if Bridge.member-card.groups.length > 0: VerticalLayout {
+            spacing: Theme.space-2;
+            Text {
+                text: @tr("Groups");
+                color: Theme.text-muted;
+                font-size: Theme.font-xs;
+                font-weight: Theme.weight-semibold;
+            }
+            for group in Bridge.member-card.groups: Text {
+                text: group;
+                color: Theme.text-secondary;
+                font-size: Theme.font-sm;
+                overflow: elide;
+            }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            alignment: start;
+            if Bridge.member-card.talk-power > 0: Chip {
+                text: @tr("talk power {}", Bridge.member-card.talk-power);
+                icon: Icons.mic;
+            }
+            if Bridge.member-card.country != "": Chip {
+                text: Bridge.member-card.country;
+                icon: Icons.globe;
+            }
+        }
+        Divider { }
+        // Local playback of this person.
+        VerticalLayout {
+            spacing: Theme.space-2;
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                Text {
+                    text: @tr("Volume");
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: @tr("{}%", round(Bridge.member-card.volume));
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    vertical-alignment: center;
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                IconButton {
+                    icon: Bridge.member-card.muted ? Icons.volume-x : Icons.volume-2;
+                    label: Bridge.member-card.muted ? @tr("Unmute for me") : @tr("Mute for me");
+                    checked: Bridge.member-card.muted;
+                    danger: true;
+                    size: 30px;
+                    icon-size: Theme.icon-sm;
+                    enabled: Bridge.member-card.known;
+                    clicked => { Bridge.member-action("mute"); }
+                }
+                Slider {
+                    horizontal-stretch: 1;
+                    minimum: 0;
+                    maximum: 200;
+                    step: 5;
+                    value: Bridge.member-card.volume;
+                    enabled: Bridge.member-card.known && !Bridge.member-card.muted;
+                    label: @tr("Volume of {}", Bridge.member-card.name);
+                    changed(v) => { Bridge.member-volume(v); }
+                }
+            }
+        }
+        Divider { }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            Button {
+                horizontal-stretch: 1;
+                small: true;
+                icon: Icons.message-square;
+                text: @tr("Message");
+                enabled: Bridge.member-card.known;
+                clicked => { Bridge.member-action("message"); }
+            }
+            Button {
+                horizontal-stretch: 1;
+                small: true;
+                icon: Icons.hand;
+                text: @tr("Poke");
+                clicked => { Bridge.member-action("poke"); }
+            }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            Button {
+                horizontal-stretch: 1;
+                small: true;
+                icon: Icons.user-plus;
+                text: Bridge.member-card.friend ? @tr("Friend") : @tr("Add friend");
+                checked: Bridge.member-card.friend;
+                enabled: Bridge.member-card.known;
+                clicked => { Bridge.member-action("friend"); }
+            }
+            Button {
+                horizontal-stretch: 1;
+                small: true;
+                kind: Bridge.member-card.blocked ? ButtonKind.danger : ButtonKind.secondary;
+                icon: Icons.shield;
+                text: Bridge.member-card.blocked ? @tr("Blocked") : @tr("Block");
+                enabled: Bridge.member-card.known;
+                clicked => { Bridge.member-action("blocked"); }
+            }
+        }
+    }
+}
+
+// The members of our channel, grouped by server group.
+export component MembersList inherits VerticalLayout {
+    if Bridge.members.length == 0: Text {
+        text: @tr("Join a channel with voice to see who is there.");
+        color: Theme.text-muted;
+        font-size: Theme.font-sm;
+        wrap: word-wrap;
+    }
+    ListView {
+        vertical-stretch: 1;
+        accessible-role: AccessibleRole.list;
+        accessible-label: @tr("Members");
+        for member in Bridge.members: VerticalLayout {
+            if member.first-in-group: GroupHeader {
+                member: member;
+            }
+            MemberRow {
+                member: member;
+            }
+        }
+    }
+}
+
+// One person as a tile of the voice grid.
+component VoiceTile inherits Rectangle {
+    in property <MemberItem> member;
+
+    border-radius: Theme.radius-lg;
+    background: Theme.surface-2;
+    border-width: member.talking ? 2px : 1px;
+    border-color: member.talking ? Theme.success : Theme.border;
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: member.name;
+    accessible-description: member.status;
+    accessible-action-default => { Bridge.open-member(member.id); }
+    TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { Bridge.open-member(member.id); }
+    }
+    VerticalLayout {
+        padding: Theme.space-4;
+        spacing: Theme.space-3;
+        alignment: center;
+        HorizontalLayout {
+            alignment: center;
+            Avatar {
+                size: 64px;
+                initials: member.initials;
+                tint: member.tint;
+                image: member.avatar;
+                speaking: member.talking;
+                crown: member.admin;
+                label: member.name;
+            }
+        }
+        HorizontalLayout {
+            alignment: center;
+            spacing: Theme.space-2;
+            Text {
+                text: member.name;
+                color: member.myself ? Theme.accent-text : Theme.text;
+                font-weight: Theme.weight-semibold;
+                overflow: elide;
+            }
+            MemberBadges {
+                member: member;
+                y: (parent.height - self.height) / 2;
+            }
+        }
+        HorizontalLayout {
+            alignment: center;
+            spacing: Theme.space-2;
+            if member.muted: Icon {
+                source: Icons.mic-off;
+                size: 15px;
+                tint: Theme.danger;
+            }
+            if member.sound-off: Icon {
+                source: Icons.headphone-off;
+                size: 15px;
+                tint: Theme.danger;
+            }
+            if member.streaming: LiveBadge { }
+            if !member.muted && !member.sound-off && !member.streaming: Text {
+                text: member.status;
+                color: member.talking ? Theme.success : Theme.text-muted;
+                font-size: Theme.font-sm;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// A stream in the channel as a tile next to the people.
+component StreamTile inherits Rectangle {
+    in property <string> name;
+    in property <string> streamer;
+    in property <string> id;
+    in property <bool> watching;
+
+    border-radius: Theme.radius-lg;
+    clip: true;
+    background: @linear-gradient(135deg, #2b1f6e 0%, #0f2a66 100%);
+    border-width: root.watching ? 2px : 1px;
+    border-color: root.watching ? Theme.accent : Theme.border;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: root.name;
+    LiveBadge {
+        x: Theme.space-3;
+        y: Theme.space-3;
+        large: true;
+    }
+    VerticalLayout {
+        padding: Theme.space-4;
+        spacing: Theme.space-2;
+        alignment: center;
+        Icon {
+            source: Icons.monitor-up;
+            size: 34px;
+            tint: #ffffffd0;
+        }
+        Text {
+            text: root.name != "" ? root.name : @tr("Untitled stream");
+            color: #ffffff;
+            font-weight: Theme.weight-semibold;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            text: @tr("by {}", root.streamer);
+            color: #ffffffb0;
+            font-size: Theme.font-sm;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+        if root.id != "": HorizontalLayout {
+            padding-top: Theme.space-2;
+            alignment: center;
+            Button {
+                small: true;
+                kind: root.watching ? ButtonKind.secondary : ButtonKind.primary;
+                icon: root.watching ? Icons.monitor : Icons.eye;
+                text: root.watching ? @tr("Show") : @tr("Watch");
+                clicked => {
+                    if root.watching {
+                        Bridge.show-viewer();
+                    } else {
+                        Bridge.watch-stream(root.id);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The voice channel as tiles: the people in it and the streams there.
+export component VoiceGrid inherits VerticalLayout {
+    // How many tiles fit; the grid wraps into rows of that many.
+    property <int> columns: max(1, min(4, floor((root.width - 32px) / 250px)));
+    property <int> total: Bridge.members.length + Bridge.streams.length;
+    property <int> rows: ceil(total / columns);
+    Rectangle {
+        height: 56px;
+        HorizontalLayout {
+            padding-left: Theme.space-6;
+            padding-right: Theme.space-4;
+            spacing: Theme.space-3;
+            Icon {
+                source: Icons.volume-2;
+                size: 22px;
+                tint: Theme.text-secondary;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: Bridge.own-channel != "" ? Bridge.own-channel : @tr("Voice");
+                color: Theme.text;
+                font-size: Theme.font-xl;
+                font-weight: Theme.weight-semibold;
+                vertical-alignment: center;
+            }
+            Text {
+                text: @tr("{} in voice", Bridge.members.length);
+                color: Theme.text-muted;
+                font-size: Theme.font-sm;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Button {
+                small: true;
+                icon: Icons.message-square;
+                text: @tr("Chat");
+                y: (parent.height - self.height) / 2;
+                clicked => { Nav.voice-grid = false; }
+            }
+        }
+        Rectangle {
+            y: parent.height - 1px;
+            height: 1px;
+            background: Theme.border;
+        }
+    }
+    if root.total == 0: VerticalLayout {
+        padding: Theme.space-8;
+        alignment: center;
+        Text {
+            text: @tr("Nobody is in this channel.");
+            color: Theme.text-muted;
+            horizontal-alignment: center;
+        }
+    }
+    ListView {
+        vertical-stretch: 1;
+        accessible-label: @tr("Voice channel");
+        for row in root.rows: HorizontalLayout {
+            padding: Theme.space-3;
+            padding-left: Theme.space-5;
+            padding-right: Theme.space-5;
+            spacing: Theme.space-4;
+            // One cell per column; the last row's empty cells stay blank.
+            for column in root.columns: Rectangle {
+                property <int> index: row * root.columns + column;
+                horizontal-stretch: 1;
+                // The cell sizes the tile, never the other way round.
+                min-width: 200px;
+                height: 176px;
+                if index < Bridge.members.length: VoiceTile {
+                    width: parent.width;
+                    height: parent.height;
+                    member: Bridge.members[index];
+                }
+                if index >= Bridge.members.length && index < root.total: StreamTile {
+                    width: parent.width;
+                    height: parent.height;
+                    name: Bridge.streams[index - Bridge.members.length].name;
+                    streamer: Bridge.streams[index - Bridge.members.length].streamer;
+                    id: Bridge.streams[index - Bridge.members.length].id;
+                    watching: Bridge.streams[index - Bridge.members.length].watching;
+                }
+            }
+        }
+    }
+}

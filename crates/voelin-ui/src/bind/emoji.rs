@@ -35,7 +35,9 @@ fn show(ui: &MainWindow, category: i32, list: Vec<PickerEmoji>) {
 }
 
 pub(super) fn wire(ui: &MainWindow) {
-	ui.global::<Images>().on_emoji(|key| images::emoji(&key));
+	let images_global = ui.global::<Images>();
+	images_global.on_emoji(|key| images::emoji(&key));
+	images_global.on_emoji_text(|key| emoji::text_of(&key).into());
 	let global = ui.global::<Emoji>();
 	let weak = ui.as_weak();
 	global.on_load(move || {

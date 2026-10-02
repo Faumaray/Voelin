@@ -6,7 +6,9 @@ use slint::{ComponentHandle, Model};
 use tracing::warn;
 use voelin_core::media::audio_source_specs;
 use voelin_core::settings::{STREAM_AUDIO_SOURCES, STREAM_BITRATE_KBPS, STREAM_FPS};
-use voelin_core::stream::{EndReason, LeaveReason, StreamSetup, ViewerInfo, ViewerState};
+use voelin_core::stream::{
+	EndReason, LayerId, LayerSpec, LeaveReason, StreamSetup, ViewerInfo, ViewerState,
+};
 use voelin_core::{Command, Event, StreamState, WatchState};
 
 use crate::app::{App, Bridge, ShareForm, SourceItem, StreamItem, ViewerItem, later, model};
@@ -42,6 +44,45 @@ pub(crate) struct Watch {
 	/// Shown instead of the chat.
 	shown: bool,
 	decoder: Option<Decoder>,
+	/// When the picture started, for the elapsed time.
+	since: Option<std::time::Instant>,
+	/// The simulcast layers the streamer offers, largest first.
+	layers: Vec<LayerSpec>,
+	/// The layer chosen by hand; `None` follows the bandwidth estimate.
+	layer: Option<LayerId>,
+	/// People watching the same stream, as the directory reports it.
+	viewers: u32,
+}
+
+impl Watch {
+	/// "12:34" since the picture started.
+	fn elapsed(&self) -> String {
+		let Some(since) = self.since else { return String::new() };
+		let seconds = since.elapsed().as_secs();
+		match seconds / 3600 {
+			0 => format!("{:02}:{:02}", seconds / 60, seconds % 60),
+			hours => format!("{hours}:{:02}:{:02}", (seconds / 60) % 60, seconds % 60),
+		}
+	}
+
+	/// "Auto" and one entry per layer the streamer offers.
+	fn qualities(&self) -> Vec<slint::SharedString> {
+		if self.layers.len() < 2 {
+			return Vec::new();
+		}
+		let mut names = vec![slint::SharedString::from("Auto")];
+		names.extend(self.layers.iter().map(|l| layer_name(l).into()));
+		names
+	}
+}
+
+/// "720p · 2.4 Mbit/s", or the scale when the size is not fixed.
+fn layer_name(layer: &LayerSpec) -> String {
+	let size = match layer.size {
+		Some((_, h)) => format!("{h}p"),
+		None => format!("{:.0}%", layer.scale * 100.0),
+	};
+	format!("{size} · {:.1} Mbit/s", layer.bitrate as f64 / 1_000_000.0)
 }
 
 fn end_text(reason: &EndReason, streamer: &str) -> String {
@@ -272,13 +313,42 @@ impl App {
 		bridge.set_viewer_ended(watch.ended);
 		bridge.set_viewer_has_frame(watch.has_frame);
 		bridge.set_viewer_volume(self.stream_volume);
-		let info = watch.decoder.as_ref().map(Decoder::info).unwrap_or_default();
-		let info = [format!("by {}", watch.streamer), info]
+		let decoded = watch.decoder.as_ref().map(Decoder::info).unwrap_or_default();
+		let info = [format!("by {}", watch.streamer), decoded.clone()]
 			.into_iter()
 			.filter(|s| !s.is_empty())
 			.collect::<Vec<_>>()
 			.join(" · ");
 		bridge.set_viewer_info(info.into());
+		bridge.set_viewer_elapsed(watch.elapsed().into());
+		bridge.set_viewer_count(watch.viewers as i32);
+		let qualities = watch.qualities();
+		let chosen = watch
+			.layer
+			.and_then(|id| watch.layers.iter().position(|l| l.id == id))
+			.map_or(0, |i| i as i32 + 1);
+		crate::vm::list::sync(&self.models.qualities, &qualities);
+		if bridge.get_viewer_quality() != chosen {
+			bridge.set_viewer_quality(chosen);
+		}
+		bridge.set_viewer_quality_detail(decoded.into());
+	}
+
+	/// A simulcast layer of the watched stream (0: follow the bandwidth
+	/// estimate). The streamer picks the layer from each viewer's estimate,
+	/// so this asks for the picture again; a viewer-side choice needs an
+	/// engine API that does not exist yet.
+	pub(crate) fn set_stream_quality(&mut self, index: i32) {
+		let Some(watch) = &mut self.watch else { return };
+		watch.layer =
+			usize::try_from(index - 1).ok().and_then(|i| watch.layers.get(i)).map(|l| l.id);
+		if let Some(session) = watch.session {
+			self.engine.send(Command::RequestStreamKeyframe {
+				session: session as u64,
+				stream_id: watch.stream_id.clone(),
+			});
+		}
+		self.refresh_viewer();
 	}
 
 	/// Once a second: statistics, a capture that ended, decoder problems.
@@ -524,9 +594,26 @@ impl App {
 			has_frame: false,
 			shown: true,
 			decoder: Some(decoder),
+			since: None,
+			layers: Vec::new(),
+			layer: None,
+			viewers: 0,
 		});
 		self.refresh_viewer();
 		self.refresh_streams();
+	}
+
+	/// `VOELIN_OPEN=watch`: watch the first stream of our channel.
+	pub(crate) fn watch_first_stream(&mut self) {
+		let Some(id) = self.view().and_then(|v| {
+			v.streams
+				.iter()
+				.find(|s| v.state.own_client != Some(s.streamer.0))
+				.map(|s| s.id.clone())
+		}) else {
+			return;
+		};
+		self.watch_stream(id);
 	}
 
 	/// The local test stream in the viewer (`VOELIN_DEMO_STREAM`).
@@ -543,6 +630,10 @@ impl App {
 			has_frame: false,
 			shown: true,
 			decoder: None,
+			since: None,
+			layers: Vec::new(),
+			layer: None,
+			viewers: 0,
 		});
 		let runtime = self.engine.runtime().clone();
 		let wake = || later(|app| app.show_picture());
@@ -570,6 +661,7 @@ impl App {
 		watch.has_frame = true;
 		if first {
 			watch.status.clear();
+			watch.since = Some(std::time::Instant::now());
 		}
 		if let Some(ui) = self.ui.upgrade() {
 			let bridge = ui.global::<Bridge>();

@@ -8,7 +8,7 @@ use tracing::warn;
 use crate::app::{App, AppearanceForm, Bridge, Nav, Theme};
 use crate::images;
 use crate::settings::{
-	ThemeChoice, UI_FONT_SCALE, UI_IMAGE_CACHE_MB, UI_NARROW_BREAKPOINT, UI_THEME,
+	ThemeChoice, UI_FONT_SCALE, UI_IMAGE_CACHE_MB, UI_MEMBERS_WIDTH, UI_NARROW_BREAKPOINT, UI_THEME,
 };
 
 impl App {
@@ -23,7 +23,12 @@ impl App {
 		let t = ui.global::<Theme>();
 		t.set_mode(theme.as_str().into());
 		t.set_font_scale(scale);
-		ui.global::<Nav>().set_narrow_breakpoint(breakpoint as f32);
+		let nav = ui.global::<Nav>();
+		nav.set_narrow_breakpoint(breakpoint as f32);
+		let width = self.prefs.get(&UI_MEMBERS_WIDTH) as f32;
+		if nav.get_right_panel_width() != width {
+			nav.set_right_panel_width(width);
+		}
 		let bridge = ui.global::<Bridge>();
 		bridge.set_appearance(AppearanceForm {
 			theme: theme.as_str().into(),
@@ -52,5 +57,17 @@ impl App {
 		// Applied now too: change events come through the engine, which
 		// may not run the settings service (tests, a hosted engine).
 		self.apply_appearance();
+	}
+
+	/// The members panel was dragged to another width: store it, so it
+	/// comes back the same and `--set ui.members_width` can change it.
+	pub(crate) fn panel_resized(&mut self, width: f32) {
+		let width = width.max(0.0).round() as u32;
+		if self.prefs.get(&UI_MEMBERS_WIDTH) == width {
+			return;
+		}
+		if let Err(e) = self.prefs.set(&UI_MEMBERS_WIDTH, width) {
+			warn!(%e, "could not store the panel width");
+		}
 	}
 }

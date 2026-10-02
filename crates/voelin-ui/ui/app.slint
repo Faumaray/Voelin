@@ -19,6 +19,8 @@ import { MobileShell } from "shells/mobile.slint";
 import { Panel } from "shells/common.slint";
 import { ServerHeader, ConnectActions, ChannelTree } from "screens/channels.slint";
 import { ChatView } from "screens/chat.slint";
+import { PinsDrawer, TopicsDrawer, TopicDialog } from "screens/drawers.slint";
+import { MemberCardPopup, VoiceGrid } from "screens/members.slint";
 import { StreamsPanel, StreamViewer } from "screens/streams.slint";
 import { SettingsNav, SettingsPage } from "screens/settings.slint";
 import { HomeNav, HomePage } from "screens/home.slint";
@@ -34,7 +36,7 @@ export component MainWindow inherits Window {
     title: Bridge.app-name;
     preferred-width: 1280px;
     preferred-height: 820px;
-    min-width: 360px;
+    min-width: 1600px;
     min-height: 480px;
     background: Theme.bg-app;
     default-font-family: "Inter";
@@ -56,8 +58,8 @@ export component MainWindow inherits Window {
         keyboard-inset = self.virtual-keyboard-size.height > 0 ? self.height - self.virtual-keyboard-position.y : 0;
     }
 
-    // The viewer takes the whole window in full screen.
-    property <bool> chrome: !(Bridge.viewer-open && Bridge.viewer-fullscreen);
+    // The viewer takes the whole window in full screen and when popped out.
+    property <bool> chrome: !(Bridge.viewer-open && (Bridge.viewer-fullscreen || Bridge.viewer-popped));
 
     // The standard widgets follow the theme. In "system" mode the palette
     // is left alone (it tracks the system) unless an explicit mode was
@@ -79,6 +81,10 @@ export component MainWindow inherits Window {
     // Status messages show as a toast.
     property <string> status: Bridge.status-text;
     changed status => { toast.shown = status != ""; }
+
+    // Dragging the members panel stores its width (`ui.members_width`).
+    property <length> panel-width: Nav.right-panel-width;
+    changed panel-width => { Bridge.panel-resized(panel-width / 1px); }
 
     // Compatibility with callers from before the navigation global.
     public function open-share-dialog() {
@@ -123,7 +129,23 @@ export component MainWindow inherits Window {
                 if Nav.page == Page.server: Panel {
                     horizontal-stretch: 1;
                     if Bridge.viewer-open: StreamViewer { }
-                    if !Bridge.viewer-open: ChatView { }
+                    if !Bridge.viewer-open && Nav.voice-grid && Bridge.voice-connected: VoiceGrid { }
+                    if !Bridge.viewer-open && !(Nav.voice-grid && Bridge.voice-connected): ChatView { }
+                    // The pins and the topics slide in over the chat.
+                    if !Bridge.viewer-open && (Nav.pins-open || Nav.topics-open): Rectangle {
+                        x: parent.width - self.width - 12px;
+                        y: 12px;
+                        width: min(parent.width - 24px, 400px);
+                        height: parent.height - 24px;
+                        if Nav.pins-open: PinsDrawer {
+                            width: parent.width;
+                            height: parent.height;
+                        }
+                        if Nav.topics-open: TopicsDrawer {
+                            width: parent.width;
+                            height: parent.height;
+                        }
+                    }
                 }
                 if Nav.page == Page.server && Nav.right-panel-open: ResizeHandle {
                     size <=> Nav.right-panel-width;
@@ -177,6 +199,17 @@ export component MainWindow inherits Window {
         text: Bridge.status-text;
     }
 
+    // The member card of the members panel, over everything.
+    if Bridge.member-card.open: Rectangle {
+        TouchArea {
+            clicked => { Bridge.open-member(-1); }
+        }
+        MemberCardPopup {
+            x: max(8px, parent.width - self.width - (Nav.narrow ? 8px : Nav.right-panel-open && Nav.page == Page.server ? Nav.right-panel-width + 24px : 32px));
+            y: max(8px, min(parent.height - self.height - 8px, 120px));
+        }
+    }
+
     if Nav.emoji-open: Rectangle {
         // Clicks outside the picker close it.
         TouchArea {
@@ -185,9 +218,25 @@ export component MainWindow inherits Window {
         EmojiPicker {
             x: max(8px, parent.width - self.width - (Nav.narrow ? 8px : Nav.right-panel-open && Nav.page == Page.server ? Nav.right-panel-width + 40px : 32px));
             y: max(8px, parent.height - self.height - (Nav.narrow ? 150px : 90px));
-            picked(cell) => { Nav.draft = Nav.draft + cell.text; }
-            close => { Nav.emoji-open = false; }
+            // Picked for a message: a reaction; otherwise the composer.
+            picked(cell) => {
+                if Nav.react-key != 0 {
+                    Bridge.react(Nav.react-key, cell.text);
+                    Nav.react-key = 0;
+                    Nav.emoji-open = false;
+                } else {
+                    Nav.draft = Nav.draft + cell.text;
+                }
+            }
+            close => {
+                Nav.react-key = 0;
+                Nav.emoji-open = false;
+            }
         }
+    }
+
+    if Nav.topic-form-open: TopicDialog {
+        done => { Nav.topic-form-open = false; }
     }
 
     if Nav.bookmark-open: BookmarkDialog {

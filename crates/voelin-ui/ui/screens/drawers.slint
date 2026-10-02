@@ -1,0 +1,290 @@
+// Drawers that slide over the chat: the pinned messages and the topics
+// (threads). Both need a gateway; the chat header hides their buttons when
+// the gateway does not offer them.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Bridge, TopicItem } from "../bridge.slint";
+import { Nav } from "../nav.slint";
+import { Icon, IconButton, Button, ButtonKind, TextField, Spinner, Modal, ListView } from "../components/index.slint";
+import { MessageRow } from "chat.slint";
+
+// The frame both drawers share: a title bar and the content (@children).
+component Drawer inherits Rectangle {
+    in property <string> title;
+    in property <image> icon;
+    in property <int> count;
+    callback closed();
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: Theme.border-strong;
+    border-radius: Theme.radius-lg;
+    clip: true;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: title;
+    VerticalLayout {
+        Rectangle {
+            height: 52px;
+            background: Theme.surface-2;
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Theme.border;
+            }
+            HorizontalLayout {
+                padding-left: Theme.space-5;
+                padding-right: Theme.space-3;
+                spacing: Theme.space-3;
+                Icon {
+                    source: root.icon;
+                    size: Theme.icon-md;
+                    tint: Theme.accent-text;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: root.count > 0 ? root.title + " — " + root.count : root.title;
+                    color: Theme.text;
+                    font-size: Theme.font-md;
+                    font-weight: Theme.weight-semibold;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                IconButton {
+                    icon: Icons.x;
+                    label: @tr("Close");
+                    size: 28px;
+                    icon-size: Theme.icon-sm;
+                    y: (parent.height - self.height) / 2;
+                    clicked => { root.closed(); }
+                }
+            }
+        }
+        @children
+    }
+}
+
+// The pinned messages of the current chat: jump to one or unpin it.
+export component PinsDrawer inherits Drawer {
+    title: @tr("Pinned");
+    icon: Icons.pin;
+    count: Bridge.pins.length;
+    closed => { Nav.pins-open = false; }
+    if Bridge.pins-loading: HorizontalLayout {
+        padding: Theme.space-6;
+        alignment: center;
+        Spinner { size: 20px; }
+    }
+    if !Bridge.pins-loading && Bridge.pins.length == 0: VerticalLayout {
+        padding: Theme.space-6;
+        spacing: Theme.space-2;
+        Text {
+            text: @tr("Nothing pinned yet.");
+            color: Theme.text-secondary;
+            font-weight: Theme.weight-medium;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: @tr("Hover a message and press the pin.");
+            color: Theme.text-muted;
+            font-size: Theme.font-sm;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+    ListView {
+        vertical-stretch: 1;
+        accessible-label: @tr("Pinned messages");
+        for pin in Bridge.pins: Rectangle {
+            min-height: entry.preferred-height;
+            entry := VerticalLayout {
+                padding-bottom: Theme.space-3;
+                MessageRow {
+                    line: pin.line;
+                    actions: false;
+                }
+                HorizontalLayout {
+                    padding-left: 78px;
+                    padding-right: Theme.space-5;
+                    spacing: Theme.space-2;
+                    Text {
+                        text: pin.by;
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    Button {
+                        small: true;
+                        icon: Icons.arrow-right;
+                        text: @tr("Jump");
+                        clicked => {
+                            Bridge.jump-to-pin(pin.line.key);
+                            Nav.pins-open = false;
+                        }
+                    }
+                    Button {
+                        small: true;
+                        kind: ButtonKind.danger;
+                        icon: Icons.pin;
+                        text: @tr("Unpin");
+                        clicked => { Bridge.pin(pin.line.key, false); }
+                    }
+                }
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border;
+                }
+            }
+        }
+    }
+}
+
+component TopicRow inherits Rectangle {
+    in property <TopicItem> topic;
+    height: 62px;
+    border-radius: Theme.radius-md;
+    background: Bridge.current-topic == topic.id ? Theme.accent-soft : area.has-hover ? Theme.surface-3 : transparent;
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: topic.title;
+    accessible-description: topic.detail;
+    accessible-action-default => { Bridge.open-topic(topic.id); }
+    area := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            Bridge.open-topic(topic.id);
+            Nav.topics-open = false;
+        }
+    }
+    HorizontalLayout {
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-3;
+        spacing: Theme.space-3;
+        Rectangle {
+            width: 34px;
+            height: 34px;
+            y: (parent.height - self.height) / 2;
+            border-radius: Theme.radius-sm;
+            background: Theme.surface-3;
+            Icon {
+                source: topic.archived ? Icons.bookmark : Icons.messages-square;
+                size: Theme.icon-sm;
+                tint: topic.archived ? Theme.text-muted : Theme.accent-text;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: 2px;
+            Text {
+                text: topic.title;
+                color: Theme.text;
+                font-weight: Theme.weight-medium;
+                overflow: elide;
+            }
+            Text {
+                text: topic.detail;
+                color: Theme.text-muted;
+                font-size: Theme.font-xs;
+                overflow: elide;
+            }
+        }
+        Icon {
+            source: Icons.chevron-right;
+            size: Theme.icon-sm;
+            tint: Theme.text-muted;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+}
+
+// The topics (threads) of the current chat.
+export component TopicsDrawer inherits Drawer {
+    title: @tr("Topics");
+    icon: Icons.messages-square;
+    count: Bridge.topics.length;
+    closed => { Nav.topics-open = false; }
+    if Bridge.topics-loading: HorizontalLayout {
+        padding: Theme.space-6;
+        alignment: center;
+        Spinner { size: 20px; }
+    }
+    if !Bridge.topics-loading && Bridge.topics.length == 0: VerticalLayout {
+        padding: Theme.space-6;
+        spacing: Theme.space-2;
+        Text {
+            text: @tr("No topics yet.");
+            color: Theme.text-secondary;
+            font-weight: Theme.weight-medium;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: @tr("Start one from a message, or below.");
+            color: Theme.text-muted;
+            font-size: Theme.font-sm;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+    ListView {
+        vertical-stretch: 1;
+        accessible-label: @tr("Topics");
+        for topic in Bridge.topics: TopicRow {
+            topic: topic;
+        }
+    }
+    HorizontalLayout {
+        padding: Theme.space-3;
+        Button {
+            horizontal-stretch: 1;
+            icon: Icons.plus;
+            text: @tr("New topic");
+            clicked => { Nav.start-topic(-1); }
+        }
+    }
+}
+
+// Asking for a topic's title (from a message, or standalone).
+export component TopicDialog inherits Modal {
+    title: @tr("Start a topic");
+    subtitle: Nav.topic-form-key > 0 ? @tr("From the chosen message.") : @tr("A new thread in this chat.");
+    icon: Icons.messages-square;
+    card-width: 460px;
+    card-height: 260px;
+    callback done();
+    dismissed => { root.done(); }
+    VerticalLayout {
+        spacing: Theme.space-4;
+        field := TextField {
+            text <=> Nav.topic-form-title;
+            placeholder: @tr("What is it about?");
+            label: @tr("Title");
+            accepted(text) => {
+                if text != "" {
+                    Bridge.create-topic(Nav.topic-form-key, text);
+                    root.done();
+                }
+            }
+        }
+        Rectangle { vertical-stretch: 1; }
+        HorizontalLayout {
+            spacing: Theme.space-3;
+            alignment: end;
+            Button {
+                text: @tr("Cancel");
+                clicked => { root.done(); }
+            }
+            Button {
+                kind: ButtonKind.primary;
+                icon: Icons.check;
+                text: @tr("Create");
+                enabled: field.text != "";
+                clicked => {
+                    Bridge.create-topic(Nav.topic-form-key, field.text);
+                    root.done();
+                }
+            }
+        }
+    }
+}
