@@ -51,6 +51,16 @@ struct EncodersArgs {
 
 #[derive(Args, Debug)]
 struct BenchArgs {
+	/// What to capture: `synthetic` (the test pattern), `portal` (the
+	/// desktop's screen-share dialog, Wayland and X11), `monitor:<n>` or
+	/// `window:<id>` (X11). Anything but `synthetic` ignores --res and
+	/// --pattern and measures the real capture → convert → encode pipeline.
+	#[arg(long, default_value = "synthetic")]
+	source: String,
+	/// Give up if the capture has not started after this many seconds (the
+	/// portal opens a dialog the user has to accept).
+	#[arg(long, default_value_t = 60)]
+	start_timeout: u64,
 	/// Size of the test pattern.
 	#[arg(long, default_value = "1920x1080")]
 	res: String,
@@ -212,6 +222,19 @@ impl MediaSink for BenchSink {
 	}
 }
 
+/// `synthetic`, `portal`, `monitor:<n>` or `window:<id>`.
+fn parse_source(value: &str) -> Result<SourceId> {
+	Ok(match value.split_once(':') {
+		Some(("monitor", n)) => SourceId::Monitor(n.parse().context("monitor index")?),
+		Some(("window", id)) => SourceId::Window(id.parse().context("window id")?),
+		_ => match value {
+			"synthetic" => SourceId::Synthetic,
+			"portal" => SourceId::Portal,
+			other => bail!("unknown source {other:?}: synthetic, portal, monitor:<n>, window:<id>"),
+		},
+	})
+}
+
 /// `<width>x<height>`.
 fn parse_size(size: &str) -> Result<(u32, u32)> {
 	let parsed = size.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
@@ -317,8 +340,9 @@ fn bench(args: BenchArgs) -> Result<()> {
 		.collect::<Result<Vec<_>>>()?;
 	let ids: Vec<LayerId> =
 		if layers.is_empty() { vec![0] } else { layers.iter().map(|l| l.id).collect() };
+	let source = parse_source(&args.source)?;
 	let config = StreamerConfig {
-		source: SourceId::Synthetic,
+		source: source.clone(),
 		synthetic_size: (width, height),
 		synthetic_pattern: pattern,
 		fps: args.fps,
@@ -330,23 +354,54 @@ fn bench(args: BenchArgs) -> Result<()> {
 		..StreamerConfig::default()
 	};
 	let runtime = tokio::runtime::Runtime::new()?;
-	let streamer = runtime.block_on(Streamer::start(&codecs, config)).context("streamer")?;
+	let timeout = Duration::from_secs(args.start_timeout.max(1));
+	// The portal opens a dialog on the desktop; without an answer the start
+	// never returns, so it is given a deadline instead of hanging.
+	let started = runtime
+		.block_on(async { tokio::time::timeout(timeout, Streamer::start(&codecs, config)).await });
+	let streamer = match started {
+		Ok(result) => result.context("streamer")?,
+		Err(_) => bail!(
+			"the capture did not start within {} s (the {} source was not accepted)",
+			timeout.as_secs(),
+			args.source
+		),
+	};
 	let sink = Arc::new(BenchSink {
 		layers: ids.iter().map(|id| (*id, LayerCount::default())).collect(),
 		keyframe: AtomicBool::new(true),
 	});
 	streamer.attach(sink.clone());
 	let backend = streamer.stats().layers.first().and_then(|l| l.backend);
+	let what = if source == SourceId::Synthetic {
+		format!("{width}x{height} {} test pattern", args.pattern)
+	} else {
+		format!("{} capture", args.source)
+	};
 	println!(
-		"{width}x{height} {} test pattern at {} fps, {codec} ({}), {} layer(s), {} s after {} s \
-		 warm-up",
-		args.pattern,
+		"{what} at {} fps, {codec} ({}), {} layer(s), {} s after {} s warm-up",
 		args.fps,
 		backend.map_or("?".to_owned(), |b| b.to_string()),
 		ids.len(),
 		args.seconds,
 		args.warmup
 	);
+	// A real source only delivers once the user has picked something.
+	if source != SourceId::Synthetic {
+		let deadline = Instant::now() + timeout;
+		while streamer.stats().captured_frames == 0 {
+			if Instant::now() >= deadline {
+				bail!(
+					"no frame from the {} source within {} s (nobody accepted the dialog?)",
+					args.source,
+					timeout.as_secs()
+				);
+			}
+			std::thread::sleep(Duration::from_millis(100));
+		}
+		let stats = streamer.stats();
+		println!("capturing {}x{}", stats.width, stats.height);
+	}
 	std::thread::sleep(Duration::from_secs(args.warmup));
 	let start = sample(&sink, &streamer);
 	std::thread::sleep(Duration::from_secs(args.seconds));
@@ -368,7 +423,13 @@ fn bench(args: BenchArgs) -> Result<()> {
 		let frames = b.frames - a.frames;
 		output_frames += frames;
 		let spec = layers.iter().find(|l| l.id == *id);
-		let size = spec.map_or((width, height), |l| l.output_size(width, height));
+		let layer_stats = stats.layers.iter().find(|l| l.id == *id);
+		// What was really encoded: with a real source the size comes from the
+		// capture, not from --res.
+		let size = match layer_stats.filter(|l| l.width > 0) {
+			Some(l) => (l.width, l.height),
+			None => spec.map_or((width, height), |l| l.output_size(width, height)),
+		};
 		let dropped = |s: &Sample| s.dropped.iter().find(|d| d.0 == *id).map_or(0, |d| d.1);
 		let layer = stats.layers.iter().find(|l| l.id == *id);
 		println!(

@@ -9190,6 +9190,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "voelin-stream",
  "wasapi",
  "wayland-client",
  "wayland-protocols",

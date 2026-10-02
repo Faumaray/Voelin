@@ -189,6 +189,61 @@ const X264_PRESETS: [&str; 10] = [
 const PROFILE_H264_HIGH: i64 = 100;
 const PROFILE_H264_CONSTRAINED_BASELINE: i64 = 66 | 1 << 9;
 
+/// H.264 level limits (ITU-T H.264 Table A-1): `level_idc`, macroblocks per
+/// second, macroblocks per frame, bitrate in kbit/s for Baseline (High
+/// allows 1.25 times that).
+const H264_LEVELS: [(i64, u64, u64, u64); 19] = [
+	(10, 1_485, 99, 64),
+	(11, 3_000, 396, 192),
+	(12, 6_000, 396, 384),
+	(13, 11_880, 396, 768),
+	(20, 11_880, 396, 2_000),
+	(21, 19_800, 792, 4_000),
+	(22, 20_250, 1_620, 4_000),
+	(30, 40_500, 1_620, 10_000),
+	(31, 108_000, 3_600, 14_000),
+	(32, 216_000, 5_120, 20_000),
+	(40, 245_760, 8_192, 20_000),
+	(41, 245_760, 8_192, 50_000),
+	(42, 522_240, 8_704, 50_000),
+	(50, 589_824, 22_080, 135_000),
+	(51, 983_040, 36_864, 240_000),
+	(52, 2_073_600, 36_864, 240_000),
+	(60, 4_177_920, 139_264, 240_000),
+	(61, 8_355_840, 139_264, 480_000),
+	(62, 16_711_680, 139_264, 800_000),
+];
+
+/// The lowest `level_idc` whose limits hold this stream, or the highest
+/// level defined if none does.
+///
+/// The signalling offers the same level to the viewer
+/// (`voelin_stream::h264::level_idc`, which this mirrors — a test pins the
+/// two together). It has to be told to the encoder, because wrappers that
+/// pick a level themselves pick a generous one: AMF writes level 4.2 into
+/// the SPS of a 720p30 stream whose offer says 3.1, and a decoder set up
+/// from that offer may refuse it.
+fn h264_level(profile: H264Profile, width: u32, height: u32, fps: u32, bitrate: u32) -> i64 {
+	let (mbs_w, mbs_h) = (u64::from(width.div_ceil(16)), u64::from(height.div_ceil(16)));
+	let frame = mbs_w * mbs_h;
+	let rate = frame * u64::from(fps.max(1));
+	let factor = match profile {
+		H264Profile::ConstrainedHigh => 1250,
+		H264Profile::ConstrainedBaseline => 1000,
+	};
+	H264_LEVELS
+		.iter()
+		.find(|&&(_, max_rate, max_frame, max_kbps)| {
+			rate <= max_rate
+				&& frame <= max_frame
+				// Neither side may exceed sqrt(8 * MaxFS) macroblocks.
+				&& mbs_w * mbs_w <= 8 * max_frame
+				&& mbs_h * mbs_h <= 8 * max_frame
+				&& u64::from(bitrate) <= max_kbps * factor
+		})
+		.map_or(H264_LEVELS[H264_LEVELS.len() - 1].0, |l| l.0)
+}
+
 /// The backend's realtime settings (besides size, format, time base and
 /// rate, which every backend gets).
 fn settings(spec: &BackendSpec, config: &EncoderConfig, low_power: bool) -> Vec<Setting> {
@@ -687,6 +742,16 @@ impl FfmpegEncoder {
 		];
 		if !self.spec.is_hardware() {
 			list.push(generic("threads", self.config.threads_for(width, height)));
+		}
+		if self.spec.codec == Codec::H264 {
+			// The level the signalling offers, so the SPS cannot claim a
+			// higher one than the viewer's decoder was set up for. Both
+			// targets: the wrappers that have a private `level` read that
+			// one, the rest `AVCodecContext.level`.
+			let level =
+				h264_level(self.config.h264_profile, width, height, fps, bitrate).to_string();
+			list.push(generic("level", &level));
+			list.push(Setting { values: vec![level], ..opt("level", &[]) });
 		}
 		list.extend(settings(self.spec, &self.config, low_power));
 		for setting in &list {
@@ -1251,6 +1316,9 @@ pub struct BackendStatus {
 	pub spec: &'static BackendSpec,
 	/// `Ok` if it encoded the test frame, else why not.
 	pub available: std::result::Result<(), String>,
+	/// How long its self-test took (the probe runs them in parallel, so the
+	/// startup cost is the slowest one).
+	pub took: Duration,
 }
 
 /// Size of the self-test frame.
@@ -1276,42 +1344,195 @@ fn in_build(ffmpeg: &Ffmpeg, name: &str) -> bool {
 	!unsafe { (ffmpeg.api.avcodec_find_encoder_by_name)(name.as_ptr()) }.is_null()
 }
 
+/// PCI vendor of a GPU, as `/sys/class/drm/*/device/vendor` gives it.
+#[cfg(target_os = "linux")]
+mod vendor {
+	pub const AMD: u32 = 0x1002;
+	pub const NVIDIA: u32 = 0x10de;
+	pub const INTEL: u32 = 0x8086;
+}
+
+/// The PCI vendors of this machine's DRM render nodes, read once; empty if
+/// `/sys/class/drm` says nothing (a container without it, say), which is
+/// taken as "unknown" and skips nothing.
+#[cfg(target_os = "linux")]
+fn drm_vendors() -> &'static [u32] {
+	static VENDORS: OnceLock<Vec<u32>> = OnceLock::new();
+	VENDORS.get_or_init(|| {
+		let Ok(entries) = std::fs::read_dir("/sys/class/drm") else { return Vec::new() };
+		let mut found: Vec<u32> = entries
+			.flatten()
+			.filter(|e| e.file_name().to_string_lossy().starts_with("renderD"))
+			.filter_map(|e| std::fs::read_to_string(e.path().join("device/vendor")).ok())
+			.filter_map(|text| u32::from_str_radix(text.trim().trim_start_matches("0x"), 16).ok())
+			.collect();
+		found.sort_unstable();
+		found.dedup();
+		found
+	})
+}
+
+/// Sends the process's standard error to a temporary file while it lives,
+/// and logs whatever landed there when it is dropped.
+///
+/// FFmpeg's own messages already go to `tracing` (see
+/// [`Ffmpeg::capture_log`](super::Ffmpeg::capture_log)), but the libraries
+/// behind the encoders write to the descriptor themselves and cannot be
+/// asked not to: SVT-AV1 prints a build banner and its allocation totals,
+/// AMD's AMF runtime prints `GetProperty(...) not found` warnings, and Mesa
+/// prints a `RADV_PERFTEST` deprecation notice when AMF brings up Vulkan.
+/// Opening every encoder at startup meant about thirty such lines on every
+/// run of the app.
+///
+/// This moves the descriptor, so anything else the process writes to
+/// standard error meanwhile lands in the file too and comes back as one
+/// `debug` record. `VOELIN_FFMPEG_PROBE_STDERR=1` leaves it alone.
+struct QuietStderr {
+	#[cfg(unix)]
+	saved: std::os::fd::OwnedFd,
+	#[cfg(unix)]
+	file: std::path::PathBuf,
+}
+
+impl QuietStderr {
+	#[cfg(unix)]
+	fn start() -> Option<Self> {
+		use std::os::fd::AsFd;
+
+		if std::env::var_os("VOELIN_FFMPEG_PROBE_STDERR").is_some() {
+			return None;
+		}
+		let file =
+			std::env::temp_dir().join(format!("voelin-encoder-probe-{}.log", std::process::id()));
+		let sink = std::fs::File::create(&file).ok()?;
+		let stderr = std::io::stderr();
+		let saved = rustix::io::dup(stderr.as_fd()).ok()?;
+		// Anything already buffered belongs on the real descriptor.
+		let _ = std::io::Write::flush(&mut std::io::stderr());
+		rustix::stdio::dup2_stderr(sink.as_fd()).ok()?;
+		Some(Self { saved, file })
+	}
+
+	#[cfg(not(unix))]
+	fn start() -> Option<Self> {
+		None
+	}
+}
+
+#[cfg(unix)]
+impl Drop for QuietStderr {
+	fn drop(&mut self) {
+		use std::os::fd::AsFd;
+
+		let _ = std::io::Write::flush(&mut std::io::stderr());
+		let _ = rustix::stdio::dup2_stderr(self.saved.as_fd());
+		if let Ok(text) = std::fs::read_to_string(&self.file) {
+			let text = text.trim();
+			if !text.is_empty() {
+				tracing::debug!(target: "ffmpeg", "the encoder libraries wrote:\n{text}");
+			}
+		}
+		let _ = std::fs::remove_file(&self.file);
+	}
+}
+
+/// Whether the hardware `spec` needs can be in this machine at all.
+///
+/// A self-test of a family whose vendor is absent still costs 0.4-1.7 s of
+/// driver initialisation before it fails (measured here: `av1_nvenc` 1.7 s,
+/// `vp9_qsv` 1.2 s), and the probe's wall time is its slowest test. Nothing
+/// is skipped when the vendors cannot be read, so an unusual setup only
+/// pays the time it used to.
+fn vendor_may_be_present(spec: &BackendSpec) -> std::result::Result<(), String> {
+	#[cfg(target_os = "linux")]
+	{
+		let vendors = drm_vendors();
+		if vendors.is_empty() {
+			return Ok(());
+		}
+		let (wanted, what) = match spec.family() {
+			"nvenc" => (vendor::NVIDIA, "no NVIDIA GPU"),
+			"qsv" => (vendor::INTEL, "no Intel GPU"),
+			"amf" => (vendor::AMD, "no AMD GPU"),
+			_ => return Ok(()),
+		};
+		// NVIDIA's driver can run without a DRM node (`nvidia-drm.modeset=0`).
+		if wanted == vendor::NVIDIA && std::path::Path::new("/dev/nvidiactl").exists() {
+			return Ok(());
+		}
+		if !vendors.contains(&wanted) {
+			return Err(format!("{what} in this machine"));
+		}
+	}
+	let _ = spec;
+	Ok(())
+}
+
 /// Every backend with its self-test result (run once per process, the
 /// backends in parallel). Empty without FFmpeg.
+///
+/// A backend whose vendor is not in the machine is not opened at all
+/// ([`vendor_may_be_present`]): its driver would spend up to 1.7 s failing,
+/// and the probe costs as much as its slowest test.
 pub fn probe() -> &'static [BackendStatus] {
 	static PROBE: OnceLock<Vec<BackendStatus>> = OnceLock::new();
 	PROBE.get_or_init(|| {
 		let Ok(ffmpeg) = Ffmpeg::get() else { return Vec::new() };
+		let started = Instant::now();
+		let quiet = QuietStderr::start();
 		let statuses: Vec<BackendStatus> = std::thread::scope(|scope| {
 			let tests: Vec<_> = BACKENDS
 				.iter()
 				.map(|spec| {
-					let present = in_build(ffmpeg, spec.name);
-					let test = present.then(|| scope.spawn(move || test_backend(spec)));
-					(spec, test)
+					let absent = vendor_may_be_present(spec).err();
+					let present = absent.is_none() && in_build(ffmpeg, spec.name);
+					let test = present.then(|| {
+						scope.spawn(move || {
+							let started = Instant::now();
+							(test_backend(spec), started.elapsed())
+						})
+					});
+					(spec, absent, test)
 				})
 				.collect();
 			tests
 				.into_iter()
-				.map(|(spec, test)| BackendStatus {
-					spec,
-					available: match test {
-						None => Err("not in this FFmpeg build".into()),
-						Some(handle) => {
-							handle.join().unwrap_or_else(|_| Err("the self-test panicked".into()))
-						}
-					},
+				.map(|(spec, absent, test)| {
+					let (available, took) = match test {
+						None => (
+							Err(absent.unwrap_or_else(|| "not in this FFmpeg build".into())),
+							Duration::ZERO,
+						),
+						Some(handle) => handle.join().unwrap_or_else(|_| {
+							(Err("the self-test panicked".into()), Duration::ZERO)
+						}),
+					};
+					BackendStatus { spec, available, took }
 				})
 				.collect()
 		});
+		// Standard error comes back (and what the libraries wrote is logged)
+		// before our own report.
+		drop(quiet);
 		for status in &statuses {
 			match &status.available {
-				Ok(()) => tracing::info!(backend = status.spec.name, "FFmpeg encoder available"),
-				Err(e) => {
-					tracing::debug!(backend = status.spec.name, "FFmpeg encoder unusable: {e}")
-				}
+				Ok(()) => tracing::info!(
+					backend = status.spec.name,
+					ms = status.took.as_millis() as u64,
+					"FFmpeg encoder available"
+				),
+				Err(e) => tracing::debug!(
+					backend = status.spec.name,
+					ms = status.took.as_millis() as u64,
+					"FFmpeg encoder unusable: {e}"
+				),
 			}
 		}
+		tracing::info!(
+			ms = started.elapsed().as_millis() as u64,
+			tested = statuses.iter().filter(|s| !s.took.is_zero()).count(),
+			"FFmpeg encoders probed"
+		);
 		statuses
 	})
 }
@@ -1398,6 +1619,154 @@ mod tests {
 			t.push(i, i as u64);
 		}
 		assert_eq!(t.pending.len(), 64, "bounded");
+	}
+
+	/// [`h264_level`] must agree with the level the signalling offers
+	/// (`voelin_stream::h264::level_idc`) for every stream, or the SPS and
+	/// the SDP would disagree again. Two copies of ITU-T Table A-1, pinned
+	/// to each other: this crate cannot depend on voelin-stream (it is the
+	/// lower one), and voelin-stream must not pull in the codecs.
+	#[test]
+	fn levels_agree_with_the_signalling() {
+		for (w, h) in [
+			(320u32, 240u32),
+			(640, 360),
+			(1280, 720),
+			(1920, 1080),
+			(2560, 1440),
+			(3840, 2160),
+			(4096, 64),
+			(16384, 16384),
+		] {
+			for fps in [1u32, 15, 30, 60, 120] {
+				for kbps in [200u32, 4_000, 8_000, 30_000] {
+					for (mine, theirs) in [
+						(H264Profile::ConstrainedHigh, voelin_stream::H264Profile::ConstrainedHigh),
+						(
+							H264Profile::ConstrainedBaseline,
+							voelin_stream::H264Profile::ConstrainedBaseline,
+						),
+					] {
+						let bitrate = kbps * 1000;
+						let ours = h264_level(mine, w, h, fps, bitrate);
+						let signalled =
+							voelin_stream::h264::level_idc(theirs, w, h, fps, u64::from(bitrate));
+						assert_eq!(
+							ours,
+							i64::from(signalled),
+							"{w}x{h}@{fps} {kbps}k {mine:?}: encoder level {ours}, offer \
+							 {signalled}"
+						);
+					}
+				}
+			}
+		}
+	}
+
+	/// The zero-copy path with a real DMA-BUF, on the GPU.
+	///
+	/// The probe reports the import as available from the offsets alone, and
+	/// screen capture hands over RGB, which the import refuses, so no frame
+	/// had ever gone through it. This makes a VA-API surface, exports it as
+	/// a DRM PRIME DMA-BUF (what a compositor would hand us, tiling
+	/// modifier and all) and feeds it back to a second encoder through
+	/// [`FfmpegEncoder::encode_dmabuf`], so the import, the
+	/// `AVFrame.hw_frames_ctx` check and the encode are exercised for real.
+	///
+	/// Skipped without a working `h264_vaapi`.
+	#[test]
+	fn a_dmabuf_really_reaches_a_vaapi_encoder() {
+		const SIZE: (u32, u32) = (320, 240);
+		if !probe().iter().any(|s| s.spec.name == "h264_vaapi" && s.available.is_ok()) {
+			eprintln!("no usable h264_vaapi, skipped");
+			return;
+		}
+		let ffmpeg = Ffmpeg::get().expect("probed above");
+		let api = &ffmpeg.api;
+		let source = FfmpegEncoder::new("h264_vaapi", EncoderConfig::default()).unwrap();
+		let mut pool = source.vaapi_pool(SIZE.0, SIZE.1).expect("a VA-API surface pool");
+		let drm_prime = ffmpeg.pix.drm_prime.expect("DRM PRIME");
+
+		// SAFETY: `pool` is a live frames context of this process's VA-API
+		// device; both frames are ours and freed below. The exported frame's
+		// `data[0]` is the AVDRMFrameDescriptor FFmpeg filled, valid while
+		// the frame holds the mapping.
+		let exported = unsafe {
+			let surface = (api.av_frame_alloc)();
+			let drm = (api.av_frame_alloc)();
+			assert!(!surface.is_null() && !drm.is_null());
+			let ret = (api.av_hwframe_get_buffer)(pool, surface, 0);
+			assert!(ret >= 0, "av_hwframe_get_buffer: {}", api.error_text(ret));
+			(*drm.cast::<FrameHead>()).format = drm_prime;
+			let ret =
+				(api.av_hwframe_map)(drm, surface, sys::HWFRAME_MAP_READ | sys::HWFRAME_MAP_DIRECT);
+			let mapped = (ret >= 0).then(|| {
+				let descriptor =
+					*(*drm.cast::<FrameHead>()).data[0].cast::<sys::DrmFrameDescriptor>();
+				assert_eq!(descriptor.nb_objects, 1, "one buffer object");
+				// The driver describes the surface one plane per layer (R8
+				// for Y, GR88 for UV) rather than as one NV12 layer, which
+				// is how a compositor hands it over. Both name the same
+				// bytes of the same object, so flatten the layers into the
+				// planes of one NV12 buffer.
+				let object = descriptor.objects[0];
+				let mut planes = [(0usize, 0usize); 4];
+				let mut count = 0;
+				for layer in &descriptor.layers[..descriptor.nb_layers as usize] {
+					for plane in &layer.planes[..layer.nb_planes as usize] {
+						planes[count] = (plane.offset as usize, plane.pitch as usize);
+						count += 1;
+					}
+				}
+				DmaBufRef {
+					width: SIZE.0,
+					height: SIZE.1,
+					timestamp: Duration::ZERO,
+					fourcc: drm_fourcc(b"NV12"),
+					modifier: object.format_modifier,
+					fd: object.fd,
+					size: object.size,
+					planes,
+					plane_count: count,
+				}
+			});
+			// The descriptor is copied out, but the file descriptor belongs
+			// to the mapping, so the encode has to happen before these go.
+			(mapped, surface, drm)
+		};
+		let (frame, mut surface, mut drm) = exported;
+		let Some(frame) = frame else {
+			// SAFETY: allocated above.
+			unsafe {
+				(api.av_frame_free)(&mut drm);
+				(api.av_frame_free)(&mut surface);
+				(api.av_buffer_unref)(&mut pool);
+			}
+			panic!("this driver cannot export a VA-API surface as a DMA-BUF");
+		};
+		assert_eq!(frame.plane_count, 2, "NV12 has two planes");
+		assert!(frame.fd >= 0 && frame.size > 0);
+
+		let mut encoder = FfmpegEncoder::new("h264_vaapi", EncoderConfig::default()).unwrap();
+		let mut packets = 0;
+		let mut keyframe = false;
+		let result = encoder.encode_dmabuf(&frame, true, &mut |chunk| {
+			packets += 1;
+			keyframe |= chunk.keyframe;
+		});
+		drop(encoder);
+		// SAFETY: allocated above; the encode is done with the mapping.
+		unsafe {
+			(api.av_frame_free)(&mut drm);
+			(api.av_frame_free)(&mut surface);
+			(api.av_buffer_unref)(&mut pool);
+		}
+		result.expect("the DMA-BUF was imported and encoded");
+		assert!(packets > 0 && keyframe, "{packets} packets, keyframe {keyframe}");
+		eprintln!(
+			"imported a {}x{} NV12 DMA-BUF (modifier {:#x}) into h264_vaapi: {packets} packet(s)",
+			frame.width, frame.height, frame.modifier
+		);
 	}
 
 	#[test]

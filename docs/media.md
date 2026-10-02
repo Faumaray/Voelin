@@ -283,12 +283,15 @@ the software encoders above are used as before.
   `initial_pool_size` (with or without `internal`, which libavutil 59
   removed; `device_ctx` and both formats checked in a new context), and for
   the DMA-BUF import `AVFrame.buf[0]` and `hw_frames_ctx` (a table per
-  libavutil major 56-60 on 64-bit, newer majors tried with the newest entry;
-  `buf[0]` checked on a real frame at load, `hw_frames_ctx` on the first
-  surface). The layouts were compiled from the headers of FFmpeg 4.4, 5.1,
-  6.1, 7.1 and 8.0. A failed check disables only what needs the field
-  (VA-API, or the import) and says why (`LibraryInfo::hw_frames`,
-  `dmabuf_import`, the report).
+  libavutil major, 56-61 on 64-bit; `buf[0]` checked on a real frame at
+  load, `hw_frames_ctx` on the first surface). The layouts were compiled
+  from the headers of FFmpeg 4.4, 5.1, 6.1, 7.1, 8.0 and 9.0. A major that
+  is not in the table turns the import off instead of reusing the newest
+  entry: `AVFrame` has shrunk as well as grown between majors (424 bytes in
+  libavutil 61 against 536 in 56), so an offset guessed for an unknown
+  layout could point past the end of the struct. A failed check disables
+  only what needs the field (VA-API, or the import) and says why
+  (`LibraryInfo::hw_frames`, `dmabuf_import`, the report).
 - Backends (`ffmpeg::BACKENDS`, FFmpeg's encoder names, also the names in
   `stream.encoder_backend`): H.264 `h264_nvenc`, `h264_amf`, `h264_vaapi`,
   `h264_qsv`, `h264_videotoolbox`, `h264_mf`, software `libx264`,
@@ -302,6 +305,25 @@ the software encoders above are used as before.
   node", "not in this FFmpeg build", ...). rav1e holds about 20 frames
   before its first packet even in low-latency mode (measured, rav1e 0.7), so
   it is used only when named.
+- Probe cost: a family whose vendor is not in the machine is not opened at
+  all. Its driver would still run its initialisation before failing, which
+  was the bulk of the startup cost (measured here: `av1_nvenc` 1.7 s,
+  `vp9_qsv` 1.2 s), and the probe takes as long as its slowest test because
+  they run in parallel. The PCI vendors of the DRM render nodes
+  (`/sys/class/drm/*/device/vendor`) are read once; NVENC needs NVIDIA (or
+  `/dev/nvidiactl`, for a driver without a DRM node), Quick Sync Intel, AMF
+  AMD. When the vendors cannot be read nothing is skipped. On the AMD
+  machine below this took `voelinctl stream encoders` from 1.77 s to
+  0.93-1.12 s, testing 12 backends instead of 20, and the report says "no
+  NVIDIA GPU in this machine" instead of a CUDA error code.
+- Third-party output: FFmpeg's own log goes to `tracing`, but the libraries
+  behind the encoders write to standard error themselves — SVT-AV1 prints a
+  build banner and its allocation totals, AMD's AMF runtime prints
+  `GetProperty(...) not found` warnings, and Mesa prints a `RADV_PERFTEST`
+  deprecation notice when AMF brings up Vulkan. That was about thirty lines
+  on every start. While the self-tests run, standard error is pointed at a
+  temporary file and what landed there comes back as one `debug` record;
+  `VOELIN_FFMPEG_PROBE_STDERR=1` leaves it alone.
 - Realtime settings: no B-frames, no lookahead, keyframes only at the start
   and on request (a GOP of 2^30 frames, or what each wrapper takes as
   unlimited: 65535 for Quick Sync, 0 for AMF and VideoToolbox, 2^29 for
@@ -322,6 +344,24 @@ the software encoders above are used as before.
   without B-frames (Constrained High, what TeamSpeak decodes) or Constrained
   Baseline (`EncoderConfig::h264_profile`). Options a release does not know
   are skipped; alternatives are tried in order.
+- H.264 level: the level the signalling offers
+  (`voelin_stream::h264::level_idc`, ITU-T Table A-1) is computed again from
+  the session's own size, rate and bitrate and set on both the codec context
+  and the wrapper's private option. Without it every wrapper picked its own,
+  and a generous one: measured on the GPU below, `h264_amf` wrote level 4.2
+  into the SPS of a 720p30 stream whose offer said 3.1, and 5.0 for a
+  1440p60 stream offered as 5.1. A viewer that sizes its decoder from our
+  SDP may refuse a stream that declares more than the offer did, which is
+  how a stream fails against an official client. With the level set,
+  `h264_vaapi`, `h264_amf` and `libx264` all emit exactly the offered level
+  (`tests/ffmpeg.rs`, `sps_carries_the_offered_profile_and_level`, parses
+  the SPS). The level table is a second copy of voelin-stream's, because
+  neither crate can depend on the other; a unit test pins the two together.
+  The constraint-flag byte still differs and is left alone: the offer claims
+  Constrained High (`0c`) and Constrained Baseline (`e0`) as WebRTC
+  implementations conventionally do, `h264_vaapi` and `h264_amf` emit `0c`
+  for the former and `libx264` emits `00`, and all three emit `40` or `c0`
+  for the latter. Those bits do not change what a decoder can decode.
 - Runtime changes: x264, NVENC and Quick Sync take bitrate changes on the
   running encoder (FFmpeg's wrappers compare `b` / `maxrate` / `bufsize`
   before each frame); the others reopen at the next keyframe, at once
@@ -337,7 +377,10 @@ the software encoders above are used as before.
   (`av_hwframe_ctx_init`, surfaces allocated on demand and recycled) filled
   with `av_hwframe_transfer_data`; the device is `VOELIN_VAAPI_DEVICE` or the
   first `/dev/dri/renderD*`, shared by all encoders. Odd sizes are cropped to
-  even ones. The streamer's steady state is 1.1 heap allocations per encoded
+  even ones. `encode_dmabuf` takes a buffer with one NV12 layer of two
+  planes, which is how a compositor hands one over; a driver exporting its
+  own surface may instead describe it as two layers (`R8` for luma, `GR88`
+  for chroma) over the same object, and that form is not accepted yet. The streamer's steady state is 1.1 heap allocations per encoded
   frame with x264 or SVT-AV1, as with libvpx (`voelinctl stream bench`).
 - Zero-copy (Linux): `FfmpegEncoder::encode_dmabuf(&DmaBufRef, ...)` maps a
   DRM PRIME frame onto a VA-API surface (`av_hwframe_map`) that the encoder
@@ -506,6 +549,10 @@ voelinctl stream bench --res 1280x720 --encoder h264_vaapi
 voelinctl stream bench --res 2560x1440 --fps 30 \
     --layer scale=1,bitrate=6M --layer scale=0.5,bitrate=1500k,fps=30 \
     --layer size=640x360,bitrate=400k,fps=15
+# A real screen capture instead of the pattern (the portal asks the user;
+# --start-timeout bounds the wait so it cannot hang):
+voelinctl stream bench --source portal --fps 60 --encoder h264_vaapi
+voelinctl stream bench --source monitor:0 --fps 60      # X11
 # Conversion and scaling alone:
 cargo bench -p voelin-media --bench convert
 ```
@@ -539,6 +586,85 @@ per frame, more when frames queue up) to 10-130 KB (the encoded frame).
 Conversion and scaling take 0.3 ms (720p) to 3-5 ms (1440p, busy) per frame
 on 4 threads. With three layers (1440p30 at 6 Mbit/s, 720p30, 360p15) the
 quiet machine kept every layer at its rate with 1.6-1.7 cores.
+
+### Hardware encoders, measured
+
+Release build, AMD Radeon RX 7900 GRE (radeonsi / RADV, `renderD128`), 32
+cores, FFmpeg 9.0.1, desktop pattern, one layer, 10 s after a 2 s warm-up,
+`voelinctl stream bench`. "cpu" is cores of the whole process (capture,
+conversion and encode together), "encode" the wall time of one
+`encode_with`.
+
+1080p60, 6000 kbit/s asked for:
+
+| encoder | fps | kbit/s | encode ms | cpu cores | allocations per frame |
+|---|---|---|---|---|---|
+| `h264_vaapi` | 60.0 | 5951 | 2.52 | 0.25 | 1.02 |
+| `h264_amf` | 60.0 | 5910 | 2.17 | 0.31 | 1.02 |
+| `av1_vaapi` | 60.0 | 6211 | 2.23 | 0.20 | 1.02 |
+| `av1_amf` | 60.0 | 5962 | 2.75 | 0.29 | 1.02 |
+| `libx264` | 60.0 | 5674 | 2.33 | 1.16 | 1.02 |
+| libvpx VP8 | 60.0 | 6031 | 4.93 | 1.69 | 1.02 |
+
+1440p60, 10000 kbit/s asked for:
+
+| encoder | fps | kbit/s | encode ms | cpu cores | allocations per frame |
+|---|---|---|---|---|---|
+| `h264_vaapi` | 60.0 | 10112 | 3.96 | 0.33 | 1.02 |
+| `h264_amf` | 60.0 | 10188 | 2.80 | 0.41 | 1.02 |
+| `av1_vaapi` | 60.0 | 10794 | 3.56 | 0.34 | 1.02 |
+| `av1_amf` | 60.0 | 10079 | 2.91 | 0.42 | 1.02 |
+| `libx264` | 59.9 | 9406 | 11.88 | 2.17 | 1.03 |
+| libvpx VP8 | 60.0 | 10038 | 4.32 | 2.55 | 1.02 |
+
+Simulcast, 1440p30 source, three layers (1440p30 at 8 Mbit/s, 720p30 at
+2 Mbit/s, 360p15 at 600 kbit/s), same run:
+
+| encoder | layer 0 | layer 1 | layer 2 | cpu cores |
+|---|---|---|---|---|
+| `h264_vaapi` | 30.0 fps, 7666 kbit/s, 4.37 ms | 30.0, 2121, 1.71 ms | 15.0, 596, 1.22 ms | 0.25 |
+| `h264_amf` | 30.0 fps, 7499 kbit/s, 3.56 ms | 30.0, 2015, 2.02 ms | 15.0, 598, 1.94 ms | 0.32 |
+| `libx264` | 30.0 fps, 7428 kbit/s, 4.40 ms | 30.0, 1993, 2.19 ms | 15.0, 593, 2.51 ms | 1.33 |
+
+What the numbers say: every encoder, hardware and software, holds the full
+frame rate at both sizes on this machine, so the difference is CPU, not
+throughput. Hardware costs 0.20-0.42 cores against 1.16-2.55 for software,
+a factor of four to eight, and the gap widens with size — at 1440p60 x264
+needs 2.17 cores and is the only encoder that dropped a frame. Every backend
+honoured the target bitrate within 2 % except `av1_vaapi`, which overshoots
+by 4-8 %. The steady state is 1.02 allocations per encoded frame (the
+`Arc<[u8]>` of `EncodedFrame`) with hardware as with software: no reopen
+storm, no per-frame allocation in the import or upload path. Conversion and
+scaling cost 0.16-0.30 ms per frame at these sizes and are not the
+bottleneck. The per-layer "threads" the bench prints is the CPU budget the
+layer was given, not what a hardware encoder uses — it encodes on the GPU.
+
+### Wayland screen capture, measured
+
+Same machine, a 2560x1440 Wayland desktop through the ScreenCast portal,
+`h264_vaapi` at 60 fps and 12 Mbit/s, `voelinctl stream bench --source
+portal`. This path had never been run against a real compositor.
+
+| buffers | capture fps | convert + scale | cpu cores | dropped |
+|---|---|---|---|---|
+| DMA-BUF (LINEAR), as first written | – | – | – | every frame |
+| DMA-BUF (LINEAR), mapping fixed | 60.0 | 11.95 ms | 19.54 | 0 |
+| shared memory | 59.9 | 0.27 ms | 0.41 | 0 |
+| what it does now (switches by itself) | 60.1 | 0.30 ms | 0.55 | 0 |
+
+The first row is the bug behind the low frame rates on Wayland: the mapping
+length was taken from `mapoffset + maxsize`, which describe a mapping that
+only shared memory has, while a DMA-BUF's size lives in its buffer object and
+this compositor leaves both fields 0. Every map was refused and nothing was
+ever delivered.
+
+The second row is why shared memory is the right choice on a discrete GPU:
+the CPU reads its memory uncached, so the same conversion costs 44 times the
+time and 48 times the CPU. `SLOW_DMABUF_NS_PER_PIXEL` exists for exactly
+this, but at 6.0 ns per pixel it never fired against the DMA-BUF path's
+3.24; it now sits between the two measurements. Zero-copy is the real answer
+for this hardware — the buffer would never be read by the CPU at all — but
+that needs the GPU colour conversion that is still missing.
 
 Build profiles: the dev profile builds the media hot path (yuv,
 voelin-media, str0m, x11rb-protocol, pipewire, wayland-client, ...) with
@@ -599,16 +725,21 @@ has not run on Windows yet.
 | Simulcast layers (sizes, fps caps, per-layer keyframes), reconfigure (codec, layers, fps) | `voelin-core` `media::tests::simulcast_layers_and_reconfigure` | tested |
 | Portal DMA-BUF negotiation | unit test of the offered formats | compiles and formats parse; no compositor with the portal here |
 | Portal / PipeWire error paths (no bus, bus without portal, no daemon) | unit tests, manual probe | tested |
-| Portal capture (shared memory and DMA-BUF), PipeWire video and audio streams | – | compiles only (no portal or PipeWire daemon here) |
+| Portal capture (shared memory and DMA-BUF), PipeWire video and audio streams | `voelinctl stream bench --source portal` on a 2560x1440 Wayland desktop | tested: it delivered no frames at all (the DMA-BUF mapping length), and the DMA-BUF path cost 19.5 cores where shared memory costs 0.41. Both fixed; 1440p60 now runs on 0.55 cores (see the table above). Portal audio is still untested |
 | Windows Graphics Capture, WASAPI | – | type-checked for `x86_64-pc-windows-gnu` only |
-| FFmpeg loader: sonames, missing FFmpeg, layout checks on a real release | `ffmpeg::sys` / `ffmpeg` unit tests; mirrors compared with offsets compiled from the 4.4-8.0 headers | tested (FFmpeg 6.1.1 on Ubuntu 24.04) |
+| FFmpeg loader: sonames, missing FFmpeg, layout checks on a real release | `ffmpeg::sys` / `ffmpeg` unit tests; mirrors compared with offsets compiled from the 4.4-9.0 headers | tested (FFmpeg 6.1.1 on Ubuntu 24.04; FFmpeg 9.0.1 / libavutil 61 / libavcodec 63 on Arch, every offset compared with that release's own headers) |
 | FFmpeg software encoders → our decoders: x264 → OpenH264, SVT-AV1 / rav1e / libaom → dav1d (PSNR > 28 dB, keyframes at start and on request, timestamps, bitrate change, size change, odd sizes, Constrained High / Baseline) | `tests/ffmpeg.rs` (`VOELIN_OPENH264_LIB`, `--features av1`) | tested |
 | Self-test failures (NVENC without CUDA, Quick Sync without a session, VA-API without a render node, encoders not in the build) | `tests/ffmpeg.rs`, `voelinctl stream encoders` | tested: each fails alone with FFmpeg's reason |
 | Encoder preference (auto, software, named, hardware off), report ranks | `codec::tests::encoder_preference` | tested |
 | An encoder per codec viewers chose (made, dropped, stream codec skipped, preference change) | `voelin-core` `media::tests::an_encoder_per_codec_viewers_chose` | tested |
 | Answer's codec reported to the streamer, H.264 level in the offer, HEVC offered | `voelin-stream` `peer::tests::streamer_learns_the_answered_codec`, `h264::tests` | tested (str0m on loopback) |
 | x264 / SVT-AV1 / libaom in the streamer pipeline | `voelinctl stream bench --encoder ...` | 720p30: x264 8.7 ms per frame, SVT-AV1 1.3 ms, libaom 37 ms; 1.1 allocations per encoded frame |
-| Hardware encoders (VA-API, NVENC, Quick Sync, AMF, Media Foundation, VideoToolbox), DMA-BUF import | – | compile only (no GPU here); the Windows code type-checks for `x86_64-pc-windows-gnu` |
+| Hardware encoders VA-API and AMF (H.264, HEVC, AV1) in the streamer pipeline | `voelinctl stream bench` on a Radeon RX 7900 GRE, 1080p60 / 1440p60 / simulcast | tested: full frame rate, 0.20-0.42 cores against 1.16-2.55 for software, 1.02 allocations per encoded frame (see the table above) |
+| Hardware encoders NVENC, Quick Sync, Media Foundation, VideoToolbox | – | not tested (no such hardware here); NVENC and Quick Sync are skipped by the vendor check and the Windows code type-checks for `x86_64-pc-windows-gnu` |
+| H.264 SPS against the offered `profile-level-id` (`profile_idc`, `level_idc`) for every usable backend, two sizes, both profiles | `tests/ffmpeg.rs` `sps_carries_the_offered_profile_and_level` | tested: it found `h264_amf` emitting level 4.2 where the offer said 3.1; with the level now set, all backends emit the offered level |
+| The encoder's H.264 level table against the signalling's | `ffmpeg::encoder::tests::levels_agree_with_the_signalling` | tested (8 sizes x 5 rates x 4 bitrates x 2 profiles) |
+| Zero-copy DMA-BUF import into a VA-API encoder | `ffmpeg::encoder::tests::a_dmabuf_really_reaches_a_vaapi_encoder` (a VA-API surface exported as DRM PRIME and fed back in) | tested: imports and encodes, with an AMD **tiling** modifier (`0x200000028a01f04`), not only LINEAR |
+| Zero-copy from screen capture | – | not reached: the import works (row above), but the portal delivers RGB and the GPU colour conversion to NV12 is missing, so no captured frame has gone through it. `Ingest` also never returns true from `FrameSink::accepts_dmabuf`, so the portal's DMA-BUF offer is never taken |
 | Offer [VP9, VP8], a viewer that decodes only VP8 → its own VP8 encoder, VP9 idle, pictures decoded | `voelin-core/tests/media_live.rs` `ts6_viewer_gets_the_codec_it_chose` (`VOELIN_LIVE=1`) | tested against the TeamSpeak 6 dev server (our client on both ends) |
 | Several codecs against official TeamSpeak viewers | – | not tested (no official client here) |
 | Test pattern → VP8 → decoder, rectangle position and colour | `voelin-core` `media::tests::local_preview_decodes_the_pattern` | tested |
