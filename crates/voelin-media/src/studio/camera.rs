@@ -23,7 +23,6 @@
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
-use tracing::debug;
 
 use crate::Result;
 use crate::capture::synthetic::SyntheticScreen;
@@ -117,16 +116,18 @@ pub struct Camera {
 /// Every camera this session can use. Never fails: a device that cannot be
 /// asked is left out, and [`SYNTHETIC`] is always last.
 pub fn list() -> Vec<Camera> {
-	let mut cameras = Vec::new();
-	#[cfg(target_os = "linux")]
-	cameras.extend(v4l2::list());
-	cameras.push(Camera {
+	// Devices are listed where they can be captured: through PipeWire.
+	#[cfg(all(target_os = "linux", feature = "pipewire"))]
+	let devices = v4l2::list();
+	#[cfg(not(all(target_os = "linux", feature = "pipewire")))]
+	let devices = Vec::new();
+	let synthetic = Camera {
 		id: SYNTHETIC.to_owned(),
 		name: "Test pattern".to_owned(),
 		backend: "synthetic",
 		formats: vec![Format { pixel: Pixel::Bgrx, sizes: vec![(1280, 720)], max_fps: 60 }],
-	});
-	cameras
+	};
+	devices.into_iter().chain([synthetic]).collect()
 }
 
 /// A running camera; stops when dropped.
@@ -181,7 +182,7 @@ impl Capture {
 		{
 			let stream =
 				pipewire_camera::Stream::start(&wanted, size, fps, feed, background).await?;
-			debug!(device = %wanted, "camera through PipeWire");
+			tracing::debug!(device = %wanted, "camera through PipeWire");
 			Ok(Self { backend: "pipewire", device: wanted, screen: None, stream: Some(stream) })
 		}
 		#[cfg(not(all(target_os = "linux", feature = "pipewire")))]
@@ -224,7 +225,7 @@ impl Drop for Capture {
 /// PipeWire. The structures below are the kernel's V4L2 ABI (`videodev2.h`),
 /// which is stable and the same on 32- and 64-bit: plain `u8` and `u32`
 /// fields, no pointers.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
 mod v4l2 {
 	#![allow(unsafe_code)]
 
