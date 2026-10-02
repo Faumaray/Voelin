@@ -145,7 +145,7 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 			"panel" => nav.set_right_panel_open(true),
 			"no-panel" => nav.set_right_panel_open(false),
 			"tab" => nav.set_mobile_tab(mobile_tab(arg)),
-			"voice" => nav.set_voice_grid(true),
+			"voice" => nav.invoke_show_voice(true),
 			"pins" => nav.invoke_show_pins(true),
 			"topics" => nav.invoke_show_topics(true),
 			"topic" => {

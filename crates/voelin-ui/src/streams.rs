@@ -7,7 +7,7 @@ use tracing::warn;
 use voelin_core::media::audio_source_specs;
 use voelin_core::settings::{STREAM_AUDIO_SOURCES, STREAM_BITRATE_KBPS, STREAM_FPS};
 use voelin_core::stream::{
-	EndReason, LayerId, LayerSpec, LeaveReason, StreamSetup, ViewerInfo, ViewerState,
+	EndReason, LayerId, LayerSpec, LeaveReason, StreamKind, StreamSetup, ViewerInfo, ViewerState,
 };
 use voelin_core::{Command, Event, StreamState, WatchState};
 
@@ -42,7 +42,7 @@ pub(crate) struct Watch {
 	ended: bool,
 	has_frame: bool,
 	/// Shown instead of the chat.
-	shown: bool,
+	pub(crate) shown: bool,
 	decoder: Option<Decoder>,
 	/// When the picture started, for the elapsed time.
 	since: Option<std::time::Instant>,
@@ -102,6 +102,16 @@ fn share_end_text(reason: &EndReason) -> String {
 	match reason {
 		EndReason::Failed(e) => format!("Sharing failed: {e}"),
 		_ => "Sharing ended.".into(),
+	}
+}
+
+/// "8 Mbit/s", "640 kbit/s" (the stream's announced bitrate, kbit/s); "" for 0.
+fn bitrate_text(kbps: u32) -> String {
+	match kbps {
+		0 => String::new(),
+		1..=999 => format!("{kbps} kbit/s"),
+		_ if kbps.is_multiple_of(1000) => format!("{} Mbit/s", kbps / 1000),
+		_ => format!("{:.1} Mbit/s", f64::from(kbps) / 1000.0),
 	}
 }
 
@@ -216,9 +226,18 @@ impl App {
 					id: s.id.clone().into(),
 					name: s.name.clone().into(),
 					streamer: view.nickname(s.streamer.0).into(),
+					streamer_id: i32::from(s.streamer.0),
 					audio: s.audio,
 					watching,
 					own: view.state.own_client == Some(s.streamer.0),
+					kind: match s.kind {
+						StreamKind::Screen => "Screen",
+						StreamKind::Window => "Window",
+						StreamKind::Camera => "Camera",
+						StreamKind::Other(_) => "",
+					}
+					.into(),
+					bitrate: bitrate_text(s.bitrate).into(),
 				});
 			}
 			// Streams that started before we joined: the server did not
@@ -235,6 +254,7 @@ impl App {
 					items.push(StreamItem {
 						name: c.nickname.clone().into(),
 						streamer: c.nickname.clone().into(),
+						streamer_id: i32::from(c.id),
 						..StreamItem::default()
 					});
 				}
@@ -248,6 +268,7 @@ impl App {
 				audio: false,
 				watching: self.watch.as_ref().is_some_and(|w| w.session.is_none() && !w.ended),
 				own: false,
+				..StreamItem::default()
 			});
 		}
 		bridge.set_streams_available(self.demo || view.is_some_and(|v| v.streams_available()));
@@ -601,6 +622,8 @@ impl App {
 		});
 		self.refresh_viewer();
 		self.refresh_streams();
+		// The people in our channel lead the members panel beside the viewer.
+		self.refresh_tree();
 	}
 
 	/// `VOELIN_OPEN=watch`: watch the first stream of our channel.
@@ -651,6 +674,8 @@ impl App {
 		});
 		self.refresh_viewer();
 		self.refresh_streams();
+		// The people in our channel lead the members panel beside the viewer.
+		self.refresh_tree();
 	}
 
 	/// A decoded picture is waiting.
@@ -681,6 +706,8 @@ impl App {
 		}
 		self.refresh_viewer();
 		self.refresh_streams();
+		// The people in our channel lead the members panel beside the viewer.
+		self.refresh_tree();
 	}
 
 	/// Stop watching and close the viewer.
@@ -695,6 +722,8 @@ impl App {
 		self.set_fullscreen(false);
 		self.refresh_viewer();
 		self.refresh_streams();
+		// The people in our channel lead the members panel beside the viewer.
+		self.refresh_tree();
 	}
 
 	pub(crate) fn set_stream_volume(&mut self, percent: f32) {
@@ -724,5 +753,16 @@ impl App {
 		}
 		bridge.set_viewer_fullscreen(full);
 		ui.window().set_fullscreen(full);
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	#[test]
+	fn bitrates() {
+		assert_eq!(super::bitrate_text(0), "");
+		assert_eq!(super::bitrate_text(640), "640 kbit/s");
+		assert_eq!(super::bitrate_text(8000), "8 Mbit/s");
+		assert_eq!(super::bitrate_text(4608), "4.6 Mbit/s");
 	}
 }

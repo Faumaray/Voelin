@@ -49,10 +49,27 @@ pub struct LineCtx {
 	pub downloads: Vec<(usize, FileItem)>,
 }
 
-fn time_of(ts_ms: i64) -> String {
+/// When a message was sent, for its header (see [`stamp`]).
+pub fn time_of(ts_ms: i64) -> String {
 	chrono::DateTime::from_timestamp_millis(ts_ms)
-		.map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string())
+		.map(|t| {
+			stamp(t.with_timezone(&chrono::Local).naive_local(), chrono::Local::now().naive_local())
+		})
 		.unwrap_or_default()
+}
+
+/// "Today at 10:14", "Yesterday at 10:14", "12 Mar at 10:14", and the year
+/// when it is not this one.
+pub fn stamp(then: chrono::NaiveDateTime, now: chrono::NaiveDateTime) -> String {
+	use chrono::Datelike;
+	let time = then.format("%H:%M");
+	let days = (now.date() - then.date()).num_days();
+	match days {
+		0 => format!("Today at {time}"),
+		1 => format!("Yesterday at {time}"),
+		_ if then.year() == now.year() => format!("{} at {time}", then.format("%-d %b")),
+		_ => format!("{} at {time}", then.format("%-d %b %Y")),
+	}
 }
 
 /// "2.4 MB", "912 kB", "48 B".
@@ -270,6 +287,16 @@ mod tests {
 		assert_eq!((file.name.as_str(), file.detail.as_str()), ("plan.pdf", "2.0 kB"));
 		assert!(!line.text.contains("ts3file"), "{}", line.text);
 		assert!(line.text.starts_with("here you go"));
+	}
+
+	#[test]
+	fn stamps() {
+		let at = |d: &str| chrono::NaiveDateTime::parse_from_str(d, "%Y-%m-%d %H:%M").unwrap();
+		let now = at("2026-10-03 09:00");
+		assert_eq!(stamp(at("2026-10-03 08:05"), now), "Today at 08:05");
+		assert_eq!(stamp(at("2026-10-02 23:59"), now), "Yesterday at 23:59");
+		assert_eq!(stamp(at("2026-03-12 10:14"), now), "12 Mar at 10:14");
+		assert_eq!(stamp(at("2025-12-31 10:14"), now), "31 Dec 2025 at 10:14");
 	}
 
 	#[test]

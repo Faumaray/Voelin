@@ -55,12 +55,6 @@ fn ago(ts_ms: i64) -> String {
 	}
 }
 
-fn time_of(ts_ms: i64) -> String {
-	chrono::DateTime::from_timestamp_millis(ts_ms)
-		.map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string())
-		.unwrap_or_default()
-}
-
 impl App {
 	pub(crate) fn open_chat(&mut self, target: ChatTarget, focus: bool) {
 		let Some(id) = self.current else { return };
@@ -396,25 +390,30 @@ impl App {
 				};
 				PinItem {
 					line: vm::chat::history_line(&p.message, None, &ctx),
-					by: format!("pinned by {} · {}", p.by, time_of(p.ts_ms)).into(),
+					by: format!("Pinned by {} · {}", p.by, vm::chat::time_of(p.ts_ms)).into(),
 				}
 			})
 			.collect();
 		vm::list::sync(&self.models.pins, &pins);
+		let filter = self.topic_filter.trim().to_lowercase();
+		let now = chrono::Utc::now().timestamp_millis();
 		let topics: Vec<crate::app::TopicItem> = tab
 			.topics
 			.iter()
+			.filter(|t| filter.is_empty() || t.title.to_lowercase().contains(&filter))
 			.map(|t| crate::app::TopicItem {
 				id: t.id as i32,
 				title: t.title.clone().into(),
 				creator: t.creator.name.clone().into(),
 				detail: format!(
-					"{} {} · {}",
+					"{} {} · by {}",
 					t.message_count,
 					if t.message_count == 1 { "message" } else { "messages" },
-					ago(t.last_activity_ms)
+					t.creator.name
 				)
 				.into(),
+				activity: format!("Last active {}", ago(t.last_activity_ms)).into(),
+				recent: now - t.last_activity_ms < 3_600_000,
 				archived: t.archived,
 			})
 			.collect();
@@ -551,6 +550,14 @@ impl App {
 		let tab = &mut view.tabs[view.current_tab];
 		tab.marked = tab.pins.iter().find(|p| p.key == key).map(|p| p.message.id);
 		self.refresh_chat();
+	}
+
+	/// The topics drawer's search.
+	pub(crate) fn search_topics(&mut self, text: String) {
+		if self.topic_filter != text {
+			self.topic_filter = text;
+			self.refresh_chat();
+		}
 	}
 
 	pub(crate) fn open_topics(&mut self) {

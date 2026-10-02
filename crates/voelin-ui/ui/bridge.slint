@@ -46,7 +46,8 @@ export struct TreeItem {
     max-members: int,
 }
 
-// A client in our channel, for the members panel and the voice grid.
+// A client for the members panel (everyone on the server) and the voice
+// channel view (our channel).
 export struct MemberItem {
     id: int,
     name: string,
@@ -63,13 +64,18 @@ export struct MemberItem {
     status: string,
     // The away message, empty without one.
     away-message: string,
-    // The server group the row is sorted under, and its icon.
+    // The section the row is in (a server group, "In Voice",
+    // "Streaming"), and the group's icon.
     group: string,
     group-icon: image,
-    // The first row of its group draws the group header.
+    // The first row of its section draws the heading, with the number of
+    // rows in the section.
     first-in-group: bool,
+    group-count: int,
     // Badges: a crown for the server's admin groups.
     admin: bool,
+    // A moderator group's name, shown as a role next to the name.
+    role: string,
     priority: bool,
     commander: bool,
     recording: bool,
@@ -190,8 +196,11 @@ export struct TopicItem {
     id: int,
     title: string,
     creator: string,
-    // "12 messages · 3 min ago"
+    // "12 messages · by Nova"
     detail: string,
+    // "Last active 3 min ago", and whether that was within the hour.
+    activity: string,
+    recent: bool,
     archived: bool,
 }
 
@@ -214,7 +223,12 @@ export struct StreamItem {
     id: string,
     name: string,
     streamer: string,
+    // The streamer's client id (their avatar in the members).
+    streamer-id: int,
     audio: bool,
+    // "Screen", "Window", "Camera"; and the announced bitrate ("8 Mbit/s").
+    kind: string,
+    bitrate: string,
     // Shown in the viewer.
     watching: bool,
     // Our own stream.
@@ -295,6 +309,10 @@ export global Bridge {
     in property <[TreeItem]> tree;
     // Clients in our channel.
     in property <[MemberItem]> members;
+    // Everyone on the server, in sections, for the members panel.
+    in property <[MemberItem]> server-members;
+    // How many people are on the server (not counting query clients).
+    in property <int> member-total;
     in property <[ChatTab]> tabs;
     in-out property <int> current-tab: 0;
     in property <[ChatLine]> messages;
@@ -327,6 +345,9 @@ export global Bridge {
     // Our nickname on the current server, and the channel we are in.
     in property <string> nickname;
     in property <string> own-channel;
+    // Its topic, and how many people it takes (-1: no limit).
+    in property <string> own-channel-topic;
+    in property <int> own-channel-limit: -1;
     in property <bool> voice-connected;
     in property <bool> voice-connecting;
     in property <bool> observing;
@@ -465,6 +486,12 @@ export global Bridge {
     callback appearance-changed(AppearanceForm);
     // The members panel was dragged to another width (pixels).
     callback panel-resized(float);
+    // The voice channel view was opened or closed.
+    callback show-voice-view(bool);
+    // The members panel's search field.
+    callback search-members(string);
+    // The topics drawer's search field.
+    callback search-topics(string);
     callback open-client(int) -> bool;
     callback client-audio-changed(ClientAudio);
     callback set-crash-reports(bool);

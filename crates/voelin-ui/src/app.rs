@@ -282,6 +282,7 @@ pub(crate) struct Models {
 	pub servers: Rc<VecModel<ServerItem>>,
 	pub tree: Rc<VecModel<TreeItem>>,
 	pub members: Rc<VecModel<MemberItem>>,
+	pub server_members: Rc<VecModel<MemberItem>>,
 	pub tabs: Rc<VecModel<ChatTab>>,
 	pub streams: Rc<VecModel<StreamItem>>,
 	pub viewers: Rc<VecModel<ViewerItem>>,
@@ -300,6 +301,7 @@ impl Models {
 			servers: Rc::default(),
 			tree: Rc::default(),
 			members: Rc::default(),
+			server_members: Rc::default(),
 			tabs: Rc::default(),
 			streams: Rc::default(),
 			viewers: Rc::default(),
@@ -312,6 +314,7 @@ impl Models {
 		bridge.set_servers(ModelRc::from(models.servers.clone()));
 		bridge.set_tree(ModelRc::from(models.tree.clone()));
 		bridge.set_members(ModelRc::from(models.members.clone()));
+		bridge.set_server_members(ModelRc::from(models.server_members.clone()));
 		bridge.set_tabs(ModelRc::from(models.tabs.clone()));
 		bridge.set_streams(ModelRc::from(models.streams.clone()));
 		bridge.set_share_viewers(ModelRc::from(models.viewers.clone()));
@@ -337,6 +340,13 @@ pub(crate) struct App {
 	pub status: String,
 	/// The top bar's search: filters the channel tree.
 	pub tree_filter: String,
+	/// The members panel's search.
+	pub member_filter: String,
+	/// The topics drawer's search.
+	pub topic_filter: String,
+	/// The voice channel view is shown (its people come first in the
+	/// members panel).
+	pub voice_view: bool,
 	/// The settings service (shared with the engine); `settings`, `audio`
 	/// and `playback` are working copies of its keys.
 	pub prefs: Settings,
@@ -544,6 +554,9 @@ pub fn run(options: RunOptions) -> Result<()> {
 		models,
 		status: String::new(),
 		tree_filter: String::new(),
+		member_filter: String::new(),
+		topic_filter: String::new(),
+		voice_view: false,
 		prefs,
 		settings,
 		audio,
@@ -801,6 +814,8 @@ impl App {
 			Event::Groups { session, server_groups, .. } => {
 				let view = self.sessions.entry(session as i64).or_default();
 				view.server_groups = (*server_groups).clone();
+				// Display order, as TeamSpeak sorts them.
+				view.server_groups.sort_by_key(|g| (g.sort_id, g.id));
 				if self.current == Some(session as i64) {
 					self.refresh_tree();
 				}

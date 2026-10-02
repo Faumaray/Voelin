@@ -46,11 +46,12 @@ export component Button inherits Rectangle {
     property <color> fill: kind == ButtonKind.primary ? (active ? Theme.accent-pressed : touch.has-hover ? Theme.accent-hover : Theme.accent)
         : kind == ButtonKind.danger ? (active ? Theme.danger : touch.has-hover ? Theme.danger-soft.brighter(0.3) : Theme.danger-soft)
         : kind == ButtonKind.ghost ? (active ? Theme.surface-4 : touch.has-hover ? Theme.surface-3 : transparent)
+        : checked ? (touch.has-hover ? Theme.accent-soft-hover : Theme.accent-soft)
         : (active ? Theme.surface-4 : touch.has-hover ? Theme.surface-3 : Theme.surface-2);
     property <color> ink: kind == ButtonKind.primary ? Theme.on-accent
         : !enabled ? Theme.text-disabled
         : kind == ButtonKind.danger ? (active ? Theme.on-accent : Theme.danger)
-        : checked ? Theme.accent-text : Theme.text;
+        : Theme.text;
 
     min-width: self.min-height;
     min-height: small ? Theme.control-height-sm : Theme.control-height;

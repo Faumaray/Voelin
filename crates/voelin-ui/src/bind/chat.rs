@@ -7,6 +7,9 @@ use crate::app::{App, Bridge, MainWindow, with_app};
 
 pub(super) fn wire(ui: &MainWindow) {
 	let bridge = ui.global::<Bridge>();
+	bridge.on_search_topics(|text| {
+		with_app(|app| app.search_topics(text.to_string()));
+	});
 	bridge.on_open_channel_chat(|cid| {
 		with_app(|app| app.open_chat(ChatTarget::Channel(cid as ChannelId), true));
 	});

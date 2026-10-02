@@ -20,8 +20,9 @@ import { Panel } from "shells/common.slint";
 import { ServerHeader, ConnectActions, ChannelTree } from "screens/channels.slint";
 import { ChatView } from "screens/chat.slint";
 import { PinsDrawer, TopicsDrawer, TopicDialog } from "screens/drawers.slint";
-import { MemberCardPopup, VoiceGrid } from "screens/members.slint";
-import { StreamsPanel, StreamViewer } from "screens/streams.slint";
+import { MemberCardPopup, MembersPanel } from "screens/members.slint";
+import { VoiceView } from "screens/voice.slint";
+import { StreamViewer } from "screens/streams.slint";
 import { SettingsNav, SettingsPage } from "screens/settings.slint";
 import { HomeNav, HomePage } from "screens/home.slint";
 import { MobileServers, ActivityPage, YouPage } from "screens/mobile.slint";
@@ -82,6 +83,9 @@ export component MainWindow inherits Window {
     property <string> status: Bridge.status-text;
     changed status => { toast.shown = status != ""; }
 
+    // The right column: members, pins or topics.
+    property <bool> side-panel: Nav.right-panel-open || Nav.pins-open || Nav.topics-open;
+
     // Dragging the members panel stores its width (`ui.members_width`).
     property <length> panel-width: Nav.right-panel-width;
     changed panel-width => { Bridge.panel-resized(panel-width / 1px); }
@@ -129,34 +133,22 @@ export component MainWindow inherits Window {
                 if Nav.page == Page.server: Panel {
                     horizontal-stretch: 1;
                     if Bridge.viewer-open: StreamViewer { }
-                    if !Bridge.viewer-open && Nav.voice-grid && Bridge.voice-connected: VoiceGrid { }
-                    if !Bridge.viewer-open && !(Nav.voice-grid && Bridge.voice-connected): ChatView { }
-                    // The pins and the topics slide in over the chat.
-                    if !Bridge.viewer-open && (Nav.pins-open || Nav.topics-open): Rectangle {
-                        x: parent.width - self.width - 12px;
-                        y: 12px;
-                        width: min(parent.width - 24px, 400px);
-                        height: parent.height - 24px;
-                        if Nav.pins-open: PinsDrawer {
-                            width: parent.width;
-                            height: parent.height;
-                        }
-                        if Nav.topics-open: TopicsDrawer {
-                            width: parent.width;
-                            height: parent.height;
-                        }
-                    }
+                    if !Bridge.viewer-open && Nav.voice-view && Bridge.voice-connected: VoiceView { }
+                    if !Bridge.viewer-open && !(Nav.voice-view && Bridge.voice-connected): ChatView { }
                 }
-                if Nav.page == Page.server && Nav.right-panel-open: ResizeHandle {
+                // The members panel, or the pins or the topics in its place.
+                if Nav.page == Page.server && root.side-panel: ResizeHandle {
                     size <=> Nav.right-panel-width;
                     minimum: Theme.right-panel-min;
                     maximum: Theme.right-panel-max;
                     left: false;
                 }
-                if Nav.page == Page.server && Nav.right-panel-open: Panel {
+                if Nav.page == Page.server && root.side-panel: Panel {
                     width: Nav.right-panel-width;
                     horizontal-stretch: 0;
-                    StreamsPanel { }
+                    if Nav.pins-open: PinsDrawer { }
+                    if Nav.topics-open && !Nav.pins-open: TopicsDrawer { }
+                    if !Nav.pins-open && !Nav.topics-open: MembersPanel { }
                 }
                 if Nav.page == Page.settings: Sidebar {
                     SettingsNav { }
@@ -205,7 +197,7 @@ export component MainWindow inherits Window {
             clicked => { Bridge.open-member(-1); }
         }
         MemberCardPopup {
-            x: max(8px, parent.width - self.width - (Nav.narrow ? 8px : Nav.right-panel-open && Nav.page == Page.server ? Nav.right-panel-width + 24px : 32px));
+            x: max(8px, parent.width - self.width - (Nav.narrow ? 8px : root.side-panel && Nav.page == Page.server ? Nav.right-panel-width + 24px : 32px));
             y: max(8px, min(parent.height - self.height - 8px, 120px));
         }
     }
@@ -216,7 +208,7 @@ export component MainWindow inherits Window {
             clicked => { Nav.emoji-open = false; }
         }
         EmojiPicker {
-            x: max(8px, parent.width - self.width - (Nav.narrow ? 8px : Nav.right-panel-open && Nav.page == Page.server ? Nav.right-panel-width + 40px : 32px));
+            x: max(8px, parent.width - self.width - (Nav.narrow ? 8px : root.side-panel && Nav.page == Page.server ? Nav.right-panel-width + 40px : 32px));
             y: max(8px, parent.height - self.height - (Nav.narrow ? 150px : 90px));
             // Picked for a message: a reaction; otherwise the composer.
             picked(cell) => {

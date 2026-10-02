@@ -6,7 +6,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, ChatLine, ReactionItem, FileItem, Images } from "../bridge.slint";
 import { Nav } from "../nav.slint";
-import { Icon, IconButton, Avatar, Chip, TabItem, TextField, RichText, Banner, Button, ButtonKind, Spinner, Tooltip, SpeakingBars, ListView } from "../components/index.slint";
+import { Icon, IconButton, Avatar, Chip, TabItem, TextField, RichText, Banner, Button, ButtonKind, Spinner, Tooltip, ListView } from "../components/index.slint";
 
 // The header of the main area: an icon, a title and a description, and
 // actions (@children) at the right.
@@ -58,161 +58,75 @@ export component PageHeader inherits Rectangle {
     }
 }
 
-// The voice connection as one strip: where we are, who talks, and the
-// controls. Shown over the chat while voice is connected.
-export component VoiceBar inherits Rectangle {
-    height: 46px;
-    background: Theme.surface-2.transparentize(0.25);
-    accessible-role: AccessibleRole.groupbox;
-    accessible-label: @tr("Voice");
-    Rectangle {
-        y: parent.height - 1px;
-        height: 1px;
-        background: Theme.border;
-    }
-    HorizontalLayout {
-        padding-left: Theme.space-5;
-        padding-right: Theme.space-3;
-        spacing: Theme.space-3;
-        Rectangle {
-            width: 8px;
-            height: 8px;
-            y: (parent.height - self.height) / 2;
-            border-radius: 4px;
-            background: Bridge.voice-connected ? Theme.success : Theme.warning;
-        }
-        VerticalLayout {
-            alignment: center;
-            Text {
-                text: Bridge.voice-connected ? @tr("Voice connected") : @tr("Connecting…");
-                color: Bridge.voice-connected ? Theme.success : Theme.warning;
-                font-size: Theme.font-xs;
-                font-weight: Theme.weight-semibold;
-            }
-            Text {
-                text: Bridge.own-channel != "" ? Bridge.own-channel + " / " + Bridge.server-title : Bridge.server-title;
-                color: Theme.text-muted;
-                font-size: Theme.font-xs;
-                overflow: elide;
-            }
-        }
-        // Who is talking right now.
-        Rectangle {
-            horizontal-stretch: 1;
-            HorizontalLayout {
-                alignment: start;
-                padding-left: Theme.space-3;
-                spacing: -6px;
-                for member in Bridge.members: Rectangle {
-                    width: member.talking ? 28px : 0px;
-                    visible: member.talking;
-                    Avatar {
-                        size: 26px;
-                        initials: member.initials;
-                        tint: member.tint;
-                        image: member.avatar;
-                        speaking: true;
-                        label: member.name;
-                    }
-                }
-            }
-        }
-        if Bridge.transmitting: VerticalLayout {
-            alignment: center;
-            SpeakingBars { }
-        }
-        IconButton {
-            icon: Bridge.input-muted ? Icons.mic-off : Icons.mic;
-            label: Bridge.input-muted ? @tr("Microphone off") : @tr("Microphone on");
-            checked: Bridge.input-muted;
-            danger: true;
-            size: 32px;
-            icon-size: Theme.icon-sm;
-            y: (parent.height - self.height) / 2;
-            clicked => { Bridge.set-input-muted(!Bridge.input-muted); }
-        }
-        IconButton {
-            icon: Bridge.output-muted ? Icons.headphone-off : Icons.headphones;
-            label: Bridge.output-muted ? @tr("Sound off") : @tr("Sound on");
-            checked: Bridge.output-muted;
-            danger: true;
-            size: 32px;
-            icon-size: Theme.icon-sm;
-            y: (parent.height - self.height) / 2;
-            clicked => { Bridge.set-output-muted(!Bridge.output-muted); }
-        }
-        if Bridge.streams-available && Bridge.can-share: IconButton {
-            icon: Icons.monitor-up;
-            label: Bridge.share-state == "live" ? @tr("Sharing") : @tr("Share screen");
-            checked: Bridge.share-state == "live";
-            size: 32px;
-            icon-size: Theme.icon-sm;
-            y: (parent.height - self.height) / 2;
-            clicked => { Nav.open-share(); }
-        }
-        IconButton {
-            icon: Icons.layout-grid;
-            label: @tr("Voice channel");
-            checked: Nav.voice-grid;
-            size: 32px;
-            icon-size: Theme.icon-sm;
-            y: (parent.height - self.height) / 2;
-            clicked => { Nav.voice-grid = !Nav.voice-grid; }
-        }
-        IconButton {
-            icon: Icons.phone-off;
-            label: @tr("Disconnect");
-            size: 32px;
-            icon-size: Theme.icon-sm;
-            tint: Theme.danger;
-            y: (parent.height - self.height) / 2;
-            clicked => { Bridge.disconnect-voice(); }
-        }
-    }
-}
-
-// The emoji under a message; clicking one adds or removes ours.
-component Reactions inherits HorizontalLayout {
+// The emoji under a message; clicking one adds or removes ours, the last
+// pill picks another.
+export component Reactions inherits HorizontalLayout {
     in property <int> key;
     in property <[ReactionItem]> model;
-    spacing: Theme.space-2;
+    spacing: Theme.space-3;
     alignment: start;
     for reaction in root.model: Rectangle {
-        width: pill.preferred-width + 16px;
-        height: 24px;
+        width: pill.preferred-width + 22px;
+        height: 30px;
         border-radius: Theme.radius-pill;
-        background: reaction.me ? Theme.accent-soft : Theme.surface-2;
+        background: reaction.me ? Theme.accent-soft : area.has-hover ? Theme.surface-3 : Theme.surface-2;
         border-width: 1px;
-        border-color: reaction.me ? Theme.accent : Theme.border;
+        border-color: reaction.me ? Theme.accent : Theme.border-strong;
         accessible-role: AccessibleRole.button;
         accessible-label: @tr("{} reacted {} times", reaction.text, reaction.count);
         accessible-checkable: true;
         accessible-checked: reaction.me;
         accessible-action-default => { Bridge.react(root.key, reaction.text); }
-        TouchArea {
+        area := TouchArea {
             mouse-cursor: MouseCursor.pointer;
             clicked => { Bridge.react(root.key, reaction.text); }
         }
         pill := HorizontalLayout {
-            spacing: Theme.space-2;
+            spacing: Theme.space-3;
             alignment: center;
             if reaction.key != "": Image {
-                width: 15px;
-                height: 15px;
+                width: 18px;
+                height: 18px;
                 source: Images.emoji(reaction.key);
                 y: (parent.height - self.height) / 2;
             }
             if reaction.key == "": Text {
                 text: reaction.text;
-                font-size: Theme.font-sm;
+                font-size: Theme.font-body;
                 vertical-alignment: center;
             }
             Text {
                 text: reaction.count;
                 color: reaction.me ? Theme.accent-text : Theme.text-secondary;
-                font-size: Theme.font-xs;
+                font-size: Theme.font-sm;
                 font-weight: Theme.weight-semibold;
                 vertical-alignment: center;
+            }
+        }
+    }
+    if Bridge.has-reactions: Rectangle {
+        width: 40px;
+        height: 30px;
+        border-radius: Theme.radius-pill;
+        background: add.has-hover ? Theme.surface-3 : Theme.surface-2;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        accessible-role: AccessibleRole.button;
+        accessible-label: @tr("Add a reaction");
+        accessible-action-default => {
+            Nav.react-key = root.key;
+            Nav.emoji-open = true;
+        }
+        Icon {
+            source: Icons.smile-plus;
+            size: 18px;
+            tint: Theme.text-secondary;
+        }
+        add := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                Nav.react-key = root.key;
+                Nav.emoji-open = true;
             }
         }
     }
@@ -222,22 +136,23 @@ component Reactions inherits HorizontalLayout {
 component FileCard inherits Rectangle {
     in property <int> key;
     in property <FileItem> file;
-    height: 56px;
-    border-radius: Theme.radius-md;
+    height: 64px;
+    border-radius: Theme.radius-lg;
     background: Theme.surface-2;
     border-width: 1px;
-    border-color: file.state == "failed" ? Theme.danger : Theme.border;
+    border-color: file.state == "failed" ? Theme.danger : Theme.border-strong;
     accessible-role: AccessibleRole.groupbox;
     accessible-label: file.name;
     HorizontalLayout {
         padding: Theme.space-3;
-        spacing: Theme.space-3;
+        padding-left: Theme.space-4;
+        spacing: Theme.space-4;
         Rectangle {
-            width: 34px;
-            height: 34px;
+            width: 40px;
+            height: 40px;
             y: (parent.height - self.height) / 2;
-            border-radius: Theme.radius-sm;
-            background: Theme.accent-soft;
+            border-radius: 20px;
+            background: Theme.surface-4;
             Icon {
                 source: file.picture ? Icons.image : Icons.file-text;
                 size: Theme.icon-md;
@@ -251,13 +166,14 @@ component FileCard inherits Rectangle {
             Text {
                 text: file.name;
                 color: Theme.text;
+                font-size: Theme.font-md;
                 font-weight: Theme.weight-medium;
                 overflow: elide;
             }
             Text {
                 text: file.detail;
-                color: file.state == "failed" ? Theme.danger : Theme.text-muted;
-                font-size: Theme.font-xs;
+                color: file.state == "failed" ? Theme.danger : Theme.text-secondary;
+                font-size: Theme.font-sm;
                 overflow: elide;
             }
             if file.state == "running": Rectangle {
@@ -351,7 +267,7 @@ export component MessageRow inherits Rectangle {
     in property <ChatLine> line;
     // The pins and topic lists show messages without their actions.
     in property <bool> actions: true;
-    property <length> avatar: 40px;
+    property <length> avatar: 44px;
     min-height: body.preferred-height;
     background: line.marked ? Theme.accent-soft : hover.has-hover ? Theme.surface-2.transparentize(0.6) : transparent;
     accessible-role: AccessibleRole.list-item;
@@ -364,8 +280,8 @@ export component MessageRow inherits Rectangle {
     body := HorizontalLayout {
         padding-left: Theme.space-6;
         padding-right: Theme.space-6;
-        padding-top: line.continued ? 1px : Theme.space-4;
-        padding-bottom: 1px;
+        padding-top: line.continued ? 2px : Theme.space-5;
+        padding-bottom: 2px;
         spacing: Theme.space-4;
         VerticalLayout {
             width: root.avatar;
@@ -387,14 +303,14 @@ export component MessageRow inherits Rectangle {
                 Text {
                     text: line.author;
                     color: line.relayed ? Theme.accent-text : Theme.name-text;
-                    font-size: Theme.font-md;
-                    font-weight: Theme.weight-semibold;
+                    font-size: Theme.font-lg;
+                    font-weight: Theme.weight-medium;
                     vertical-alignment: center;
                 }
                 Text {
                     text: line.time;
                     color: Theme.text-muted;
-                    font-size: Theme.font-xs;
+                    font-size: Theme.font-sm;
                     vertical-alignment: center;
                 }
                 if line.relayed: Chip {
@@ -425,11 +341,13 @@ export component MessageRow inherits Rectangle {
             if !line.blocked && !line.rich && line.text != "": Text {
                 text: line.text;
                 color: Theme.text;
+                font-size: Theme.font-md;
                 wrap: word-wrap;
             }
             if !line.blocked && line.rich: RichText {
                 runs: line.runs;
-                emoji-size: line.jumbo ? 44px : Theme.font-body * 1.4;
+                font-size: Theme.font-md;
+                emoji-size: line.jumbo ? 44px : Theme.font-md * 1.4;
             }
             if line.files.length > 0 && !line.blocked: VerticalLayout {
                 padding-top: Theme.space-2;
@@ -438,7 +356,7 @@ export component MessageRow inherits Rectangle {
                 for file in line.files: FileCard {
                     key: line.key;
                     file: file;
-                    max-width: 420px;
+                    max-width: 440px;
                 }
             }
             if line.reactions.length > 0: VerticalLayout {
@@ -460,7 +378,7 @@ export component MessageRow inherits Rectangle {
 }
 
 // The messages of the current chat (or of an open topic).
-component MessageList inherits VerticalLayout {
+export component MessageList inherits VerticalLayout {
     in property <[ChatLine]> model;
     in property <bool> older;
     if Bridge.local-history: Rectangle {
@@ -508,31 +426,36 @@ component MessageList inherits VerticalLayout {
     }
 }
 
-// The composer: emoji, attachment and the text field.
-component Composer inherits HorizontalLayout {
+// The composer: a round attach button, the text field with the emoji
+// picker and send.
+export component Composer inherits HorizontalLayout {
     in property <string> placeholder;
     in property <bool> topic;
     padding: Theme.space-4;
     padding-left: Theme.space-5;
     padding-right: Theme.space-5;
     spacing: Theme.space-3;
+    // Files go to the channel's file browser and a link into the chat.
+    if !root.topic: IconButton {
+        icon: Icons.plus;
+        label: @tr("Attach a file");
+        round: true;
+        filled: true;
+        size: 44px;
+        y: (parent.height - self.height) / 2;
+        clicked => { Bridge.attach-file(); }
+    }
     Rectangle {
         horizontal-stretch: 1;
         min-height: 48px;
         border-radius: Theme.radius-lg;
         background: Theme.surface-2;
         border-width: 1px;
-        border-color: input.has-focus ? Theme.accent : Theme.border;
+        border-color: input.has-focus ? Theme.accent : Theme.border-strong;
         HorizontalLayout {
-            padding-left: Theme.space-3;
+            padding-left: Theme.space-5;
             padding-right: Theme.space-2;
             spacing: Theme.space-2;
-            IconButton {
-                icon: Icons.paperclip;
-                label: @tr("Attach a file");
-                y: (parent.height - self.height) / 2;
-                clicked => { Bridge.attach-file(); }
-            }
             input := TextField {
                 text <=> Nav.draft;
                 bare: true;
@@ -564,7 +487,7 @@ component Composer inherits HorizontalLayout {
                 label: @tr("Send");
                 round: true;
                 enabled: input.text != "";
-                tint: input.text != "" ? Theme.on-accent : Theme.text-muted;
+                tint: input.text != "" ? Theme.on-accent : Theme.accent-text;
                 filled: input.text != "";
                 y: (parent.height - self.height) / 2;
                 clicked => {
@@ -595,39 +518,41 @@ export component ChatView inherits VerticalLayout {
         icon: root.tab-kind == 1 ? Icons.hash : root.tab-kind == 2 ? Icons.at-sign : Icons.message-square;
         title: root.tab-name;
         description: root.tab-topic != "" ? root.tab-topic : Bridge.server-title;
-        if Bridge.presence-source != "": Chip {
+        // Only when the chat does not come through our voice connection
+        // (an invisible observer or a relay).
+        if Bridge.presence-source != "" && !Bridge.voice-connected: Chip {
             text: Bridge.presence-source;
             icon: Icons.radio;
             tint: Theme.accent-text;
             y: (parent.height - self.height) / 2;
         }
-        if Bridge.has-pins: IconButton {
+        if Bridge.has-pins: Button {
             icon: Icons.pin;
-            label: @tr("Pinned messages");
+            text: @tr("Pinned Messages");
             checked: Nav.pins-open;
             y: (parent.height - self.height) / 2;
             clicked => { Nav.show-pins(!Nav.pins-open); }
         }
-        if Bridge.has-topics: IconButton {
-            icon: Icons.messages-square;
-            label: @tr("Topics");
+        if Bridge.has-topics: Button {
+            icon: Icons.book-open;
+            text: @tr("Topics");
             checked: Nav.topics-open;
             y: (parent.height - self.height) / 2;
             clicked => { Nav.show-topics(!Nav.topics-open); }
         }
-        if !Bridge.viewer-open && !Nav.right-panel-open && Bridge.streams.length > 0: Button {
-            small: true;
-            icon: Icons.monitor-up;
-            text: @tr("Streams ({})", Bridge.streams.length);
+        // The voice channel we are in, with the people and the streams.
+        if Bridge.voice-connected: IconButton {
+            icon: Icons.volume-2;
+            label: @tr("Voice channel");
             y: (parent.height - self.height) / 2;
-            clicked => { Nav.right-panel-open = true; }
+            clicked => { Nav.show-voice(true); }
         }
         IconButton {
             icon: Icons.users;
-            label: @tr("Members and streams");
-            checked: Nav.right-panel-open;
+            label: @tr("Members");
+            checked: Nav.right-panel-open && !Nav.pins-open && !Nav.topics-open;
             y: (parent.height - self.height) / 2;
-            clicked => { Nav.right-panel-open = !Nav.right-panel-open; }
+            clicked => { Nav.toggle-members(); }
         }
     }
     if Bridge.crash-notice != "": Rectangle {
@@ -683,7 +608,6 @@ export component ChatView inherits VerticalLayout {
             }
         }
     }
-    if Bridge.voice-connected || Bridge.voice-connecting: VoiceBar { }
     // The open topic replaces the chat.
     if Bridge.current-topic >= 0: Rectangle {
         height: 44px;
