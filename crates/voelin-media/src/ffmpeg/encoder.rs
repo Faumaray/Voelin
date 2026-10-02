@@ -1682,14 +1682,14 @@ fn drm_vendors() -> &'static [u32] {
 /// standard error meanwhile lands in the file too and comes back as one
 /// `debug` record. `VOELIN_FFMPEG_PROBE_STDERR=1` leaves it alone.
 struct QuietStderr {
-	#[cfg(unix)]
+	#[cfg(target_os = "linux")]
 	saved: std::os::fd::OwnedFd,
-	#[cfg(unix)]
+	#[cfg(target_os = "linux")]
 	file: std::path::PathBuf,
 }
 
 impl QuietStderr {
-	#[cfg(unix)]
+	#[cfg(target_os = "linux")]
 	fn start() -> Option<Self> {
 		use std::os::fd::AsFd;
 
@@ -1707,26 +1707,28 @@ impl QuietStderr {
 		Some(Self { saved, file })
 	}
 
-	#[cfg(not(unix))]
+	#[cfg(not(target_os = "linux"))]
 	fn start() -> Option<Self> {
 		None
 	}
 }
 
-#[cfg(unix)]
 impl Drop for QuietStderr {
 	fn drop(&mut self) {
-		use std::os::fd::AsFd;
+		#[cfg(target_os = "linux")]
+		{
+			use std::os::fd::AsFd;
 
-		let _ = std::io::Write::flush(&mut std::io::stderr());
-		let _ = rustix::stdio::dup2_stderr(self.saved.as_fd());
-		if let Ok(text) = std::fs::read_to_string(&self.file) {
-			let text = text.trim();
-			if !text.is_empty() {
-				tracing::debug!(target: "ffmpeg", "the encoder libraries wrote:\n{text}");
+			let _ = std::io::Write::flush(&mut std::io::stderr());
+			let _ = rustix::stdio::dup2_stderr(self.saved.as_fd());
+			if let Ok(text) = std::fs::read_to_string(&self.file) {
+				let text = text.trim();
+				if !text.is_empty() {
+					tracing::debug!(target: "ffmpeg", "the encoder libraries wrote:\n{text}");
+				}
 			}
+			let _ = std::fs::remove_file(&self.file);
 		}
-		let _ = std::fs::remove_file(&self.file);
 	}
 }
 
@@ -2266,7 +2268,10 @@ mod tests {
 
 		// The buffers: the driver's own (tiled), and a LINEAR one with a
 		// padded pitch in system memory, which is what the portal negotiates.
+		#[cfg(target_os = "linux")]
 		let linear = linear_dmabuf(&picture, (SIZE.0 as usize * 4).next_multiple_of(256));
+		#[cfg(not(target_os = "linux"))]
+		let linear: Option<((), DmaBufRef)> = None;
 		if linear.is_none() {
 			eprintln!("no /dev/udmabuf: the LINEAR buffer is skipped");
 		}
@@ -2332,6 +2337,7 @@ mod tests {
 
 	/// `struct udmabuf_create` of `<linux/udmabuf.h>`, and `UDMABUF_CREATE`
 	/// returning the new DMA-BUF.
+	#[cfg(target_os = "linux")]
 	#[repr(C)]
 	struct UdmabufCreate {
 		memfd: u32,
@@ -2342,6 +2348,7 @@ mod tests {
 
 	// SAFETY: `UDMABUF_CREATE` (`_IOW('u', 0x42, struct udmabuf_create)`)
 	// only reads the struct and returns a new descriptor.
+	#[cfg(target_os = "linux")]
 	unsafe impl rustix::ioctl::Ioctl for UdmabufCreate {
 		type Output = std::os::fd::OwnedFd;
 		const IS_MUTATING: bool = false;
@@ -2367,6 +2374,7 @@ mod tests {
 	/// bytes apart: `/dev/udmabuf` over a sealed memfd. The descriptor has
 	/// to outlive the returned buffer. `None` without access to
 	/// `/dev/udmabuf`.
+	#[cfg(target_os = "linux")]
 	fn linear_dmabuf(
 		picture: &VideoFrame,
 		stride: usize,
