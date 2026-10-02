@@ -4,8 +4,9 @@
 //! is — on a thread of its own and at a lower rate than the video, because
 //! segmentation costs far more than a frame does and a mask is still good
 //! enough a few frames later. The frame path takes the newest mask through a
-//! latest-wins handoff, upsamples and feathers it, and mixes the person over a
-//! background it makes with [`blur_rgba`], an image or a colour.
+//! latest-wins handoff, samples it up to the frame (nearest: the mask's own
+//! soft edge is the feathering) and mixes the person over a background it
+//! makes with [`blur_rgba`], an image or a colour.
 //!
 //! The blur is a three-pass box blur (which approximates a Gaussian closely
 //! enough that nobody sees the difference at these radii), separable and with
@@ -75,7 +76,7 @@ impl Mask {
 		self.data.resize(width as usize * height as usize, 0);
 	}
 
-	/// The mask value at a point of a `width` x `height` frame, bilinear.
+	/// The mask value at a point of a `width` x `height` frame (nearest).
 	fn sample(&self, x: u32, y: u32, width: u32, height: u32) -> u8 {
 		let fx = (u64::from(x) * u64::from(self.width) / u64::from(width.max(1))) as u32;
 		let fy = (u64::from(y) * u64::from(self.height) / u64::from(height.max(1))) as u32;

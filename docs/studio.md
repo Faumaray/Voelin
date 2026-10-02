@@ -115,7 +115,8 @@ Anything but `keep` runs a `BackgroundFilter` on the source's own thread: the
 segmenter gets a copy reduced to 256 pixels wide on a thread of its own and
 makes a mask at 10 fps (a mask a few frames old is still right, and
 segmentation costs far more than a frame); the frame path takes the newest
-mask latest-wins, samples it up and mixes the subject over the backdrop. The
+mask latest-wins, samples it up (nearest; the edge is only as soft as the
+mask's own) and mixes the subject over the backdrop. The
 blur is a three-pass box blur (close to a Gaussian), separable, with a
 running sum so its cost does not grow with the radius, in bands on a worker
 pool over pooled buffers.
