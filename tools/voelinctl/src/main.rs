@@ -11,6 +11,7 @@ mod probe;
 mod query;
 mod session;
 mod stream;
+mod studio;
 mod tree;
 mod versions;
 mod voice;
@@ -22,7 +23,7 @@ use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-/// Counts heap allocations for `stream bench`.
+/// Counts heap allocations for `stream bench` and `studio bench`.
 #[global_allocator]
 static ALLOCATOR: alloc::Counting = alloc::Counting;
 
@@ -65,6 +66,9 @@ enum Command {
 	ProbeStream(probe::ProbeStreamArgs),
 	/// Stream tools that need no server (`bench`).
 	Stream(bench::StreamToolArgs),
+	/// The Stream Studio headless: run a scene file (preview picture,
+	/// recording, replay clip, WHIP), bench the compositor, list cameras.
+	Studio(studio::StudioArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -262,6 +266,7 @@ fn main() -> Result<()> {
 		Command::Engine(args) => tokio::runtime::Runtime::new()?.block_on(client::run(args)),
 		Command::ProbeStream(args) => tokio::runtime::Runtime::new()?.block_on(probe::run(args)),
 		Command::Stream(args) => bench::run(args),
+		Command::Studio(args) => studio::run(args),
 	}
 }
 
