@@ -33,6 +33,9 @@ pipewire = ["dep:ashpd", "dep:pipewire", "dep:memmap2", "dep:rustix"]
 wlroots = ["dep:wayland-client", "dep:wayland-protocols", "dep:wayland-protocols-wlr", "dep:memmap2", "dep:rustix"]
 # Conversion between `Codec` and `str0m::format::Codec`.
 str0m = ["dep:str0m"]
+# The studio's WHIP output: a WebRTC session (str0m) set up over HTTP. Needs
+# str0m's crypto provider, the same one voelin-stream uses.
+whip = ["str0m", "str0m/aws-lc-rs", "dep:reqwest"]
 
 [dependencies]
 bzip2 = { version = "0.6.1", optional = true }
@@ -43,6 +46,11 @@ openh264 = { version = "0.9.8", default-features = false, features = ["libloadin
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"], optional = true }
 # Lock-free single-producer rings from capture threads to the stream mixer.
 rtrb = "0.4.0"
+# Scene graphs are serialised into the `studio.scenes` setting.
+serde = { version = "1", features = ["derive"] }
+# Studio sources: text rasterising and image files.
+ab_glyph = "0.2.32"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 sha2 = { version = "0.10.9", optional = true }
 str0m = { version = "0.23.1", default-features = false, optional = true }
 thiserror = "2.0.21"
@@ -51,7 +59,7 @@ tracing = "0.1.44"
 yuv = "0.8.19"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-ashpd = { version = "0.13.13", default-features = false, features = ["screencast", "tokio"], optional = true }
+ashpd = { version = "0.13.13", default-features = false, features = ["camera", "screencast", "tokio"], optional = true }
 memmap2 = { version = "0.9.11", optional = true }
 pipewire = { version = "0.10.1", optional = true }
 rustix = { version = "1.1.5", features = ["event", "fs"], optional = true }
@@ -71,6 +79,7 @@ windows-capture = "2.0.1"
 
 [dev-dependencies]
 criterion = "0.8"
+serde_json = "1"
 # Logs of integration tests (`RUST_LOG`).
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }

@@ -38,7 +38,7 @@ pub mod playback;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod portal;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
-mod pw;
+pub(crate) mod pw;
 pub mod synthetic;
 #[cfg(windows)]
 pub mod windows;
@@ -60,6 +60,8 @@ pub enum SourceId {
 	Portal,
 	/// The synthetic test pattern.
 	Synthetic,
+	/// The Stream Studio's composite ([`crate::studio::StudioCapture`]).
+	Studio,
 }
 
 /// A source as shown in a picker.

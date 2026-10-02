@@ -16,7 +16,9 @@
 //! [`Engine::subscribe_frames`] for the frames of watched streams. The audio
 //! of watched streams plays through the session's speakers by itself
 //! ([`Command::SetStreamVolume`]); capture, encoding and decoding of video
-//! are in [`media`] (feature `media`).
+//! are in [`media`] (feature `media`), and the Stream Studio (scenes of
+//! sources composited into one stream, recording, a replay buffer, WHIP) in
+//! [`studio`].
 //!
 //! Settings are a [`settings::Settings`] service: typed keys, runtime
 //! values stored in the client database ahead of command line, config file
@@ -56,6 +58,8 @@ mod route;
 mod session;
 pub mod settings;
 pub mod stream;
+#[cfg(feature = "media")]
+pub mod studio;
 mod voice;
 
 use std::collections::HashMap;

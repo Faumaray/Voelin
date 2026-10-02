@@ -23,7 +23,8 @@ use crate::{Error, Result};
 /// Fixed-point scale of filter weights.
 const ONE: u32 = 1 << 14;
 /// Fractional bits kept between the vertical and the horizontal pass.
-const MID_BITS: u32 = 6;
+/// [`crate::studio::compose`] uses the same two-pass layout for RGBA.
+pub(crate) const MID_BITS: u32 = 6;
 
 /// Filter taps of one output coordinate: source index of the first tap, and
 /// where its weights start.
@@ -36,14 +37,14 @@ struct Taps {
 
 /// The filter along one axis.
 #[derive(Clone, Debug, Default)]
-struct Axis {
+pub(crate) struct Axis {
 	taps: Vec<Taps>,
 	weights: Vec<u32>,
 }
 
 impl Axis {
 	/// Weights (summing to [`ONE`]) mapping `src` samples to `dst`.
-	fn new(src: usize, dst: usize) -> Self {
+	pub(crate) fn new(src: usize, dst: usize) -> Self {
 		let mut axis = Self { taps: Vec::with_capacity(dst), weights: Vec::new() };
 		let ratio = src as f64 / dst as f64;
 		let mut scratch: Vec<(usize, f64)> = Vec::new();
@@ -92,7 +93,8 @@ impl Axis {
 		self.taps.push(Taps { start: taps[0].0 as u32, len: taps.len() as u32, weights: offset });
 	}
 
-	fn get(&self, o: usize) -> (usize, &[u32]) {
+	/// Source index of the first tap of output `o`, and its weights.
+	pub(crate) fn get(&self, o: usize) -> (usize, &[u32]) {
 		let t = self.taps[o];
 		(t.start as usize, &self.weights[t.weights as usize..(t.weights + t.len) as usize])
 	}

@@ -1,7 +1,8 @@
 //! Stream media (feature `media`): capture and encoding for our stream,
 //! decoding for the streams we watch.
 //!
-//! - [`Streamer`] captures a screen or window, encodes the video with the
+//! - [`Streamer`] captures a screen or window (or the Stream Studio's
+//!   composite, [`Streamer::start_studio`]), encodes the video with the
 //!   codec our offer carries ([`stream_codec`], VP8 by default) in one or
 //!   more simulcast layers ([`LayerSpec`]), and mixes any number of audio
 //!   sources ([`AudioSourceSpec`]: desktop audio without Voelin's own
@@ -31,7 +32,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -52,6 +53,8 @@ use voelin_media::mix::{
 };
 pub use voelin_media::mix::{Level, SourceState};
 use voelin_media::scale::Pyramid;
+use voelin_media::studio::Studio;
+use voelin_media::studio::output::{Packet, Track};
 use voelin_media::{Codec, Codecs, ContentHint, EncoderConfig, FrameRef, VideoEncoder, VideoFrame};
 pub use voelin_media::{EncoderBackend, EncoderPreference};
 use voelin_stream::{
@@ -761,11 +764,30 @@ struct Shared {
 	encoders: Mutex<Option<(Codecs, EncoderPreference)>>,
 	/// Bumped when `encoders` changes: those encoders are made again.
 	encoders_generation: AtomicU64,
+	/// The studio whose composite this is ([`Streamer::start_studio`]): its
+	/// outputs get every packet of the stream codec, attached or not.
+	studio: Option<Arc<Studio>>,
 }
+
+/// The sink of a studio's streamer while no stream is attached: the frames
+/// are still encoded, for the studio's recording and replay buffer.
+struct Unattached;
+
+impl MediaSink for Unattached {
+	fn send(&self, _frame: EncodedFrame) -> bool {
+		true
+	}
+
+	fn take_keyframe_request(&self) -> bool {
+		false
+	}
+}
+
+static UNATTACHED: LazyLock<Arc<dyn MediaSink>> = LazyLock::new(|| Arc::new(Unattached));
 
 impl Shared {
 	fn sink(&self) -> Option<Arc<dyn MediaSink>> {
-		lock(&self.sink).clone()
+		lock(&self.sink).clone().or_else(|| self.studio.as_ref().map(|_| UNATTACHED.clone()))
 	}
 
 	fn stopped(&self) -> bool {
@@ -869,10 +891,33 @@ impl Streamer {
 	/// Start capturing. Must run on a Tokio runtime (the portal talks D-Bus
 	/// on it); may wait for the user in the portal's dialog.
 	pub async fn start(codecs: &Codecs, config: StreamerConfig) -> Result<Self, MediaError> {
+		Self::launch(codecs, config, None).await
+	}
+
+	/// Stream `studio`'s composite ([`SourceId::Studio`]; `config.source` is
+	/// ignored). Unlike other sources it is encoded from the start, attached
+	/// or not, and every packet of the stream codec (video of the studio's
+	/// layer, and the audio) also goes to the studio's outputs: recording
+	/// and the replay buffer work without going live, and cost no second
+	/// encode.
+	pub async fn start_studio(
+		codecs: &Codecs,
+		config: StreamerConfig,
+		studio: Arc<Studio>,
+	) -> Result<Self, MediaError> {
+		let config = StreamerConfig { source: SourceId::Studio, ..config };
+		Self::launch(codecs, config, Some(studio)).await
+	}
+
+	async fn launch(
+		codecs: &Codecs,
+		config: StreamerConfig,
+		studio: Option<Arc<Studio>>,
+	) -> Result<Self, MediaError> {
 		let fps = config.fps.max(1);
 		let layers = config.effective_layers();
 		check_layers(&layers)?;
-		let shared = Arc::new(Shared::default());
+		let shared = Arc::new(Shared { studio, ..Shared::default() });
 		shared.fps.store(fps, Ordering::Relaxed);
 		let mut streamer = Self {
 			shared: shared.clone(),
@@ -917,6 +962,16 @@ impl Streamer {
 				let mut screen = SyntheticScreen::with_pattern(w, h, config.synthetic_pattern);
 				screen.start_sink(&SourceId::Synthetic, &options, ingest).await?;
 				(Box::new(screen), None)
+			}
+			SourceId::Studio => {
+				let Some(studio) = &shared.studio else {
+					return Err(MediaError::Config(
+						"the studio's composite is streamed with Streamer::start_studio".into(),
+					));
+				};
+				let mut capture = studio.capture();
+				capture.start_sink(&SourceId::Studio, &options, ingest).await?;
+				(Box::new(capture), None)
 			}
 			#[cfg(all(target_os = "linux", feature = "media-desktop"))]
 			_ if config.source == SourceId::Portal || config.backend == CaptureBackend::Portal => {
@@ -1524,7 +1579,7 @@ impl FrameSink for Ingest {
 		shared
 			.size
 			.store(u64::from(frame.width) << 32 | u64::from(frame.height), Ordering::Relaxed);
-		if lock(&shared.sink).is_none() {
+		if shared.sink().is_none() {
 			return true;
 		}
 		let mut any = false;
@@ -1580,13 +1635,15 @@ impl LayerEncoder {
 		Self { codec: encoder.codec(), encoder: Some(encoder), keyframe_due: true, bitrate: 0, fps }
 	}
 
-	/// Encode `frame` and hand the frames to `sink`; follows the layer's
-	/// target bitrate and frame rate first.
+	/// Encode `frame` and hand the frames to `sink` (and `studio`'s
+	/// outputs); follows the layer's target bitrate and frame rate first.
+	#[allow(clippy::too_many_arguments)]
 	fn encode(
 		&mut self,
 		shared: &Shared,
 		layer: &Layer,
 		sink: &dyn MediaSink,
+		studio: Option<&Studio>,
 		frame: &VideoFrame,
 		requested: bool,
 		target: u64,
@@ -1607,6 +1664,16 @@ impl LayerEncoder {
 		let mut produced_keyframe = false;
 		let result = encoder.encode_with(frame, force, &mut |chunk| {
 			produced_keyframe |= chunk.keyframe;
+			if let Some(studio) = studio {
+				studio.write_packet(&Packet {
+					track: Track::Video { codec, layer: u32::from(layer.id) },
+					pts_90khz: chunk.pts_90khz,
+					keyframe: chunk.keyframe,
+					width: frame.width,
+					height: frame.height,
+					data: chunk.data,
+				});
+			}
 			let encoded = EncodedFrame {
 				kind: MediaKind::Video,
 				time: MediaTime::from_90khz(chunk.pts_90khz),
@@ -1683,6 +1750,9 @@ fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 		}
 		let Some(sink) = shared.sink() else { continue };
 		shared.poll_keyframes(&*sink);
+		if shared.studio.as_ref().is_some_and(|s| s.needs_keyframe(u32::from(layer.id))) {
+			layer.keyframe.store(true, Ordering::Relaxed);
+		}
 		// The codecs viewers chose; none known: the stream codec.
 		wanted.clear();
 		sink.video_codecs(&mut wanted);
@@ -1742,11 +1812,12 @@ fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 		let target = sink.layer_bitrate(layer.id).unwrap_or(configured).clamp(1, cap);
 		let started = Instant::now();
 		if primary_on {
-			primary.encode(shared, layer, &*sink, &frame, requested, target);
+			let studio = shared.studio.as_deref();
+			primary.encode(shared, layer, &*sink, studio, &frame, requested, target);
 			layer.target.store(primary.bitrate, Ordering::Relaxed);
 		}
 		for encoder in &mut extra {
-			encoder.encode(shared, layer, &*sink, &frame, requested, target);
+			encoder.encode(shared, layer, &*sink, None, &frame, requested, target);
 		}
 		layer.encode_ns.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 		layer.encoded.fetch_add(1, Ordering::Relaxed);
@@ -1853,9 +1924,11 @@ fn stats_loop(shared: &Shared) {
 /// The mixer thread: every 20 ms (on the monotonic clock) one Opus frame
 /// of the mix, encoded while a sink is attached. The RTP time is the
 /// frame's number since the start, so it follows real time across
-/// silences and stalls.
+/// silences and stalls. A studio's streamer counts from the studio's epoch
+/// instead, the clock of its video, so its recordings stay in sync.
 fn audio_loop(shared: &Shared, mut mixer: StreamMixer, mut encoder: VoiceEncoder) {
-	let mut clock = BlockClock::new(OPUS_FRAME);
+	let start = shared.studio.as_ref().map_or_else(Instant::now, |s| s.epoch());
+	let mut clock = BlockClock::starting_at(start, OPUS_FRAME);
 	let mut block = vec![0.0f32; OPUS_FRAME * 2];
 	while !shared.stopped() {
 		let now = Instant::now();
@@ -1875,6 +1948,16 @@ fn audio_loop(shared: &Shared, mut mixer: StreamMixer, mut encoder: VoiceEncoder
 					continue;
 				}
 			};
+			if let Some(studio) = &shared.studio {
+				studio.write_packet(&Packet {
+					track: Track::Audio { channels: 2 },
+					pts_90khz: frame * OPUS_FRAME as u64 * 90_000 / u64::from(MIX_RATE),
+					keyframe: true,
+					width: 0,
+					height: 0,
+					data: &data,
+				});
+			}
 			let time = MediaTime::new(frame * OPUS_FRAME as u64, Frequency::FORTY_EIGHT_KHZ);
 			let frame =
 				EncodedFrame { kind: MediaKind::Audio, time, data, layer: 0, keyframe: false };
