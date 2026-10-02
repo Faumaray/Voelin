@@ -8,17 +8,24 @@
 #
 # WAYLAND_DISPLAY is removed so the window opens on the Xvfb server and not
 # on the desktop of a Wayland session (winit prefers Wayland when it can).
+# The screen is twice the window's size, so the pointer (in its middle) is
+# not over the window and nothing shows as hovered. FFmpeg stays off: the
+# pictures need no hardware encoders, and probing them can crash in some
+# drivers. Extra arguments (`--set ui.theme=light`) come from $ARGS.
 set -eu
 out=$1
 open=$2
 size=${3:-1440x960}
+w=${size%x*}
+h=${size#*x}
 bin=${VOELIN_BIN:-$CARGO_TARGET_DIR/debug/voelin}
 env -u WAYLAND_DISPLAY \
 	SLINT_BACKEND=winit-software \
+	VOELIN_FFMPEG=0 \
 	VOELIN_DATA_DIR="$(mktemp -d)" \
 	VOELIN_DEMO_UI=1 \
 	VOELIN_OPEN="$open" \
 	VOELIN_WINDOW_SIZE="$size" \
 	VOELIN_SCREENSHOT="$out" \
 	VOELIN_SCREENSHOT_DELAY="${DELAY:-4}" \
-	xvfb-run -a -s "-screen 0 ${size}x24" "$bin" >/dev/null 2>&1
+	xvfb-run -a -s "-screen 0 $((w * 2))x$((h * 2))x24" "$bin" ${ARGS:-} >/dev/null 2>&1

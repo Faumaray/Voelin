@@ -14,7 +14,11 @@
 //!   `server`, `settings[:<section>]` (voice, keybinds, streaming, privacy,
 //!   appearance, or 0-4), `about`, `share`, `bookmark` (add a server),
 //!   `emoji` (the picker), `client` (the volume dialog of the first other
-//!   client once connected), `panel` / `no-panel` (the right panel),
+//!   client once connected), `panel` / `no-panel` (the members panel),
+//!   `voice` (the voice channel view), `pins`, `topics` (the drawers),
+//!   `topic:<id>` (a topic's messages), `member` (the member card of the
+//!   first other client), `watch` (the first stream; with sample data the
+//!   local test pattern in its place), `popout` (the same, popped out),
 //!   `tab:<home|servers|chat|activity|you>` (phone layout).
 //! - `VOELIN_AUTOWATCH=1`: watch the first stream that shows up.
 //! - `VOELIN_AUTOSHARE=test-pattern`: share the test pattern (accepting
