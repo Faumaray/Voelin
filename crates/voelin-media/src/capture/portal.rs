@@ -11,9 +11,13 @@
 //! (`BGRx` / `BGRA` / `RGBx` / `RGBA`) second, so compositors without
 //! DMA-BUF support use shared memory. When reading DMA-BUFs turns out slow
 //! (buffers in memory the CPU reads uncached, e.g. a discrete GPU's VRAM),
-//! the stream switches to shared memory. Tiled DMA-BUFs would need a GPU
-//! import and are not offered. Frames go to the [`FrameSink`] while the
-//! buffer is dequeued; nothing is copied before conversion. The frame rate
+//! the stream switches to shared memory. A sink that
+//! [accepts DMA-BUFs](FrameSink::accepts_dmabuf) (a VA-API encoder, which
+//! converts and encodes them on the GPU) gets them before anything is
+//! mapped, and then the CPU never reads them. Tiled DMA-BUFs are not
+//! offered: the modifiers the encoder's driver imports are not known here.
+//! Frames go to the [`FrameSink`] while the buffer is dequeued; nothing is
+//! copied before conversion. The frame rate
 //! follows the sink's cap: the compositor is asked for up to that rate and
 //! sends frames when the screen changes.
 
@@ -31,7 +35,7 @@ use pw::spa::pod::{
 use pw::spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Fraction, Id, Rectangle, SpaTypes};
 use tracing::{debug, warn};
 
-use crate::capture::dmabuf::DmaBufMap;
+use crate::capture::dmabuf::{self, DmaBufMap};
 use crate::capture::pw::{PwThread, pod, serialize};
 use crate::capture::{
 	BoxFuture, CaptureOptions, CaptureSource, DRM_MOD_LINEAR, DmaBufRef, FrameSink, QueueSink,
@@ -600,7 +604,12 @@ fn process(stream: &pw::stream::Stream, state: &mut VideoState) {
 			fourcc,
 			modifier: format.modifier.map_or(DRM_MOD_LINEAR, |m| m as u64),
 			fd: data.fd(),
-			size: (raw.mapoffset + raw.maxsize) as usize,
+			// As for the mapping below: compositors leave `maxsize` 0 for
+			// a DMA-BUF, whose size is its buffer object's.
+			size: match (raw.mapoffset + raw.maxsize) as usize {
+				0 => dmabuf::size_of(data.fd()).unwrap_or(raw.mapoffset as usize + needed),
+				size => size,
+			},
 			planes: [(raw.mapoffset as usize + offset, stride), (0, 0), (0, 0), (0, 0)],
 			plane_count: 1,
 		};

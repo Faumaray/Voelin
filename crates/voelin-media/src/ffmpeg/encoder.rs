@@ -1098,7 +1098,7 @@ impl FfmpegEncoder {
 	/// this frame's packet came out (the encoder reads them one frame deep).
 	/// RGB buffers (`XR24`, `AR24`, `XB24`, `AB24`: what screen capture
 	/// delivers) are converted into the session's NV12 surfaces on the GPU
-	/// (VA-API video processing, [`vpp`]), cropped to the coded size, and
+	/// (VA-API video processing), cropped to the coded size, and
 	/// are no longer read when this returns.
 	///
 	/// Anything else fails with `Error::CodecUnavailable`; callers then map
