@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use super::layout::{self, HwFramesFields};
 use super::sys::{self, FrameHead, PacketHead, Ptr, Rational, cstr};
-use super::{Ffmpeg, take_log};
+use super::{Ffmpeg, take_log, vpp};
 use crate::capture::{DmaBufRef, drm_fourcc};
 use crate::codec::hw::EncoderFactory;
 use crate::codec::{
@@ -452,6 +452,20 @@ fn vaapi_device(ffmpeg: &Ffmpeg) -> std::result::Result<Ptr, String> {
 		.map_err(Clone::clone)
 }
 
+/// The `VADisplay` of the process's VA-API device (the first field of its
+/// `AVVAAPIDeviceContext`).
+fn vaapi_display(ffmpeg: &Ffmpeg) -> std::result::Result<vpp::Display, String> {
+	let device = vaapi_device(ffmpeg)?;
+	let name = cstr("vaapi");
+	// SAFETY: a C string; `device` is a live VA-API device reference, whose
+	// API context starts with the display.
+	unsafe {
+		let kind = (ffmpeg.api.av_hwdevice_find_type_by_name)(name.as_ptr());
+		let hwctx = layout::device_hwctx(device, kind)?;
+		Ok(layout::read::<Ptr>(hwctx, 0))
+	}
+}
+
 /// FFmpeg's recent messages, appended to an error.
 fn log_suffix(context: &str) -> String {
 	let log = take_log(context);
@@ -503,6 +517,8 @@ struct Session {
 	hw: Ptr,
 	packet: Ptr,
 	last_pts: Option<i64>,
+	/// A frame went in (so there is something to flush).
+	sent: bool,
 	/// No packet came out yet: the first one starts the stream, so it is a
 	/// keyframe even where the wrapper does not flag it (rav1e).
 	first_packet: bool,
@@ -511,11 +527,54 @@ struct Session {
 	opened: Instant,
 	timestamps: Timestamps,
 	nv12: bool,
+	/// RGB DMA-BUFs: made on the first one; why not, if they cannot be.
+	rgb: Option<std::result::Result<RgbImport, String>>,
 }
 
 // SAFETY: the FFmpeg objects belong to this session alone and are used from
 // one thread at a time (`&mut self`).
 unsafe impl Send for Session {}
+
+/// What RGB DMA-BUFs need on their way into the session's NV12 surfaces:
+/// a frames context of their own size to be mapped onto (FFmpeg gives an
+/// imported surface the size of the destination's frames context, and the
+/// session's has the coded size), the frame that holds the mapping, and
+/// the GPU colour conversion.
+struct RgbImport {
+	pool: Ptr,
+	mapped: Ptr,
+	size: (u32, u32),
+	converter: vpp::Converter,
+}
+
+// SAFETY: as `Session`, which owns it.
+unsafe impl Send for RgbImport {}
+
+impl Drop for RgbImport {
+	fn drop(&mut self) {
+		let api = &Ffmpeg::get().expect("an import exists only with FFmpeg").api;
+		// SAFETY: both are NULL or ours.
+		unsafe {
+			(api.av_frame_free)(&mut self.mapped);
+			(api.av_buffer_unref)(&mut self.pool);
+		}
+	}
+}
+
+/// The VA-API surface of a VA-API frame (`data[3]`, `hwcontext_vaapi.h`).
+///
+/// # Safety
+/// `frame` must be a live frame of format `AV_PIX_FMT_VAAPI` holding a
+/// surface.
+unsafe fn surface_id(frame: Ptr) -> std::ffi::c_uint {
+	// SAFETY: guaranteed by the caller.
+	unsafe { (*frame.cast::<FrameHead>()).data[3] as usize as std::ffi::c_uint }
+}
+
+/// The DRM formats of RGB buffers the conversion takes (8 bits per
+/// channel, 4 bytes per pixel; what screen capture offers).
+const RGB_FOURCCS: [u32; 4] =
+	[drm_fourcc(b"XR24"), drm_fourcc(b"AR24"), drm_fourcc(b"XB24"), drm_fourcc(b"AB24")];
 
 impl Drop for Session {
 	fn drop(&mut self) {
@@ -705,10 +764,12 @@ impl FfmpegEncoder {
 			hw: std::ptr::null_mut(),
 			packet: std::ptr::null_mut(),
 			last_pts: None,
+			sent: false,
 			first_packet: true,
 			opened: Instant::now(),
 			timestamps: Timestamps::new(),
 			nv12: self.spec.input != Input::Yuv420p,
+			rgb: None,
 		};
 		// SAFETY: `ctx` is a live codec context; the first child is its
 		// private options object (NULL if the codec has none).
@@ -771,7 +832,7 @@ impl FfmpegEncoder {
 			self.apply(ctx, private, setting)?;
 		}
 		if self.spec.is_vaapi() {
-			session.pool = self.vaapi_pool(width, height)?;
+			session.pool = self.vaapi_pool(width, height, self.ffmpeg.pix.nv12)?;
 			let offset = self.ffmpeg.codec_hw_frames.clone().map_err(|e| self.unavailable(e))?;
 			// SAFETY: `offset` is AVCodecContext.hw_frames_ctx (checked at
 			// load); the context takes the new reference and frees it.
@@ -821,8 +882,9 @@ impl FfmpegEncoder {
 		Ok(session)
 	}
 
-	/// A VA-API surface pool (NV12) for `width` x `height`.
-	fn vaapi_pool(&self, width: u32, height: u32) -> Result<Ptr> {
+	/// A VA-API surface pool of `sw_format` (an `AVPixelFormat`) for `width`
+	/// x `height`.
+	fn vaapi_pool(&self, width: u32, height: u32, sw_format: c_int) -> Result<Ptr> {
 		let api = &self.ffmpeg.api;
 		let device = vaapi_device(self.ffmpeg).map_err(|e| self.unavailable(e))?;
 		let vaapi =
@@ -846,7 +908,7 @@ impl FfmpegEncoder {
 		let ret = unsafe {
 			let ctx = (*pool.cast::<sys::BufferRefHead>()).data.cast::<std::ffi::c_void>();
 			layout::write::<c_int>(ctx, fields.format, vaapi);
-			layout::write::<c_int>(ctx, fields.sw_format, self.ffmpeg.pix.nv12);
+			layout::write::<c_int>(ctx, fields.sw_format, sw_format);
 			layout::write::<c_int>(ctx, fields.width, width as c_int);
 			layout::write::<c_int>(ctx, fields.height, height as c_int);
 			// Surfaces are allocated on demand and recycled by the pool.
@@ -953,6 +1015,14 @@ impl FfmpegEncoder {
 		frame: Ptr,
 		out: &mut dyn FnMut(EncodedChunk<'_>),
 	) -> Result<bool> {
+		if frame.is_null() && !session.sent {
+			// Nothing to flush, and FFmpeg 9's VA-API encoders crash when
+			// drained before their first frame (h264_vaapi on an RX 7900
+			// GRE: SIGSEGV in avcodec_send_frame), which is what dropping an
+			// encoder whose first frame failed (a DMA-BUF import, a surface
+			// upload) used to do.
+			return Ok(false);
+		}
 		let api = &self.ffmpeg.api;
 		let mut keyframe = false;
 		loop {
@@ -965,6 +1035,7 @@ impl FfmpegEncoder {
 			if ret < 0 && ret != sys::EOF {
 				return Err(self.error("send", ret));
 			}
+			session.sent |= !frame.is_null();
 			break;
 		}
 		keyframe |= self.drain(session, out)?;
@@ -1018,17 +1089,20 @@ impl FfmpegEncoder {
 		result
 	}
 
-	/// Encode a frame that is still in a DMA-BUF, without a copy: the buffer
-	/// becomes a VA-API surface (`av_hwframe_map` of a DRM PRIME frame) that
-	/// the encoder reads directly.
+	/// Encode a frame that is still in a DMA-BUF, without the CPU reading
+	/// it: the buffer becomes a VA-API surface (`av_hwframe_map` of a DRM
+	/// PRIME frame).
 	///
-	/// VA-API backends and NV12 buffers only: the RGB frames screen capture
-	/// delivers first need a colour conversion on the GPU (VA-API video
-	/// processing), which is not implemented. Anything else fails with
-	/// `Error::CodecUnavailable`; callers then map the buffer and use
-	/// [`encode_with`](VideoEncoder::encode_with). The buffer must stay
-	/// unchanged until this frame's packet came out (the encoder reads it
-	/// asynchronously, one frame deep).
+	/// VA-API backends only. NV12 buffers go to the encoder as they are
+	/// (their size must be one it encodes exactly), and stay in use until
+	/// this frame's packet came out (the encoder reads them one frame deep).
+	/// RGB buffers (`XR24`, `AR24`, `XB24`, `AB24`: what screen capture
+	/// delivers) are converted into the session's NV12 surfaces on the GPU
+	/// (VA-API video processing, [`vpp`]), cropped to the coded size, and
+	/// are no longer read when this returns.
+	///
+	/// Anything else fails with `Error::CodecUnavailable`; callers then map
+	/// the buffer and use [`encode_with`](VideoEncoder::encode_with).
 	pub fn encode_dmabuf(
 		&mut self,
 		frame: &DmaBufRef,
@@ -1038,36 +1112,30 @@ impl FfmpegEncoder {
 		if !self.spec.is_vaapi() {
 			return Err(self.unavailable(format!("{} does not import DMA-BUFs", self.spec.name)));
 		}
-		if frame.fourcc != drm_fourcc(b"NV12") || frame.plane_count != 2 {
-			return Err(self.unavailable(
-				"only NV12 DMA-BUFs are imported (RGB needs GPU colour conversion)".into(),
-			));
+		let rgb = RGB_FOURCCS.contains(&frame.fourcc) && frame.plane_count == 1;
+		if !rgb && (frame.fourcc != drm_fourcc(b"NV12") || frame.plane_count != 2) {
+			return Err(self.unavailable("only NV12 and RGB DMA-BUFs are imported".into()));
 		}
-		if self.coded_size(frame.width, frame.height) != (frame.width, frame.height) {
+		if !rgb && self.coded_size(frame.width, frame.height) != (frame.width, frame.height) {
 			return Err(self.unavailable(format!(
 				"{}x{} is not a size {} encodes exactly",
 				frame.width, frame.height, self.spec.name
 			)));
 		}
 		let refs = self.ffmpeg.frame_refs.clone().map_err(|e| self.unavailable(e))?;
-		let drm_prime =
-			self.ffmpeg.pix.drm_prime.ok_or_else(|| self.unavailable("no DRM PRIME".into()))?;
-		let vaapi = self.ffmpeg.pix.vaapi.ok_or_else(|| self.unavailable("no VA-API".into()))?;
 		let (mut session, force) = self.prepare(frame.width, frame.height, force_keyframe, out)?;
-		let result = self.import_and_send(&mut session, frame, force, refs, drm_prime, vaapi, out);
+		let result = self.import_and_send(&mut session, frame, rgb, force, refs, out);
 		self.session = Some(session);
 		result
 	}
 
-	#[allow(clippy::too_many_arguments)] // the parts of one import
 	fn import_and_send(
 		&mut self,
 		session: &mut Session,
 		frame: &DmaBufRef,
+		rgb: bool,
 		force: bool,
 		refs: layout::FrameRefs,
-		drm_prime: c_int,
-		vaapi: c_int,
 		out: &mut dyn FnMut(EncodedChunk<'_>),
 	) -> Result<()> {
 		let api = &self.ffmpeg.api;
@@ -1086,6 +1154,96 @@ impl FfmpegEncoder {
 			}
 			self.dmabuf_checked = true;
 		}
+		let (pool, hw) = (session.pool, session.hw);
+		if rgb {
+			let import = self.rgb_import(session, frame)?;
+			self.map_dmabuf(frame, import.pool, import.mapped, refs)?;
+			// SAFETY: `hw` is our frame (unreferenced after each frame), the
+			// pool the session's; both surfaces belong to the process's
+			// device, the converter's display.
+			let converted = unsafe {
+				let ret = (api.av_hwframe_get_buffer)(pool, hw, 0);
+				let converted = if ret < 0 {
+					Err(self.error("VA-API surface", ret))
+				} else {
+					let done = import.converter.convert(surface_id(import.mapped), surface_id(hw));
+					done.map_err(|e| self.unavailable(e))
+				};
+				// The buffer has been read: the mapping can go.
+				(api.av_frame_unref)(import.mapped);
+				converted
+			};
+			if let Err(e) = converted {
+				// SAFETY: our frame.
+				unsafe { (api.av_frame_unref)(hw) };
+				return Err(e);
+			}
+		} else {
+			self.map_dmabuf(frame, pool, hw, refs)?;
+		}
+		let pts =
+			self.stamp(session, frame.timestamp, (frame.timestamp.as_micros() * 9 / 100) as u64);
+		let pict_type = if force { sys::PICTURE_TYPE_I } else { sys::PICTURE_TYPE_NONE };
+		// SAFETY: offsets checked at load for this release's AVFrame; `hw`
+		// holds a surface until the unref.
+		unsafe {
+			layout::write::<i64>(hw, self.ffmpeg.frame.pts, pts);
+			layout::write::<c_int>(hw, self.ffmpeg.frame.pict_type, pict_type);
+		}
+		let result = self.send(session, hw, out);
+		// SAFETY: our frame; the encoder holds its own reference.
+		unsafe { (api.av_frame_unref)(hw) };
+		result.map(|_| ())
+	}
+
+	/// The session's [`RgbImport`] for `frame`, made on first use (again
+	/// when the buffers change size within the session's coded size).
+	fn rgb_import<'s>(&self, session: &'s mut Session, frame: &DmaBufRef) -> Result<&'s RgbImport> {
+		let size = (frame.width, frame.height);
+		let stale = match &session.rgb {
+			None => true,
+			Some(Ok(import)) => import.size != size,
+			Some(Err(_)) => false,
+		};
+		if stale {
+			session.rgb = None;
+			session.rgb = Some(self.new_rgb_import(size, (session.width, session.height)));
+		}
+		match session.rgb.as_ref().expect("made above") {
+			Ok(import) => Ok(import),
+			Err(e) => Err(self.unavailable(e.clone())),
+		}
+	}
+
+	fn new_rgb_import(
+		&self,
+		size: (u32, u32),
+		coded: (u32, u32),
+	) -> std::result::Result<RgbImport, String> {
+		let bgr0 = self.ffmpeg.pix.bgr0.ok_or("no bgr0 pixel format")?;
+		let display = vaapi_display(self.ffmpeg)?;
+		let converter = vpp::Converter::new(display, coded.0, coded.1)?;
+		let pool = self.vaapi_pool(size.0, size.1, bgr0).map_err(|e| e.to_string())?;
+		// SAFETY: an allocation (NULL is freed as nothing by the drop).
+		let mapped = unsafe { (self.ffmpeg.api.av_frame_alloc)() };
+		let import = RgbImport { pool, mapped, size, converter };
+		if import.mapped.is_null() { Err("out of memory".into()) } else { Ok(import) }
+	}
+
+	/// Map DMA-BUF `frame` onto a VA-API surface in `dst` (one of our
+	/// frames), which gets a reference to `pool`: the import takes that
+	/// frames context's size and device.
+	fn map_dmabuf(
+		&self,
+		frame: &DmaBufRef,
+		pool: Ptr,
+		dst: Ptr,
+		refs: layout::FrameRefs,
+	) -> Result<()> {
+		let api = &self.ffmpeg.api;
+		let drm_prime =
+			self.ffmpeg.pix.drm_prime.ok_or_else(|| self.unavailable("no DRM PRIME".into()))?;
+		let vaapi = self.ffmpeg.pix.vaapi.ok_or_else(|| self.unavailable("no VA-API".into()))?;
 		let mut descriptor =
 			sys::DrmFrameDescriptor { nb_objects: 1, nb_layers: 1, ..Default::default() };
 		descriptor.objects[0] =
@@ -1098,8 +1256,6 @@ impl FfmpegEncoder {
 			*plane =
 				sys::DrmPlane { object_index: 0, offset: offset as isize, pitch: pitch as isize };
 		}
-		let pts =
-			self.stamp(session, frame.timestamp, (frame.timestamp.as_micros() * 9 / 100) as u64);
 		// SAFETY: the descriptor lives in a buffer the source frame owns
 		// (buf[0], checked offset), so FFmpeg can keep it while mapped; the
 		// destination frame gets a reference to the pool at the checked
@@ -1120,22 +1276,16 @@ impl FfmpegEncoder {
 			(*head).height = frame.height as c_int;
 			(*head).data[0] = data;
 			layout::write::<Ptr>(src, refs.buf, buffer);
-			let dst = session.hw;
 			(*dst.cast::<FrameHead>()).format = vaapi;
-			layout::write::<Ptr>(dst, refs.hw_frames_ctx, (api.av_buffer_ref)(session.pool));
+			layout::write::<Ptr>(dst, refs.hw_frames_ctx, (api.av_buffer_ref)(pool));
 			let ret = (api.av_hwframe_map)(dst, src, sys::HWFRAME_MAP_READ);
 			(api.av_frame_free)(&mut src);
 			if ret < 0 {
 				(api.av_frame_unref)(dst);
 				return Err(self.error("DMA-BUF import", ret));
 			}
-			let pict_type = if force { sys::PICTURE_TYPE_I } else { sys::PICTURE_TYPE_NONE };
-			layout::write::<i64>(dst, self.ffmpeg.frame.pts, pts);
-			layout::write::<c_int>(dst, self.ffmpeg.frame.pict_type, pict_type);
-			let result = self.send(session, dst, out);
-			(api.av_frame_unref)(dst);
-			result.map(|_| ())
 		}
+		Ok(())
 	}
 
 	/// The pts of a frame taken at `timestamp`: frame numbers at the
@@ -1878,110 +2028,458 @@ mod tests {
 		assert_eq!(alignment_of(258, 4096), 2, "not an alignment: left alone");
 	}
 
+	fn usable(name: &str) -> bool {
+		probe().iter().any(|s| s.spec.name == name && s.available.is_ok())
+	}
+
+	/// A VA-API surface of `sw_format` (holding `picture`, BGRA, if given)
+	/// exported as a DRM PRIME DMA-BUF: what a compositor hands over,
+	/// tiling modifier and all. The buffer is valid while this lives.
+	struct Exported {
+		pool: Ptr,
+		surface: Ptr,
+		drm: Ptr,
+		frame: DmaBufRef,
+	}
+
+	impl Exported {
+		fn new(
+			(width, height): (u32, u32),
+			sw_format: c_int,
+			fourcc: u32,
+			picture: Option<&VideoFrame>,
+		) -> Self {
+			let ffmpeg = Ffmpeg::get().unwrap();
+			let api = &ffmpeg.api;
+			let encoder = FfmpegEncoder::new("h264_vaapi", EncoderConfig::default()).unwrap();
+			let pool = encoder.vaapi_pool(width, height, sw_format).expect("a VA-API surface pool");
+			// SAFETY: `pool` is a live frames context of this process's
+			// VA-API device; the frames are ours and freed by the drop. The
+			// exported frame's `data[0]` is the AVDRMFrameDescriptor FFmpeg
+			// filled, valid while the frame holds the mapping.
+			unsafe {
+				let mut exported = Exported {
+					pool,
+					surface: (api.av_frame_alloc)(),
+					drm: (api.av_frame_alloc)(),
+					frame: DmaBufRef {
+						width,
+						height,
+						timestamp: Duration::ZERO,
+						fourcc,
+						modifier: 0,
+						fd: -1,
+						size: 0,
+						planes: [(0, 0); 4],
+						plane_count: 0,
+					},
+				};
+				let (surface, drm) = (exported.surface, exported.drm);
+				assert!(!surface.is_null() && !drm.is_null());
+				let ret = (api.av_hwframe_get_buffer)(pool, surface, 0);
+				assert!(ret >= 0, "av_hwframe_get_buffer: {}", api.error_text(ret));
+				if let Some(picture) = picture {
+					let FrameData::Bgra(pixels) = &picture.data else { panic!("BGRA only") };
+					let mut sw = (api.av_frame_alloc)();
+					let head = sw.cast::<FrameHead>();
+					((*head).width, (*head).height) = (width as c_int, height as c_int);
+					(*head).format = sw_format;
+					assert!((api.av_frame_get_buffer)(sw, 0) >= 0);
+					let stride = (*head).linesize[0] as usize;
+					let rows =
+						std::slice::from_raw_parts_mut((*head).data[0], stride * height as usize);
+					for (y, row) in rows.chunks_exact_mut(stride).enumerate() {
+						row[..width as usize * 4]
+							.copy_from_slice(pixels.row(y, width as usize * 4));
+					}
+					let ret = (api.av_hwframe_transfer_data)(surface, sw, 0);
+					(api.av_frame_free)(&mut sw);
+					assert!(ret >= 0, "upload: {}", api.error_text(ret));
+				}
+				(*drm.cast::<FrameHead>()).format = ffmpeg.pix.drm_prime.expect("DRM PRIME");
+				let ret = (api.av_hwframe_map)(
+					drm,
+					surface,
+					sys::HWFRAME_MAP_READ | sys::HWFRAME_MAP_DIRECT,
+				);
+				assert!(ret >= 0, "this driver cannot export a VA-API surface as a DMA-BUF");
+				let descriptor =
+					*(*drm.cast::<FrameHead>()).data[0].cast::<sys::DrmFrameDescriptor>();
+				assert_eq!(descriptor.nb_objects, 1, "one buffer object");
+				// The driver may describe a surface one plane per layer (NV12
+				// as R8 for Y and GR88 for UV) rather than as one layer, which
+				// is how a compositor hands it over. Both name the same bytes
+				// of the same object, so flatten the layers into planes.
+				let object = descriptor.objects[0];
+				let frame = &mut exported.frame;
+				for layer in &descriptor.layers[..descriptor.nb_layers as usize] {
+					for plane in &layer.planes[..layer.nb_planes as usize] {
+						frame.planes[frame.plane_count] =
+							(plane.offset as usize, plane.pitch as usize);
+						frame.plane_count += 1;
+					}
+				}
+				(frame.modifier, frame.fd, frame.size) =
+					(object.format_modifier, object.fd, object.size);
+				assert!(frame.fd >= 0 && frame.size > 0);
+				exported
+			}
+		}
+	}
+
+	impl Drop for Exported {
+		fn drop(&mut self) {
+			let api = &Ffmpeg::get().unwrap().api;
+			// SAFETY: ours; the mapping goes before the surface it maps.
+			unsafe {
+				(api.av_frame_free)(&mut self.drm);
+				(api.av_frame_free)(&mut self.surface);
+				(api.av_buffer_unref)(&mut self.pool);
+			}
+		}
+	}
+
+	/// Our decoder for `codec`, if this build and machine have one: OpenH264
+	/// with `VOELIN_OPENH264_LIB`, dav1d with `--features av1`.
+	fn decoder(codec: Codec) -> Option<Box<dyn crate::codec::VideoDecoder>> {
+		match codec {
+			#[cfg(feature = "openh264")]
+			Codec::H264 => {
+				let path = std::env::var_os("VOELIN_OPENH264_LIB")?;
+				let library = crate::codec::h264::OpenH264::load(path).ok()?;
+				Some(Box::new(library.decoder().ok()?))
+			}
+			#[cfg(feature = "av1")]
+			Codec::Av1 => Some(Box::new(crate::codec::av1::Dav1dDecoder::new().ok()?)),
+			_ => None,
+		}
+	}
+
 	/// The zero-copy path with a real DMA-BUF, on the GPU.
 	///
-	/// The probe reports the import as available from the offsets alone, and
-	/// screen capture hands over RGB, which the import refuses, so no frame
-	/// had ever gone through it. This makes a VA-API surface, exports it as
-	/// a DRM PRIME DMA-BUF (what a compositor would hand us, tiling
-	/// modifier and all) and feeds it back to a second encoder through
-	/// [`FfmpegEncoder::encode_dmabuf`], so the import, the
-	/// `AVFrame.hw_frames_ctx` check and the encode are exercised for real.
+	/// The probe reports the import as available from the offsets alone, so
+	/// this makes a VA-API surface, exports it as a DMA-BUF and feeds it back
+	/// to an encoder through [`FfmpegEncoder::encode_dmabuf`]: the import,
+	/// the `AVFrame.hw_frames_ctx` check and the encode, for real.
 	///
 	/// Skipped without a working `h264_vaapi`.
 	#[test]
 	fn a_dmabuf_really_reaches_a_vaapi_encoder() {
-		const SIZE: (u32, u32) = (320, 240);
-		if !probe().iter().any(|s| s.spec.name == "h264_vaapi" && s.available.is_ok()) {
+		if !usable("h264_vaapi") {
 			eprintln!("no usable h264_vaapi, skipped");
 			return;
 		}
-		let ffmpeg = Ffmpeg::get().expect("probed above");
-		let api = &ffmpeg.api;
-		let source = FfmpegEncoder::new("h264_vaapi", EncoderConfig::default()).unwrap();
-		let mut pool = source.vaapi_pool(SIZE.0, SIZE.1).expect("a VA-API surface pool");
-		let drm_prime = ffmpeg.pix.drm_prime.expect("DRM PRIME");
-
-		// SAFETY: `pool` is a live frames context of this process's VA-API
-		// device; both frames are ours and freed below. The exported frame's
-		// `data[0]` is the AVDRMFrameDescriptor FFmpeg filled, valid while
-		// the frame holds the mapping.
-		let exported = unsafe {
-			let surface = (api.av_frame_alloc)();
-			let drm = (api.av_frame_alloc)();
-			assert!(!surface.is_null() && !drm.is_null());
-			let ret = (api.av_hwframe_get_buffer)(pool, surface, 0);
-			assert!(ret >= 0, "av_hwframe_get_buffer: {}", api.error_text(ret));
-			(*drm.cast::<FrameHead>()).format = drm_prime;
-			let ret =
-				(api.av_hwframe_map)(drm, surface, sys::HWFRAME_MAP_READ | sys::HWFRAME_MAP_DIRECT);
-			let mapped = (ret >= 0).then(|| {
-				let descriptor =
-					*(*drm.cast::<FrameHead>()).data[0].cast::<sys::DrmFrameDescriptor>();
-				assert_eq!(descriptor.nb_objects, 1, "one buffer object");
-				// The driver describes the surface one plane per layer (R8
-				// for Y, GR88 for UV) rather than as one NV12 layer, which
-				// is how a compositor hands it over. Both name the same
-				// bytes of the same object, so flatten the layers into the
-				// planes of one NV12 buffer.
-				let object = descriptor.objects[0];
-				let mut planes = [(0usize, 0usize); 4];
-				let mut count = 0;
-				for layer in &descriptor.layers[..descriptor.nb_layers as usize] {
-					for plane in &layer.planes[..layer.nb_planes as usize] {
-						planes[count] = (plane.offset as usize, plane.pitch as usize);
-						count += 1;
-					}
-				}
-				DmaBufRef {
-					width: SIZE.0,
-					height: SIZE.1,
-					timestamp: Duration::ZERO,
-					fourcc: drm_fourcc(b"NV12"),
-					modifier: object.format_modifier,
-					fd: object.fd,
-					size: object.size,
-					planes,
-					plane_count: count,
-				}
-			});
-			// The descriptor is copied out, but the file descriptor belongs
-			// to the mapping, so the encode has to happen before these go.
-			(mapped, surface, drm)
-		};
-		let (frame, mut surface, mut drm) = exported;
-		let Some(frame) = frame else {
-			// SAFETY: allocated above.
-			unsafe {
-				(api.av_frame_free)(&mut drm);
-				(api.av_frame_free)(&mut surface);
-				(api.av_buffer_unref)(&mut pool);
-			}
-			panic!("this driver cannot export a VA-API surface as a DMA-BUF");
-		};
+		let nv12 = Ffmpeg::get().unwrap().pix.nv12;
+		let exported = Exported::new((320, 240), nv12, drm_fourcc(b"NV12"), None);
+		let frame = exported.frame;
 		assert_eq!(frame.plane_count, 2, "NV12 has two planes");
-		assert!(frame.fd >= 0 && frame.size > 0);
-
 		let mut encoder = FfmpegEncoder::new("h264_vaapi", EncoderConfig::default()).unwrap();
 		let mut packets = 0;
 		let mut keyframe = false;
-		let result = encoder.encode_dmabuf(&frame, true, &mut |chunk| {
-			packets += 1;
-			keyframe |= chunk.keyframe;
-		});
-		drop(encoder);
-		// SAFETY: allocated above; the encode is done with the mapping.
-		unsafe {
-			(api.av_frame_free)(&mut drm);
-			(api.av_frame_free)(&mut surface);
-			(api.av_buffer_unref)(&mut pool);
-		}
-		result.expect("the DMA-BUF was imported and encoded");
+		encoder
+			.encode_dmabuf(&frame, true, &mut |chunk| {
+				packets += 1;
+				keyframe |= chunk.keyframe;
+			})
+			.expect("the DMA-BUF was imported and encoded");
 		assert!(packets > 0 && keyframe, "{packets} packets, keyframe {keyframe}");
 		eprintln!(
 			"imported a {}x{} NV12 DMA-BUF (modifier {:#x}) into h264_vaapi: {packets} packet(s)",
 			frame.width, frame.height, frame.modifier
 		);
+	}
+
+	/// An RGB DMA-BUF, what screen capture hands over, converted to NV12 on
+	/// the GPU: the conversion against the CPU's ([`convert`]), then through
+	/// the encoders to our decoders. 642x362 is not a size the AV1 encoder of
+	/// an RDNA3 GPU encodes exactly, so there the conversion also crops.
+	///
+	/// Skipped without a working `h264_vaapi`; the decoding without
+	/// decoders.
+	#[test]
+	fn an_rgb_dmabuf_is_converted_on_the_gpu() {
+		const SIZE: (u32, u32) = (642, 362);
+		if !usable("h264_vaapi") {
+			eprintln!("no usable h264_vaapi, skipped");
+			return;
+		}
+		let ffmpeg = Ffmpeg::get().unwrap();
+		let api = &ffmpeg.api;
+		let screen = crate::capture::synthetic::SyntheticScreen::with_pattern(
+			SIZE.0,
+			SIZE.1,
+			crate::capture::synthetic::Pattern::Desktop,
+		);
+		let picture = screen.frame(3, 30);
+		let rgb =
+			Exported::new(SIZE, ffmpeg.pix.bgr0.unwrap(), drm_fourcc(b"XR24"), Some(&picture));
+		assert_eq!(rgb.frame.plane_count, 1);
+
+		// The conversion alone: the GPU's NV12 against the CPU's I420.
+		let converter =
+			vpp::Converter::new(vaapi_display(ffmpeg).unwrap(), SIZE.0, SIZE.1).unwrap();
+		let encoder = FfmpegEncoder::new("h264_vaapi", EncoderConfig::default()).unwrap();
+		let mut pool = encoder.vaapi_pool(SIZE.0, SIZE.1, ffmpeg.pix.nv12).unwrap();
+		let cpu = convert::to_i420(&picture).unwrap();
+		let FrameData::I420 { y, u, v } = &cpu.data else { unreachable!() };
+		let (w, h, cw, ch) =
+			(SIZE.0 as usize, SIZE.1 as usize, SIZE.0 as usize / 2, SIZE.1 as usize / 2);
+		let mut gpu = [Vec::new(), Vec::new(), Vec::new()];
+		// SAFETY: frames and pool are ours and freed below; the downloaded
+		// planes hold `linesize * rows` bytes.
+		unsafe {
+			let (mut out, mut sw) = ((api.av_frame_alloc)(), (api.av_frame_alloc)());
+			assert!((api.av_hwframe_get_buffer)(pool, out, 0) >= 0);
+			converter.convert(surface_id(rgb.surface), surface_id(out)).expect("converted");
+			(*sw.cast::<FrameHead>()).format = ffmpeg.pix.nv12;
+			assert!((api.av_hwframe_transfer_data)(sw, out, 0) >= 0, "download");
+			let head = &*sw.cast::<FrameHead>();
+			let plane = |i: usize, rows: usize| {
+				let stride = head.linesize[i] as usize;
+				std::slice::from_raw_parts(head.data[i], stride * rows).chunks_exact(stride)
+			};
+			for row in plane(0, h) {
+				gpu[0].extend_from_slice(&row[..w]);
+			}
+			for row in plane(1, ch) {
+				for pair in row[..cw * 2].chunks_exact(2) {
+					gpu[1].push(pair[0]);
+					gpu[2].push(pair[1]);
+				}
+			}
+			(api.av_frame_free)(&mut sw);
+			(api.av_frame_free)(&mut out);
+			(api.av_buffer_unref)(&mut pool);
+		}
+		drop(converter);
+		for (name, gpu, cpu, width, rows) in
+			[("Y", &gpu[0], y, w, h), ("U", &gpu[1], u, cw, ch), ("V", &gpu[2], v, cw, ch)]
+		{
+			let cpu: Vec<u8> = (0..rows).flat_map(|r| cpu.row(r, width).to_vec()).collect();
+			let mean = gpu.iter().zip(&cpu).map(|(a, b)| u64::from(a.abs_diff(*b))).sum::<u64>()
+				as f64 / cpu.len() as f64;
+			eprintln!("{name}: GPU and CPU conversion differ by {mean:.2} on average");
+			// Chroma differs a little at edges (another subsampling filter);
+			// another matrix, range or transfer function moves whole areas.
+			assert!(mean < 1.0, "{name} differs by {mean:.2}: another matrix, range or transfer?");
+		}
+
+		// The buffers: the driver's own (tiled), and a LINEAR one with a
+		// padded pitch in system memory, which is what the portal negotiates.
+		let linear = linear_dmabuf(&picture, (SIZE.0 as usize * 4).next_multiple_of(256));
+		if linear.is_none() {
+			eprintln!("no /dev/udmabuf: the LINEAR buffer is skipped");
+		}
+		let buffers: Vec<DmaBufRef> =
+			std::iter::once(rgb.frame).chain(linear.as_ref().map(|(_, frame)| *frame)).collect();
+
+		// Through the encoders, decoded: as good as the same picture
+		// converted and uploaded by the CPU.
+		for name in ["h264_vaapi", "av1_vaapi"] {
+			if !usable(name) {
+				continue;
+			}
+			// The lowest PSNR through the CPU path (`None`), then each buffer.
+			let paths = std::iter::once(None).chain(buffers.iter().map(Some));
+			let mut psnr = Vec::new();
+			let mut coded = (0, 0);
+			for buffer in paths {
+				let mut encoder = FfmpegEncoder::new(name, EncoderConfig::default()).unwrap();
+				let (cw, ch) = encoder.coded_size(SIZE.0, SIZE.1);
+				coded = (cw, ch);
+				let mut decoder = decoder(encoder.codec());
+				let (mut packets, mut worst) = (0, f64::INFINITY);
+				for n in 0..4u32 {
+					let timestamp = Duration::from_secs(n.into()) / 30;
+					let mut take = |chunk: EncodedChunk<'_>| {
+						packets += 1;
+						let Some(decoder) = &mut decoder else { return };
+						let Some(decoded) = decoder.decode(chunk.data).unwrap() else { return };
+						assert_eq!((decoded.width, decoded.height), (cw, ch), "{name}");
+						let mut source = picture.view();
+						(source.width, source.height) = (cw, ch);
+						worst = worst.min(convert::psnr(&source.to_frame(), &decoded).unwrap());
+					};
+					let result = match buffer {
+						Some(buffer) => {
+							let frame = DmaBufRef { timestamp, ..*buffer };
+							encoder.encode_dmabuf(&frame, n == 0, &mut take)
+						}
+						None => {
+							let frame = picture.clone().with_timestamp(timestamp);
+							encoder.encode_with(&frame, n == 0, &mut take)
+						}
+					};
+					result.unwrap_or_else(|e| panic!("{name}: {e}"));
+				}
+				assert!(packets >= 3, "{name}: {packets} packets");
+				psnr.push(worst);
+			}
+			let cpu = psnr[0];
+			for (buffer, gpu) in buffers.iter().zip(&psnr[1..]) {
+				assert!(
+					gpu.is_infinite() || *gpu > cpu - 0.5,
+					"{name}: {gpu:.1} dB against {cpu:.1}"
+				);
+				eprintln!(
+					"{name}: {}x{} XR24 DMA-BUF (modifier {:#x}, pitch {}) encoded at {}x{}, lowest \
+					 PSNR {gpu:.1} dB (the CPU path {cpu:.1} dB)",
+					SIZE.0, SIZE.1, buffer.modifier, buffer.planes[0].1, coded.0, coded.1
+				);
+			}
+		}
+	}
+
+	/// `struct udmabuf_create` of `<linux/udmabuf.h>`, and `UDMABUF_CREATE`
+	/// returning the new DMA-BUF.
+	#[repr(C)]
+	struct UdmabufCreate {
+		memfd: u32,
+		flags: u32,
+		offset: u64,
+		size: u64,
+	}
+
+	// SAFETY: `UDMABUF_CREATE` (`_IOW('u', 0x42, struct udmabuf_create)`)
+	// only reads the struct and returns a new descriptor.
+	unsafe impl rustix::ioctl::Ioctl for UdmabufCreate {
+		type Output = std::os::fd::OwnedFd;
+		const IS_MUTATING: bool = false;
+
+		fn opcode(&self) -> rustix::ioctl::Opcode {
+			rustix::ioctl::opcode::write::<UdmabufCreate>(b'u', 0x42)
+		}
+
+		fn as_ptr(&mut self) -> *mut std::ffi::c_void {
+			(&raw mut *self).cast()
+		}
+
+		unsafe fn output_from_ptr(
+			out: rustix::ioctl::IoctlOutput,
+			_: *mut std::ffi::c_void,
+		) -> rustix::io::Result<Self::Output> {
+			// SAFETY: the descriptor the kernel just made, ours to own.
+			Ok(unsafe { std::os::fd::FromRawFd::from_raw_fd(out) })
+		}
+	}
+
+	/// `picture` (BGRA) in a LINEAR DMA-BUF of system memory, rows `stride`
+	/// bytes apart: `/dev/udmabuf` over a sealed memfd. The descriptor has
+	/// to outlive the returned buffer. `None` without access to
+	/// `/dev/udmabuf`.
+	fn linear_dmabuf(
+		picture: &VideoFrame,
+		stride: usize,
+	) -> Option<(std::os::fd::OwnedFd, DmaBufRef)> {
+		use rustix::fs::{MemfdFlags, SealFlags};
+		use std::io::Write;
+		use std::os::fd::AsRawFd;
+
+		let FrameData::Bgra(pixels) = &picture.data else { return None };
+		let (w, h) = (picture.width as usize, picture.height as usize);
+		let size = (stride * h).next_multiple_of(4096);
+		let memfd = rustix::fs::memfd_create(
+			"voelin-linear-dmabuf",
+			MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
+		)
+		.ok()?;
+		let mut bytes = vec![0; size];
+		for (y, row) in bytes.chunks_exact_mut(stride).take(h).enumerate() {
+			row[..w * 4].copy_from_slice(pixels.row(y, w * 4));
+		}
+		let mut file = std::fs::File::from(memfd);
+		file.write_all(&bytes).ok()?;
+		rustix::fs::fcntl_add_seals(&file, SealFlags::SHRINK).ok()?;
+		let device =
+			std::fs::OpenOptions::new().read(true).write(true).open("/dev/udmabuf").ok()?;
+		let create = UdmabufCreate {
+			memfd: file.as_raw_fd() as u32,
+			flags: 1,
+			offset: 0,
+			size: size as u64,
+		};
+		// SAFETY: see the `Ioctl` impl; `device` is /dev/udmabuf.
+		let fd = unsafe { rustix::ioctl::ioctl(&device, create) }.ok()?;
+		let frame = DmaBufRef {
+			width: picture.width,
+			height: picture.height,
+			timestamp: Duration::ZERO,
+			fourcc: drm_fourcc(b"XR24"),
+			modifier: crate::capture::DRM_MOD_LINEAR,
+			fd: fd.as_raw_fd(),
+			size,
+			planes: [(0, stride), (0, 0), (0, 0), (0, 0)],
+			plane_count: 1,
+		};
+		Some((fd, frame))
+	}
+
+	/// What the CPU spends per frame on its way into a VA-API encoder at
+	/// 2560x1440: the shared-memory path (the picture converted to I420 on
+	/// every core, then interleaved and uploaded by `encode_with`) against
+	/// an RGB DMA-BUF converted on the GPU. CPU time is every thread of the
+	/// process (`/proc/self/task/*/schedstat`), so run it alone:
+	/// `cargo test -p voelin-media --release --lib zero_copy_cpu_cost --
+	/// --ignored --nocapture`.
+	#[test]
+	#[ignore = "a measurement, not a check"]
+	fn zero_copy_cpu_cost() {
+		const SIZE: (u32, u32) = (2560, 1440);
+		const FRAMES: u32 = 600;
+		if !usable("h264_vaapi") {
+			eprintln!("no usable h264_vaapi, skipped");
+			return;
+		}
+		let ffmpeg = Ffmpeg::get().unwrap();
+		let cpu_time = || -> Duration {
+			let tasks = std::fs::read_dir("/proc/self/task").unwrap().flatten();
+			tasks
+				.filter_map(|t| std::fs::read_to_string(t.path().join("schedstat")).ok())
+				.filter_map(|s| s.split_whitespace().next()?.parse().ok())
+				.map(Duration::from_nanos)
+				.sum()
+		};
+		let measure = |what: &str, encode: &mut dyn FnMut(Duration)| {
+			for n in 0..30 {
+				encode(Duration::from_secs(n) / 60);
+			}
+			let (cpu, wall) = (cpu_time(), Instant::now());
+			for n in 30..30 + FRAMES {
+				encode(Duration::from_secs(n.into()) / 60);
+			}
+			let per_frame = |d: Duration| d.as_secs_f64() * 1e3 / f64::from(FRAMES);
+			let (cpu, wall) = (per_frame(cpu_time() - cpu), per_frame(wall.elapsed()));
+			eprintln!(
+				"{what}: {cpu:.2} ms CPU and {wall:.2} ms wall per frame, {:.2} cores at 60 fps",
+				cpu * 60.0 / 1e3
+			);
+		};
+		let screen = crate::capture::synthetic::SyntheticScreen::with_pattern(
+			SIZE.0,
+			SIZE.1,
+			crate::capture::synthetic::Pattern::Desktop,
+		);
+		let picture = screen.frame(0, 60);
+		let config = EncoderConfig { fps: 60, bitrate_bps: 10_000_000, ..EncoderConfig::default() };
+
+		let mut converter = convert::Converter::new(0);
+		let mut i420 = VideoFrame::black_i420(SIZE.0, SIZE.1);
+		let mut encoder = FfmpegEncoder::new("h264_vaapi", config.clone()).unwrap();
+		measure("CPU: convert on every core, interleave, upload", &mut |timestamp| {
+			let mut source = picture.view();
+			source.timestamp = timestamp;
+			converter.to_i420_into(&source, &mut i420).unwrap();
+			encoder.encode_with(&i420, false, &mut |_| {}).unwrap();
+		});
+		drop(encoder);
+
+		let rgb =
+			Exported::new(SIZE, ffmpeg.pix.bgr0.unwrap(), drm_fourcc(b"XR24"), Some(&picture));
+		let mut encoder = FfmpegEncoder::new("h264_vaapi", config).unwrap();
+		measure("GPU: RGB DMA-BUF imported and converted", &mut |timestamp| {
+			let frame = DmaBufRef { timestamp, ..rgb.frame };
+			encoder.encode_dmabuf(&frame, false, &mut |_| {}).unwrap();
+		});
 	}
 
 	#[test]

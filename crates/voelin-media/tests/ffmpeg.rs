@@ -400,29 +400,46 @@ fn bitrate_changes_without_live_reconfiguration() {
 	assert!(!key(&mut encoder, 6, false));
 }
 
-/// DMA-BUF import is for VA-API encoders and NV12 buffers; anything else is
-/// refused as unavailable, so the caller maps the buffer instead.
+/// DMA-BUF import is for VA-API encoders and NV12 or RGB buffers; anything
+/// else is refused as unavailable, so the caller maps the buffer instead. A
+/// buffer the driver cannot import is an error, not a crash: the encoder
+/// takes the next frame, and drops cleanly although nothing went in (FFmpeg
+/// 9's VA-API encoders crash when drained before their first frame).
 #[cfg(target_os = "linux")]
 #[test]
 fn dmabuf_import_is_refused_cleanly() {
+	use std::os::fd::AsRawFd;
 	use voelin_media::capture::{DRM_MOD_LINEAR, DmaBufRef, drm_fourcc};
 	if ffmpeg().is_none() {
 		return;
 	}
+	let not_a_dmabuf = std::fs::File::open("/dev/null").unwrap();
 	let frame = DmaBufRef {
 		width: W,
 		height: H,
 		timestamp: Duration::ZERO,
 		fourcc: drm_fourcc(b"XR24"),
 		modifier: DRM_MOD_LINEAR,
-		fd: -1,
+		fd: not_a_dmabuf.as_raw_fd(),
 		size: (W * H * 4) as usize,
 		planes: [(0, (W * 4) as usize), (0, 0), (0, 0), (0, 0)],
 		plane_count: 1,
 	};
-	for name in ["libx264", "h264_vaapi"] {
+	let unavailable = |name: &str, frame: &DmaBufRef| {
 		let mut encoder = FfmpegEncoder::new(name, EncoderConfig::default()).unwrap();
-		let err = encoder.encode_dmabuf(&frame, true, &mut |_| {}).unwrap_err();
+		let err = encoder.encode_dmabuf(frame, true, &mut |_| {}).unwrap_err();
 		assert!(matches!(err, voelin_media::Error::CodecUnavailable { .. }), "{name}: {err}");
+	};
+	unavailable("libx264", &frame);
+	unavailable("h264_vaapi", &DmaBufRef { fourcc: drm_fourcc(b"YUYV"), ..frame });
+	if !available("h264_vaapi") {
+		return;
 	}
+	let mut encoder = FfmpegEncoder::new("h264_vaapi", EncoderConfig::default()).unwrap();
+	assert!(encoder.encode_dmabuf(&frame, true, &mut |_| {}).is_err(), "/dev/null imported");
+	drop(encoder);
+	let mut encoder = FfmpegEncoder::new("h264_vaapi", EncoderConfig::default()).unwrap();
+	assert!(encoder.encode_dmabuf(&frame, true, &mut |_| {}).is_err());
+	let black = voelin_media::VideoFrame::black_i420(W, H);
+	assert!(!encoder.encode(&black, true).unwrap().is_empty(), "no packet after a failed import");
 }

@@ -21,6 +21,7 @@ use std::sync::{Mutex, OnceLock};
 pub mod encoder;
 mod layout;
 pub mod sys;
+mod vpp;
 
 pub use encoder::{
 	BACKENDS, BackendKind, BackendSpec, BackendStatus, FfmpegEncoder, FfmpegFactory, Input, probe,
@@ -37,6 +38,8 @@ pub(crate) struct PixFmts {
 	pub nv12: c_int,
 	pub vaapi: Option<c_int>,
 	pub drm_prime: Option<c_int>,
+	/// `bgr0`: B, G, R, x in memory, the DRM `XR24` of captured screens.
+	pub bgr0: Option<c_int>,
 }
 
 /// What was loaded, for logs and the UI.
@@ -98,6 +101,7 @@ impl Ffmpeg {
 			nv12,
 			vaapi: api.pix_fmt("vaapi").or_else(|| api.pix_fmt("vaapi_vld")),
 			drm_prime: api.pix_fmt("drm_prime"),
+			bgr0: api.pix_fmt("bgr0"),
 		};
 		let codec_hw_frames = layout::codec_hw_frames(&api);
 		let frame_refs = layout::frame_refs(&api, yuv420p);

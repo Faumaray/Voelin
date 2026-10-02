@@ -14,6 +14,7 @@
 //! | `AVCodecContext.hw_frames_ctx` | VA-API input frames | next to fields that have AVOptions, whose offsets `av_opt_find` reports: before `hw_device_ctx`, `hwaccel_flags` (libavcodec 61 and later, after `err_recognition`), or two fields before `max_pixels` (up to 60) | the neighbours' option offsets must match the layout, and the field must be NULL in a new context |
 //! | `AVHWFramesContext` `initial_pool_size`, `format`, `sw_format`, `width`, `height` | creating a frame pool | after seven pointers (eight up to libavutil 58: `internal`) | `device_ctx` must equal the device and both formats must be `AV_PIX_FMT_NONE` in a new context |
 //! | `AVFrame.buf[0]`, `AVFrame.hw_frames_ctx` | importing DMA-BUFs (zero-copy) | a table per libavutil major (56-61, 64-bit only; an unlisted major disables the import) | `buf[0]` of a frame from `av_frame_get_buffer` must hold that frame's `data[0]`; `hw_frames_ctx` of a frame from `av_hwframe_get_buffer` must reference the pool |
+//! | `AVHWDeviceContext.hwctx` | the `VADisplay`, for the GPU colour conversion of RGB DMA-BUFs | right after `type`, after one pointer (two up to libavutil 58: `internal`) | `type` must be the device's type in exactly that layout |
 //!
 //! A check that fails disables only what needs the field (VA-API, or the
 //! DMA-BUF import), with the reason in the probe results. The first three
@@ -319,6 +320,51 @@ pub unsafe fn hw_frames_fields(frames: Ptr, device: Ptr) -> Result<HwFramesField
 	}
 }
 
+/// `AVHWDeviceContext` up to libavutil 58.
+#[repr(C)]
+struct DeviceWithInternal {
+	av_class: Ptr,
+	internal: Ptr,
+	kind: c_int,
+	hwctx: Ptr,
+}
+
+/// `AVHWDeviceContext` from libavutil 59 (`internal` removed).
+#[repr(C)]
+struct DevicePublic {
+	av_class: Ptr,
+	kind: c_int,
+	hwctx: Ptr,
+}
+
+/// `AVHWDeviceContext.hwctx` of `device`, a device of type `kind`: the
+/// API's own context (`AVVAAPIDeviceContext` for VA-API, whose first field
+/// is the `VADisplay`).
+///
+/// Found by `type`, which comes right before it: in the old layout the
+/// same offset holds the low half of the `internal` pointer, which is
+/// aligned and so never a small device type.
+///
+/// # Safety
+/// `device` must be a live buffer reference of an `AVHWDeviceContext`.
+pub unsafe fn device_hwctx(device: Ptr, kind: c_int) -> Result<Ptr, String> {
+	// SAFETY: guaranteed by the caller; `data` is the leading field pair,
+	// and both layouts lie within the smaller one (the current struct).
+	unsafe {
+		let ctx = (*device.cast::<BufferRefHead>()).data.cast::<std::ffi::c_void>();
+		for (kind_at, hwctx_at) in [
+			(offset_of!(DevicePublic, kind), offset_of!(DevicePublic, hwctx)),
+			(offset_of!(DeviceWithInternal, kind), offset_of!(DeviceWithInternal, hwctx)),
+		] {
+			if read::<c_int>(ctx, kind_at) == kind {
+				let hwctx: Ptr = read(ctx, hwctx_at);
+				return if hwctx.is_null() { Err("no device context".into()) } else { Ok(hwctx) };
+			}
+		}
+	}
+	Err("unknown AVHWDeviceContext layout".into())
+}
+
 /// Offsets of `buf[0]` and `hw_frames_ctx` in `AVFrame`, for importing
 /// DMA-BUFs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -435,7 +481,7 @@ mod tests {
 	/// `err_recognition` 528, `hw_frames_ctx` 552, `hw_device_ctx` 560,
 	/// `hwaccel_flags` 568, `extra_hw_frames` 572; `AVHWFramesContext`
 	/// `pool` 48, `initial_pool_size` 56, `format` 60, `sw_format` 64,
-	/// `width` 68, `height` 72.
+	/// `width` 68, `height` 72; `AVHWDeviceContext` `type` 8, `hwctx` 16.
 	#[cfg(target_pointer_width = "64")]
 	#[test]
 	fn libavutil_61_matches_the_headers() {
@@ -451,6 +497,8 @@ mod tests {
 		assert_eq!(offset_of!(HwFramesPublic, initial_pool_size), 56);
 		assert_eq!(offset_of!(HwFramesPublic, sw_format), 64);
 		assert_eq!(offset_of!(HwFramesPublic, height), 72);
+		assert_eq!(offset_of!(DevicePublic, kind), 8);
+		assert_eq!(offset_of!(DevicePublic, hwctx), 16);
 		// A major nobody measured must disable the import, not reuse 61's
 		// offsets: AVFrame has shrunk between majors (424 bytes in 61
 		// against 536 in 56), so reading at a guessed offset could leave
