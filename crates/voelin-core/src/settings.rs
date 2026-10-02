@@ -1224,9 +1224,52 @@ pub static STREAM_AUDIO_SOURCES: Key<Vec<AudioSourceSetting>> = Key::new(
 )
 .validated(valid_audio_sources);
 
+/// The Stream Studio's scenes, their sources, and the size and frame rate
+/// of its composite (`voelin_media::studio::scene::Scenes`); kept up to date
+/// by `crate::studio::start` as the scenes are edited.
+#[cfg(feature = "media")]
+pub static STUDIO_SCENES: Key<voelin_media::studio::scene::Scenes> = Key::new(
+	"studio.scenes",
+	Kind::Json,
+	"Stream Studio scenes and sources, and the output size and frame rate.",
+	voelin_media::studio::scene::Scenes::default,
+)
+.validated(voelin_media::studio::scene::Scenes::check);
+
+/// How many seconds the Stream Studio's replay buffer keeps, for saving a
+/// clip after the fact. 0: off. No maximum (past
+/// [`STUDIO_REPLAY_MEMORY_MB`] it spills to disk).
+#[cfg(feature = "media")]
+pub static STUDIO_REPLAY_SECONDS: Key<u32> = Key::new(
+	"studio.replay_seconds",
+	Kind::UInt { min: 0 },
+	"Seconds the Stream Studio's replay buffer keeps (0: off).",
+	|| 30,
+);
+
+/// MiB of the replay buffer kept in memory; older packets go to a
+/// temporary file. 0: everything goes to the file.
+#[cfg(feature = "media")]
+pub static STUDIO_REPLAY_MEMORY_MB: Key<u64> = Key::new(
+	"studio.replay_memory_mb",
+	Kind::UInt { min: 0 },
+	"MiB of the replay buffer kept in memory before older packets go to disk.",
+	|| 256,
+);
+
+/// Where the Stream Studio puts recordings and clips; empty: a `Voelin`
+/// folder in the user's videos folder (`crate::studio::recording_dir`).
+#[cfg(feature = "media")]
+pub static STUDIO_RECORDING_DIR: Key<String> = Key::new(
+	"studio.recording_dir",
+	Kind::Text { suggestions: &[] },
+	"Folder for Stream Studio recordings and clips (empty: Videos/Voelin).",
+	String::new,
+);
+
 /// The keys every [`Settings`] knows from the start.
-pub fn builtin_keys() -> [&'static dyn Setting; 20] {
-	[
+pub fn builtin_keys() -> Vec<&'static dyn Setting> {
+	vec![
 		&CRASH_REPORTS,
 		&AUDIO,
 		&STREAM_FPS,
@@ -1247,6 +1290,14 @@ pub fn builtin_keys() -> [&'static dyn Setting; 20] {
 		&CACHE_FETCH_IMAGES,
 		&FILES_PROGRESS_MS,
 		&PRIVACY_BLOCK_MODE,
+		#[cfg(feature = "media")]
+		&STUDIO_SCENES,
+		#[cfg(feature = "media")]
+		&STUDIO_REPLAY_SECONDS,
+		#[cfg(feature = "media")]
+		&STUDIO_REPLAY_MEMORY_MB,
+		#[cfg(feature = "media")]
+		&STUDIO_RECORDING_DIR,
 	]
 }
 

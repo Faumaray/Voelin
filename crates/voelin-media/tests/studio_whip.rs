@@ -213,8 +213,9 @@ async fn a_whip_session_carries_the_studios_packets() {
 		.await
 		.expect("the WHIP session started");
 	assert!(whip.resource().is_some_and(|r| r.contains("/whip/")), "{:?}", whip.resource());
-	// Until ICE is up there is nobody to send a keyframe to.
+	// A session starts with a keyframe, asked for once.
 	assert!(whip.needs_keyframe());
+	assert!(!whip.needs_keyframe());
 	assert!(whip.wants(Track::Video { codec: Codec::Vp8, layer: 0 }));
 	assert!(!whip.wants(Track::Video { codec: Codec::Vp9, layer: 0 }));
 	assert!(!whip.wants(Track::Video { codec: Codec::Vp8, layer: 1 }));
@@ -258,6 +259,8 @@ async fn a_whip_session_carries_the_studios_packets() {
 	let stats = whip.stats();
 	assert!(seen.connected.load(Ordering::Relaxed), "ICE never came up: {stats:?}");
 	assert!(stats.connected, "the output does not think it is connected: {stats:?}");
+	// Coming up asked for another, so the service's first picture decodes.
+	assert!(whip.needs_keyframe());
 	assert!(whip.bytes() > 0, "{stats:?}");
 	assert_eq!(stats.error, None);
 	let (video, audio) = (seen.video.load(Ordering::Relaxed), seen.audio.load(Ordering::Relaxed));

@@ -3,7 +3,10 @@
 //! Every packet is kept until it falls out of the window
 //! (`studio.replay_seconds`, no maximum), and the window always reaches back
 //! to a keyframe, so [`ReplayBuffer::save_clip`] can write a playable file
-//! without re-encoding anything.
+//! without re-encoding anything. The encoders only make keyframes when asked
+//! (like WebRTC), so the buffer asks for one every [`KEYFRAME_EVERY`]: a
+//! clip is then at most that much longer than the window, and the window
+//! cannot grow without bound on a stream nobody asks keyframes of.
 //!
 //! Long windows do not have to fit in memory: past
 //! `studio.replay_memory_mb` the oldest packets are moved to a temporary
@@ -23,6 +26,9 @@ use crate::codec::Codec;
 use crate::studio::output::record::Recorder;
 use crate::studio::output::{OutputSink, Packet, Track};
 use crate::{Error, Result};
+
+/// How far apart the buffer asks for keyframes while it is on.
+pub const KEYFRAME_EVERY: Duration = Duration::from_secs(2);
 
 /// Where a kept packet's bytes are.
 enum Data {
@@ -82,6 +88,9 @@ pub struct ReplayBuffer {
 	codec: Option<Codec>,
 	clips: u64,
 	needs_keyframe: bool,
+	/// Times (90 kHz) of the newest video packet and of the newest keyframe.
+	newest: u64,
+	last_keyframe: u64,
 }
 
 impl ReplayBuffer {
@@ -100,6 +109,8 @@ impl ReplayBuffer {
 			codec: None,
 			clips: 0,
 			needs_keyframe: true,
+			newest: 0,
+			last_keyframe: 0,
 		}
 	}
 
@@ -123,6 +134,14 @@ impl ReplayBuffer {
 
 	pub fn length(&self) -> Duration {
 		self.length
+	}
+
+	/// Keep another simulcast layer (what was kept of the old one goes).
+	pub fn set_layer(&mut self, layer: u32) {
+		if layer != self.layer {
+			self.layer = layer;
+			self.clear();
+		}
 	}
 
 	/// Megabytes kept in memory before older packets go to disk.
@@ -313,7 +332,9 @@ impl OutputSink for ReplayBuffer {
 	}
 
 	fn needs_keyframe(&mut self) -> bool {
-		self.is_on() && self.needs_keyframe
+		let every = KEYFRAME_EVERY.as_millis() as u64 * 90;
+		self.is_on()
+			&& (self.needs_keyframe || self.newest.saturating_sub(self.last_keyframe) >= every)
 	}
 
 	fn write(&mut self, packet: &Packet<'_>) -> Result<()> {
@@ -326,8 +347,10 @@ impl OutputSink for ReplayBuffer {
 				self.clear();
 			}
 			self.codec = Some(codec);
+			self.newest = packet.pts_90khz;
 			if packet.keyframe {
 				self.needs_keyframe = false;
+				self.last_keyframe = packet.pts_90khz;
 			}
 		}
 		// Nothing before the first keyframe: a clip has to start at one.
@@ -479,10 +502,37 @@ mod tests {
 
 	#[test]
 	fn other_layers_are_left_alone() {
-		let buffer = ReplayBuffer::new(Duration::from_secs(1), 64, 1, 2);
+		let mut buffer = ReplayBuffer::new(Duration::from_secs(1), 64, 1, 2);
 		assert!(!buffer.wants(Track::Video { codec: Codec::Vp8, layer: 0 }));
 		assert!(buffer.wants(Track::Video { codec: Codec::Vp8, layer: 1 }));
 		assert!(buffer.wants(Track::Audio { channels: 2 }));
 		assert_eq!(buffer.name(), "replay");
+		buffer.set_layer(0);
+		assert!(buffer.wants(Track::Video { codec: Codec::Vp8, layer: 0 }));
+	}
+
+	#[test]
+	fn it_asks_for_keyframes_so_the_window_can_move() {
+		let mut buffer = ReplayBuffer::new(Duration::from_secs(1), 64, 0, 2);
+		push(&mut buffer, 0, true, 10);
+		let mut asked = Vec::new();
+		// An encoder that only makes keyframes when asked.
+		for n in 1..300u64 {
+			let ms = n * 33;
+			let keyframe = buffer.needs_keyframe();
+			if keyframe {
+				asked.push(ms);
+			}
+			push(&mut buffer, ms, keyframe, 10);
+		}
+		let every = KEYFRAME_EVERY.as_millis() as u64;
+		assert!(asked.len() >= 4, "{asked:?}");
+		assert!(asked.windows(2).all(|w| w[1] - w[0] >= every), "{asked:?}");
+		// So the window stays near its length instead of reaching back to 0.
+		let stats = buffer.stats();
+		assert!(stats.duration <= Duration::from_secs(1) + KEYFRAME_EVERY, "{stats:?}");
+		// Off, it asks for nothing.
+		buffer.set_length(Duration::ZERO);
+		assert!(!buffer.needs_keyframe());
 	}
 }

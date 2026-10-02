@@ -337,6 +337,8 @@ struct Shared {
 	preview_frames: AtomicU64,
 	delivered: AtomicU64,
 	stop: AtomicBool,
+	/// What the composite's timestamps count from.
+	epoch: Instant,
 	events: broadcast::Sender<Event>,
 	/// The outputs, and the replay buffer which is always there (off when its
 	/// window is zero).
@@ -409,6 +411,7 @@ impl Studio {
 			preview_frames: AtomicU64::new(0),
 			delivered: AtomicU64::new(0),
 			stop: AtomicBool::new(false),
+			epoch: Instant::now(),
 			events,
 			outputs: Mutex::new(Vec::new()),
 			replay: Mutex::new(ReplayBuffer::new(Duration::ZERO, 512, 0, 2)),
@@ -460,6 +463,12 @@ impl Studio {
 		self.shared.preview.clone()
 	}
 
+	/// The instant the composite's timestamps (and so the encoded video's)
+	/// count from. Audio meant for the same outputs must use this clock too.
+	pub fn epoch(&self) -> Instant {
+		self.shared.epoch
+	}
+
 	/// The scene graph as it stands, to persist or to show.
 	pub fn scenes(&self) -> Scenes {
 		lock(&self.graph).scenes.clone()
@@ -474,10 +483,11 @@ impl Studio {
 		camera::list()
 	}
 
-	/// Which simulcast layer the file outputs and WHIP take (the streamer's
-	/// layer ids). Default 0.
+	/// Which simulcast layer the outputs and the replay buffer take (the
+	/// streamer's layer ids), from the next output started. Default 0.
 	pub fn set_layer(&self, layer: u32) {
 		self.shared.layer.store(layer, Ordering::Relaxed);
+		lock(&self.shared.replay).set_layer(layer);
 	}
 
 	/// A [`ScreenCapture`] backend that hands the composite to the streamer.
@@ -813,10 +823,12 @@ impl Studio {
 		self.shared.write_packet(packet);
 	}
 
-	/// Whether any output needs a keyframe now (a recording that just
-	/// started, a WHIP session that just connected).
-	pub fn needs_keyframe(&self) -> bool {
-		self.shared.needs_keyframe()
+	/// Whether an output needs a keyframe of `layer` now (a recording that
+	/// just started, a WHIP session that just connected, the replay buffer's
+	/// next clip start). Only the layer the outputs take
+	/// ([`Studio::set_layer`]) ever does.
+	pub fn needs_keyframe(&self, layer: u32) -> bool {
+		layer == self.shared.layer.load(Ordering::Relaxed) && self.shared.needs_keyframe()
 	}
 
 	/// Stop composing and close every output.
@@ -929,7 +941,6 @@ impl Shared {
 fn compose_loop(shared: &Shared) {
 	let mut compositor = Compositor::new(0);
 	let mut preview = RgbaScaler::new(2);
-	let started = Instant::now();
 	let mut pacer = crate::capture::FramePacer::new(Some(15));
 	let mut preview_fps = 0;
 	let mut next = Instant::now();
@@ -942,7 +953,7 @@ fn compose_loop(shared: &Shared) {
 			pacer.set_fps(Some(want));
 		}
 		compositor.set_size(live.size.0, live.size.1);
-		let timestamp = started.elapsed();
+		let timestamp = shared.epoch.elapsed();
 		let frame = match compositor.compose(&live.scene, live.revision, &live.feeds, timestamp) {
 			Ok(frame) => frame,
 			Err(e) => {
@@ -1198,7 +1209,8 @@ mod tests {
 		let path = dir.join("out.webm");
 		studio.apply(Command::StartRecording { path: path.clone() }).await.unwrap();
 		assert_eq!(studio.status().recording.as_deref(), Some(path.as_path()));
-		assert!(studio.needs_keyframe(), "a fresh recording wants a keyframe");
+		assert!(studio.needs_keyframe(0), "a fresh recording wants a keyframe");
+		assert!(!studio.needs_keyframe(1), "but only of the layer it records");
 		assert!(studio.apply(Command::StartRecording { path: path.clone() }).await.is_err());
 		studio.apply(Command::StopRecording).await.unwrap();
 		assert!(studio.status().recording.is_none());

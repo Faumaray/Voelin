@@ -81,6 +81,9 @@ pub struct Whip {
 #[derive(Default)]
 struct Shared {
 	connected: AtomicBool,
+	/// A keyframe is wanted: at the start, when the session comes up, and
+	/// when the service asks (PLI/FIR). Taken by [`OutputSink::needs_keyframe`].
+	keyframe: AtomicBool,
 	packets: AtomicU64,
 	bytes: AtomicU64,
 	dropped: AtomicU64,
@@ -157,7 +160,8 @@ impl Whip {
 
 		let (queue, packets) = sync_channel(QUEUE);
 		let stop = Arc::new(AtomicBool::new(false));
-		let shared = Arc::new(Shared::default());
+		// The first frames should stand alone too.
+		let shared = Arc::new(Shared { keyframe: AtomicBool::new(true), ..Shared::default() });
 		let session = Session {
 			rtc,
 			socket,
@@ -251,8 +255,8 @@ impl OutputSink for Whip {
 	}
 
 	fn needs_keyframe(&mut self) -> bool {
-		// Until the session is up there is nobody to send a keyframe to.
-		!self.shared.connected.load(Ordering::Relaxed)
+		// Once per request, not on every frame until one arrives.
+		self.shared.keyframe.swap(false, Ordering::Relaxed)
 	}
 
 	fn write(&mut self, packet: &Packet<'_>) -> Result<()> {
@@ -357,14 +361,19 @@ impl Session {
 							trace!("WHIP send to {} failed: {e}", t.destination);
 						}
 					}
-					Ok(Output::Event(event)) => {
-						if let Event::IceConnectionStateChange(state) = event {
-							let up = state == str0m::IceConnectionState::Connected
-								|| state == str0m::IceConnectionState::Completed;
-							self.shared.connected.store(up, Ordering::Relaxed);
-							debug!(?state, "WHIP ICE");
+					Ok(Output::Event(Event::IceConnectionStateChange(state))) => {
+						let up = state == str0m::IceConnectionState::Connected
+							|| state == str0m::IceConnectionState::Completed;
+						if up && !self.shared.connected.swap(up, Ordering::Relaxed) {
+							self.shared.keyframe.store(true, Ordering::Relaxed);
 						}
+						self.shared.connected.store(up, Ordering::Relaxed);
+						debug!(?state, "WHIP ICE");
 					}
+					Ok(Output::Event(Event::KeyframeRequest(_))) => {
+						self.shared.keyframe.store(true, Ordering::Relaxed);
+					}
+					Ok(Output::Event(_)) => {}
 					Err(e) => {
 						self.fail(format!("WHIP session failed: {e}"));
 						return;
