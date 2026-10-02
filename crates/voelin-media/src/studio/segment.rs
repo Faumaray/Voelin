@@ -89,16 +89,9 @@ pub trait Segmenter: Send {
 	/// For logs and the UI.
 	fn name(&self) -> &'static str;
 
-	/// The size the frame should be reduced to before [`Segmenter::mask`].
-	fn input_size(&self, width: u32, height: u32) -> (u32, u32) {
-		let width = width.clamp(1, SEGMENT_WIDTH);
-		let height =
-			(u64::from(width) * u64::from(height.max(1)) / u64::from(width.max(1)).max(1)) as u32;
-		(width, height.max(1))
-	}
-
-	/// Fill `mask` from `frame` (packed RGBA at the size
-	/// [`Segmenter::input_size`] asked for).
+	/// Fill `mask` from `frame`: packed RGBA, the source's picture reduced
+	/// to at most 256 pixels wide with its aspect ratio kept. A model with a
+	/// fixed input size scales it to that itself; the mask may have any size.
 	fn mask(&mut self, frame: &VideoFrame, mask: &mut Mask) -> Result<()>;
 }
 

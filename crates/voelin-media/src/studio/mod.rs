@@ -782,7 +782,7 @@ impl Studio {
 			graph.inputs.retain(|(id, input)| {
 				wanted.iter().any(|(w, kind, background)| {
 					w == id
-						&& !restart(input.kind(), kind)
+						&& input.kind().same_input(kind)
 						// A background filter is set up when the input starts.
 						&& input.background().needs_mask() == background.needs_mask()
 				})
@@ -855,17 +855,6 @@ impl Drop for Studio {
 
 fn no_scene(scene: u64) -> Error {
 	Error::InvalidFrame(format!("no studio scene {scene}"))
-}
-
-/// Whether a kind change means the input must be started again. A text or
-/// colour source is simply drawn again, but everything else opens a device.
-fn restart(old: &SourceKind, new: &SourceKind) -> bool {
-	match (old, new) {
-		// The portal hands back a token we store in the scene; that alone is
-		// not a reason to ask the user again.
-		(SourceKind::Portal { cursor: a, .. }, SourceKind::Portal { cursor: b, .. }) => a != b,
-		_ => old != new,
-	}
 }
 
 impl Shared {

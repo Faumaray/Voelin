@@ -34,8 +34,9 @@ use crate::codec::Codec;
 use crate::studio::output::{OutputSink, Packet, Track};
 use crate::{Error, Result};
 
-/// Packets waiting for the session thread; a full queue drops the oldest,
-/// because a stalled upload must not stall an encoder.
+/// Packets waiting for the session thread. A full queue drops the packet
+/// (a stalled upload must not stall an encoder) and asks for a keyframe, so
+/// the service's decoder recovers once the upload does.
 const QUEUE: usize = 256;
 
 fn error(message: impl Into<String>) -> Error {
@@ -81,8 +82,9 @@ pub struct Whip {
 #[derive(Default)]
 struct Shared {
 	connected: AtomicBool,
-	/// A keyframe is wanted: at the start, when the session comes up, and
-	/// when the service asks (PLI/FIR). Taken by [`OutputSink::needs_keyframe`].
+	/// A keyframe is wanted: at the start, when the session comes up, when
+	/// the service asks (PLI/FIR), and after a packet was dropped. Taken by
+	/// [`OutputSink::needs_keyframe`].
 	keyframe: AtomicBool,
 	packets: AtomicU64,
 	bytes: AtomicU64,
@@ -273,6 +275,7 @@ impl OutputSink for Whip {
 			Ok(()) => Ok(()),
 			Err(TrySendError::Full(_)) => {
 				self.shared.dropped.fetch_add(1, Ordering::Relaxed);
+				self.shared.keyframe.store(true, Ordering::Relaxed);
 				Ok(())
 			}
 			Err(TrySendError::Disconnected(_)) => Err(error(

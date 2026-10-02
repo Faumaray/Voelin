@@ -305,15 +305,18 @@ impl SourceKind {
 		}
 	}
 
-	/// Whether two kinds describe the same live input, so a source that
-	/// changes from one to the other need not restart (only its drawing
-	/// changes).
+	/// Whether a source that changes from one kind to the other keeps its
+	/// running input. Only what is drawn differs for a camera's mirroring,
+	/// and a portal's restore token is what the portal wrote back, not a
+	/// reason to ask the user again; any other change starts the input anew
+	/// (for text and colour that is just drawing them again).
 	pub fn same_input(&self, other: &Self) -> bool {
 		match (self, other) {
-			// Text and colour are redrawn, not recaptured.
-			(Self::Text { .. }, Self::Text { .. }) | (Self::Colour { .. }, Self::Colour { .. }) => {
-				true
-			}
+			(Self::Portal { cursor: a, .. }, Self::Portal { cursor: b, .. }) => a == b,
+			(
+				Self::Camera { device: a, size: sa, fps: fa, .. },
+				Self::Camera { device: b, size: sb, fps: fb, .. },
+			) => (a, sa, fa) == (b, sb, fb),
 			_ => self == other,
 		}
 	}
@@ -610,6 +613,33 @@ mod tests {
 		scenes.scenes[0].sources[0].transform =
 			Transform { width: Some(f32::INFINITY), ..Transform::default() };
 		assert!(scenes.check().unwrap_err().contains("width and height"));
+	}
+
+	#[test]
+	fn which_changes_keep_the_input() {
+		let camera = |mirror, fps| SourceKind::Camera {
+			device: "/dev/video0".into(),
+			size: None,
+			fps: Some(fps),
+			mirror,
+		};
+		assert!(camera(false, 30).same_input(&camera(true, 30)));
+		assert!(!camera(false, 30).same_input(&camera(false, 60)));
+		let portal = |token: Option<&str>| SourceKind::Portal {
+			restore_token: token.map(str::to_owned),
+			cursor: true,
+		};
+		assert!(portal(None).same_input(&portal(Some("t"))));
+		let text = |text: &str| SourceKind::Text {
+			text: text.into(),
+			font: None,
+			size_px: 48.0,
+			colour: Colour::WHITE,
+			backdrop: Colour::CLEAR,
+			align: Align::Left,
+			padding: 0,
+		};
+		assert!(!text("a").same_input(&text("b")), "new text is drawn anew");
 	}
 
 	#[test]
