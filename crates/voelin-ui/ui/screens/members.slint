@@ -359,7 +359,7 @@ export component MembersList inherits VerticalLayout {
 // One person as a tile of the voice grid.
 component VoiceTile inherits Rectangle {
     in property <MemberItem> member;
-    min-height: 150px;
+
     border-radius: Theme.radius-lg;
     background: Theme.surface-2;
     border-width: member.talking ? 2px : 1px;
@@ -432,7 +432,7 @@ component StreamTile inherits Rectangle {
     in property <string> streamer;
     in property <string> id;
     in property <bool> watching;
-    min-height: 150px;
+
     border-radius: Theme.radius-lg;
     clip: true;
     background: @linear-gradient(135deg, #2b1f6e 0%, #0f2a66 100%);
@@ -551,15 +551,21 @@ export component VoiceGrid inherits VerticalLayout {
             padding-left: Theme.space-5;
             padding-right: Theme.space-5;
             spacing: Theme.space-4;
+            // One cell per column; the last row's empty cells stay blank.
             for column in root.columns: Rectangle {
                 property <int> index: row * root.columns + column;
                 horizontal-stretch: 1;
+                // The cell sizes the tile, never the other way round.
+                min-width: 200px;
+                height: 176px;
                 if index < Bridge.members.length: VoiceTile {
                     width: parent.width;
+                    height: parent.height;
                     member: Bridge.members[index];
                 }
                 if index >= Bridge.members.length && index < root.total: StreamTile {
                     width: parent.width;
+                    height: parent.height;
                     name: Bridge.streams[index - Bridge.members.length].name;
                     streamer: Bridge.streams[index - Bridge.members.length].streamer;
                     id: Bridge.streams[index - Bridge.members.length].id;

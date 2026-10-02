@@ -499,6 +499,8 @@ component MessageList inherits VerticalLayout {
     }
     ListView {
         vertical-stretch: 1;
+        // A long chat must not make the window taller: the list scrolls.
+        preferred-height: 0px;
         accessible-label: @tr("Messages");
         for line in root.model: MessageRow {
             line: line;
@@ -613,7 +615,7 @@ export component ChatView inherits VerticalLayout {
             y: (parent.height - self.height) / 2;
             clicked => { Nav.show-topics(!Nav.topics-open); }
         }
-        if Bridge.viewer-open == false && Bridge.streams.length > 0: Button {
+        if !Bridge.viewer-open && !Nav.right-panel-open && Bridge.streams.length > 0: Button {
             small: true;
             icon: Icons.monitor-up;
             text: @tr("Streams ({})", Bridge.streams.length);

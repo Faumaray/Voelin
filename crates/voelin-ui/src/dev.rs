@@ -166,8 +166,8 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 			other => eprintln!("VOELIN_OPEN: unknown screen {other:?}"),
 		}
 	}
-	// The size set before the window opened can be overruled while it lays
-	// out, so ask again shortly before the picture is taken.
+	// A window manager can refuse the size set before the window opened,
+	// so ask again once it is up (a bare X server ignores both).
 	let resize = switches.window_size.map(|(w, h)| {
 		let weak = ui.as_weak();
 		let timer = slint::Timer::default();
@@ -456,6 +456,50 @@ fn demo_chat(app: &mut App, session: u64) {
 			Vec::new(),
 			true,
 			Some(1),
+		),
+		(
+			DEMO,
+			"dex",
+			5,
+			"Can somebody look at the wiki page? The old link is dead.".into(),
+			26,
+			false,
+			Vec::new(),
+			false,
+			None,
+		),
+		(
+			DEMO,
+			"Kairo",
+			3,
+			"Fixed, it points at the new host now.".into(),
+			24,
+			false,
+			vec![react("👍", 2, false)],
+			false,
+			None,
+		),
+		(
+			DEMO,
+			"Mira",
+			4,
+			format!("And the banner I promised: {}", file_link(2, "guild-banner.png", 486_912)),
+			20,
+			false,
+			Vec::new(),
+			false,
+			None,
+		),
+		(
+			DEMO,
+			"Talon",
+			6,
+			"That looks great. Putting it on the site tonight.".into(),
+			17,
+			false,
+			vec![react("❤️", 4, true)],
+			false,
+			None,
 		),
 		(
 			DEMO,
