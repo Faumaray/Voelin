@@ -167,7 +167,8 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 		}
 	}
 	// A window manager can refuse the size set before the window opened,
-	// so ask again once it is up (a bare X server ignores both).
+	// so ask again once it is up. (Under `xvfb-run` in a Wayland session,
+	// remove WAYLAND_DISPLAY, or winit opens the window on the desktop.)
 	let resize = switches.window_size.map(|(w, h)| {
 		let weak = ui.as_weak();
 		let timer = slint::Timer::default();

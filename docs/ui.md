@@ -187,14 +187,19 @@ Environment variables (see `src/dev.rs`):
   `VOELIN_AUTOSHARE`, `VOELIN_DATA_DIR` as before.
 
 ```sh
-SLINT_BACKEND=winit-software VOELIN_DATA_DIR=$(mktemp -d) VOELIN_DEMO_UI=1 \
-VOELIN_OPEN=settings:appearance VOELIN_WINDOW_SIZE=1440x960 \
+scripts/shots.sh shot.png settings:appearance 1440x960
+# which runs, headless:
+env -u WAYLAND_DISPLAY SLINT_BACKEND=winit-software VOELIN_DATA_DIR=$(mktemp -d) \
+VOELIN_DEMO_UI=1 VOELIN_OPEN=settings:appearance VOELIN_WINDOW_SIZE=1440x960 \
 VOELIN_SCREENSHOT=shot.png VOELIN_SCREENSHOT_DELAY=4 \
-xvfb-run -a -s "-screen 0 1600x1100x24" target/debug/voelin
+xvfb-run -a -s "-screen 0 1440x960x24" target/debug/voelin
 ```
 
-The pictures in `docs/screenshots/` were made this way (reduced to 256
-colours with `convert -colors 256 PNG8:`).
+Remove `WAYLAND_DISPLAY` as above in a Wayland session: winit prefers
+Wayland, so the window would open on the desktop instead of on the Xvfb
+server (and take whatever size the compositor gives it). The pictures in
+`docs/screenshots/` were made this way (reduced to 256 colours with
+`convert -colors 256 PNG8:`).
 
 | Desktop | |
 |---|---|
