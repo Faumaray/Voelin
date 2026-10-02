@@ -172,10 +172,12 @@ pub enum Command {
 		id: u64,
 	},
 
-	/// Start the outputs that push somewhere and report [`State::Live`]; the
-	/// TeamSpeak stream itself is started by the engine around the studio.
+	/// Report [`State::Live`] (the UI's LIVE and timer). Outputs that push
+	/// (WHIP) push from when they are added; the TeamSpeak stream itself is
+	/// started by the engine around the studio.
 	GoLive,
-	/// Stop them again. Recording and the replay buffer keep running.
+	/// Back to [`State::Idle`], closing every output that pushes. Recording
+	/// and the replay buffer keep running.
 	EndStream,
 }
 
@@ -644,6 +646,19 @@ impl Studio {
 				return Ok(());
 			}
 			Command::EndStream => {
+				let pushing: Vec<Output> = {
+					let mut outputs = lock(&self.shared.outputs);
+					let (pushing, rest) = outputs.drain(..).partition(|o| o.pushes);
+					*outputs = rest;
+					pushing
+				};
+				for mut output in pushing {
+					let name = output.sink.name().to_owned();
+					if let Err(e) = output.sink.finish() {
+						self.shared.fail(name.clone(), e);
+					}
+					self.shared.send(Event::OutputRemoved { id: output.id, name });
+				}
 				*lock(&self.shared.state) = State::Idle;
 				*lock(&self.shared.live_since) = None;
 				self.shared.state_changed();
@@ -1188,8 +1203,32 @@ mod tests {
 		assert_eq!(studio.status().state, State::Idle);
 		studio.apply(Command::GoLive).await.unwrap();
 		assert_eq!(studio.status().state, State::Live);
+		// Ending the stream closes what pushes somewhere.
+		struct Pushing;
+		impl OutputSink for Pushing {
+			fn name(&self) -> &str {
+				"push"
+			}
+
+			fn write(&mut self, _packet: &Packet<'_>) -> Result<()> {
+				Ok(())
+			}
+		}
+		lock(&studio.shared.outputs).push(Output {
+			id: 99,
+			sink: Box::new(Pushing),
+			path: None,
+			started: Instant::now(),
+			kbps: 0.0,
+			last_bytes: 0,
+			pushes: true,
+			error: None,
+		});
+		assert_eq!(studio.status().outputs, 1);
 		studio.apply(Command::EndStream).await.unwrap();
 		assert_eq!(studio.status().state, State::Idle);
+		assert_eq!(studio.status().outputs, 0);
+		assert!(lock(&studio.shared.outputs).is_empty());
 
 		// A recording is an output; stopping one that is not running fails.
 		assert!(studio.apply(Command::StopRecording).await.is_err());
@@ -1217,6 +1256,7 @@ mod tests {
 		}
 		assert!(seen.iter().any(|e| matches!(e, Event::RecordingStarted { .. })), "{seen:?}");
 		assert!(seen.iter().any(|e| matches!(e, Event::RecordingStopped { .. })), "{seen:?}");
+		assert!(seen.iter().any(|e| matches!(e, Event::OutputRemoved { id: 99, .. })), "{seen:?}");
 		assert!(seen.iter().any(|e| matches!(e, Event::State(_))), "{seen:?}");
 		std::fs::remove_dir_all(&dir).ok();
 	}
