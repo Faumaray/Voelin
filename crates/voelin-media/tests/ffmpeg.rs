@@ -148,6 +148,34 @@ fn software_encoders_roundtrip() {
 	eprintln!("tested: {tested:?}");
 }
 
+/// What the GPU encoders produce, through the same round-trip as the
+/// software ones: our own decoders have to decode it (OpenH264 for H.264 with
+/// `VOELIN_OPENH264_LIB`, dav1d for AV1 with `--features av1`), keyframes
+/// where asked, timestamps kept, PSNR above 28 dB.
+///
+/// Whatever hardware the machine has; skipped where none of it works. HEVC is
+/// left out, having no decoder here.
+#[test]
+fn hardware_encoders_roundtrip() {
+	if ffmpeg().is_none() {
+		return;
+	}
+	let names: Vec<&'static str> = BACKENDS
+		.iter()
+		.filter(|b| b.is_hardware() && matches!(b.codec, Codec::H264 | Codec::Av1))
+		.map(|b| b.name)
+		.filter(|name| available(name))
+		.collect();
+	if names.is_empty() {
+		eprintln!("no usable hardware encoder, skipped");
+		return;
+	}
+	for name in &names {
+		roundtrip(name);
+	}
+	eprintln!("tested: {names:?}");
+}
+
 #[test]
 fn x264_is_constrained_high_and_changes_size() {
 	if ffmpeg().is_none() || !available("libx264") {
