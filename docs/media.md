@@ -7,6 +7,10 @@ rendering. It does no networking:
 MediaTime::new(frame.pts_90khz, Frequency::NINETY_KHZ), data)`), and received
 `MediaFrame`s go to `VideoDecoder::decode`.
 
+The Stream Studio (`studio`: scenes of sources composited into the stream's
+video, recording, a replay buffer, WHIP) is described in
+[studio.md](studio.md).
+
 ## API overview
 
 | Item | What it is |
@@ -78,6 +82,9 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   without Voelin, or a quiet sine tone with the test pattern
   (`SourceId::Synthetic`, `synthetic_pattern`). The portal's restore token
   is available afterwards (`restore_token()`) to store.
+  `Streamer::start_studio(&codecs, config, studio)` streams the Stream
+  Studio's composite instead, encoded from the start for the studio's
+  recording and replay buffer ([studio.md](studio.md#in-the-engine-voelin_corestudio-feature-media)).
 - Threads: the capture backend calls the streamer's `FrameSink` on its own
   thread with the frame still in its capture buffer. Frames over the
   frame-rate cap (`StreamerConfig::fps`, any value >= 1) are skipped before
