@@ -559,6 +559,9 @@ pub struct FfmpegEncoder {
 	low_power: bool,
 	/// `AVFrame.hw_frames_ctx` was checked on a surface of this encoder.
 	dmabuf_checked: bool,
+	/// Sizes it encodes exactly are multiples of these
+	/// ([`BackendStatus::alignment`]).
+	alignment: (u32, u32),
 }
 
 impl FfmpegEncoder {
@@ -571,6 +574,12 @@ impl FfmpegEncoder {
 		})?;
 		let ffmpeg = Ffmpeg::get()
 			.map_err(|e| Error::CodecUnavailable { codec: spec.codec, reason: e.to_owned() })?;
+		// What the probe measured, once it is done (its own encoders run
+		// before that, at sizes every backend encodes exactly).
+		let alignment = PROBE
+			.get()
+			.and_then(|p| p.iter().find(|s| s.spec == spec))
+			.map_or((2, 2), |s| s.alignment);
 		Ok(Self {
 			ffmpeg,
 			spec,
@@ -579,6 +588,7 @@ impl FfmpegEncoder {
 			reinit: Reinit::No,
 			low_power: false,
 			dmabuf_checked: false,
+			alignment,
 		})
 	}
 
@@ -643,9 +653,12 @@ impl FfmpegEncoder {
 		Ok(())
 	}
 
-	/// The encoder size: even (4:2:0 chroma), at least 2x2.
-	fn coded_size(width: u32, height: u32) -> (u32, u32) {
-		((width & !1).max(2), (height & !1).max(2))
+	/// The encoder size: the frame cropped to a multiple of the backend's
+	/// alignment (even at least, for 4:2:0 chroma), so that the stream
+	/// declares exactly the picture it carries; at least 2x2.
+	fn coded_size(&self, width: u32, height: u32) -> (u32, u32) {
+		let crop = |v: u32, a: u32| if v >= a { v / a * a } else { (v & !1).max(2) };
+		(crop(width, self.alignment.0), crop(height, self.alignment.1))
 	}
 
 	/// Open a session for `width` x `height`.
@@ -967,7 +980,7 @@ impl FfmpegEncoder {
 		force_keyframe: bool,
 		out: &mut dyn FnMut(EncodedChunk<'_>),
 	) -> Result<(Session, bool)> {
-		let (w, h) = Self::coded_size(width, height);
+		let (w, h) = self.coded_size(width, height);
 		let mut force = force_keyframe;
 		let reopen = match &self.session {
 			None => true,
@@ -1030,8 +1043,11 @@ impl FfmpegEncoder {
 				"only NV12 DMA-BUFs are imported (RGB needs GPU colour conversion)".into(),
 			));
 		}
-		if Self::coded_size(frame.width, frame.height) != (frame.width, frame.height) {
-			return Err(self.unavailable("odd frame size".into()));
+		if self.coded_size(frame.width, frame.height) != (frame.width, frame.height) {
+			return Err(self.unavailable(format!(
+				"{}x{} is not a size {} encodes exactly",
+				frame.width, frame.height, self.spec.name
+			)));
 		}
 		let refs = self.ffmpeg.frame_refs.clone().map_err(|e| self.unavailable(e))?;
 		let drm_prime =
@@ -1184,24 +1200,34 @@ impl FfmpegEncoder {
 		result.map(|_| ())
 	}
 
-	/// Encode one frame and flush the encoder (the self-test): the packets,
-	/// and whether one was a keyframe.
-	fn self_test(&mut self, width: u32, height: u32) -> Result<(usize, bool)> {
+	/// Encode one frame and flush the encoder (the self-test), which has to
+	/// give a keyframe; the size an AV1 stream declares.
+	fn self_test(&mut self, width: u32, height: u32) -> Result<Option<(u32, u32)>> {
 		let frame = test_frame(width, height);
 		let mut packets = 0;
 		let mut keyframe = false;
-		self.encode_with(&frame, true, &mut |chunk| {
+		let mut declared = None;
+		let av1 = self.spec.codec == Codec::Av1;
+		let mut take = |chunk: EncodedChunk<'_>| {
 			packets += 1;
 			keyframe |= chunk.keyframe;
-		})?;
-		let mut session = self.session.take().expect("opened by the frame");
-		let flushed = self.send(&mut session, std::ptr::null_mut(), &mut |chunk| {
-			packets += 1;
-			keyframe |= chunk.keyframe;
+			if declared.is_none() && av1 {
+				declared = av1_frame_size(chunk.data);
+			}
+		};
+		let encoded = self.encode_with(&frame, true, &mut take);
+		let flushed = encoded.and_then(|()| {
+			let mut session = self.session.take().expect("opened by the frame");
+			self.send(&mut session, std::ptr::null_mut(), &mut take)
 		});
-		drop(session);
 		flushed?;
-		Ok((packets, keyframe))
+		match (packets, keyframe) {
+			(0, _) => Err(self.unavailable("no packet from the test frame".into())),
+			(_, false) => {
+				Err(self.unavailable("the test frame did not come out as a keyframe".into()))
+			}
+			_ => Ok(declared),
+		}
 	}
 }
 
@@ -1319,22 +1345,140 @@ pub struct BackendStatus {
 	/// How long its self-test took (the probe runs them in parallel, so the
 	/// startup cost is the slowest one).
 	pub took: Duration,
+	/// The sizes it encodes exactly are multiples of these; frames are
+	/// cropped to them. (2, 2) for most; AV1 on an RDNA3 GPU is (64, 16):
+	/// it pads anything else (1366x768 comes out as 1408x768, 1600x900 as
+	/// 1600x912, 1080 rows as 1082), and AV1 has no cropping like H.264's
+	/// SPS (its render size is a display hint decoders do not apply), so a
+	/// viewer would show the padding.
+	pub alignment: (u32, u32),
 }
 
 /// Size of the self-test frame.
 const TEST_SIZE: (u32, u32) = (320, 240);
 
-fn test_backend(spec: &'static BackendSpec) -> std::result::Result<(), String> {
+/// Size of the AV1 self-test frame: 2 more than a power of two, so its next
+/// multiple of 4, 8, ... 256 is a different size each, and the size the
+/// stream declares tells which alignment the encoder pads to.
+///
+/// Not a multiple of 8: the RDNA3 encoder pads a height that is 8 more than
+/// a multiple of 16 by 2 rows only (1080 to 1082), any other by up to 16.
+const AV1_TEST_SIZE: (u32, u32) = (258, 258);
+
+/// The alignment that turns `tested` into the `declared` size: the power of
+/// two whose next multiple of `tested` is `declared` (2 if they are equal,
+/// or if no power of two explains it, which leaves frames uncropped).
+fn alignment_of(tested: u32, declared: u32) -> u32 {
+	(2..=8).map(|s| 1 << s).find(|a| tested.next_multiple_of(*a) == declared).unwrap_or(2)
+}
+
+fn test_backend(spec: &'static BackendSpec) -> std::result::Result<(u32, u32), String> {
 	let config = EncoderConfig { fps: 30, bitrate_bps: 500_000, ..EncoderConfig::default() };
 	let mut encoder = FfmpegEncoder::new(spec.name, config).map_err(|e| e.to_string())?;
-	match encoder.self_test(TEST_SIZE.0, TEST_SIZE.1) {
-		Ok((0, _)) => Err("no packet from the test frame".into()),
-		Ok((_, false)) => Err("the test frame did not come out as a keyframe".into()),
-		Ok(_) => Ok(()),
+	let (w, h) = if spec.codec == Codec::Av1 { AV1_TEST_SIZE } else { TEST_SIZE };
+	match encoder.self_test(w, h) {
+		Ok(Some((dw, dh))) => Ok((alignment_of(w, dw), alignment_of(h, dh))),
+		Ok(None) => Ok((2, 2)),
 		Err(Error::CodecUnavailable { reason, .. }) => Err(reason),
 		Err(Error::Encoder { message, .. }) => Err(message),
 		Err(e) => Err(e.to_string()),
 	}
+}
+
+/// The frame size an AV1 stream declares: `max_frame_width_minus_1 + 1` and
+/// `max_frame_height_minus_1 + 1` of the first sequence header OBU in
+/// `data` (AV1 specification 5.3 and 5.5), or `None` if there is none.
+fn av1_frame_size(data: &[u8]) -> Option<(u32, u32)> {
+	const OBU_SEQUENCE_HEADER: u8 = 1;
+	let mut rest = data;
+	while let [header, tail @ ..] = rest {
+		let mut body = if header & 0x04 != 0 { tail.get(1..)? } else { tail };
+		let size = if header & 0x02 != 0 {
+			let mut size = 0usize;
+			let mut i = 0;
+			loop {
+				let byte = *body.get(i)?;
+				size |= usize::from(byte & 0x7f) << (7 * i);
+				i += 1;
+				if byte & 0x80 == 0 {
+					break;
+				}
+				if i == 8 {
+					return None;
+				}
+			}
+			body = &body[i..];
+			size
+		} else {
+			body.len()
+		};
+		let payload = body.get(..size)?;
+		if (header >> 3) & 0xf == OBU_SEQUENCE_HEADER {
+			return av1_sequence_size(payload);
+		}
+		rest = &body[size..];
+	}
+	None
+}
+
+/// `sequence_header_obu()` up to the maximum frame size.
+fn av1_sequence_size(payload: &[u8]) -> Option<(u32, u32)> {
+	let mut pos = 0usize;
+	let mut read = |bits: u32| -> Option<u32> {
+		(0..bits).try_fold(0u32, |value, _| {
+			let bit = (payload.get(pos / 8)? >> (7 - pos % 8)) & 1;
+			pos += 1;
+			Some(value << 1 | u32::from(bit))
+		})
+	};
+	read(3)?; // seq_profile
+	read(1)?; // still_picture
+	if read(1)? == 1 {
+		// reduced_still_picture_header
+		read(5)?; // seq_level_idx[0]
+	} else {
+		let mut decoder_model = false;
+		let mut delay_bits = 0;
+		if read(1)? == 1 {
+			// timing_info: display tick, time scale, equal_picture_interval
+			read(32)?;
+			read(32)?;
+			if read(1)? == 1 {
+				// num_ticks_per_picture_minus_1, uvlc()
+				let mut zeros = 0;
+				while read(1)? == 0 {
+					zeros += 1;
+				}
+				if zeros < 32 {
+					read(zeros)?;
+				}
+			}
+			decoder_model = read(1)? == 1;
+			if decoder_model {
+				delay_bits = read(5)? + 1; // buffer_delay_length_minus_1
+				read(32)?; // num_units_in_decoding_tick
+				read(10)?; // buffer_removal_time / frame_presentation_time lengths
+			}
+		}
+		let initial_display_delay = read(1)? == 1;
+		for _ in 0..=read(5)? {
+			read(12)?; // operating_point_idc
+			if read(5)? > 7 {
+				read(1)?; // seq_tier
+			}
+			if decoder_model && read(1)? == 1 {
+				// operating_parameters_info: both buffer delays, low_delay_mode_flag
+				read(delay_bits)?;
+				read(delay_bits)?;
+				read(1)?;
+			}
+			if initial_display_delay && read(1)? == 1 {
+				read(4)?;
+			}
+		}
+	}
+	let (width_bits, height_bits) = (read(4)? + 1, read(4)? + 1);
+	Some((read(width_bits)? + 1, read(height_bits)? + 1))
 }
 
 /// Whether FFmpeg has `name` at all (cheap, before any self-test).
@@ -1468,6 +1612,9 @@ fn vendor_may_be_present(spec: &BackendSpec) -> std::result::Result<(), String> 
 	Ok(())
 }
 
+/// The result of [`probe`], once it ran.
+static PROBE: OnceLock<Vec<BackendStatus>> = OnceLock::new();
+
 /// Every backend with its self-test result (run once per process, the
 /// backends in parallel). Empty without FFmpeg.
 ///
@@ -1475,7 +1622,6 @@ fn vendor_may_be_present(spec: &BackendSpec) -> std::result::Result<(), String> 
 /// ([`vendor_may_be_present`]): its driver would spend up to 1.7 s failing,
 /// and the probe costs as much as its slowest test.
 pub fn probe() -> &'static [BackendStatus] {
-	static PROBE: OnceLock<Vec<BackendStatus>> = OnceLock::new();
 	PROBE.get_or_init(|| {
 		let Ok(ffmpeg) = Ffmpeg::get() else { return Vec::new() };
 		let started = Instant::now();
@@ -1498,7 +1644,7 @@ pub fn probe() -> &'static [BackendStatus] {
 			tests
 				.into_iter()
 				.map(|(spec, absent, test)| {
-					let (available, took) = match test {
+					let (tested, took) = match test {
 						None => (
 							Err(absent.unwrap_or_else(|| "not in this FFmpeg build".into())),
 							Duration::ZERO,
@@ -1507,7 +1653,8 @@ pub fn probe() -> &'static [BackendStatus] {
 							(Err("the self-test panicked".into()), Duration::ZERO)
 						}),
 					};
-					BackendStatus { spec, available, took }
+					let alignment = *tested.as_ref().unwrap_or(&(2, 2));
+					BackendStatus { spec, available: tested.map(|_| ()), took, alignment }
 				})
 				.collect()
 		});
@@ -1519,6 +1666,7 @@ pub fn probe() -> &'static [BackendStatus] {
 				Ok(()) => tracing::info!(
 					backend = status.spec.name,
 					ms = status.took.as_millis() as u64,
+					alignment = ?status.alignment,
 					"FFmpeg encoder available"
 				),
 				Err(e) => tracing::debug!(
@@ -1661,6 +1809,73 @@ mod tests {
 				}
 			}
 		}
+	}
+
+	/// The frame size of a sequence header that takes every optional branch
+	/// (timing info, decoder model, two operating points), behind a temporal
+	/// delimiter, and the alignment derived from it.
+	#[test]
+	fn av1_declared_size_and_alignment() {
+		// (value, bits), most significant bit first.
+		let fields: &[(u32, u32)] = &[
+			(0, 3),      // seq_profile
+			(0, 1),      // still_picture
+			(0, 1),      // reduced_still_picture_header
+			(1, 1),      // timing_info_present_flag
+			(1, 32),     // num_units_in_display_tick
+			(60, 32),    // time_scale
+			(1, 1),      // equal_picture_interval
+			(0b011, 3),  // num_ticks_per_picture_minus_1 = 2, uvlc
+			(1, 1),      // decoder_model_info_present_flag
+			(9, 5),      // buffer_delay_length_minus_1
+			(1, 32),     // num_units_in_decoding_tick
+			(0, 10),     // the two time lengths
+			(1, 1),      // initial_display_delay_present_flag
+			(1, 5),      // operating_points_cnt_minus_1
+			(0x103, 12), // operating_point_idc[0]
+			(9, 5),      // seq_level_idx[0], > 7
+			(0, 1),      // seq_tier[0]
+			(1, 1),      // decoder_model_present_for_this_op[0]
+			(500, 10),   // decoder_buffer_delay
+			(500, 10),   // encoder_buffer_delay
+			(0, 1),      // low_delay_mode_flag
+			(1, 1),      // initial_display_delay_present_for_this_op[0]
+			(9, 4),      // initial_display_delay_minus_1[0]
+			(0x001, 12), // operating_point_idc[1]
+			(4, 5),      // seq_level_idx[1]
+			(0, 1),      // decoder_model_present_for_this_op[1]
+			(0, 1),      // initial_display_delay_present_for_this_op[1]
+			(10, 4),     // frame_width_bits_minus_1
+			(10, 4),     // frame_height_bits_minus_1
+			(1919, 11),  // max_frame_width_minus_1
+			(1081, 11),  // max_frame_height_minus_1
+			(0xa5, 8),   // what follows
+		];
+		let mut payload = Vec::new();
+		let mut n = 0;
+		for &(value, bits) in fields {
+			for i in (0..bits).rev() {
+				if n % 8 == 0 {
+					payload.push(0);
+				}
+				*payload.last_mut().unwrap() |= (((value >> i) & 1) as u8) << (7 - n % 8);
+				n += 1;
+			}
+		}
+		// Temporal delimiter (type 2, empty), then the sequence header
+		// (type 1), both with a size field.
+		let mut stream = vec![2 << 3 | 2, 0, 1 << 3 | 2, payload.len() as u8];
+		stream.extend_from_slice(&payload);
+		assert_eq!(av1_frame_size(&stream), Some((1920, 1082)));
+		assert_eq!(av1_frame_size(&stream[..stream.len() - 8]), None, "cut short");
+		assert_eq!(av1_frame_size(&[2 << 3 | 2, 0]), None, "no sequence header");
+
+		assert_eq!(alignment_of(258, 258), 2);
+		assert_eq!(alignment_of(258, 260), 4);
+		assert_eq!(alignment_of(258, 272), 16);
+		assert_eq!(alignment_of(258, 320), 64);
+		assert_eq!(alignment_of(258, 512), 256);
+		assert_eq!(alignment_of(258, 4096), 2, "not an alignment: left alone");
 	}
 
 	/// The zero-copy path with a real DMA-BUF, on the GPU.

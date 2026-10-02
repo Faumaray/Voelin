@@ -41,19 +41,21 @@ fn decoder(codec: Codec) -> Option<Box<dyn VideoDecoder>> {
 	}
 }
 
-/// Twelve frames of the moving test pattern, a keyframe forced at 8, a
-/// bitrate change at 5: keyframes where asked, timestamps kept, and (with a
-/// decoder) every picture decodable at PSNR > 28 dB.
-fn roundtrip(name: &'static str) {
-	let screen = SyntheticScreen::new(W, H);
+/// Twelve frames of the moving test pattern at `w` x `h`, a keyframe forced
+/// at 8, a bitrate change at 5: keyframes where asked, timestamps kept, and
+/// (with a decoder) every picture decodable at its own size, PSNR > 28 dB.
+fn roundtrip(name: &'static str, w: u32, h: u32) {
+	let screen = SyntheticScreen::new(w, h);
 	let config = EncoderConfig { fps: 30, bitrate_bps: 1_500_000, ..EncoderConfig::default() };
 	let mut encoder = FfmpegEncoder::new(name, config).unwrap();
 	assert_eq!(encoder.backend(), EncoderBackend::Ffmpeg(name));
+	let (aw, ah) = probe().iter().find(|s| s.spec.name == name).unwrap().alignment;
 	let codec = encoder.codec();
 	let mut decoder = decoder(codec);
 	let mut keyframes = Vec::new();
 	let mut sent = Vec::new();
 	let mut decoded = 0;
+	let mut worst = f64::INFINITY;
 	let mut sources = Vec::new();
 	// Frames in until the first packet came out (the encoder's delay).
 	let mut delay = None;
@@ -81,15 +83,25 @@ fn roundtrip(name: &'static str) {
 			if let Some(decoder) = &mut decoder
 				&& let Some(picture) = decoder.decode(&f.data).unwrap()
 			{
-				assert_eq!((picture.width, picture.height), (W, H));
-				let psnr = convert::psnr(&sources[index], &picture).unwrap();
-				assert!(psnr > 28.0, "{name} frame {index}: PSNR {psnr:.1} dB");
+				// The top-left part the encoder's alignment allows, never
+				// padding (which the viewer would see).
+				let (pw, ph) = (picture.width, picture.height);
+				assert!(
+					pw <= w && ph <= h && w - pw < aw && h - ph < ah,
+					"{name}: {w}x{h} decoded as {pw}x{ph} (alignment {aw}x{ah})"
+				);
+				let mut source = sources[index].view();
+				(source.width, source.height) = (pw, ph);
+				let psnr = convert::psnr(&source.to_frame(), &picture).unwrap();
+				assert!(psnr > 28.0, "{name} {w}x{h} frame {index}: PSNR {psnr:.1} dB");
+				worst = worst.min(psnr);
 				decoded += 1;
 			}
 		}
 	}
 	eprintln!(
-		"{name}: {} packets from {} frames (first after {delay:?}), keyframes at {keyframes:?}, decoded {decoded}",
+		"{name} {w}x{h} (alignment {aw}x{ah}): {} packets from {} frames (first after \
+		 {delay:?}), keyframes at {keyframes:?}, decoded {decoded}, lowest PSNR {worst:.1} dB",
 		sent.len(),
 		sources.len()
 	);
@@ -139,7 +151,7 @@ fn software_encoders_roundtrip() {
 	let mut tested = Vec::new();
 	for name in ["libx264", "libopenh264", "libsvtav1", "librav1e", "libaom-av1"] {
 		if available(name) {
-			roundtrip(name);
+			roundtrip(name, W, H);
 			tested.push(name);
 		} else {
 			eprintln!("{name} skipped: not available");
@@ -152,6 +164,11 @@ fn software_encoders_roundtrip() {
 /// software ones: our own decoders have to decode it (OpenH264 for H.264 with
 /// `VOELIN_OPENH264_LIB`, dav1d for AV1 with `--features av1`), keyframes
 /// where asked, timestamps kept, PSNR above 28 dB.
+///
+/// Also at 1920x1080, which is not a whole number of 16-pixel macroblocks:
+/// the H.264 SPS has to crop the 1088 coded rows, and AV1 has no cropping at
+/// all, so a GPU that only encodes aligned sizes shows as a wrong decoded
+/// size.
 ///
 /// Whatever hardware the machine has; skipped where none of it works. HEVC is
 /// left out, having no decoder here.
@@ -171,7 +188,8 @@ fn hardware_encoders_roundtrip() {
 		return;
 	}
 	for name in &names {
-		roundtrip(name);
+		roundtrip(name, W, H);
+		roundtrip(name, 1920, 1080);
 	}
 	eprintln!("tested: {names:?}");
 }
