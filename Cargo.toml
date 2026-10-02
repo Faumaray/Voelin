@@ -69,7 +69,15 @@ opt-level = 3
 # every 10 ms of microphone audio; unoptimized it needs about a third of a core.
 [profile.dev.package.sonora]
 opt-level = 3
+[profile.dev.package.sonora-aec3]
+opt-level = 3
 [profile.dev.package.sonora-agc2]
+opt-level = 3
+[profile.dev.package.sonora-common-audio]
+opt-level = 3
+[profile.dev.package.sonora-fft]
+opt-level = 3
+[profile.dev.package.sonora-ns]
 opt-level = 3
 [profile.dev.package.sonora-simd]
 opt-level = 3
@@ -83,6 +91,10 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.str0m]
 opt-level = 3
+[profile.dev.package.str0m-proto]
+opt-level = 3
+[profile.dev.package.str0m-aws-lc-rs]
+opt-level = 3
 [profile.dev.package.openh264]
 opt-level = 3
 [profile.dev.package.dav1d]
@@ -90,6 +102,12 @@ opt-level = 3
 [profile.dev.package.opus2]
 opt-level = 3
 [profile.dev.package.pipewire]
+opt-level = 3
+[profile.dev.package.libspa]
+opt-level = 3
+[profile.dev.package.x11rb-protocol]
+opt-level = 3
+[profile.dev.package.wayland-backend]
 opt-level = 3
 [profile.dev.package.wayland-client]
 opt-level = 3
