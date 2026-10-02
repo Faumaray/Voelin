@@ -9171,10 +9171,12 @@ dependencies = [
 name = "voelin-media"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "ashpd",
  "bzip2",
  "criterion",
  "dav1d",
+ "image",
  "libloading",
  "libvpx-native-sys",
  "memmap2",
@@ -9184,6 +9186,8 @@ dependencies = [
  "reqwest",
  "rtrb",
  "rustix 1.1.5",
+ "serde",
+ "serde_json",
  "sha2 0.10.9",
  "str0m",
  "thiserror 2.0.21",

@@ -37,6 +37,12 @@ fn stride_u32(stride: usize) -> Result<u32> {
 /// Suits a Slint `SharedPixelBuffer<Rgba8Pixel>`:
 /// `to_rgba(&frame, buffer.make_mut_bytes(), width as usize * 4)`.
 pub fn to_rgba(frame: &VideoFrame, out: &mut [u8], out_stride: usize) -> Result<()> {
+	to_rgba_ref(&frame.view(), out, out_stride)
+}
+
+/// Write a borrowed frame (e.g. a mapped capture buffer) as RGBA (alpha 255)
+/// into `out`, `out_stride` bytes per row. Allocates nothing.
+pub fn to_rgba_ref(frame: &FrameRef<'_>, out: &mut [u8], out_stride: usize) -> Result<()> {
 	frame.validate()?;
 	let (w, h) = (frame.width, frame.height);
 	let row = w as usize * 4;
@@ -48,32 +54,32 @@ pub fn to_rgba(frame: &VideoFrame, out: &mut [u8], out_stride: usize) -> Result<
 		)));
 	}
 	let out_stride_u32 = stride_u32(out_stride)?;
-	match &frame.data {
-		FrameData::I420 { y, u, v } => {
+	match &frame.pixels {
+		PixelsRef::I420 { y, u, v } => {
 			let image = YuvPlanarImage {
-				y_plane: &y.data,
+				y_plane: y.data,
 				y_stride: stride_u32(y.stride)?,
-				u_plane: &u.data,
+				u_plane: u.data,
 				u_stride: stride_u32(u.stride)?,
-				v_plane: &v.data,
+				v_plane: v.data,
 				v_stride: stride_u32(v.stride)?,
 				width: w,
 				height: h,
 			};
 			yuv::yuv420_to_rgba(&image, out, out_stride_u32, RANGE, MATRIX).map_err(error)
 		}
-		FrameData::Nv12 { y, uv } => {
+		PixelsRef::Nv12 { y, uv } => {
 			let image = YuvBiPlanarImage {
-				y_plane: &y.data,
+				y_plane: y.data,
 				y_stride: stride_u32(y.stride)?,
-				uv_plane: &uv.data,
+				uv_plane: uv.data,
 				uv_stride: stride_u32(uv.stride)?,
 				width: w,
 				height: h,
 			};
 			yuv::yuv_nv12_to_rgba(&image, out, out_stride_u32, RANGE, MATRIX, mode()).map_err(error)
 		}
-		FrameData::Bgra(p) => {
+		PixelsRef::Bgra(p) => {
 			for y in 0..h as usize {
 				let src = p.row(y, row);
 				let dst = &mut out[y * out_stride..y * out_stride + row];
@@ -83,7 +89,7 @@ pub fn to_rgba(frame: &VideoFrame, out: &mut [u8], out_stride: usize) -> Result<
 			}
 			Ok(())
 		}
-		FrameData::Rgba(p) => {
+		PixelsRef::Rgba(p) => {
 			for y in 0..h as usize {
 				out[y * out_stride..y * out_stride + row].copy_from_slice(p.row(y, row));
 			}

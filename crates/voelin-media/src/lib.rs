@@ -39,6 +39,7 @@ pub mod mix;
 pub mod pool;
 pub mod queue;
 pub mod scale;
+pub mod studio;
 pub mod workers;
 
 pub use capture::{AudioCapture, CaptureOptions, CaptureSource, ScreenCapture, SourceId};
