@@ -23,7 +23,7 @@ use std::time::Duration;
 use tracing::debug;
 
 use crate::codec::Codec;
-use crate::studio::output::record::Recorder;
+use crate::studio::output::record::{BACKLOG, Recorder};
 use crate::studio::output::{OutputSink, Packet, Track};
 use crate::{Error, Result};
 
@@ -188,6 +188,16 @@ impl ReplayBuffer {
 			.rfind(|(_, e)| e.keyframe && e.track.is_video() && e.pts_90khz <= cutoff)
 			.map(|(i, _)| i);
 		let Some(keep) = keep else { return };
+		// Audio that arrived before the keyframe but belongs after it (the
+		// video encoder's delay) stays with it; the older video between is
+		// harmless, a clip skips video up to its first keyframe.
+		let key = self.entries[keep].pts_90khz;
+		let keep = self
+			.entries
+			.iter()
+			.take(keep)
+			.position(|e| !e.track.is_video() && e.pts_90khz >= key)
+			.unwrap_or(keep);
 		let dropped: Vec<Data> = self.entries.drain(..keep).map(|e| e.data).collect();
 		for data in &dropped {
 			self.release(data);
@@ -293,13 +303,14 @@ impl ReplayBuffer {
 				"the replay buffer is off (studio.replay_seconds is 0)".into(),
 			));
 		}
-		let start =
-			self.entries.iter().position(|e| e.keyframe && e.track.is_video()).ok_or_else(
-				|| Error::InvalidFrame("the replay buffer holds no keyframe yet".into()),
-			)?;
+		if !self.entries.iter().any(|e| e.keyframe && e.track.is_video()) {
+			return Err(Error::InvalidFrame("the replay buffer holds no keyframe yet".into()));
+		}
+		// Everything, from the start: the recorder skips video up to the
+		// first keyframe and keeps the audio of its moment.
 		let mut recorder = Recorder::start(path, self.layer, self.channels)?;
 		let mut bytes = Vec::new();
-		for index in start..self.entries.len() {
+		for index in 0..self.entries.len() {
 			self.read(index, &mut bytes)?;
 			let entry = &self.entries[index];
 			recorder.write(&Packet {
@@ -353,9 +364,18 @@ impl OutputSink for ReplayBuffer {
 				self.last_keyframe = packet.pts_90khz;
 			}
 		}
-		// Nothing before the first keyframe: a clip has to start at one.
-		if self.entries.is_empty() && !(packet.keyframe && packet.track.is_video()) {
-			return Ok(());
+		// No video before the first keyframe: a clip has to start at one. The
+		// audio waits for it, the last [`BACKLOG`] of it.
+		if self.needs_keyframe {
+			if packet.track.is_video() && !packet.keyframe {
+				return Ok(());
+			}
+			let keep = BACKLOG.as_millis() as u64 * 90;
+			while self.entries.front().is_some_and(|e| e.pts_90khz + keep < packet.pts_90khz) {
+				if let Some(entry) = self.entries.pop_front() {
+					self.release(&entry.data);
+				}
+			}
 		}
 		self.entries.push_back(Entry {
 			track: packet.track,
@@ -509,6 +529,44 @@ mod tests {
 		assert_eq!(buffer.name(), "replay");
 		buffer.set_layer(0);
 		assert!(buffer.wants(Track::Video { codec: Codec::Vp8, layer: 0 }));
+	}
+
+	#[test]
+	fn audio_ahead_of_a_late_keyframe_stays_with_it() {
+		let mut buffer = ReplayBuffer::new(Duration::from_secs(1), 64, 0, 2);
+		let audio = |buffer: &mut ReplayBuffer, ms: u64| {
+			let track = Track::Audio { channels: 2 };
+			let packet = Packet {
+				track,
+				pts_90khz: ms * 90,
+				keyframe: true,
+				width: 0,
+				height: 0,
+				data: &[7],
+			};
+			buffer.write(&packet).unwrap();
+		};
+		// The encoder is 100 ms behind the audio: each keyframe arrives after
+		// the audio of the next 100 ms.
+		for ms in (0..=200).step_by(20) {
+			audio(&mut buffer, ms);
+		}
+		push(&mut buffer, 100, true, 10);
+		for ms in (220..3000).step_by(20) {
+			audio(&mut buffer, ms);
+			if ms % 100 == 0 {
+				push(&mut buffer, ms - 100, (ms - 100) % 1000 == 0, 10);
+			}
+		}
+		// The window starts at the keyframe of 1000 ms (the last one at or
+		// before 2900 - 1000 ms), with the audio from 1000 ms on that came
+		// before it.
+		let first = buffer.entries.front().unwrap();
+		assert!(!first.track.is_video());
+		assert_eq!(first.pts_90khz, 1000 * 90);
+		assert!(buffer.entries.iter().all(|e| e.track.is_video() || e.pts_90khz >= 1000 * 90));
+		let key = buffer.entries.iter().find(|e| e.keyframe && e.track.is_video()).unwrap();
+		assert_eq!(key.pts_90khz, 1000 * 90);
 	}
 
 	#[test]

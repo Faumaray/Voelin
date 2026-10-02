@@ -2,10 +2,12 @@
 //!
 //! The recorder waits for the first keyframe of the layer it records (a file
 //! that starts mid-picture is useless), then writes an [`ebml`] file and
-//! every packet after it. The audio track is declared from the start, so
-//! audio that arrives before the first keyframe is simply dropped rather
-//! than shifting the file's clock.
+//! every packet after it. The video encoder's delay means that keyframe
+//! arrives after the audio of the same moment, so the last [`BACKLOG`] of
+//! audio is kept while waiting and what of it is not older than the keyframe
+//! is written too: the recording's audio starts with its picture.
 
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
@@ -17,6 +19,10 @@ use crate::codec::Codec;
 use crate::studio::output::ebml::{self, Track as MkvTrack, TrackKind, Writer};
 use crate::studio::output::{OutputSink, Packet, Track};
 use crate::{Error, Result};
+
+/// How much audio is kept while waiting for the first keyframe: more than
+/// any encoder's delay.
+pub const BACKLOG: Duration = Duration::from_secs(2);
 
 /// The container a recording is written in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -65,6 +71,8 @@ pub struct Recorder {
 	/// H.264 frames are rewritten length-prefixed.
 	scratch: Vec<u8>,
 	video: Option<Codec>,
+	/// Audio (90 kHz time, bytes) that came while waiting for the keyframe.
+	backlog: VecDeque<(u64, Vec<u8>)>,
 }
 
 impl Recorder {
@@ -90,6 +98,7 @@ impl Recorder {
 			waiting: true,
 			scratch: Vec::new(),
 			video: None,
+			backlog: VecDeque::new(),
 		})
 	}
 
@@ -169,9 +178,20 @@ impl OutputSink for Recorder {
 			Track::Video { .. } => return Ok(()),
 			Track::Audio { .. } => (1, None),
 		};
-		if self.writer.is_none() {
-			// Nothing before the first keyframe of the recorded layer.
-			let Some(codec) = codec.filter(|_| packet.keyframe) else { return Ok(()) };
+		let opening = self.writer.is_none();
+		if opening {
+			// No video before the first keyframe of the recorded layer; the
+			// audio waits for it.
+			let Some(codec) = codec.filter(|_| packet.keyframe) else {
+				if codec.is_none() {
+					let keep = BACKLOG.as_millis() as u64 * 90;
+					self.backlog.push_back((packet.pts_90khz, packet.data.to_vec()));
+					while self.backlog.front().is_some_and(|(t, _)| t + keep < packet.pts_90khz) {
+						self.backlog.pop_front();
+					}
+				}
+				return Ok(());
+			};
 			self.open(packet, codec)?;
 		}
 		let Some(writer) = &mut self.writer else { return Ok(()) };
@@ -186,12 +206,18 @@ impl OutputSink for Recorder {
 		}
 		if codec == Some(Codec::H264) {
 			ebml::to_length_prefixed(packet.data, &mut self.scratch);
-			let scratch = std::mem::take(&mut self.scratch);
-			let result = writer.write(index, packet.ms(), packet.keyframe, &scratch);
-			self.scratch = scratch;
-			return result;
+			writer.write(index, packet.ms(), packet.keyframe, &self.scratch)?;
+		} else {
+			writer.write(index, packet.ms(), packet.keyframe, packet.data)?;
 		}
-		writer.write(index, packet.ms(), packet.keyframe, packet.data)
+		if opening {
+			for (time, data) in self.backlog.drain(..) {
+				if time >= packet.pts_90khz {
+					writer.write(1, time * 1000 / 90_000, true, &data)?;
+				}
+			}
+		}
+		Ok(())
 	}
 
 	fn finish(&mut self) -> Result<()> {
@@ -281,6 +307,31 @@ mod tests {
 		let written = std::fs::read(&path).unwrap();
 		assert!(written.len() > 100, "{} bytes", written.len());
 		assert!(written.windows(4).any(|w| w == b"webm"));
+		std::fs::remove_dir_all(&dir).ok();
+	}
+
+	#[test]
+	fn audio_of_the_keyframes_moment_is_kept_while_waiting() {
+		let dir = dir("backlog");
+		let mut recorder = Recorder::start(dir.join("clip.webm"), 0, 2).unwrap();
+		let audio = |ms: u64| Packet {
+			track: Track::Audio { channels: 2 },
+			pts_90khz: ms * 90,
+			keyframe: true,
+			width: 0,
+			height: 0,
+			data: &[7, 7],
+		};
+		// The encoder is slow: audio up to 200 ms is here before the keyframe
+		// of the picture at 100 ms.
+		for ms in (0..=200).step_by(20) {
+			recorder.write(&audio(ms)).unwrap();
+		}
+		recorder.write(&video(0, 100, true, &[1, 2, 3])).unwrap();
+		// The keyframe, then the audio from 100 ms on: 100, 120, ... 200.
+		assert_eq!(recorder.writer.as_ref().unwrap().blocks(), 1 + 6);
+		assert!(recorder.backlog.is_empty());
+		recorder.finish().unwrap();
 		std::fs::remove_dir_all(&dir).ok();
 	}
 
