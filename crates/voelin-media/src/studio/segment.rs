@@ -404,8 +404,7 @@ impl BackgroundFilter {
 				let FrameData::Rgba(behind) = &image.data else {
 					return Err(Error::InvalidFrame("the background image is not RGBA".into()));
 				};
-				let behind = behind.data.clone();
-				mix(&mut self.workers, &mut plane.data, &behind, stride, width, height, &mask);
+				mix(&mut self.workers, &mut plane.data, &behind.data, stride, width, height, &mask);
 			}
 			Some(Backdrop::Colour(rgba)) => {
 				let rgba = *rgba;
@@ -691,6 +690,26 @@ mod tests {
 		// Any other mode needs RGBA and says so.
 		filter.set_mode(Background::Blur { strength: 0.05 });
 		assert!(filter.apply(&mut VideoFrame::black_i420(8, 8)).is_err());
+	}
+
+	#[test]
+	fn an_image_background_shows_behind_the_subject() {
+		let dir = std::env::temp_dir().join(format!("voelin-backdrop-{}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("behind.png");
+		image::RgbaImage::from_pixel(16, 16, image::Rgba([0, 0, 220, 255])).save(&path).unwrap();
+		let mut filter =
+			BackgroundFilter::with_default_segmenter(Background::Image { path: path.clone() });
+		let started = Instant::now();
+		let mut frame = flat_rgba(64, 64, [0, 255, 0, 255]);
+		while pixel(&frame, 0, 0) != [0, 0, 220, 255] {
+			assert!(started.elapsed() < Duration::from_secs(5), "the image never showed");
+			frame = flat_rgba(64, 64, [0, 255, 0, 255]);
+			filter.apply(&mut frame).unwrap();
+			std::thread::sleep(Duration::from_millis(10));
+		}
+		assert_eq!(pixel(&frame, 32, 35), [0, 255, 0, 255], "the subject is untouched");
+		std::fs::remove_dir_all(&dir).ok();
 	}
 
 	#[test]
