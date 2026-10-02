@@ -154,12 +154,11 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 			"member" => {
 				with_app(|app| app.open_first_member());
 			}
-			"watch" => {
-				with_app(|app| app.watch_first_stream());
-			}
-			"popout" => {
-				with_app(|app| app.watch_first_stream());
-				ui.global::<Bridge>().set_viewer_popped(true);
+			"watch" | "popout" => {
+				with_app(|app| {
+					if switches.demo_ui { app.demo_watch() } else { app.watch_first_stream() }
+				});
+				ui.global::<Bridge>().set_viewer_popped(what == "popout");
 			}
 			// Opened once connected (settings_page.rs).
 			"client" => {}

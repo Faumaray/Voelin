@@ -341,6 +341,12 @@ impl App {
 			.collect::<Vec<_>>()
 			.join(" · ");
 		bridge.set_viewer_info(info.into());
+		bridge.set_viewer_streamer(watch.streamer.clone().into());
+		let streamer = self
+			.view()
+			.and_then(|v| v.streams.iter().find(|s| s.id == watch.stream_id))
+			.map_or(-1, |s| i32::from(s.streamer.0));
+		bridge.set_viewer_streamer_id(streamer);
 		bridge.set_viewer_elapsed(watch.elapsed().into());
 		bridge.set_viewer_count(watch.viewers as i32);
 		let qualities = watch.qualities();
@@ -676,6 +682,20 @@ impl App {
 		self.refresh_streams();
 		// The people in our channel lead the members panel beside the viewer.
 		self.refresh_tree();
+	}
+
+	/// `VOELIN_OPEN=watch` with sample data: the local test pattern in the
+	/// viewer, dressed as the first stream of our channel.
+	pub(crate) fn demo_watch(&mut self) {
+		let sample = self.view().and_then(|v| {
+			v.streams.first().map(|s| (s.id.clone(), s.name.clone(), v.nickname(s.streamer.0)))
+		});
+		self.start_demo();
+		if let (Some(watch), Some((id, title, streamer))) = (&mut self.watch, sample) {
+			(watch.stream_id, watch.title, watch.streamer, watch.viewers) =
+				(id, title, streamer, 12);
+		}
+		self.refresh_viewer();
 	}
 
 	/// A decoded picture is waiting.

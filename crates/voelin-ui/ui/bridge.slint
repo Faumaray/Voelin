@@ -376,6 +376,9 @@ export global Bridge {
     in property <image> viewer-frame;
     in property <bool> viewer-has-frame;
     in property <string> viewer-title;
+    // Who streams it (their client id: -1 unknown).
+    in property <string> viewer-streamer;
+    in property <int> viewer-streamer-id: -1;
     // Shown instead of (or over) the picture: waiting, ended, errors.
     in property <string> viewer-status;
     in property <string> viewer-info;
