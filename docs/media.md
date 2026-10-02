@@ -376,8 +376,13 @@ the software encoders above are used as before.
   (`encode_with`). VA-API frames come from a surface pool
   (`av_hwframe_ctx_init`, surfaces allocated on demand and recycled) filled
   with `av_hwframe_transfer_data`; the device is `VOELIN_VAAPI_DEVICE` or the
-  first `/dev/dri/renderD*`, shared by all encoders. Odd sizes are cropped to
-  even ones. `encode_dmabuf` takes a buffer with one NV12 layer of two
+  first `/dev/dri/renderD*`, shared by all encoders. Frames are cropped to
+  the sizes a backend encodes exactly: even ones for most, and for AV1 the
+  alignment its self-test measured (`BackendStatus::alignment`). The AV1
+  self-test encodes 258x258 (2 more than a power of two) and reads the
+  frame size the sequence header declares: an encoder that pads to 64
+  declares 320. AV1 has no cropping like H.264's SPS, so padding would
+  reach the viewer as picture. `encode_dmabuf` takes a buffer with one NV12 layer of two
   planes, which is how a compositor hands one over; a driver exporting its
   own surface may instead describe it as two layers (`R8` for luma, `GR88`
   for chroma) over the same object, and that form is not accepted yet. The streamer's steady state is 1.1 heap allocations per encoded
@@ -639,6 +644,30 @@ scaling cost 0.16-0.30 ms per frame at these sizes and are not the
 bottleneck. The per-layer "threads" the bench prints is the CPU budget the
 layer was given, not what a hardware encoder uses — it encodes on the GPU.
 
+What the GPU encoders produce, decoded by our own decoders (OpenH264 2.6.0,
+dav1d 1.5.4): `tests/ffmpeg.rs` `hardware_encoders_roundtrip`, twelve
+frames of the test pattern with a keyframe forced at frame 8 and a bitrate
+change at frame 5.
+
+| encoder | 320x240 | 1920x1080 |
+|---|---|---|
+| `h264_vaapi` | 12 of 12 decoded, lowest PSNR 38.1 dB | 1920x1080, 37.8 dB |
+| `h264_amf` | 12 of 12, 38.1 dB (first packet after one frame) | 1920x1080, 37.8 dB |
+| `av1_vaapi` | 12 of 12, 37.8 dB | 1920x1082 before, 1920x1072 now (cropped), 43.7 dB |
+| `av1_amf` | 12 of 12, 37.8 dB (first packet after one frame) | 1920x1082 before, 1920x1072 now (cropped), 43.6 dB |
+
+Keyframes came out at frames 0 and 8 and timestamps in order everywhere.
+The AV1 encoder of this GPU (both through VA-API and AMF) does not encode
+every size: it pads the width to a multiple of 64 and the height to 16,
+except that a height 8 more than a multiple of 16 gets 2 rows (1366x768 is
+sent as 1408x768, 3440x1440 as 3456x1440, 1600x900 as 1600x912, 1920x1080
+as 1920x1082, 642x482 as 704x496; sizes that are multiples of 64x16 come out
+exact). The padding is picture as far as AV1 is concerned, so every viewer
+showed it. The encoders now crop to 64x16 instead, measured by the
+self-test: 1920x1080 is sent as 1920x1072, 1366x768 as 1344x768. H.264 has
+no such problem; its SPS crops whatever the hardware pads (exact at all 12
+sizes tried, 320x240 to 3440x1440).
+
 ### Wayland screen capture, measured
 
 Same machine, a 2560x1440 Wayland desktop through the ScreenCast portal,
@@ -718,7 +747,7 @@ has not run on Windows yet.
 | H.264 with Cisco's 2.6.0 library (PSNR, Constrained High `profile_idc` 100, Baseline 66) | `tests/openh264.rs` with `VOELIN_OPENH264_LIB` | tested locally, skipped without the library |
 | OpenH264 download, SHA-256 check, reuse | `tests/openh264.rs -- --ignored` | tested locally (network) |
 | H.264 library missing / unknown file | unit + integration tests | tested |
-| AV1 decoder construction, garbage input | unit test (`--features av1`) | tested; no AV1 stream decoded (no encoder available) |
+| AV1 decoder construction, garbage input | unit test (`--features av1`) | tested; streams of SVT-AV1, rav1e, libaom, `av1_vaapi` and `av1_amf` decoded (rows below) |
 | X11 capture (MIT-SHM and GetImage), sources, window capture → VP8 → decode, cursor | `tests/x11_capture.rs` under Xvfb | tested |
 | wlroots capture (wlr-screencopy v3): outputs, pixels, a change arriving as a new frame, queue API | `tests/wlroots_capture.rs` against headless sway 1.9 (`VOELIN_WLROOTS_TEST_DISPLAY`) | tested; the ext-image-copy-capture path is untested (sway 1.9 predates it) |
 | Converter (strides, unpadded last row, odd sizes, RGBA/I420/NV12), scaler (flat, area average, half), pyramid (sharing, recycling, steady-state pools) | unit tests | tested |
@@ -735,6 +764,8 @@ has not run on Windows yet.
 | Answer's codec reported to the streamer, H.264 level in the offer, HEVC offered | `voelin-stream` `peer::tests::streamer_learns_the_answered_codec`, `h264::tests` | tested (str0m on loopback) |
 | x264 / SVT-AV1 / libaom in the streamer pipeline | `voelinctl stream bench --encoder ...` | 720p30: x264 8.7 ms per frame, SVT-AV1 1.3 ms, libaom 37 ms; 1.1 allocations per encoded frame |
 | Hardware encoders VA-API and AMF (H.264, HEVC, AV1) in the streamer pipeline | `voelinctl stream bench` on a Radeon RX 7900 GRE, 1080p60 / 1440p60 / simulcast | tested: full frame rate, 0.20-0.42 cores against 1.16-2.55 for software, 1.02 allocations per encoded frame (see the table above) |
+| Hardware encoders → our decoders: `h264_vaapi` / `h264_amf` → OpenH264, `av1_vaapi` / `av1_amf` → dav1d (PSNR > 28 dB, decoded size, keyframes at start and on request, timestamps, bitrate change) at 320x240 and 1920x1080 | `tests/ffmpeg.rs` `hardware_encoders_roundtrip` (`VOELIN_OPENH264_LIB`, `--features av1`) | tested on the Radeon RX 7900 GRE: it found the AV1 encoder padding 1080 rows to 1082 (and other sizes to 64x16), now cropped (see above). HEVC is not decoded (no decoder here) |
+| The alignment an AV1 encoder pads to, from the sequence header it writes | `ffmpeg::encoder::tests::av1_declared_size_and_alignment` (every optional header field), the self-test on the GPU | tested: (64, 16) for `av1_vaapi` and `av1_amf`, (2, 2) for SVT-AV1, rav1e and libaom |
 | Hardware encoders NVENC, Quick Sync, Media Foundation, VideoToolbox | – | not tested (no such hardware here); NVENC and Quick Sync are skipped by the vendor check and the Windows code type-checks for `x86_64-pc-windows-gnu` |
 | H.264 SPS against the offered `profile-level-id` (`profile_idc`, `level_idc`) for every usable backend, two sizes, both profiles | `tests/ffmpeg.rs` `sps_carries_the_offered_profile_and_level` | tested: it found `h264_amf` emitting level 4.2 where the offer said 3.1; with the level now set, all backends emit the offered level |
 | The encoder's H.264 level table against the signalling's | `ffmpeg::encoder::tests::levels_agree_with_the_signalling` | tested (8 sizes x 5 rates x 4 bitrates x 2 profiles) |
