@@ -248,9 +248,14 @@ libwebrtc, the stack the official client is built on:
   strings (e.g. `fhs`), not `0`. Our `iceCandidate` signals use the peer's
   first mid and `sdpMLineIndex` 0; Chromium's `addIceCandidate` accepts them.
 - Without camera/microphone permission Chromium hides host candidates behind
-  mDNS names (`<uuid>.local`), which str0m cannot resolve. The test disables
-  that; the official client may send mDNS candidates, which would then need a
-  resolver (or its server-reflexive candidates) on our side.
+  mDNS names (`<uuid>.local`), which str0m cannot use. Our peers resolve them
+  with a multicast DNS query (`voelin_stream::mdns`, 2026-10-03). Chromium
+  152's responder answers queries sent from port 5353 (with multicast
+  answers on every interface) and ignores "legacy" queries from other
+  ports, so the query goes out from 5353, shared with the system's
+  responder. `browser_mdns_candidates_connect` keeps our candidates from the
+  browser, so only a resolved name can connect: it does, both ways. The
+  official client may send such names too.
 - str0m answers in its own codec order and the offerer sends the answer's
   first codec, so `Peer::answer` orders the viewer's codecs like the offer.
 - SRTP profile: libwebrtc answers our `setup:actpass` offer as DTLS client
@@ -263,6 +268,18 @@ libwebrtc, the stack the official client is built on:
   `srtpCipher: AES_CM_128_HMAC_SHA1_80` (DTLS 1.2,
   `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256`). Whether this was what broke the
   official client is still to be confirmed with it.
+- When SRTP fails after the handshake (a relay that lets STUN and DTLS
+  through and drops SRTP once AES-GCM was selected), Chromium 152 decodes
+  nothing and its receiver reports never mention our video; our streamer
+  peer reports that (`PeerEvent::NoFeedback`) and the session offers a new
+  connection without AES-GCM (`browser_srtp_failure_is_noticed`; the
+  AES_CM_128_HMAC_SHA1_80 connection then decodes 90 of 90 frames). A
+  working connection raises no such report.
+- DTLS: Chromium 152's ClientHello offers 1.3 and 1.2. Our peers use 1.2
+  (str0m's default) and get it; allowed 1.3, dimpl negotiates it with
+  Chromium 152 (`FEFC`, `TLS_AES_128_GCM_SHA256`) and the stream decodes
+  (tried 2026-10-03, not turned on: see "Negotiation" in
+  [architecture.md](../architecture.md)).
 - With bandwidth estimation on our streamer peer, Chromium's transport-cc
   feedback gives estimates; the offer is the same as without (str0m always
   offers transport-cc and abs-send-time).
@@ -331,6 +348,18 @@ VP9 on the same connection; VP9 frames arrive).
 - [ ] Interop with the official TS6 client (its offer/answer details, whether
       it trickles candidates, mDNS host candidates). The codecs it picks and
       decodes are known (see above); Chromium's WebRTC stack interoperates.
+- [ ] Whether the official client, as a viewer, answers a `reconnectOffer`
+      it did not ask for (our streamer sends one when the viewer's receiver
+      reports show none of our video), and whether it offers AES-GCM at all.
+      To find out: Voelin streams to it with
+      `voelinctl ... stream start --synthetic --auto-accept --srtp
+      AEAD_AES_128_GCM,AES_CM_128_HMAC_SHA1_80` and `RUST_LOG=voelin_stream=debug`;
+      the viewer list prints the SRTP profile per viewer. AES-GCM selected
+      and a picture: the official client handles it, and AEAD-first could
+      become the default. AES_CM_128_HMAC_SHA1_80 selected: it does not
+      offer AES-GCM, and the order does not matter. No picture: after 10 s
+      the log says "offering a new connection without SRTP"; a picture after
+      that proves it answers our `reconnectOffer`.
 - [ ] Whether stream audio can be sent without video.
 - [ ] The WebRTC/protobuf transport some TS6 clients use on UDP 9987
       (`client_protocol_format=proto`, reported in community reverse engineering).

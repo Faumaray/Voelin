@@ -16,6 +16,8 @@ TeamSpeak server is involved.
 | `share_offer_picks_a_codec_every_client_decodes` (voelin-core) | The offer a share makes on this machine (`preferred_codec`, `peer_config`): the browser, answering with the first codec of the offer it lists as the official client does, must pick one every TeamSpeak client decodes (`decoded_everywhere`), and decode it |
 | `browser_renegotiates_with_rust` | Chromium streams VP8, then sends a new offer on the same connection with VP9 first (as the official client re-offers when it does not encode the codec we chose); `Peer::renegotiate` answers on the same peer, in the new offer's codec order; VP9 frames must arrive |
 | `trickled_candidates_reach_browser` | A server-reflexive candidate (from a fake STUN server) as our sessions trickle it (`iceCandidate` signal with the peer's mid) is accepted by `addIceCandidate` |
+| `browser_mdns_candidates_connect` | Chromium with its host addresses behind mDNS names (`VOELIN_BROWSER_MDNS=1`, see below) and our candidates kept from it, so only resolving its names can connect: our streamer (names in its answer) and our viewer (names in its offer) connect and the media flows |
+| `browser_srtp_failure_is_noticed` | The relay of `crates/voelin-stream/tests/relay` between our streamer peer and Chromium drops SRTP once AES-GCM was selected: Chromium decodes nothing, our peer reports `NoFeedback`; the next connection with AES_CM_128_HMAC_SHA1_80 only decodes and reports nothing |
 
 ## Running
 
@@ -41,8 +43,12 @@ defaults to `npm root -g` so a global Playwright is found.
 
 Chromium is started with `--disable-features=WebRtcHideLocalIpsWithMdns`:
 without camera/microphone permission it would hide host candidates behind
-mDNS names (`<uuid>.local`), which str0m cannot resolve. The official client
-may do the same; see `docs/protocol-notes/ts6-streaming.md`.
+mDNS names (`<uuid>.local`). Our peers resolve those (`voelin_stream::mdns`),
+which `browser_mdns_candidates_connect` tests with the feature left on
+(`Browser::start_with_mdns`, `VOELIN_BROWSER_MDNS=1` for the driver). That
+test needs a network interface with multicast (the browser's responder
+answers on it) and port 5353 shareable (`SO_REUSEADDR`). The official client
+may hide its addresses the same way; see `docs/protocol-notes/ts6-streaming.md`.
 
 ## Findings
 
@@ -76,6 +82,12 @@ may do the same; see `docs/protocol-notes/ts6-streaming.md`.
   entry and decodes what an encoder in Constrained Baseline makes
   (`h264_vaapi`, also from DMA-BUFs, and `libx264`: 90 of 90 frames,
   2026-10-03).
+- Chromium 152 offers DTLS 1.3 and 1.2; our peers (1.2) get 1.2. Allowed
+  1.3, dimpl negotiates it with Chromium 152 (`tlsVersion` `FEFC`,
+  `TLS_AES_128_GCM_SHA256`) and the stream decodes; it is not turned on
+  (see "Negotiation" in `docs/architecture.md`).
+- When SRTP fails after the handshake, Chromium sends no receiver report
+  that mentions our video: what `PeerEvent::NoFeedback` waits for.
 - With str0m's bandwidth estimation and pacer on our streamer peer, Chromium's
   transport-cc feedback yields estimates within the first second (about
   640 kbit/s rising towards the desired bitrate with the 720 kbit/s synthetic
