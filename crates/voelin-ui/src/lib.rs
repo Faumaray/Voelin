@@ -8,6 +8,7 @@ mod dev;
 mod emoji;
 mod hotkey;
 mod images;
+mod inbox;
 mod members;
 mod servers;
 mod settings;
@@ -18,3 +19,4 @@ mod video;
 mod vm;
 
 pub use app::{HostedEngine, RunOptions, run};
+pub use inbox::{Request, request};

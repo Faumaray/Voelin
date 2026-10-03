@@ -13,6 +13,8 @@
 //!   native methods it calls back (`Native`)
 //! - `capture` (Android): screen and system-audio capture through
 //!   MediaProjection, registered as `voelin_media` capture providers
+//! - `camera` (Android): the Stream Studio's cameras through Camera2,
+//!   registered as its camera provider
 //! - `secrets` (Android): passwords encrypted with an Android Keystore key
 //! - `egl` (Android): keeps EGL extension slots for Skia, without which the
 //!   UI cannot draw on Mesa-based Android (Waydroid)
@@ -26,6 +28,8 @@ pub mod host;
 mod app;
 #[cfg(target_os = "android")]
 mod bridge;
+#[cfg(target_os = "android")]
+mod camera;
 #[cfg(target_os = "android")]
 mod capture;
 #[cfg(target_os = "android")]

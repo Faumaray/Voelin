@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::capture::playback::{AudioApp, PlaybackFilter, SourceCapture, forward_audio};
 use crate::capture::{
-	AudioCapture, BoxFuture, CaptureOptions, CaptureSource, ScreenCapture, SourceId,
+	AudioCapture, BoxFuture, CaptureOptions, CaptureSource, FrameSink, ScreenCapture, SourceId,
 };
 use crate::frame::{AUDIO_SAMPLE_RATE, AudioBuffer, VideoFrame};
 use crate::mix::{SourceHandle, SourceInput};
@@ -40,6 +40,24 @@ pub trait ScreenProvider: Send + Sync {
 		options: &CaptureOptions,
 		frames: FrameSender<VideoFrame>,
 	) -> BoxFuture<'static, Result<()>>;
+
+	/// Like [`start`](Self::start), but frames go to `sink` from the
+	/// provider's own thread, borrowed (no copy), and the provider may hand
+	/// it [`FrameSink::gpu`] pictures while it accepts them. The default
+	/// forwards the frames of `start`.
+	fn start_sink(
+		&self,
+		source: &SourceId,
+		options: &CaptureOptions,
+		sink: Box<dyn FrameSink>,
+	) -> BoxFuture<'static, Result<()>> {
+		let (tx, rx) = frame_channel(options.queue);
+		let started = self.start(source, options, tx);
+		Box::pin(async move {
+			started.await?;
+			super::forward(rx, sink)
+		})
+	}
 
 	fn stop(&self);
 }
@@ -173,6 +191,19 @@ impl ScreenCapture for ExternalScreenCapture {
 			started.await?;
 			Ok(rx)
 		})
+	}
+
+	fn start_sink(
+		&mut self,
+		source: &SourceId,
+		options: &CaptureOptions,
+		sink: Box<dyn FrameSink>,
+	) -> BoxFuture<'_, Result<()>> {
+		self.stop();
+		let options = CaptureOptions { fps: sink.max_fps(), ..options.clone() };
+		let started = self.provider.start_sink(source, &options, sink);
+		self.running = true;
+		started
 	}
 
 	fn stop(&mut self) {

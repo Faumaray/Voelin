@@ -1,6 +1,8 @@
 package io.github.faumaray.voelin
 
 import android.Manifest
+import android.app.Notification
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
@@ -34,9 +36,10 @@ import kotlin.math.roundToInt
 /**
  * Screen sharing: holds the MediaProjection (a `mediaProjection` foreground
  * service, as Android requires), mirrors the display into an ImageReader and
- * hands each RGBA frame to Native.onScreenFrame; optionally captures what
- * other apps play (AudioPlaybackCapture: all but us, or one app) for
- * Native.onSystemAudio and Native.onAudioInput.
+ * hands each RGBA frame to Native.onScreenFrame, or (the zero-copy path,
+ * Bridge.setScreenSurface) straight into an encoder's input surface;
+ * optionally captures what other apps play (AudioPlaybackCapture: all but
+ * us, or one app) for Native.onSystemAudio and Native.onAudioInput.
  */
 class ScreenCaptureService : Service() {
     private var projection: MediaProjection? = null
@@ -66,21 +69,9 @@ class ScreenCaptureService : Service() {
             return START_NOT_STICKY
         }
         if (projection != null) return START_NOT_STICKY
-        val stop = PendingIntent.getService(
-            this,
-            0,
-            Intent(this, ScreenCaptureService::class.java).setAction(ACTION_STOP),
-            PendingIntent.FLAG_IMMUTABLE,
-        )
-        val notification = Notifications.ongoing(
-            this,
-            Notifications.CHANNEL_SCREEN,
-            getString(R.string.screen_sharing),
-            getString(R.string.stop_sharing) to stop,
-        )
         try {
             // Must be in the foreground before getMediaProjection (Android 14).
-            startForeground(ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            startForeground(ID, notification(this), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
             val data = if (Build.VERSION.SDK_INT >= 33) {
                 intent.getParcelableExtra(EXTRA_DATA, Intent::class.java)
             } else {
@@ -157,6 +148,32 @@ class ScreenCaptureService : Service() {
             null,
             handler,
         )
+    }
+
+    /**
+     * Point the virtual display at `surface` (an encoder's input surface,
+     * `width` x `height`: the screen goes into the encoder without a copy),
+     * or with null back at the reader, at the reader's size.
+     */
+    @Synchronized
+    private fun redirectTo(surface: Surface?, width: Int, height: Int) {
+        val display = display ?: return
+        val reader = reader ?: return
+        val dpi = resources.displayMetrics.densityDpi
+        try {
+            // Detached while resizing, so neither consumer gets a picture of
+            // the other's size.
+            display.surface = null
+            if (surface != null) {
+                display.resize(width, height, dpi)
+                display.surface = surface
+            } else {
+                display.resize(reader.width, reader.height, dpi)
+                display.surface = reader.surface
+            }
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "cannot point the screen at ${if (surface != null) "the encoder" else "the reader"}", e)
+        }
     }
 
     /**
@@ -259,6 +276,36 @@ class ScreenCaptureService : Service() {
         @Volatile
         private var instance: ScreenCaptureService? = null
 
+        /** Where our stream is live and who watches ("Live in Chill Zone"), or null. */
+        @Volatile
+        private var notice: Pair<String, String>? = null
+
+        private fun notification(context: Context): Notification {
+            val stop = PendingIntent.getService(
+                context,
+                0,
+                Intent(context, ScreenCaptureService::class.java).setAction(ACTION_STOP),
+                PendingIntent.FLAG_IMMUTABLE,
+            )
+            val (title, text) = notice ?: (context.getString(R.string.screen_sharing) to context.getString(R.string.screen_sharing_text))
+            return Notifications.ongoing(
+                context,
+                Notifications.CHANNEL_SCREEN,
+                title,
+                text,
+                Notifications.openApp(context),
+                0,
+                context.getString(R.string.stop_sharing) to stop,
+            )
+        }
+
+        /** What the notification says while our stream is live (null: the default). */
+        fun setNotice(title: String?, text: String?) {
+            notice = if (title != null) title to (text ?: "") else null
+            val service = instance ?: return
+            service.getSystemService(NotificationManager::class.java).notify(ID, notification(service))
+        }
+
         /** Start capturing with the consent the user just gave. */
         fun start(context: Context, resultCode: Int, data: Intent, fps: Int, maxSize: Int) {
             val intent = Intent(context, ScreenCaptureService::class.java)
@@ -271,6 +318,11 @@ class ScreenCaptureService : Service() {
 
         fun stop(context: Context) {
             context.stopService(Intent(context, ScreenCaptureService::class.java))
+        }
+
+        /** See redirectTo; nothing without a running capture. */
+        fun redirect(surface: Surface?, width: Int, height: Int) {
+            instance?.redirectTo(surface, width, height)
         }
 
         fun startAudio(): Boolean {

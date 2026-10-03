@@ -6,6 +6,8 @@ import { Bridge, BookmarkForm, ShareForm } from "../bridge.slint";
 import { Nav } from "../nav.slint";
 import { Icon, Button, ButtonKind, IconButton, TextField, Field, Select, Toggle, ToggleRow, Slider, Modal, Card, Chip, Banner, Avatar, Status, ListView, ScrollView } from "../components/index.slint";
 import { AboutSlint } from "std-widgets.slint";
+import { StudioBridge } from "../studio-bridge.slint";
+import { MixerRow, PickDialog } from "studio-parts.slint";
 
 // Buttons at the bottom right of a dialog.
 component Footer inherits HorizontalLayout {
@@ -175,15 +177,57 @@ component SourceCard inherits Rectangle {
     }
 }
 
-export component ShareDialog inherits Modal {
+// The stream's audio: the Stream Studio's mixer rows (`stream.audio_sources`,
+// levels while live) and Add, which opens its picker.
+component ShareAudio inherits VerticalLayout {
+    callback add();
+    spacing: Theme.space-1;
+    HorizontalLayout {
+        spacing: Theme.space-2;
+        Text {
+            text: @tr("Audio sources");
+            color: Theme.text-secondary;
+            font-size: Theme.font-sm;
+            font-weight: Theme.weight-semibold;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Button {
+            small: true;
+            icon: Icons.plus;
+            text: @tr("Add");
+            clicked => { root.add(); }
+        }
+    }
+    if StudioBridge.audio.length == 0: Text {
+        text: @tr("No audio: add your microphone, the desktop or an application.");
+        color: Theme.text-muted;
+        font-size: Theme.font-sm;
+        wrap: word-wrap;
+    }
+    // Three rows at a time.
+    if StudioBridge.audio.length > 0: ListView {
+        height: min(StudioBridge.audio.length, 3) * 56px;
+        accessible-label: @tr("Audio sources");
+        for audio[i] in StudioBridge.audio: MixerRow {
+            audio: audio;
+            index: i;
+            compact: true;
+            phone: Nav.narrow;
+        }
+    }
+}
+
+component ShareCard inherits Modal {
     in-out property <ShareForm> form;
     callback done();
+    callback pick-audio();
     property <bool> live: Bridge.share-state == "live" || Bridge.share-state == "starting";
     title: Bridge.share-state == "live" ? @tr("You are sharing your screen") : Bridge.share-state == "starting" ? @tr("Starting…") : @tr("Share screen");
     subtitle: live ? Bridge.share-status : @tr("Stream to the people in your channel.");
     icon: Icons.radio;
     card-width: 600px;
-    card-height: 660px;
+    card-height: 860px;
     dismissed => { done(); }
 
     if live: VerticalLayout {
@@ -257,6 +301,15 @@ export component ShareDialog inherits Modal {
                 }
             }
         }
+        // Changes apply to the stream at once.
+        if Bridge.share-audio: ShareAudio {
+            add => { root.pick-audio(); }
+        }
+        if !Bridge.share-audio: Text {
+            text: @tr("This stream has no sound.");
+            color: Theme.text-muted;
+            font-size: Theme.font-sm;
+        }
         Footer {
             Button {
                 text: @tr("Close");
@@ -313,7 +366,8 @@ export component ShareDialog inherits Modal {
                         input-type: number;
                         placeholder: @tr("fps");
                         label: @tr("Frames per second");
-                        width: 80px;
+                        // On a phone both pairs fit side by side.
+                        width: Nav.narrow ? 60px : 80px;
                         horizontal-stretch: 0;
                     }
                 }
@@ -333,16 +387,21 @@ export component ShareDialog inherits Modal {
                         input-type: number;
                         placeholder: @tr("kbit/s");
                         label: @tr("Bitrate in kbit/s");
-                        width: 80px;
+                        // On a phone both pairs fit side by side.
+                        width: Nav.narrow ? 60px : 80px;
                         horizontal-stretch: 0;
                     }
                 }
             }
         }
+        // Off: no audio at all.
         ToggleRow {
             text: @tr("Share system audio");
             icon: Icons.volume-2;
             checked <=> form.audio;
+        }
+        if form.audio: ShareAudio {
+            add => { root.pick-audio(); }
         }
         ToggleRow {
             text: @tr("Let everyone in the channel watch without asking");
@@ -367,6 +426,30 @@ export component ShareDialog inherits Modal {
                 clicked => { Bridge.start-share(form); }
             }
         }
+    }
+}
+
+// Share the screen or a window, with the stream's audio; the studio's
+// audio picker opens over it.
+export component ShareDialog inherits Rectangle {
+    in-out property <ShareForm> form;
+    callback done();
+    property <bool> picking;
+    ShareCard {
+        width: parent.width;
+        height: parent.height;
+        form <=> root.form;
+        done => { root.done(); }
+        pick-audio => {
+            StudioBridge.list-audio();
+            root.picking = true;
+        }
+    }
+    if root.picking: PickDialog {
+        width: parent.width;
+        height: parent.height;
+        kind: "audio";
+        done => { root.picking = false; }
     }
 }
 

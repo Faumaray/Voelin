@@ -133,6 +133,17 @@ other formats itself. Frames go through the same pacer, pool and
 background filter as on Linux. **Never run**: it is type-checked for
 `x86_64-pc-windows-gnu` only, as nothing here runs Windows.
 
+Android: the app registers a `camera::CameraProvider` (Camera2 through its
+Kotlin side, [android.md](android.md#cameras)), whose cameras `list()` puts
+first (front ones first). A camera opens into an `ImageReader`
+(YUV_420_888) and its planes arrive as `camera::YuvPlanes` with the turn
+that makes the picture upright for the screen's rotation: an upright planar
+or NV12 picture goes to the source's sink as it is, NV21 and turned ones are
+gathered into I420 in a buffer each camera keeps (nothing is allocated per
+frame). `Camera::mirrored` is the default mirroring (a camera that faces the
+user; not a phone's back camera); the source menu's Switch camera moves a
+camera source to the next camera.
+
 ## Background replacement (`studio::segment`)
 
 A source's `background` is `keep`, `blur` (`strength`: radius as a fraction
@@ -356,7 +367,7 @@ two threads) takes about 3 ms at its own rate (15 fps by default).
 | Background blur, image and colour backdrops on the oval mask | `segment::tests` | tested |
 | Person segmentation (PP-HumanSeg through tract): loads, 192x192 mask, nobody in an empty room, time per mask | `segment::tests::the_model_finds_nobody_in_an_empty_room` | tested (about 50 ms per mask); on a photo of a person the mask follows the silhouette, arms and legs included (checked by eye, the photo is not in the repository); not yet tried with a camera |
 | Windows cameras (Media Foundation: listing, the native format nearest the wanted size, NV12 through the source reader, MJPEG decoded by it) | `cargo clippy --target x86_64-pc-windows-gnu -p voelin-media` | type-checked only, never run |
-| Android cameras | – | not implemented: `camera::list()` has only the test pattern there |
+| Android cameras (Camera2): planes borrowed, gathered or turned | `camera::tests::camera_planes_are_borrowed_gathered_and_turned` (the Rust side) | tested on the host; the Camera2 side compiles only (no device here) |
 | RTMP: the FLV tags (sizes, times past 24 bits, AVC from Annex B, `onMetaData` in AMF0), URL and key handling (the name hides the key), dead servers refused | `flv::tests`, `rtmp::tests` | tested |
 | RTMP beside another stream codec: an output asks for H.264 of its layer only, its packets reach it alone, the recording and the replay buffer keep the stream's | `studio::tests::packets_reach_the_outputs_and_the_studio_is_a_capture_backend` | tested |
 | RTMP: write errors seen (`AVIOContext.error`, found at load), an abort ends a stuck connect, the sample format field of the AAC encoder, Opus → AAC (frames back to back from the packets' clock, priming, a gap restarts the clock) | `ffmpeg::avio::tests`, `ffmpeg::audio::tests`, `ffmpeg::tests` | tested with FFmpeg 9.0.1 (libavformat 63: `error` at 84, `sample_fmt` at 348) and FFmpeg 4.4.8 (58: 120 and 408) |
