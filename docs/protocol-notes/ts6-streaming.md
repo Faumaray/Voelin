@@ -38,7 +38,8 @@ Transport (**reported**, TeamSpeak staff on community.teamspeak.com):
 Codecs (**reported**, from the ts6-manager bot's working code):
 
 - Video: H.264 Constrained High (the only H.264 profile the TS client decodes),
-  VP8, VP9, AV1.
+  VP8, VP9, AV1. H.264 only when the client could download OpenH264 (see
+  "Codecs the official client decodes" below).
 - Audio: Opus, 48 kHz stereo, payload type 111.
 
 Commands over the normal client command channel (**reported**, ts6-manager,
@@ -253,6 +254,36 @@ libwebrtc, the stack the official client is built on:
   feedback gives estimates; the offer is the same as without (str0m always
   offers transport-cc and abs-send-time).
 
+### Codecs the official client decodes (confirmed, client 6.0.0-beta4.1, 2026-10-03)
+
+From the official Linux client's log (`~/.cache/TeamSpeak/Default/logs/`)
+while it watched a Voelin stream, and the symbols of its binary:
+
+- At start-up it downloads Cisco's OpenH264
+  (`http://ciscobinary.openh264.org/libopenh264-2.6.0-linux64.8.so.bz2`); here
+  the download failed (`Failed to download openh264 binary http code: 403`).
+- Voelin offered H.264 first (the hardware encoder's codec), with every H.264
+  variant str0m knows. The client answered H.264 `profile-level-id=42e01f`
+  (packetization mode 1), then could not make a decoder for it: `Trying to
+  create decoder for unsupported format. Codec name: H264` — libwebrtc's
+  `NullVideoDecoder`, nothing shown. Its SDP capabilities list H.264 whether
+  or not OpenH264 loaded.
+- Its decoders: `FFmpegDecoderVP8`, `FFmpegDecoderVP9`, `FFmpegDecoderAV1`
+  (FFmpeg bundled in `/opt/teamspeak`, dav1d and libaom linked in), AMF
+  hardware decoders for H.264 and AV1, and OpenH264 (`H264DecoderImpl`) once
+  downloaded. VP8, VP9 and AV1 therefore always decode; H.264 depends on the
+  download.
+- It answers with the first codec of the offer it lists, like Chromium.
+
+Voelin now offers codecs every client decodes first (`decoded_everywhere`)
+and H.264 only in the profile it encodes. The real encoders' streams (VA-API
+H.264 and AV1, from memory and from DMA-BUFs; libvpx VP8 and VP9; x264,
+SVT-AV1, libaom) decode in Chromium 152's libwebrtc at full size
+(`crates/voelin-core/tests/browser_codecs.rs`). Watching such a stream with
+the official client itself is still to be confirmed: the beta needs a
+myTeamSpeak sign-in on first start, so it cannot run from a throwaway
+profile.
+
 ## Open questions
 
 - [x] Viewer side: `joinstreamrequest id clid msg is_remove` (see above).
@@ -264,9 +295,9 @@ libwebrtc, the stack the official client is built on:
 - [x] Whether a client that connects later is told about running streams: no (see above).
 - [x] How a client finds running streams after connecting: `requeststreaminfo`
       (presumably what the official client does too; not captured from it).
-- [ ] Interop with the official TS6 client (its offer/answer details, codecs it
-      actually picks, whether it trickles candidates, mDNS host candidates).
-      Chromium's WebRTC stack interoperates (see above).
+- [ ] Interop with the official TS6 client (its offer/answer details, whether
+      it trickles candidates, mDNS host candidates). The codecs it picks and
+      decodes are known (see above); Chromium's WebRTC stack interoperates.
 - [ ] Whether stream audio can be sent without video.
 - [ ] The WebRTC/protobuf transport some TS6 clients use on UDP 9987
       (`client_protocol_format=proto`, reported in community reverse engineering).

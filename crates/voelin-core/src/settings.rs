@@ -964,7 +964,8 @@ pub enum CodecChoice {
 pub static STREAM_CODEC: Key<CodecChoice> = Key::new(
 	"stream.codec",
 	Kind::Choice(&["auto", "vp8", "vp9", "h264", "av1"]),
-	"Video codec of our stream.",
+	"Video codec of our stream. Official TeamSpeak clients always decode VP8, VP9 and AV1; \
+	 H.264 only when they could download OpenH264.",
 	CodecChoice::default,
 );
 
