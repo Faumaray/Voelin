@@ -282,7 +282,7 @@ impl Peer {
 	) -> Result<(Self, String), PeerError> {
 		let start = options.start_bitrate.unwrap_or(DEFAULT_START_BITRATE).max(1);
 		let bwe = config.bandwidth_estimation.then_some(start);
-		let (mut rtc, srtp_profile) = build_rtc(config, &config.video_codecs, bwe);
+		let (mut rtc, srtp_profile) = build_rtc(config, &config.video_codecs, true, bwe);
 		if bwe.is_some() {
 			let desired = options.desired_bitrate.unwrap_or(start);
 			rtc.bwe().set_desired_bitrate(Bitrate::bps(desired));
@@ -333,7 +333,7 @@ impl Peer {
 			}
 		}
 		let offer = SdpOffer::from_sdp_string(offer).map_err(|e| PeerError::Sdp(e.to_string()))?;
-		let (mut rtc, srtp_profile) = build_rtc(config, &codecs, None);
+		let (mut rtc, srtp_profile) = build_rtc(config, &codecs, false, None);
 		let net = Net::bind(config, &mut rtc).await?;
 		let answer = rtc.sdp_api().accept_offer(offer)?;
 		let peer = Self::spawn(rtc, net, config, None, Vec::new(), srtp_profile);
@@ -462,10 +462,15 @@ fn simulcast_offer(layers: &[LayerSpec]) -> Option<Simulcast> {
 }
 
 /// An RTC with Opus and `video` codecs, in this order of preference, our
-/// DTLS, and bandwidth estimation starting at `bwe` bit/s if given.
+/// DTLS, and bandwidth estimation starting at `bwe` bit/s if given. An
+/// offer lists H.264 only as our encoders produce it (`profile-level-id`
+/// [`PeerConfig::h264_profile_level_id`], packetization mode 1): with
+/// str0m's other variants offered too, a viewer may answer a profile we
+/// never send. An answer takes every variant the offer has.
 fn build_rtc(
 	config: &PeerConfig,
 	video: &[VideoCodec],
+	offer: bool,
 	bwe: Option<u64>,
 ) -> (Rtc, NegotiatedProfile) {
 	let mut rtc_config =
@@ -475,7 +480,7 @@ fn build_rtc(
 			VideoCodec::Vp8 => rtc_config.enable_vp8(true),
 			VideoCodec::Vp9 => rtc_config.enable_vp9(true),
 			VideoCodec::H264 => {
-				let mut c = rtc_config.enable_h264(true);
+				let mut c = if offer { rtc_config } else { rtc_config.enable_h264(true) };
 				c.codec_config().add_h264(
 					112.into(),
 					Some(113.into()),
@@ -935,6 +940,9 @@ mod tests {
 		};
 		let (_peer, offer) = Peer::offer(&streamer, "s").await.unwrap();
 		assert!(offer.contains("profile-level-id=640c1f"), "{offer}");
+		// Only the profile we encode: a viewer must not answer another.
+		let h264 = offer.lines().filter(|l| l.contains(" H264/90000")).count();
+		assert_eq!(h264, 1, "{offer}");
 		let (_peer, answer) = Peer::answer(&PeerConfig::loopback(), &offer).await.unwrap();
 		assert_eq!(offered_video_codecs(&answer)[0], VideoCodec::H264, "{answer}");
 		let vp8_only =

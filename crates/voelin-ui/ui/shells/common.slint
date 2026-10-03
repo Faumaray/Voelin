@@ -4,6 +4,8 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge } from "../bridge.slint";
 import { Nav, SettingsSection } from "../nav.slint";
+import { StudioBridge } from "../studio-bridge.slint";
+import { ShareMenu } from "../share-menu.slint";
 import { Icon, IconButton, Avatar, Status } from "../components/index.slint";
 
 // A rounded panel of the frame (sidebar, main area, right panel).
@@ -143,12 +145,16 @@ export component VoiceButtons inherits HorizontalLayout {
         enabled: Bridge.voice-connected;
         clicked => { Bridge.set-output-muted(!Bridge.output-muted); }
     }
-    if Bridge.streams-available && Bridge.can-share: IconButton {
-        icon: Icons.monitor-up;
-        label: Bridge.share-state == "live" ? @tr("Sharing") : @tr("Share screen");
-        checked: Bridge.share-state == "live";
-        size: root.size;
-        clicked => { Nav.open-share(); }
+    // A screen or window, or the Stream Studio (ShareMenu).
+    if Bridge.streams-available && Bridge.can-share: VerticalLayout {
+        IconButton {
+            icon: Icons.monitor-up;
+            label: Bridge.share-state == "live" ? @tr("Sharing") : StudioBridge.status.live ? @tr("Live in the Stream Studio") : @tr("Share or go live");
+            checked: Bridge.share-state == "live" || StudioBridge.status.live;
+            size: root.size;
+            clicked => { share-menu.open(0, - root.size - share-menu.menu-height - 4px); }
+        }
+        share-menu := ShareMenu { }
     }
     IconButton {
         icon: Icons.settings;

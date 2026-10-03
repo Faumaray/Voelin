@@ -159,18 +159,26 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
 - `peer_config(&codecs, config)` makes a viewer accept only what we decode
   and a streamer offer its stream codec (the first of `config.video_codecs`
   it can encode) followed by `offer_codecs`: the codecs of hardware
-  encoders, VP8 through libvpx (every TeamSpeak client decodes it), and HEVC
+  encoders and VP8 through libvpx that every TeamSpeak client decodes
+  (`decoded_everywhere`: AV1, VP9, VP8), then H.264 from hardware, and HEVC
   last. Other software encoders (x264, SVT-AV1, libvpx VP9, ...) are only
   ever the stream codec, so a viewer's answer never starts an expensive
   second encoder. Answers keep the offer's order, so viewers take the stream
   codec when they decode it. `preferred_codec(&codecs, configured)` picks the
   stream codec: `stream.codec` if encodable, else the preference's first
-  (hardware first when enabled, VP8 in software; never HEVC);
-  `encoder_preference(&settings)` and `configured_codec(&settings)` read the
-  settings. H.264 is offered as Constrained High at the level the stream
-  needs (`PeerConfig::set_h264_format(profile, width, height, fps, bitrate)`:
+  codec every TeamSpeak client decodes (hardware first when enabled, VP8 in
+  software), else any but HEVC; `encoder_preference(&settings)` and
+  `configured_codec(&settings)` read the settings. The official client
+  decodes H.264 only with an OpenH264 library it downloads at start-up; when
+  that fails it still answers H.264 and shows nothing (see
+  `docs/protocol-notes/ts6-streaming.md`), so H.264 never comes before a
+  codec it always decodes. H.264 is offered as one variant, Constrained High
+  (packetization mode 1) at the level the stream needs
+  (`PeerConfig::set_h264_format(profile, width, height, fps, bitrate)`:
   macroblocks per second and per frame, and bitrate, per H.264 Table A-1;
-  never below 3.1, the level offered before).
+  never below 3.1, the level offered before); str0m's other H.264 variants
+  are only accepted, never offered, so a viewer cannot answer a profile we
+  do not send.
 - `VideoPipeline` decodes on its own thread. It starts at a keyframe, and
   after a lost frame (`contiguous == false`, a lagging frame bus, a queue
   longer than 30 frames) or a decoder error it skips to the next keyframe,
@@ -488,9 +496,13 @@ takes and returns `VideoFrame`s like the software codecs. Encoders get NV12
 `slice-height`, parsed by `codec::image_layout`, which is tested on every
 platform); H.264 is High (preferably Constrained High) without B-frames, SPS/PPS
 in front of every keyframe, keyframes on request (`request-sync`), bitrate
-changes at runtime (`video-bitrate`). Encoder order: the device's hardware
-encoders (H.264, VP9, VP8), then Google's software VP8 and H.264. Decoders
-return the newest finished picture per `decode` call (NV12 or I420).
+changes at runtime (`video-bitrate`). Encoders: the device's hardware ones
+(H.264, VP9, VP8, AV1) and Google's software VP8 and H.264 (software VP9 and
+AV1 are too slow), ordered by codec like every hardware encoder: the codecs
+every TeamSpeak client decodes (AV1, VP9, VP8) before H.264. So a phone
+without a hardware VP8, VP9 or AV1 encoder streams Google's software VP8 by
+default; a stream codec set to H.264 uses its hardware H.264 encoder.
+Decoders return the newest finished picture per `decode` call (NV12 or I420).
 
 The zero-copy path for screen sharing: while it is the only MediaCodec
 encoder in the process (one simulcast layer, one codec), an encoder reports a
@@ -929,7 +941,7 @@ has not run on Windows yet.
 | OpenH264 download, SHA-256 check, reuse | `tests/openh264.rs -- --ignored` | tested locally (network) |
 | H.264 library missing / unknown file | unit + integration tests | tested |
 | AV1 decoder construction, garbage input | unit test (`--features av1`) | tested; streams of SVT-AV1, rav1e, libaom, `av1_vaapi` and `av1_amf` decoded (rows below) |
-| X11 capture (MIT-SHM and GetImage), sources, window capture → VP8 → decode, cursor | `tests/x11_capture.rs` under Xvfb | tested |
+| X11 capture (MIT-SHM and GetImage), sources, window capture → VP8 → decode, cursor | `tests/x11_capture.rs` under Xvfb (`VOELIN_X11_TEST_DISPLAY`) | tested |
 | wlroots capture (wlr-screencopy v3): outputs, pixels, a change arriving as a new frame, queue API | `tests/wlroots_capture.rs` against headless sway 1.9 (`VOELIN_WLROOTS_TEST_DISPLAY`) | tested; the ext-image-copy-capture path is untested (sway 1.9 predates it) |
 | Converter (strides, unpadded last row, odd sizes, RGBA/I420/NV12), scaler (flat, area average, half), pyramid (sharing, recycling, steady-state pools) | unit tests | tested |
 | Simulcast layers (sizes, fps caps, per-layer keyframes), reconfigure (codec, layers, fps) | `voelin-core` `media::tests::simulcast_layers_and_reconfigure` | tested |
@@ -967,7 +979,7 @@ has not run on Windows yet.
 | Stream mixer (latency, fade on underrun, drift correction, rate conversion, limiter, levels, live source changes), `BlockClock` | `voelin-media` `mix::tests`, `tests/mix_alloc.rs` (no allocation per block) | tested |
 | Application audio on PipeWire: desktop without our own stream, by name, by pid, a new player linked live, a quit one dropped, a restarted one matched again, the app list | `voelin-media/tests/pipewire_apps.rs` (private PipeWire, WirePlumber and D-Bus; tones told apart by frequency) | tested with PipeWire 1.0 and WirePlumber 0.4; skipped without them |
 | Streamer audio sources (mix levels, gain, mute, live change, microphone tap, window source error, silence) | `voelin-core` `media::tests::audio_sources_change_live`, `audio_sources_from_settings`, `settings::tests::audio_sources` | tested |
-| X11 `_NET_WM_PID` of the shared window | `tests/x11_capture.rs` under Xvfb | tested |
+| X11 `_NET_WM_PID` of the shared window | `tests/x11_capture.rs` under Xvfb (`VOELIN_X11_TEST_DISPLAY`) | tested |
 | WASAPI per-process loopback, audio sessions, `HWND` owner | – | type-checked for `x86_64-pc-windows-gnu` only |
 | Android per-app and all-but-ours playback capture | `cargo ndk -t arm64-v8a clippy`, `gradlew compileDebugKotlin` | compiles only (no device or emulator here) |
 | The same through the TeamSpeak 6 server | `voelin-core/tests/media_live.rs` (`VOELIN_LIVE=1`), `voelinctl stream start --synthetic` / `watch --expect-frames` | tested against 6.0.0-beta13.1 |

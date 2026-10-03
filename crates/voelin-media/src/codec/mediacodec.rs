@@ -178,8 +178,9 @@ pub fn check_decoder(codec: Codec) -> Result<()> {
 	}
 }
 
-/// Encoders of this device: hardware ones first (H.264, VP9, VP8), then
-/// Google's software VP8 and H.264. Software VP9 and AV1 are too slow.
+/// Encoders of this device: the hardware ones (H.264, VP9, VP8, AV1) and
+/// Google's software VP8 and H.264; software VP9 and AV1 are too slow.
+/// `Codecs` orders them by codec, as every hardware factory.
 pub fn probe() -> Option<MediaCodecFactory> {
 	let encoders = &available().encoders;
 	let name = |codec| encoders.iter().find(|(c, _)| *c == codec).map(|(_, n)| n.as_str());

@@ -406,10 +406,12 @@ fn unavailable(codec: Codec, reason: impl Into<String>) -> Error {
 	Error::CodecUnavailable { codec, reason: reason.into() }
 }
 
-/// Order of codecs among hardware encoders: H.264 (every viewer decodes
-/// it), AV1, VP9, VP8, and HEVC last (only for peers that take nothing
-/// else).
-const HARDWARE_ORDER: [Codec; 5] = [Codec::H264, Codec::Av1, Codec::Vp9, Codec::Vp8, Codec::H265];
+/// Order of codecs among hardware encoders: the ones every TeamSpeak
+/// client decodes first (AV1, VP9, VP8: the official client's WebRTC stack
+/// has their decoders built in), then H.264 (the official client decodes it
+/// only with an OpenH264 library it downloads at start-up and may not get),
+/// and HEVC last (only for peers that take nothing else).
+const HARDWARE_ORDER: [Codec; 5] = [Codec::Av1, Codec::Vp9, Codec::Vp8, Codec::H264, Codec::H265];
 
 /// An encoder backend in the base order (before the preference applies).
 struct Candidate {
@@ -868,8 +870,8 @@ mod tests {
 			codecs.encoders_for(&preference).iter().map(|(_, b)| b.name()).collect()
 		};
 		let auto = names(EncoderPreference::default());
-		// Hardware in codec order (HEVC last), then software.
-		assert_eq!(auto[..3], ["h264_gpu", "vp8_gpu", "hevc_gpu"]);
+		// Hardware in codec order (H.264 after VP8, HEVC last), then software.
+		assert_eq!(auto[..3], ["vp8_gpu", "h264_gpu", "hevc_gpu"]);
 		let position = |list: &[&str], name| list.iter().position(|n| *n == name).unwrap();
 		assert!(position(&auto, "x264") < position(&auto, "av1_sw"));
 		#[cfg(feature = "vpx")]
@@ -886,7 +888,7 @@ mod tests {
 		assert!(!named[1..].iter().any(|n| n.ends_with("_gpu")));
 		// The codecs follow the preference.
 		codecs.set_preference(EncoderPreference::default());
-		assert_eq!(codecs.encoder_codecs()[..3], [Codec::H264, Codec::Vp8, Codec::H265]);
+		assert_eq!(codecs.encoder_codecs()[..3], [Codec::Vp8, Codec::H264, Codec::H265]);
 		// The report ranks what the preference uses.
 		let report = codecs.report();
 		let openh264 = report.encoders.iter().find(|e| e.name == "openh264").unwrap();

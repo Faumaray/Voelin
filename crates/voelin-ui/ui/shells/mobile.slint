@@ -173,15 +173,6 @@ export component MobileShell inherits Rectangle {
                     }
                 }
                 if !root.voice: IconButton {
-                    icon: Icons.radio;
-                    label: @tr("Stream Studio");
-                    round: true;
-                    filled: true;
-                    checked: Nav.page == Page.studio;
-                    y: (parent.height - self.height) / 2;
-                    clicked => { Nav.open-studio(); }
-                }
-                if !root.voice: IconButton {
                     icon: Icons.bell;
                     label: @tr("Notifications");
                     round: true;
