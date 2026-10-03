@@ -153,7 +153,13 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 			"pins" => nav.invoke_show_pins(true),
 			"topics" => nav.invoke_show_topics(true),
 			"topic" => {
-				with_app(|app| app.open_topic(arg.parse().unwrap_or(1)));
+				with_app(|app| {
+					app.open_topic(arg.parse().unwrap_or(1));
+					// No gateway answers in demo mode.
+					if switches.demo_ui {
+						demo_topic(app);
+					}
+				});
 			}
 			"member" => {
 				with_app(|app| app.open_first_member());
@@ -640,8 +646,14 @@ fn demo_chat(app: &mut App, session: u64) {
 			],
 		},
 	});
+}
+
+/// The messages of the sample topic, as the gateway answers when it is
+/// opened.
+fn demo_topic(app: &mut App) {
+	let now = chrono::Utc::now().timestamp_millis();
 	app.handle_event(Event::Gateway {
-		session,
+		session: DEMO as u64,
 		update: GatewayUpdate::TopicHistory {
 			target: ChatTarget::Channel(2),
 			topic: 1,
