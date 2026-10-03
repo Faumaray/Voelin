@@ -735,6 +735,9 @@ impl App {
 			self.playback = self.prefs.get(&CLIENT_PLAYBACK);
 		} else if appearance_keys().iter().any(|k| k.name() == key) {
 			self.apply_appearance();
+		} else if key == voelin_core::settings::STREAM_AUDIO_SOURCES.name() {
+			// A running share mixes the new sources (streams.rs).
+			self.share_audio_changed();
 		}
 	}
 

@@ -28,8 +28,8 @@ use voelin_core::media::voelin_media::handoff::Handoff;
 use voelin_core::media::voelin_media::mix::SourceHandle;
 use voelin_core::media::voelin_media::{VideoFrame, convert};
 use voelin_core::media::{
-	AudioApps, AudioSourceSpec, Latest, Streamer, StreamerConfigUpdate, StreamerStats, audio_apps,
-	audio_source_specs, screen_sources,
+	AudioApps, AudioSourceSpec, AudioSourceStats, Latest, Streamer, StreamerConfigUpdate,
+	StreamerStats, audio_apps, audio_source_specs, screen_sources,
 };
 use voelin_core::settings::{
 	AudioSourceKindSetting, AudioSourceSetting, Key, Kind, STREAM_AUDIO_SOURCES,
@@ -421,8 +421,9 @@ fn file_name(what: &str) -> String {
 }
 
 impl App {
-	/// The studio's settings (made once).
-	fn studio_settings(&mut self) -> Settings {
+	/// The studio's settings (made once): its mixer's `stream.audio_sources`
+	/// are the share dialog's too.
+	pub(crate) fn studio_settings(&mut self) -> Settings {
 		let demo = self.demo_ui;
 		let prefs = &self.prefs;
 		self.studio
@@ -478,14 +479,19 @@ impl App {
 			|| self.ui.upgrade().is_some_and(|ui| ui.global::<Nav>().get_page() == Page::Studio)
 	}
 
-	/// The studio page or window appeared: show it and start the studio.
-	pub(crate) fn studio_open(&mut self) {
+	/// The models in the main window's StudioBridge (once).
+	fn studio_attach_main(&mut self) {
 		if !self.studio.attached
 			&& let Some(ui) = self.ui.upgrade()
 		{
 			self.studio_attach(&ui.global::<StudioBridge>());
 			self.studio.attached = true;
 		}
+	}
+
+	/// The studio page or window appeared: show it and start the studio.
+	pub(crate) fn studio_open(&mut self) {
+		self.studio_attach_main();
 		if let Some(window) = &self.studio.window
 			&& let Err(e) = window.show()
 		{
@@ -726,12 +732,23 @@ impl App {
 		vm::list::sync(&m.sources, &vm::studio::sources(self.studio.scenes.active(), stats));
 	}
 
+	/// The streamer whose mixer the audio rows show: a quick share's while
+	/// one runs (what goes out; both mix `stream.audio_sources`), else the
+	/// studio's encoder.
+	fn mixer_streamer(&self) -> Option<&Streamer> {
+		self.share_streamer().or_else(|| self.studio_streamer())
+	}
+
+	/// What the mixer says about each of its sources now.
+	fn mixer_stats(&self) -> Vec<AudioSourceStats> {
+		self.mixer_streamer().map(|s| s.stats().audio_sources).unwrap_or_default()
+	}
+
 	/// The mixer source of each audio row, and why one captures nothing.
 	fn studio_map_meters(&mut self) {
 		let sources = self.studio.settings.as_ref().map(|s| s.get(&STREAM_AUDIO_SOURCES));
-		let streamer = self.studio_streamer();
-		let mixer = streamer.and_then(Streamer::audio_mixer);
-		let stats = self.studio.encoder.as_ref().map(|s| &s.audio_sources[..]).unwrap_or_default();
+		let mixer = self.mixer_streamer().and_then(Streamer::audio_mixer);
+		let stats = self.mixer_stats();
 		self.studio.meters = sources
 			.unwrap_or_default()
 			.iter()
@@ -746,7 +763,7 @@ impl App {
 	fn studio_refresh_audio(&self) {
 		let Some(settings) = &self.studio.settings else { return };
 		let sources = settings.get(&STREAM_AUDIO_SOURCES);
-		let stats = self.studio.encoder.as_ref().map(|s| &s.audio_sources[..]).unwrap_or_default();
+		let stats = self.mixer_stats();
 		let live: Vec<Option<vm::studio::AudioLive>> = sources
 			.iter()
 			.enumerate()
@@ -761,8 +778,38 @@ impl App {
 		vm::list::sync(&self.studio.models.audio, &vm::studio::audio(&sources, &live));
 	}
 
+	/// The share dialog's audio: the studio's mixer rows and picker in the
+	/// main window, without starting the studio.
+	pub(crate) fn mixer_show(&mut self) {
+		self.studio_attach_main();
+		self.studio_settings();
+		self.mixer_refresh();
+	}
+
+	/// The audio rows again: which mixer source each meter reads, levels
+	/// and errors.
+	pub(crate) fn mixer_refresh(&mut self) {
+		self.studio_map_meters();
+		self.studio_refresh_audio();
+	}
+
+	/// Once a second while the studio does not run (it has its own tick):
+	/// the share's rows, and the picker's application list let go once the
+	/// share dialog is closed.
+	pub(crate) fn mixer_tick(&mut self) {
+		if self.studio.run.is_some() {
+			return;
+		}
+		if self.share.is_some() {
+			self.mixer_refresh();
+		}
+		if !self.ui.upgrade().is_some_and(|ui| ui.global::<Nav>().get_share_open()) {
+			self.studio.apps = None;
+		}
+	}
+
 	/// The meters, about 15 times a second (only rows that moved redraw).
-	fn studio_meters(&mut self) {
+	pub(crate) fn studio_meters(&mut self) {
 		let model = &self.studio.models.audio;
 		for (i, meter) in self.studio.meters.iter().enumerate() {
 			let level = meter.as_ref().map_or(-100.0, |m| m.level().peak_db().max(-100.0));
@@ -1689,6 +1736,8 @@ impl App {
 		if let Err(e) = settings.set(&STREAM_AUDIO_SOURCES, sources) {
 			self.set_status(e.to_string());
 		}
+		// A quick share follows at once (the studio through its watch).
+		self.share_audio_changed();
 		self.studio_refresh_audio();
 	}
 

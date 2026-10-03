@@ -735,8 +735,8 @@ export component StudioHeader inherits HorizontalLayout {
     }
 }
 
-// One audio source: meter, gain, mute, a menu.
-component MixerRow inherits Rectangle {
+// One audio source: meter, gain, mute, a menu (also the share dialog's).
+export component MixerRow inherits Rectangle {
     in property <StudioAudio> audio;
     in property <int> index;
     in property <bool> compact;
@@ -1922,8 +1922,9 @@ component SourceDialog inherits Modal {
     }
 }
 
-// Pick a screen, window, camera or audio source.
-component PickDialog inherits Modal {
+// Pick a screen, window, camera or audio source (audio: also over the
+// share dialog).
+export component PickDialog inherits Modal {
     in property <string> kind;
     callback done();
     title: kind == "screen" ? @tr("Share a screen") : kind == "window" ? @tr("Share a window") : kind == "camera" ? @tr("Add a camera") : @tr("Audio sources");

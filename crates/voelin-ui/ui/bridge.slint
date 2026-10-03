@@ -380,6 +380,8 @@ export global Bridge {
     in property <[SourceItem]> share-sources;
     in property <string> share-error;
     in property <bool> share-busy;
+    // Our share carries sound: its audio mixer can change it.
+    in property <bool> share-audio;
     // Whether capture and encoding are built in.
     in property <bool> can-share: true;
 

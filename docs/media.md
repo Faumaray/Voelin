@@ -234,9 +234,13 @@ The audio of our stream is a mix of any number of sources
   `[{"kind": "desktop"}, {"kind": "app", "name": "firefox", "gain": 0.5},
   {"kind": "microphone", "muted": true}]`. Other kinds are `"window"` and
   `"synthetic"` (`frequency`), and an app can be given by `"pid"`. The
-  default is desktop audio; `[]` shares without sound. The desktop app
-  reads it when sharing starts (`media::audio_source_specs`).
-  `media::audio_apps()` lists the applications for a picker.
+  default is desktop audio; `[]` shares without sound. The app's share
+  dialog and the Stream Studio pick and mix the sources with the same
+  mixer rows and picker ([ui.md](ui.md#sound-in-the-quick-share)); a share
+  hands them to its capture when it starts (`media::audio_source_specs`),
+  and a running share or studio follows every change of the key through
+  `Streamer::reconfigure`. `media::audio_apps()` lists the applications
+  for a picker.
 
 What applications play is captured by `capture::playback::start_playback`:
 
@@ -979,6 +983,7 @@ has not run on Windows yet.
 | Stream mixer (latency, fade on underrun, drift correction, rate conversion, limiter, levels, live source changes), `BlockClock` | `voelin-media` `mix::tests`, `tests/mix_alloc.rs` (no allocation per block) | tested |
 | Application audio on PipeWire: desktop without our own stream, by name, by pid, a new player linked live, a quit one dropped, a restarted one matched again, the app list | `voelin-media/tests/pipewire_apps.rs` (private PipeWire, WirePlumber and D-Bus; tones told apart by frequency) | tested with PipeWire 1.0 and WirePlumber 0.4; skipped without them |
 | Streamer audio sources (mix levels, gain, mute, live change, microphone tap, window source error, silence) | `voelin-core` `media::tests::audio_sources_change_live`, `audio_sources_from_settings`, `settings::tests::audio_sources` | tested |
+| The share dialog's audio: the picked sources (gain, mute) in the capture request, none with "Share system audio" off; a running share following `stream.audio_sources` (a share without sound left so) | `voelin-ui` `streams::tests::the_share_carries_the_picked_audio`, `video::tests::a_share_follows_its_audio_sources`; headless screenshots (`share`, `share:live`) | tested; the dialog itself only in headless screenshots (nothing clicked) |
 | X11 `_NET_WM_PID` of the shared window | `tests/x11_capture.rs` under Xvfb (`VOELIN_X11_TEST_DISPLAY`) | tested |
 | WASAPI per-process loopback, audio sessions, `HWND` owner | – | type-checked for `x86_64-pc-windows-gnu` only |
 | Android per-app and all-but-ours playback capture | `cargo ndk -t arm64-v8a clippy`, `gradlew compileDebugKotlin` | compiles only (no device or emulator here) |

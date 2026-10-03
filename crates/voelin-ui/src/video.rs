@@ -14,7 +14,7 @@ use voelin_core::media::voelin_media::capture::{CaptureSource, SourceId};
 use voelin_core::media::voelin_media::{Codec, Codecs, EncoderReport, VideoFrame, convert};
 use voelin_core::media::{
 	self, AudioSourceSpec, EncoderPreference, Latest, LocalPreview, Streamer, StreamerConfig,
-	Viewer, peer_config, preferred_codec, stream_codec,
+	StreamerConfigUpdate, Viewer, peer_config, preferred_codec, stream_codec,
 };
 use voelin_core::stream::{LayerSpec, PeerConfig};
 use voelin_core::studio::Studio;
@@ -426,6 +426,28 @@ impl Capture {
 		self.streamer.audio_error()
 	}
 
+	/// For the audio mixer's rows: its levels and errors.
+	pub fn streamer(&self) -> &Streamer {
+		&self.streamer
+	}
+
+	/// Mix `sources` from now on (`stream.audio_sources` changed while
+	/// sharing): a source whose kind stays keeps capturing with the new
+	/// gain and mute, new ones start, removed ones stop. True if anything
+	/// changed. A capture without sound stays so: its stream has no audio
+	/// track to carry them.
+	pub fn follow_audio(
+		&self,
+		codecs: &Codecs,
+		sources: Vec<AudioSourceSpec>,
+	) -> Result<bool, String> {
+		if !self.has_audio() || self.streamer.audio_sources() == sources {
+			return Ok(false);
+		}
+		let update = StreamerConfigUpdate { audio_sources: Some(sources), ..Default::default() };
+		self.streamer.reconfigure(codecs, update).map(|()| true).map_err(|e| e.to_string())
+	}
+
 	/// The portal's token for this choice, to keep.
 	pub fn restore_token(&self) -> Option<String> {
 		self.streamer.restore_token().map(str::to_owned)
@@ -522,5 +544,42 @@ mod tests {
 		assert_eq!(names, ["Choose via system dialog", "Same as last time"]);
 		let restore: Vec<_> = entries.iter().map(|e| e.2).collect();
 		assert_eq!(restore, [false, true]);
+	}
+
+	/// A running share mixes what `stream.audio_sources` says now; one
+	/// started without sound has no audio track to change.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_share_follows_its_audio_sources() {
+		use voelin_core::media::AudioSourceKind;
+		let codecs = Codecs::new();
+		let tone = |hz| AudioSourceSpec::new(AudioSourceKind::Synthetic { hz });
+		let start = async |audio| {
+			let config = StreamerConfig {
+				source: SourceId::Synthetic,
+				synthetic_size: (64, 48),
+				audio,
+				audio_sources: vec![tone(440)],
+				..StreamerConfig::default()
+			};
+			let streamer = Streamer::start(&codecs, config).await.unwrap();
+			Capture { streamer, name: "Test pattern".into() }
+		};
+		let share = start(true).await;
+		let mixed = vec![
+			AudioSourceSpec { muted: true, ..tone(440) },
+			AudioSourceSpec { gain: 0.5, ..tone(660) },
+		];
+		assert_eq!(share.follow_audio(&codecs, mixed.clone()), Ok(true));
+		assert_eq!(share.streamer().audio_sources(), mixed);
+		assert_eq!(share.follow_audio(&codecs, mixed), Ok(false), "nothing changed");
+		// Every source taken out: silence, the track stays for new ones.
+		assert_eq!(share.follow_audio(&codecs, Vec::new()), Ok(true));
+		assert!(share.has_audio() && share.streamer().audio_sources().is_empty());
+		assert_eq!(share.follow_audio(&codecs, vec![tone(330)]), Ok(true));
+		assert_eq!(share.streamer().audio_sources(), [tone(330)]);
+
+		let silent = start(false).await;
+		assert_eq!(silent.follow_audio(&codecs, vec![tone(660)]), Ok(false));
+		assert!(!silent.has_audio());
 	}
 }
