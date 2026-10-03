@@ -103,6 +103,13 @@ fn share_end_text(reason: &EndReason) -> String {
 	}
 }
 
+/// How many watch stream `id`: the server's count (TeamSpeak 6 tells it),
+/// else the gateway directory's.
+fn viewer_count(view: &crate::app::SessionView, id: &str) -> Option<u32> {
+	let native = view.streams.iter().find(|s| s.id == id).and_then(|s| s.viewers);
+	native.or_else(|| view.stream_viewers.get(id).copied())
+}
+
 /// "8 Mbit/s", "640 kbit/s" (the stream's announced bitrate, kbit/s); "" for 0.
 fn bitrate_text(kbps: u32) -> String {
 	match kbps {
@@ -225,7 +232,7 @@ impl App {
 					name: s.name.clone().into(),
 					streamer: view.nickname(s.streamer.0).into(),
 					streamer_id: i32::from(s.streamer.0),
-					viewers: view.stream_viewers.get(&s.id).map_or(0, |v| *v as i32),
+					viewers: viewer_count(view, &s.id).unwrap_or(0) as i32,
 					audio: s.audio,
 					watching,
 					own: view.state.own_client == Some(s.streamer.0),
@@ -347,7 +354,7 @@ impl App {
 			.map_or(-1, |s| i32::from(s.streamer.0));
 		bridge.set_viewer_streamer_id(streamer);
 		bridge.set_viewer_elapsed(watch.elapsed().into());
-		let viewers = self.view().and_then(|v| v.stream_viewers.get(&watch.stream_id)).copied();
+		let viewers = self.view().and_then(|v| viewer_count(v, &watch.stream_id));
 		bridge.set_viewer_count(viewers.unwrap_or(0) as i32);
 		let qualities = watch.qualities();
 		let chosen = watch

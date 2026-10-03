@@ -181,6 +181,14 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
 - `Viewer` feeds a `VideoPipeline` from the engine and sends
   `RequestStreamKeyframe`; `LocalPreview` runs capture → encoder → decoder
   without a server (the desktop app's `VOELIN_DEMO_STREAM`).
+- Viewer counts come from the server: `StreamInfo::viewers` in
+  `Event::StreamsChanged` is TeamSpeak 6's own count (`viewer` of
+  `notifystreaminfo`), counted up from `notifystreamclientjoined` and
+  refreshed with `requeststreaminfo`, one stream every 5 s, because the
+  server tells only the streamer and the viewer when someone leaves
+  ([protocol notes](protocol-notes/ts6-streaming.md#viewer-counts-confirmed-600-beta131-2026-10-03)).
+  The app shows it, and the gateway directory's count where the server
+  gave none.
 - The audio of watched streams does not go through this module: the session
   hands the Opus frames to its audio thread, which plays them through the
   jitter buffer and mixer under a made-up client id, with its own volume.
@@ -993,6 +1001,7 @@ has not run on Windows yet.
 | Zero-copy from a real screen capture | `voelinctl stream bench --source portal --encoder h264_vaapi` | not run yet (a portal capture asks the person at the desktop); everything up to the portal is tested with the test pattern as DMA-BUFs (rows above, and the measurements) |
 | Offer [VP9, VP8], a viewer that decodes only VP8 → its own VP8 encoder, VP9 idle, pictures decoded | `voelin-core/tests/media_live.rs` `ts6_viewer_gets_the_codec_it_chose` (`VOELIN_LIVE=1`) | tested against the TeamSpeak 6 dev server (our client on both ends) |
 | Several codecs against official TeamSpeak viewers | – | not tested (no official client here) |
+| Viewer counts: `viewer` of `notifystreaminfo`, counted up and down from the viewers joining and leaving, refreshed one stream at a time | `voelin-stream` `proto::tests::stream_info_answers`, `session::tests::viewer_counts`; `voelinctl stream list` | tested; against the TeamSpeak 6 dev server `stream list` printed "1 watching" while a viewer watched and "0 watching" after |
 | Test pattern → VP8 → decoder, rectangle position and colour | `voelin-core` `media::tests::local_preview_decodes_the_pattern` | tested |
 | Test pattern → two engine stream tasks → str0m peers on loopback → decoder | `voelin-core` `stream::tests::test_pattern_through_stream_tasks` | tested |
 | Stream audio (RTP time → jitter buffer ids, volume, end) | `voelin-core` `audio::tests::stream_audio_with_volume`, stream task test | tested |

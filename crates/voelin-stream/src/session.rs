@@ -284,6 +284,20 @@ impl StreamDirectory {
 				*info != before
 			}
 			StreamNotification::Stopped { id, .. } => self.streams.remove(id).is_some(),
+			// The server tells the whole channel who joins, but only the
+			// streamer and the viewer who leaves (and nobody when a viewer
+			// stops watching by leaving the server):
+			// [`Streams::refresh_viewer_counts`] asks again now and then.
+			StreamNotification::ViewerJoined { id, .. }
+			| StreamNotification::ViewerLeft { id, .. } => {
+				let joined = matches!(n, StreamNotification::ViewerJoined { .. });
+				let Some(count) = self.streams.get_mut(id).and_then(|s| s.viewers.as_mut()) else {
+					return false;
+				};
+				let before = *count;
+				*count = if joined { count.saturating_add(1) } else { count.saturating_sub(1) };
+				*count != before
+			}
 			_ => false,
 		}
 	}
@@ -1476,6 +1490,8 @@ pub struct Streams {
 	streamer: Option<StreamerSession>,
 	viewers: BTreeMap<String, ViewerSession>,
 	out: Outbox,
+	/// The stream whose viewer count was asked for last.
+	counted: Option<String>,
 }
 
 impl Streams {
@@ -1489,6 +1505,7 @@ impl Streams {
 			streamer: None,
 			viewers: BTreeMap::new(),
 			out: Outbox::default(),
+			counted: None,
 		}
 	}
 
@@ -1729,6 +1746,24 @@ impl Streams {
 		self.discovery.add_lookup(lookup);
 	}
 
+	/// Ask the server for the viewer count of the next stream of another
+	/// client in our channel, round robin: one `requeststreaminfo` per call,
+	/// so a few calls a minute keep the counts close without flooding the
+	/// server however many stream. Viewers leaving are only announced to the
+	/// streamer and themselves (see [`StreamDirectory::apply`]).
+	pub fn refresh_viewer_counts(&mut self) {
+		let (own, last) = (self.own, self.counted.take());
+		let others = || self.directory.iter().filter(|s| s.streamer != own);
+		let next = others()
+			.find(|s| last.as_ref().is_some_and(|last| s.id > *last))
+			.or_else(|| others().next())
+			.map(|s| (s.id.clone(), s.streamer));
+		let Some((id, streamer)) = next else { return };
+		if self.discovery.ask_server(streamer, &mut self.out) {
+			self.counted = Some(id);
+		}
+	}
+
 	/// A request from [`Output::Request`] failed on the server.
 	pub fn request_failed(&mut self, request: &Request, error: &str) {
 		let watched = match request {
@@ -1826,6 +1861,7 @@ mod tests {
 			bitrate: 4608,
 			viewer_limit: 0,
 			audio: true,
+			viewers: Some(0),
 		}
 	}
 
@@ -2220,6 +2256,45 @@ mod tests {
 		assert!(d.apply(&started("c", ClientId(3), false)));
 		assert!(d.apply(&stopped("c")));
 		assert!(!d.apply(&join(ClientId(3), false)));
+	}
+
+	#[tokio::test]
+	async fn viewer_counts() {
+		let joined = |id: &str| StreamNotification::ViewerJoined { id: id.into(), viewer: OTHER };
+		let left = |id: &str| StreamNotification::ViewerLeft {
+			id: id.into(),
+			viewer: OTHER,
+			reason: Some(LeaveReason::None),
+		};
+		let mut d = StreamDirectory::default();
+		assert!(d.apply(&started("a", ClientId(1), false)));
+		assert_eq!(d.get("a").unwrap().viewers, Some(0));
+		assert!(d.apply(&joined("a")) && d.apply(&joined("a")) && d.apply(&left("a")));
+		assert_eq!(d.get("a").unwrap().viewers, Some(1));
+		// The server's count replaces ours; never below zero.
+		let counted = StreamInfo { viewers: Some(5), ..info("a", ClientId(1)) };
+		assert!(d.apply(&StreamNotification::Info(counted)));
+		assert_eq!(d.get("a").unwrap().viewers, Some(5));
+		let unknown = StreamInfo { viewers: None, ..info("a", ClientId(1)) };
+		assert!(d.apply(&StreamNotification::Info(unknown)));
+		assert!(!d.apply(&joined("a")) && !d.apply(&left("x")));
+		assert!(d.apply(&started("z", ClientId(1), false)) && !d.apply(&left("z")));
+
+		// Asked for one stream of another client at a time, round robin.
+		let mut s = Streams::new(OWN, PeerConfig::loopback());
+		for (id, streamer) in [("a", OWN), ("b", ClientId(2)), ("c", ClientId(3))] {
+			s.handle_notification(StreamNotification::Info(info(id, streamer))).await;
+		}
+		let _ = drain(&mut s);
+		let mut asked = Vec::new();
+		for _ in 0..3 {
+			s.refresh_viewer_counts();
+			asked.extend(drain(&mut s).0.into_iter().map(|r| match r {
+				Request::StreamInfo { streamer } => streamer.0,
+				other => panic!("{other:?}"),
+			}));
+		}
+		assert_eq!(asked, [2, 3, 2]);
 	}
 
 	/// Layers for the simulcast tests: 0 needs 2 Mbit/s, 1 needs 600 kbit/s

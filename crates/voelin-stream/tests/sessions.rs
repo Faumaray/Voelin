@@ -43,6 +43,7 @@ impl FakeServer {
 					bitrate: setup.bitrate,
 					viewer_limit: setup.viewer_limit,
 					audio: setup.audio,
+					viewers: Some(0),
 				};
 				self.streams.insert(info.id.clone(), info.clone());
 				(0..2)

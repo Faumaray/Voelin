@@ -35,6 +35,10 @@ use crate::settings::{STREAM_PERMISSIONS, SharedSettings, StreamPermissions};
 use crate::voice::VoiceCmd;
 use crate::{Event, SessionId};
 
+/// How often the viewer count of one stream in our channel is asked for
+/// (round robin, see [`Streams::refresh_viewer_counts`]).
+const VIEWER_COUNTS: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Our own stream.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StreamState {
@@ -317,6 +321,8 @@ struct StreamTask {
 
 impl StreamTask {
 	async fn run(mut self, mut rx: mpsc::UnboundedReceiver<StreamInput>) {
+		let mut counts = tokio::time::interval(VIEWER_COUNTS);
+		counts.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 		loop {
 			tokio::select! {
 				input = rx.recv() => match input {
@@ -328,6 +334,7 @@ impl StreamTask {
 					Some(input) => self.input(input).await,
 				},
 				() = self.streams.wait_peers() => {}
+				_ = counts.tick() => self.streams.refresh_viewer_counts(),
 			}
 			self.flush();
 		}
@@ -614,6 +621,7 @@ mod tests {
 						bitrate: setup.bitrate,
 						viewer_limit: setup.viewer_limit,
 						audio: setup.audio,
+						viewers: Some(0),
 					};
 					let return_code = (c == from).then(|| "1".to_owned());
 					(c, StreamNotification::Started { info, return_code })
@@ -973,6 +981,7 @@ mod tests {
 			bitrate: 0,
 			viewer_limit: 0,
 			audio: true,
+			viewers: None,
 		};
 		handles[1].send(StreamInput::Directory(vec![entry]));
 		wait(&mut rx, |e| match e {

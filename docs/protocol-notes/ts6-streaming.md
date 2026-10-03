@@ -195,6 +195,28 @@ Full transcript, all the variants tried, and what Voelin does with them:
 looks up unannounced streams in its channel with `requeststreaminfo`
 (`voelin_stream::discovery`).
 
+### Viewer counts (confirmed, 6.0.0-beta13.1, 2026-10-03)
+
+Streamer A, viewers B and B2, bystander C in one channel, every command
+logged (`--log-commands`):
+
+- `viewer` of `notifystreaminfo` is the number of viewers the streamer
+  accepted: `requeststreaminfo clid=<A>` answered `viewer=1` while B2
+  watched and `viewer=0` after it left.
+- `notifystreamclientjoined clid=<viewer> id=<stream>` goes to everyone in
+  the channel (C got one for B and one for B2), but not to the viewer who
+  joined.
+- `notifystreamclientleft clid=<viewer> id=<stream> reason=1` goes only to
+  the streamer and to the viewer who left (`joinstreamrequest ...
+  is_remove=1`); C got nothing, also not when B left the server.
+- No `notifystreamupdated` when viewers come or go (`StreamUpdated` has no
+  viewer field).
+
+So a client counts joins itself, and asks `requeststreaminfo` again now and
+then for the leaves it is not told about: `StreamInfo::viewers`
+(`voelin_stream`), kept by `StreamDirectory` and refreshed one stream at a
+time every 5 s by the engine (`Streams::refresh_viewer_counts`).
+
 ### WebRTC interop with Chromium (confirmed, Chromium 141, 2026-09-26)
 
 `crates/voelin-stream/tests/browser_interop.rs` (`VOELIN_INTEROP=1`, see

@@ -1091,6 +1091,8 @@ impl Session {
 					bitrate: 0,
 					viewer_limit: 0,
 					audio: true,
+					// The UI takes the directory's count, which stays current.
+					viewers: None,
 				})
 			})
 			.collect();

@@ -694,13 +694,14 @@ async fn list(con: &mut Connection, driver: &mut Driver, settle: Duration) -> Re
 	let streams: Vec<&StreamInfo> = driver.streams.directory().iter().collect();
 	for s in &streams {
 		println!(
-			"{}  {:?} by {} (clid {}), {} kbit/s{}",
+			"{}  {:?} by {} (clid {}), {} kbit/s{}{}",
 			s.id,
 			s.name,
 			nick(con, s.streamer),
 			s.streamer.0,
 			s.bitrate,
-			if s.audio { ", audio" } else { "" }
+			if s.audio { ", audio" } else { "" },
+			s.viewers.map(|n| format!(", {n} watching")).unwrap_or_default()
 		);
 	}
 	// Streamers in our channel known only by the flag: the lookup failed or
