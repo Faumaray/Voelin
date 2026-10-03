@@ -246,6 +246,17 @@ Transport details of our stream (`voelin-stream`):
   patch for it (`VOELIN-PATCH.md`). The order is a setting
   (`Streams::set_srtp_profiles`, `Command::SetSrtpProfiles`) and applies to
   new connections.
+- **Losses**: each peer socket asks for 4 MB of receive and send buffer
+  (`PeerConfig::udp_buffer`; Linux caps it at `net.core.rmem_max`, and
+  what was granted is logged, with a hint when it is less): the default
+  208 KB overflowed under a 1440p keyframe on loopback (118-209 datagrams
+  per 5 s of a 9 Mbit/s stream), the larger buffer dropped none
+  (`tests/loopback.rs` `high_bitrate_bursts`). What is still lost is
+  repaired by NACK and retransmission (RTX), which our answers keep for
+  every video codec; str0m waits up to 30 complete frames for a
+  retransmission before it hands a frame over as non-contiguous
+  (`losses_are_repaired_by_retransmission`: one packet in 25 lost, every
+  frame whole).
 - **Bandwidth estimation and pacing**: each viewer connection of our stream
   runs str0m's send-side estimation (transport-cc feedback; REMB if a viewer
   sends only that) and paces packets to it. Estimates are per viewer

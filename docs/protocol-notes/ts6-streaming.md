@@ -289,7 +289,11 @@ while it watched a Voelin stream, and the symbols of its binary:
 - It answers with the first codec of the offer it lists, like Chromium.
 
 Voelin now offers codecs every client decodes first (`decoded_everywhere`)
-and H.264 only in the profile it encodes. The real encoders' streams (VA-API
+and H.264 only in the profiles it encodes: Constrained High, then
+Constrained Baseline (both packetization mode 1). A client that answers
+the Baseline entry (headless Chromium 152; the official client's own
+answer above was a Baseline profile too) gets frames from an encoder in
+that profile. The real encoders' streams (VA-API
 H.264 and AV1, from memory and from DMA-BUFs; libvpx VP8 and VP9; x264,
 SVT-AV1, libaom) decode in Chromium 152's libwebrtc at full size
 (`crates/voelin-core/tests/browser_codecs.rs`). Watching such a stream with

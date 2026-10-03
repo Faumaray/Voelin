@@ -12,7 +12,7 @@ TeamSpeak server is involved.
 |---|---|
 | `rust_streams_to_browser` | Our streamer offer (`PeerConfig::loopback()`, VP8 + Opus, with the `a=x-voelin-layers` line a Voelin streamer with several layers adds, which libwebrtc must skip) answered by an `RTCPeerConnection`; `SyntheticSource` media for 3 s; `inbound-rtp` stats: VP8 packets and bytes, decoded frames (the synthetic frames are real 1x1 VP8 keyframes), Opus packets; the `transport` stats' `srtpCipher` is `AES_CM_128_HMAC_SHA1_80` (our SRTP order, we are the DTLS server); our bandwidth estimation gets estimates from Chromium's transport-cc feedback |
 | `browser_streams_to_rust` | Chromium offers a canvas `captureStream` and an oscillator with VP8, VP9, H264 and AV1 preferred in turn (codecs the browser cannot send are skipped); our viewer `Peer::answer` must receive frames of that codec and Opus, over `AES_CM_128_HMAC_SHA1_80`. VP8 also uses trickled browser candidates and checks that a PLI brings a keyframe |
-| `real_encoders_decode_in_browser` (voelin-core) | Every encoder this machine has (`Codecs::encoders()`), as a share uses it: the 1280x720 test pattern through the `Streamer`, VA-API encoders also from DMA-BUFs as the ScreenCast portal hands over the screen; our streamer peer offers that codec alone (H.264 as Constrained Baseline, see below); the browser must decode at least 60 frames at 1280x720 in 3 s. Codecs the browser does not answer (HEVC, H.264 in Playwright's Chromium) are skipped |
+| `real_encoders_decode_in_browser` (voelin-core) | Every encoder this machine has (`Codecs::encoders()`), as a share uses it: the 1280x720 test pattern through the `Streamer`, VA-API encoders also from DMA-BUFs as the ScreenCast portal hands over the screen; our streamer peer offers that codec alone (H.264 as the ladder of the offer, Constrained High then Constrained Baseline), and the `Streamer` encodes the format the browser's answer chose, as for a viewer of a real stream; the browser must decode at least 60 frames at 1280x720 in 3 s, and H.264 must carry the chosen profile in its SPS. Codecs the browser does not answer (HEVC, H.264 in Playwright's Chromium) are skipped |
 | `share_offer_picks_a_codec_every_client_decodes` (voelin-core) | The offer a share makes on this machine (`preferred_codec`, `peer_config`): the browser, answering with the first codec of the offer it lists as the official client does, must pick one every TeamSpeak client decodes (`decoded_everywhere`), and decode it |
 | `browser_renegotiates_with_rust` | Chromium streams VP8, then sends a new offer on the same connection with VP9 first (as the official client re-offers when it does not encode the codec we chose); `Peer::renegotiate` answers on the same peer, in the new offer's codec order; VP9 frames must arrive |
 | `trickled_candidates_reach_browser` | A server-reflexive candidate (from a fake STUN server) as our sessions trickle it (`iceCandidate` signal with the peer's mid) is accepted by `addIceCandidate` |
@@ -70,8 +70,12 @@ may do the same; see `docs/protocol-notes/ts6-streaming.md`.
 - Headless Chromium 152 lists H.264 only in the profiles of libwebrtc's
   software decoder (Baseline, Constrained Baseline, Main, packetization modes
   0 and 1): it does not answer an offer of Constrained High alone
-  (`640c1f`, what our streamers offer), yet decodes High profile streams
-  when it negotiated another profile (its decoder is FFmpeg's).
+  (`640c1f`), yet decodes High profile streams when it negotiated another
+  profile (its decoder is FFmpeg's). Our offers now list Constrained
+  Baseline (`42e01f`) after Constrained High; Chromium 152 answers that
+  entry and decodes what an encoder in Constrained Baseline makes
+  (`h264_vaapi`, also from DMA-BUFs, and `libx264`: 90 of 90 frames,
+  2026-10-03).
 - With str0m's bandwidth estimation and pacer on our streamer peer, Chromium's
   transport-cc feedback yields estimates within the first second (about
   640 kbit/s rising towards the desired bitrate with the 720 kbit/s synthetic
