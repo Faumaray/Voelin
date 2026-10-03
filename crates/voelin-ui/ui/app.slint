@@ -252,7 +252,9 @@ export component MainWindow inherits Window {
                 if Nav.page == Page.messages && Bridge.dm.open: Conversation {
                     compact: true;
                 }
-                if Nav.page == Page.library: LibraryPage { }
+                if Nav.page == Page.library: LibraryPage {
+                    compact: true;
+                }
                 if Nav.page == Page.events: EventsPage {
                     compact: true;
                 }

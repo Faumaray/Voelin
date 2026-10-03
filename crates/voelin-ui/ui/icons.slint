@@ -152,4 +152,13 @@ export global Icons {
     out property <image> zap: @image-url("assets/icons/zap.svg");
     // The app mark (full colour, not for colorize).
     out property <image> logo: @image-url("assets/logo.svg");
+    // Painted backgrounds (full colour; assets/art/): the home banner, the
+    // home sidebar's picture, and pictures for server and stream cards.
+    out property <image> art-banner: @image-url("assets/art/banner.svg");
+    out property <image> art-sidebar: @image-url("assets/art/sidebar.svg");
+    out property <[image]> art-scenes: [
+        @image-url("assets/art/scene-1.svg"),
+        @image-url("assets/art/scene-2.svg"),
+        @image-url("assets/art/scene-3.svg"),
+    ];
 }

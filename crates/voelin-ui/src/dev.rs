@@ -387,6 +387,9 @@ fn demo_ui(app: &mut App) {
 		client(9, 1, "Rin"),
 	];
 	clients[1].streaming = Some(true);
+	// Live in other channels (the gateway's directory has their streams).
+	clients[5].streaming = Some(true);
+	clients[6].streaming = Some(true);
 	clients[4].input_muted = true;
 	clients[7].away = Some("brb".into());
 	clients[8].output_muted = true;
@@ -1217,19 +1220,47 @@ fn demo_chat(app: &mut App, session: u64) {
 	app.handle_event(Event::Gateway {
 		session,
 		update: GatewayUpdate::Streams {
-			streams: vec![StreamEntry {
-				id: "demo-stream".into(),
-				stream_id: Some("demo-stream".into()),
-				streamer: UserRef { uid: "demo-2".into(), name: "Lumen".into() },
-				client_id: Some(2),
-				channel: Some(2),
-				title: "Exploring the Lands Between".into(),
-				kind: "screen".into(),
-				started_ms: now - 12 * 60_000,
-				viewers: Some(12),
-				source: StreamSource::Registered,
-				event_id: None,
-			}],
+			streams: vec![
+				StreamEntry {
+					id: "demo-stream".into(),
+					stream_id: Some("demo-stream".into()),
+					streamer: UserRef { uid: "demo-2".into(), name: "Lumen".into() },
+					client_id: Some(2),
+					channel: Some(2),
+					title: "Exploring the Lands Between".into(),
+					kind: "screen".into(),
+					started_ms: now - 12 * 60_000,
+					viewers: Some(12),
+					source: StreamSource::Registered,
+					event_id: None,
+				},
+				StreamEntry {
+					id: "demo-stream-2".into(),
+					stream_id: Some("demo-stream-2".into()),
+					streamer: UserRef { uid: "demo-6".into(), name: "Talon".into() },
+					client_id: Some(6),
+					channel: Some(3),
+					title: "Ranked Grind & Vibes".into(),
+					kind: "screen".into(),
+					started_ms: now - 41 * 60_000,
+					viewers: Some(38),
+					source: StreamSource::Registered,
+					event_id: None,
+				},
+				StreamEntry {
+					id: "demo-stream-3".into(),
+					stream_id: Some("demo-stream-3".into()),
+					streamer: UserRef { uid: "demo-7".into(), name: "Zeph".into() },
+					client_id: Some(7),
+					channel: Some(4),
+					title: "Raid prep: gear check".into(),
+					kind: "camera".into(),
+					started_ms: now - 8 * 60_000,
+					viewers: Some(9),
+					source: StreamSource::Registered,
+					event_id: None,
+				},
+			],
 		},
 	});
 	let by = |name: &str| UserRef { uid: format!("demo-{name}"), name: name.into() };

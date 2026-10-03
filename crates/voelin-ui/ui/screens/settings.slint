@@ -560,6 +560,7 @@ component QualityCard inherits Card {
         }
         Slider {
             y: (parent.height - self.height) / 2;
+            horizontal-stretch: 1;
             minimum: 500;
             maximum: 20000;
             step: 250;
@@ -571,7 +572,7 @@ component QualityCard inherits Card {
             }
         }
         TextField {
-            width: 92px;
+            width: 80px;
             text: round(Bridge.video.bitrate);
             input-type: number;
             label: @tr("Stream bitrate in kbit/s");
@@ -606,19 +607,21 @@ component QualityCard inherits Card {
 
 component VoiceSection inherits VerticalLayout {
     in property <bool> wide;
+    // Two columns of the same width, as in the design (a long device name
+    // would otherwise widen the left one).
     if root.wide: HorizontalLayout {
         spacing: Theme.space-5;
         VerticalLayout {
+            width: (parent.width - Theme.space-5) / 2;
             spacing: Theme.space-5;
-            horizontal-stretch: 1;
             alignment: start;
             MicrophoneCard { }
             OutputCard { }
             PermissionsCard { }
         }
         VerticalLayout {
+            width: (parent.width - Theme.space-5) / 2;
             spacing: Theme.space-5;
-            horizontal-stretch: 1;
             alignment: start;
             CameraCard { }
             VideoCard { }
