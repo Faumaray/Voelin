@@ -317,21 +317,25 @@ component SourceRow inherits Rectangle {
             { text: source.locked ? @tr("Unlock") : @tr("Lock"), icon: Icons.lock, enabled: true },
             { text: source.background == "keep" ? @tr("Blur background") : @tr("Background effect off"), icon: Icons.sparkles, enabled: source.kind == "camera", separator: true },
             { text: @tr("Background effect…"), icon: Icons.sliders-horizontal, enabled: source.kind == "camera" },
+            // A phone's front and back camera, or the next webcam.
+            { text: @tr("Switch camera"), icon: Icons.video, enabled: source.kind == "camera" },
             { text: @tr("Bring forward"), icon: Icons.chevron-up, enabled: !source.front, separator: true },
             { text: @tr("Send backward"), icon: Icons.chevron-down, enabled: !source.back },
             { text: @tr("Rename…"), icon: Icons.pencil, enabled: true, separator: true },
             { text: @tr("Remove"), icon: Icons.trash-2, enabled: true, danger: true },
         ];
         activated(i) => {
-            if i == 0 || i == 1 || i == 2 || i == 5 || i == 8 {
+            if i == 0 || i == 1 || i == 2 || i == 5 || i == 9 {
                 StudioNav.edit-source(source.id);
             } else if i == 3 {
                 StudioBridge.source-action(source.id, "lock");
             } else if i == 4 {
                 StudioBridge.source-action(source.id, source.background == "keep" ? "bg-blur" : "bg-keep");
             } else if i == 6 {
-                StudioBridge.source-action(source.id, "up");
+                StudioBridge.source-action(source.id, "next-camera");
             } else if i == 7 {
+                StudioBridge.source-action(source.id, "up");
+            } else if i == 8 {
                 StudioBridge.source-action(source.id, "down");
             } else {
                 StudioBridge.source-action(source.id, "remove");

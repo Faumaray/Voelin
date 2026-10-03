@@ -1,7 +1,9 @@
 package io.github.faumaray.voelin
 
+import android.Manifest
 import android.app.NativeActivity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
@@ -123,6 +125,18 @@ class MainActivity : NativeActivity() {
         return name?.replace(Regex("[/\\\\\n\r\u0000]"), "_")?.trim()?.takeIf { it.isNotEmpty() && it != "." && it != ".." }
     }
 
+    /** Ask for the camera (a studio camera source); CameraCapture gets the answer. */
+    fun requestCameraPermission() {
+        requestPermissions(arrayOf(Manifest.permission.CAMERA), REQUEST_CAMERA)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_CAMERA) {
+            CameraCapture.onPermissionResult(grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED)
+        }
+    }
+
     /** Show the system's "start recording or casting?" dialog. */
     fun requestScreenCapture(fps: Int, maxSize: Int) {
         captureFps = fps
@@ -148,6 +162,7 @@ class MainActivity : NativeActivity() {
     companion object {
         private const val TAG = "MainActivity"
         private const val REQUEST_SCREEN_CAPTURE = 1001
+        private const val REQUEST_CAMERA = 1002
 
         /** The activity in front, if any. */
         @Volatile

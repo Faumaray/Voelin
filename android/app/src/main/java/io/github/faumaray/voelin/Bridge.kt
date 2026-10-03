@@ -108,6 +108,23 @@ object Bridge {
             .joinToString("\n") { (packageName, label) -> label.replace(separators, " ") + "\t" + packageName }
     }
 
+    /** The cameras, as CameraCapture.list describes them. */
+    @JvmStatic
+    fun cameras(): String = CameraCapture.list(app)
+
+    /**
+     * Open camera `cameraId` for feed `id` (Native.onCameraFrame, errors to
+     * Native.onCameraError); 0 x 0: its default size.
+     */
+    @JvmStatic
+    fun startCamera(id: Long, cameraId: String, width: Int, height: Int, fps: Int): Boolean =
+        CameraCapture.start(app, id, cameraId, width, height, fps)
+
+    @JvmStatic
+    fun stopCamera(id: Long) {
+        CameraCapture.stop(id)
+    }
+
     @JvmStatic
     fun secretGet(key: String): String? = SecretStore.get(app, key)
 

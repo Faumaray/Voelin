@@ -14,7 +14,7 @@ use voelin_core::Command;
 
 use crate::foreground::Foreground;
 use crate::host::EngineHost;
-use crate::{bridge, capture, egl, secrets};
+use crate::{bridge, camera, capture, egl, secrets};
 
 /// Store setting (`bool`): the user's opt-in to local crash reports (read
 /// before the settings service starts, straight from the database).
@@ -77,6 +77,7 @@ fn run(app: AndroidApp) -> anyhow::Result<()> {
 		// Before Slint creates the first window surface.
 		egl::reserve_skia_extension_slots();
 		capture::register();
+		camera::register();
 		watch_voice(host);
 	});
 	if let Err(e) = bridge::request_permissions() {

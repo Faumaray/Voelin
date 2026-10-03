@@ -1364,6 +1364,35 @@ impl App {
 			"remove" => {
 				self.studio_op(Op::Apply(studio::Command::RemoveSource { scene, source: id }));
 			}
+			// The next camera (a phone's front and back), mirrored as that
+			// camera is by default.
+			"next-camera" => {
+				let SourceKind::Camera { device, size, fps, .. } = source.kind.clone() else {
+					return;
+				};
+				let name = source.name.clone();
+				let cameras = if self.demo_ui { Vec::new() } else { camera::list() };
+				let real: Vec<_> = cameras.iter().filter(|c| c.backend != "synthetic").collect();
+				let at = real.iter().position(|c| c.id == device);
+				let next = at.map_or(real.first(), |i| real.get((i + 1) % real.len()));
+				let Some(next) = next.filter(|c| c.id != device) else {
+					self.set_status("There is no other camera.");
+					return;
+				};
+				let kind = SourceKind::Camera {
+					device: next.id.clone(),
+					size,
+					fps,
+					mirror: next.mirrored,
+				};
+				// A source named after its camera is named after the next.
+				let renamed = name.is_empty() || at.is_some_and(|i| real[i].name == name);
+				let name = renamed.then(|| next.name.clone());
+				self.studio_update(
+					id,
+					SourceChange { kind: Some(kind), name, ..Default::default() },
+				);
+			}
 			"bg-keep" | "bg-blur" => {
 				let background = if action == "bg-blur" {
 					Background::Blur { strength: 0.04 }
@@ -1435,6 +1464,7 @@ impl App {
 						camera::SYNTHETIC.to_owned(),
 						"Test pattern".to_owned(),
 						"1280×720".to_owned(),
+						true,
 					)]
 				} else {
 					camera::list()
@@ -1444,12 +1474,12 @@ impl App {
 								c.formats.iter().flat_map(|f| &f.sizes).max_by_key(|(w, h)| w * h);
 							let detail =
 								biggest.map_or(String::new(), |(w, h)| format!("up to {w}×{h}"));
-							(c.id, c.name, detail)
+							(c.id, c.name, detail, c.mirrored)
 						})
 						.collect()
 				};
-				for (device, name, detail) in cameras {
-					let kind = SourceKind::Camera { device, size: None, fps: None, mirror: true };
+				for (device, name, detail, mirror) in cameras {
+					let kind = SourceKind::Camera { device, size: None, fps: None, mirror };
 					picks.push((source(&name, kind), row(&name, detail, "camera")));
 				}
 			}

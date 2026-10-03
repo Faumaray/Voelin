@@ -18,19 +18,24 @@
 //! [`SYNTHETIC`] is a camera that is always there: the test pattern. Tests
 //! and machines without a camera use it.
 //!
-//! Windows and Android have no camera backend yet ([`list`] returns only the
-//! synthetic one).
+//! Android: the app registers a [`CameraProvider`] (Camera2 through its
+//! Kotlin side) whose cameras [`list`] puts first and [`Capture::start`]
+//! opens; its frames come as [`YuvPlanes`], converted straight from the
+//! camera's memory where the layout allows. Windows has no camera backend
+//! yet ([`list`] returns only the synthetic one there).
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
-use crate::Result;
 use crate::capture::synthetic::SyntheticScreen;
-use crate::capture::{CaptureOptions, ScreenCapture, SourceId};
+use crate::capture::{CaptureOptions, FrameSink, ScreenCapture, SourceId};
+use crate::frame::{FrameRef, PixelsRef, PlaneRef};
 use crate::studio::compose::Feed;
 use crate::studio::scene::Background;
 use crate::studio::segment::BackgroundFilter;
 use crate::studio::source::FeedSink;
+use crate::{Error, Result};
 
 /// The id of the camera that is always available: the test pattern.
 pub const SYNTHETIC: &str = "synthetic";
@@ -108,9 +113,12 @@ pub struct Camera {
 	/// on Linux, or [`SYNTHETIC`].
 	pub id: String,
 	pub name: String,
-	/// Where the list came from (`"v4l2"`, `"synthetic"`).
+	/// Where the list came from (`"v4l2"`, `"synthetic"`, `"camera2"`).
 	pub backend: &'static str,
 	pub formats: Vec<Format>,
+	/// Shown mirrored by default: a camera facing the user (webcams, a
+	/// phone's front camera), not one facing away.
+	pub mirrored: bool,
 }
 
 /// Every camera this session can use. Never fails: a device that cannot be
@@ -126,8 +134,150 @@ pub fn list() -> Vec<Camera> {
 		name: "Test pattern".to_owned(),
 		backend: "synthetic",
 		formats: vec![Format { pixel: Pixel::Bgrx, sizes: vec![(1280, 720)], max_fps: 60 }],
+		mirrored: true,
 	};
-	devices.into_iter().chain([synthetic]).collect()
+	let external = provider().map(|p| p.list()).unwrap_or_default();
+	external.into_iter().chain(devices).chain([synthetic]).collect()
+}
+
+/// Cameras of a platform API outside this crate, registered by the app at
+/// start like the external screen capture ([`crate::capture::external`]):
+/// on Android, Camera2 through the app's Kotlin side.
+pub trait CameraProvider: Send + Sync {
+	/// Short name for logs and [`Capture::backend`] (`"camera2"`).
+	fn name(&self) -> &'static str;
+
+	/// The cameras, in the order a picker shows them.
+	fn list(&self) -> Vec<Camera>;
+
+	/// Open `device` and feed `sink` with up to `fps` frames a second at
+	/// about `size` (`None`: the camera's default); what fails after the
+	/// start (a permission refused, the camera taken by another app) goes
+	/// to `feed`. The camera stops when the returned value is dropped.
+	fn start(
+		&self,
+		device: &str,
+		size: Option<(u32, u32)>,
+		fps: u32,
+		sink: Box<dyn FrameSink>,
+		feed: Arc<Feed>,
+	) -> Result<Box<dyn Send>>;
+}
+
+static PROVIDER: Mutex<Option<Arc<dyn CameraProvider>>> = Mutex::new(None);
+
+/// Make [`list`] and [`Capture::start`] use `provider` (`None`: only the
+/// built-in cameras).
+pub fn set_provider(provider: Option<Arc<dyn CameraProvider>>) {
+	*PROVIDER.lock().unwrap_or_else(PoisonError::into_inner) = provider;
+}
+
+fn provider() -> Option<Arc<dyn CameraProvider>> {
+	PROVIDER.lock().unwrap_or_else(PoisonError::into_inner).clone()
+}
+
+/// A camera picture in three 4:2:0 planes whose chroma samples may lie
+/// apart (`uv_step` 2), as Android's `YUV_420_888` hands them over, and the
+/// clockwise turn that makes it upright.
+#[derive(Clone, Copy, Debug)]
+pub struct YuvPlanes<'a> {
+	pub width: u32,
+	pub height: u32,
+	pub y: &'a [u8],
+	pub y_stride: usize,
+	pub u: &'a [u8],
+	pub v: &'a [u8],
+	/// Bytes per chroma row (both planes).
+	pub uv_stride: usize,
+	/// Bytes from one chroma sample to the next in a row: 1 (planar) or 2
+	/// (interleaved).
+	pub uv_step: usize,
+	/// The chroma as one interleaved block with U first (NV12), when it is
+	/// one: then taken as it is.
+	pub nv12: Option<&'a [u8]>,
+	/// Clockwise degrees: 0, 90, 180 or 270.
+	pub rotation: u32,
+}
+
+impl<'a> YuvPlanes<'a> {
+	/// The picture as a frame: borrowed when it is upright and planar or
+	/// NV12, else gathered (and turned) into `scratch` as I420; `scratch`
+	/// keeps its capacity, so nothing is allocated once it has grown.
+	pub fn frame(&self, timestamp: Duration, scratch: &'a mut Vec<u8>) -> Result<FrameRef<'a>> {
+		let (w, h) = (self.width as usize, self.height as usize);
+		if w == 0 || h == 0 {
+			return Err(Error::InvalidFrame(format!("{w}x{h} camera frame")));
+		}
+		let rotation = self.rotation / 90 % 4 * 90;
+		let (width, height) = (self.width, self.height);
+		if rotation == 0 {
+			let y = PlaneRef::new(self.y, self.y_stride);
+			let pixels = if self.uv_step == 1 {
+				let u = PlaneRef::new(self.u, self.uv_stride);
+				let v = PlaneRef::new(self.v, self.uv_stride);
+				Some(PixelsRef::I420 { y, u, v })
+			} else {
+				self.nv12.map(|uv| PixelsRef::Nv12 { y, uv: PlaneRef::new(uv, self.uv_stride) })
+			};
+			if let Some(pixels) = pixels {
+				return Ok(FrameRef { width, height, timestamp, pixels });
+			}
+		}
+		let (cw, ch) = crate::frame::chroma_size(self.width, self.height);
+		let turned = rotation % 180 == 90;
+		let (ow, oh) = if turned { (h, w) } else { (w, h) };
+		let (ocw, och) = if turned { (ch, cw) } else { (cw, ch) };
+		scratch.resize(ow * oh + 2 * ocw * och, 0);
+		{
+			let (y, rest) = scratch.split_at_mut(ow * oh);
+			let (u, v) = rest.split_at_mut(ocw * och);
+			turn(self.y, self.y_stride, 1, w, h, rotation, y)?;
+			turn(self.u, self.uv_stride, self.uv_step, cw, ch, rotation, u)?;
+			turn(self.v, self.uv_stride, self.uv_step, cw, ch, rotation, v)?;
+		}
+		let scratch: &'a [u8] = scratch;
+		let (y, rest) = scratch.split_at(ow * oh);
+		let (u, v) = rest.split_at(ocw * och);
+		let pixels = PixelsRef::I420 {
+			y: PlaneRef::new(y, ow),
+			u: PlaneRef::new(u, ocw),
+			v: PlaneRef::new(v, ocw),
+		};
+		Ok(FrameRef { width: ow as u32, height: oh as u32, timestamp, pixels })
+	}
+}
+
+/// Copy the `w` x `h` samples of a plane (`step` bytes apart in a row,
+/// `stride` bytes per row) into `out`, turned clockwise by `rotation`, rows
+/// without padding.
+fn turn(
+	src: &[u8],
+	stride: usize,
+	step: usize,
+	w: usize,
+	h: usize,
+	rotation: u32,
+	out: &mut [u8],
+) -> Result<()> {
+	if src.len() < (h - 1) * stride + (w - 1) * step + 1 {
+		return Err(Error::InvalidFrame(format!(
+			"camera plane of {} bytes is too small for {w}x{h}",
+			src.len()
+		)));
+	}
+	for y in 0..h {
+		let row = &src[y * stride..];
+		for x in 0..w {
+			let at = match rotation {
+				90 => x * h + (h - 1 - y),
+				180 => (h - 1 - y) * w + (w - 1 - x),
+				270 => (w - 1 - x) * h + y,
+				_ => y * w + x,
+			};
+			out[at] = row[x * step];
+		}
+	}
+	Ok(())
 }
 
 /// A running camera; stops when dropped.
@@ -135,6 +285,8 @@ pub struct Capture {
 	backend: &'static str,
 	device: String,
 	screen: Option<Box<dyn ScreenCapture>>,
+	/// A [`CameraProvider`]'s camera, stopped when dropped.
+	_external: Option<Box<dyn Send>>,
 	#[cfg(all(target_os = "linux", feature = "pipewire"))]
 	stream: Option<pipewire_camera::Stream>,
 }
@@ -174,6 +326,23 @@ impl Capture {
 				backend: "synthetic",
 				device: wanted,
 				screen: Some(Box::new(screen)),
+				_external: None,
+				#[cfg(all(target_os = "linux", feature = "pipewire"))]
+				stream: None,
+			});
+		}
+		if let Some(provider) = provider() {
+			let mut sink = FeedSink::new(feed.clone(), Arc::new(AtomicU32::new(fps)));
+			if background.needs_mask() {
+				sink = sink.with_background(BackgroundFilter::with_default_segmenter(background));
+			}
+			let running = provider.start(&wanted, size, fps, Box::new(sink), feed)?;
+			tracing::debug!(device = %wanted, backend = provider.name(), "camera");
+			return Ok(Self {
+				backend: provider.name(),
+				device: wanted,
+				screen: None,
+				_external: Some(running),
 				#[cfg(all(target_os = "linux", feature = "pipewire"))]
 				stream: None,
 			});
@@ -183,7 +352,13 @@ impl Capture {
 			let stream =
 				pipewire_camera::Stream::start(&wanted, size, fps, feed, background).await?;
 			tracing::debug!(device = %wanted, "camera through PipeWire");
-			Ok(Self { backend: "pipewire", device: wanted, screen: None, stream: Some(stream) })
+			Ok(Self {
+				backend: "pipewire",
+				device: wanted,
+				screen: None,
+				_external: None,
+				stream: Some(stream),
+			})
 		}
 		#[cfg(not(all(target_os = "linux", feature = "pipewire")))]
 		{
@@ -195,7 +370,8 @@ impl Capture {
 		}
 	}
 
-	/// Where the frames come from (`"pipewire"`, `"portal"`, `"synthetic"`).
+	/// Where the frames come from (`"pipewire"`, `"portal"`, `"synthetic"`,
+	/// a provider's name).
 	pub fn backend(&self) -> &'static str {
 		#[cfg(all(target_os = "linux", feature = "pipewire"))]
 		if let Some(stream) = &self.stream {
@@ -455,6 +631,7 @@ mod v4l2 {
 					name: if name.is_empty() { path.to_string_lossy().into_owned() } else { name },
 					backend: "v4l2",
 					formats,
+					mirrored: true,
 				})
 			})
 			.collect()
@@ -931,6 +1108,74 @@ mod tests {
 					.join(", ")
 			);
 		}
+	}
+
+	#[test]
+	fn camera_planes_are_borrowed_gathered_and_turned() {
+		// 4x2 luma 0..8, one 2x1 chroma row: U 10 11, V 20 21.
+		let y: Vec<u8> = (0..8).collect();
+		let planar = YuvPlanes {
+			width: 4,
+			height: 2,
+			y: &y,
+			y_stride: 4,
+			u: &[10, 11],
+			v: &[20, 21],
+			uv_stride: 2,
+			uv_step: 1,
+			nv12: None,
+			rotation: 0,
+		};
+		let mut scratch = Vec::new();
+		let frame = planar.frame(Duration::from_millis(3), &mut scratch).unwrap();
+		frame.validate().unwrap();
+		assert_eq!(frame.timestamp, Duration::from_millis(3));
+		let PixelsRef::I420 { y: luma, .. } = frame.pixels else { panic!("not I420") };
+		assert!(std::ptr::eq(luma.data, &y[..]), "upright planar is borrowed");
+
+		let uv = [10, 20, 11, 21];
+		let nv12 = YuvPlanes {
+			u: &uv[..3],
+			v: &uv[1..],
+			uv_stride: 4,
+			uv_step: 2,
+			nv12: Some(&uv),
+			..planar
+		};
+		let mut scratch = Vec::new();
+		let frame = nv12.frame(Duration::ZERO, &mut scratch).unwrap();
+		frame.validate().unwrap();
+		assert!(
+			matches!(frame.pixels, PixelsRef::Nv12 { uv: p, .. } if std::ptr::eq(p.data, &uv[..]))
+		);
+
+		// NV21 (V first) is gathered into I420.
+		let vu = [20, 10, 21, 11];
+		let nv21 = YuvPlanes { u: &vu[1..], v: &vu[..3], uv_stride: 4, uv_step: 2, ..planar };
+		let mut scratch = Vec::new();
+		let frame = nv21.frame(Duration::ZERO, &mut scratch).unwrap();
+		frame.validate().unwrap();
+		let PixelsRef::I420 { y: luma, u, v } = frame.pixels else { panic!("not I420") };
+		assert_eq!((luma.data, u.data, v.data), (&y[..], &[10, 11][..], &[20, 21][..]));
+
+		// Turned clockwise; the chroma turns with the luma.
+		for (rotation, size, luma) in [
+			(90, (2, 4), [4, 0, 5, 1, 6, 2, 7, 3]),
+			(180, (4, 2), [7, 6, 5, 4, 3, 2, 1, 0]),
+			(270, (2, 4), [3, 7, 2, 6, 1, 5, 0, 4]),
+		] {
+			let mut scratch = Vec::new();
+			let frame = YuvPlanes { rotation, ..nv21 }.frame(Duration::ZERO, &mut scratch).unwrap();
+			frame.validate().unwrap();
+			assert_eq!((frame.width, frame.height), size, "{rotation}");
+			let PixelsRef::I420 { y, u, .. } = frame.pixels else { panic!("not I420") };
+			assert_eq!(y.data, luma, "{rotation}");
+			let chroma: &[u8] = if rotation == 90 { &[10, 11] } else { &[11, 10] };
+			assert_eq!(u.data, chroma, "{rotation}");
+		}
+
+		let short = YuvPlanes { y: &y[..7], rotation: 90, ..planar };
+		assert!(short.frame(Duration::ZERO, &mut Vec::new()).is_err());
 	}
 
 	#[test]

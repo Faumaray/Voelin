@@ -214,6 +214,56 @@ fn parse_apps(lines: &str) -> Vec<(String, String)> {
 		.collect()
 }
 
+/// The cameras (`CameraCapture.list`): `id<TAB>facing<TAB>sizes<TAB>maxFps`
+/// lines.
+pub fn cameras() -> Result<String> {
+	with_bridge(|env, class| {
+		let value = env
+			.call_static_method(class, jni_str!("cameras"), jni_sig!(() -> java.lang.String), &[])?
+			.l()?;
+		if value.is_null() {
+			return Ok(String::new());
+		}
+		let value = env.cast_local::<JString>(value)?;
+		value.try_to_string(env)
+	})
+}
+
+/// Open camera `device` for feed `id` (frames to `Native.onCameraFrame`,
+/// later failures to `Native.onCameraError`); 0 x 0: its default size.
+pub fn start_camera(id: u64, device: &str, width: u32, height: u32, fps: u32) -> Result<bool> {
+	with_bridge(|env, class| {
+		let device = JObject::from(env.new_string(device)?);
+		env.call_static_method(
+			class,
+			jni_str!("startCamera"),
+			jni_sig!(
+				(id: jlong, camera_id: java.lang.String, width: jint, height: jint, fps: jint) -> jboolean
+			),
+			&[
+				JValue::Long(id as jlong),
+				JValue::Object(&device),
+				JValue::Int(width as jint),
+				JValue::Int(height as jint),
+				JValue::Int(fps as jint),
+			],
+		)?
+		.z()
+	})
+}
+
+pub fn stop_camera(id: u64) -> Result<()> {
+	with_bridge(|env, class| {
+		env.call_static_method(
+			class,
+			jni_str!("stopCamera"),
+			jni_sig!((id: jlong) -> void),
+			&[JValue::Long(id as jlong)],
+		)?;
+		Ok(())
+	})
+}
+
 pub fn secret_get(key: &str) -> Result<Option<String>> {
 	with_bridge(|env, class| {
 		let key = JObject::from(env.new_string(key)?);
@@ -383,6 +433,101 @@ fn on_audio_input<'local>(
 		samples.get_region(env, 0, buffer)?;
 		Ok(crate::capture::on_input(id, buffer, channels.clamp(1, 8) as u16))
 	})
+}
+
+/// The memory of a direct buffer: its address and capacity.
+fn direct(env: &Env<'_>, buffer: &JByteBuffer<'_>, what: &'static str) -> Result<(*mut u8, usize)> {
+	let address = env.get_direct_buffer_address(buffer)?;
+	if address.is_null() {
+		return Err(Error::NullPtr(what));
+	}
+	Ok((address, env.get_direct_buffer_capacity(buffer)?))
+}
+
+const _: jni::NativeMethod = native_method! {
+	java_type = "io.github.faumaray.voelin.Native",
+	static extern fn on_camera_frame(
+		id: jlong,
+		y: JByteBuffer,
+		u: JByteBuffer,
+		v: JByteBuffer,
+		y_row_stride: jint,
+		uv_row_stride: jint,
+		uv_pixel_stride: jint,
+		width: jint,
+		height: jint,
+		rotation: jint,
+		timestamp_ns: jlong,
+	) -> jboolean,
+};
+
+/// A YUV_420_888 camera frame (see `crate::camera`). Returns `false` once
+/// it is no longer wanted.
+#[allow(clippy::too_many_arguments)]
+fn on_camera_frame<'local>(
+	env: &mut Env<'local>,
+	_class: JClass<'local>,
+	id: jlong,
+	y: JByteBuffer<'local>,
+	u: JByteBuffer<'local>,
+	v: JByteBuffer<'local>,
+	y_row_stride: jint,
+	uv_row_stride: jint,
+	uv_pixel_stride: jint,
+	width: jint,
+	height: jint,
+	rotation: jint,
+	timestamp_ns: jlong,
+) -> Result<jboolean> {
+	let (y_at, y_len) = direct(env, &y, "camera luma")?;
+	let (u_at, u_len) = direct(env, &u, "camera U")?;
+	let (v_at, v_len) = direct(env, &v, "camera V")?;
+	let step = uv_pixel_stride.max(1) as usize;
+	// SAFETY: a direct buffer's memory is `capacity` bytes at its address,
+	// and the `Image` the planes belong to stays open until this call
+	// returns. With V one byte after U (interleaved, U first), U's address
+	// and V's length plus one span both planes up to the end of V's buffer:
+	// memory of the same image.
+	#[allow(unsafe_code)]
+	let (y, u, v, nv12) = unsafe {
+		let nv12 = (step == 2 && v_at as usize == u_at as usize + 1)
+			.then(|| std::slice::from_raw_parts(u_at, v_len + 1));
+		(
+			std::slice::from_raw_parts(y_at, y_len),
+			std::slice::from_raw_parts(u_at, u_len),
+			std::slice::from_raw_parts(v_at, v_len),
+			nv12,
+		)
+	};
+	let planes = voelin_media::studio::camera::YuvPlanes {
+		width: width.max(0) as u32,
+		height: height.max(0) as u32,
+		y,
+		y_stride: y_row_stride.max(0) as usize,
+		u,
+		v,
+		uv_stride: uv_row_stride.max(0) as usize,
+		uv_step: step,
+		nv12,
+		rotation: rotation.max(0) as u32,
+	};
+	Ok(crate::camera::on_frame(id as u64, &planes, timestamp_ns))
+}
+
+const _: jni::NativeMethod = native_method! {
+	java_type = "io.github.faumaray.voelin.Native",
+	static extern fn on_camera_error(id: jlong, message: JString),
+};
+
+fn on_camera_error<'local>(
+	env: &mut Env<'local>,
+	_class: JClass<'local>,
+	id: jlong,
+	message: JString<'local>,
+) -> Result<()> {
+	let message = if message.is_null() { String::new() } else { message.try_to_string(env)? };
+	crate::camera::on_error(id as u64, message);
+	Ok(())
 }
 
 const _: jni::NativeMethod = native_method! {
