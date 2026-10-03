@@ -7,7 +7,8 @@ buffer to save clips from after the fact, and WHIP to a broadcast service. It
 is the engine behind the Studio screen of the UI (scenes and sources, a live
 preview, LIVE / timer, the audio mixer, Record Clip, Go Live / End Stream,
 Share Window / Share Screen, a camera with background blur); this page is
-about the engine and the API the UI drives.
+about the engine and the API the UI drives. The screen itself is described
+in [ui.md](ui.md#the-stream-studio).
 
 ```
 sources (a thread each) ─ Feed (latest wins) ┐
@@ -72,7 +73,8 @@ Changing a source restarts its input only when the input itself changed
 (`SourceKind::same_input`): a drag, a crop, an opacity or a camera's
 mirroring is a new plan for the compositor, not a new capture; a new text
 or colour is drawn again; a portal token written back is not a reason to
-ask the user again.
+ask the user again. Another background effect (or blur strength, image,
+colour) starts the input again: its filter is set up with the effect.
 
 ## Compositing (`studio::compose`)
 

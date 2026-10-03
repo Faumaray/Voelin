@@ -6,8 +6,11 @@ mod emoji;
 mod servers;
 mod settings;
 mod streams;
+pub(crate) mod studio;
 
-use crate::app::MainWindow;
+use slint::ComponentHandle;
+
+use crate::app::{MainWindow, StudioBridge};
 
 /// Connect every callback of the window.
 pub(crate) fn wire(ui: &MainWindow) {
@@ -16,4 +19,5 @@ pub(crate) fn wire(ui: &MainWindow) {
 	streams::wire(ui);
 	settings::wire(ui);
 	emoji::wire(ui);
+	studio::wire(&ui.global::<StudioBridge>());
 }

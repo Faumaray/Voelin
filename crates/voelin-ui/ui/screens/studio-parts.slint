@@ -1,0 +1,2136 @@
+// The Stream Studio's pieces: scenes, sources, the preview, the audio
+// mixer, the stream chat, the stream settings, the bottom bar and the
+// dialogs. studio.slint arranges them for the main window, the detached
+// window and the phone. They read only StudioBridge / StudioNav (and the
+// theme), so they work in the second window too.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { ChatLine } from "../bridge.slint";
+import { StudioBridge, StudioNav, StudioScene, StudioSource, StudioAudio, StudioLayer, StudioPick, StudioSourceForm, StudioSettingsForm } from "../studio-bridge.slint";
+import { Icon, Button, ButtonKind, IconButton, Avatar, LiveBadge, Chip, Toggle, ToggleRow, TextField, Field, Select, Slider, Meter, SegmentedTabs, Divider, Spinner, PopupMenu, MenuEntry, Modal, Tooltip, RichText, ListView, ScrollView } from "../components/index.slint";
+
+// Icons of source and audio kinds.
+export global StudioKinds {
+    public pure function icon(kind: string) -> image {
+        kind == "screen" || kind == "portal" || kind == "monitor" ? Icons.monitor
+            : kind == "window" ? Icons.app-window
+            : kind == "camera" ? Icons.video
+            : kind == "image" ? Icons.image
+            : kind == "text" ? Icons.type
+            : kind == "colour" ? Icons.palette
+            : kind == "pattern" ? Icons.layout-grid
+            : kind == "microphone" ? Icons.mic
+            : kind == "desktop" ? Icons.volume-2
+            : kind == "app" ? Icons.gamepad-2
+            : kind == "window-audio" ? Icons.app-window
+            : kind == "tone" ? Icons.audio-lines
+            : Icons.layers
+    }
+}
+
+// A rounded panel of the studio (surface, border).
+export component StudioPanel inherits Rectangle {
+    background: Theme.surface.transparentize(0.08);
+    border-radius: Theme.radius-xl;
+    border-width: 1px;
+    border-color: Theme.border;
+    clip: true;
+}
+
+// A panel's title row with actions (@children) at the right.
+export component PanelTitle inherits HorizontalLayout {
+    in property <string> text;
+    in property <string> note;
+    in property <image> icon;
+    in property <bool> compact;
+    spacing: Theme.space-3;
+    min-height: compact ? 28px : 34px;
+    if root.icon.width > 0: Icon {
+        source: root.icon;
+        size: Theme.icon-md;
+        tint: Theme.text-secondary;
+        y: (parent.height - self.height) / 2;
+    }
+    HorizontalLayout {
+        horizontal-stretch: 1;
+        spacing: Theme.space-2;
+        Text {
+            text: root.text;
+            color: Theme.text;
+            font-size: root.compact ? Theme.font-md : Theme.font-lg;
+            font-weight: Theme.weight-semibold;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 0;
+            accessible-role: AccessibleRole.text;
+        }
+        if root.note != "": Text {
+            text: root.note;
+            color: Theme.text-muted;
+            font-size: root.compact ? Theme.font-sm : Theme.font-body;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 0;
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+    }
+    @children
+}
+
+// One scene: click to make it live, double-click (or the menu) to rename.
+component SceneRow inherits Rectangle {
+    in property <StudioScene> scene;
+    in property <bool> compact;
+    height: compact ? 46px : 58px;
+    border-radius: Theme.radius-md;
+    background: scene.live ? @linear-gradient(90deg, Theme.accent-pressed 0%, Theme.accent 100%)
+        : touch.has-hover ? Theme.surface-3 : Theme.surface-2.transparentize(0.45);
+    border-width: 1px;
+    border-color: scene.live ? Theme.accent-hover : Theme.border;
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: scene.name;
+    accessible-description: scene.detail;
+    accessible-item-selectable: true;
+    accessible-item-selected: scene.live;
+    accessible-action-default => { StudioBridge.select-scene(scene.id); }
+    if scene.live: Rectangle {
+        x: -Theme.glow-width;
+        y: -Theme.glow-width;
+        width: parent.width + 2 * Theme.glow-width;
+        height: parent.height + 2 * Theme.glow-width;
+        border-radius: Theme.radius-md + Theme.glow-width;
+        border-width: Theme.glow-width;
+        border-color: Theme.glow;
+    }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { StudioBridge.select-scene(scene.id); }
+        double-clicked => { StudioNav.rename-scene(scene.id, scene.name); }
+        pointer-event(e) => {
+            if e.button == PointerEventButton.right && e.kind == PointerEventKind.up {
+                menu.show(self.mouse-x, self.mouse-y);
+            }
+        }
+        HorizontalLayout {
+            padding-left: Theme.space-4;
+            padding-right: Theme.space-2;
+            spacing: Theme.space-4;
+            Icon {
+                source: StudioKinds.icon(scene.kind);
+                size: root.compact ? 20px : 24px;
+                tint: scene.live ? Theme.on-accent : Theme.icon;
+                y: (parent.height - self.height) / 2;
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                Text {
+                    text: scene.name;
+                    color: scene.live ? Theme.on-accent : Theme.text;
+                    font-size: root.compact ? Theme.font-body : Theme.font-md;
+                    font-weight: Theme.weight-semibold;
+                    overflow: elide;
+                }
+                if scene.detail != "": Text {
+                    text: scene.detail;
+                    color: scene.live ? #ffffffc0 : Theme.text-muted;
+                    font-size: root.compact ? Theme.font-xs : Theme.font-sm;
+                    overflow: elide;
+                }
+            }
+            if touch.has-hover: IconButton {
+                icon: Icons.more-vertical;
+                label: @tr("Scene menu");
+                size: 28px;
+                icon-size: Theme.icon-sm;
+                tint: scene.live ? Theme.on-accent : Theme.icon;
+                y: (parent.height - self.height) / 2;
+                clicked => { menu.show(root.width - 200px, root.height); }
+            }
+        }
+    }
+    menu := PopupMenu {
+        menu-width: 200px;
+        entries: [
+            { text: @tr("Go live with this scene"), icon: Icons.radio, enabled: !scene.live },
+            { text: @tr("Rename"), icon: Icons.pencil, enabled: true },
+            { text: @tr("Remove"), icon: Icons.trash-2, enabled: true, danger: true, separator: true },
+        ];
+        activated(i) => {
+            if i == 0 {
+                StudioBridge.select-scene(scene.id);
+            } else if i == 1 {
+                StudioNav.rename-scene(scene.id, scene.name);
+            } else {
+                StudioBridge.remove-scene(scene.id);
+            }
+        }
+    }
+}
+
+// The scenes: the live one highlighted; "Add Scene" at the end.
+export component ScenesCard inherits StudioPanel {
+    in property <bool> compact;
+    VerticalLayout {
+        padding: root.compact ? Theme.space-3 : Theme.space-4;
+        spacing: Theme.space-3;
+        PanelTitle {
+            text: @tr("Scenes");
+            compact: root.compact;
+            IconButton {
+                icon: Icons.plus;
+                label: @tr("Add scene");
+                size: 30px;
+                y: (parent.height - self.height) / 2;
+                clicked => { StudioBridge.add-scene(); }
+            }
+        }
+        ListView {
+            vertical-stretch: 1;
+            accessible-label: @tr("Scenes");
+            for scene in StudioBridge.scenes: VerticalLayout {
+                padding-top: 3px;
+                padding-bottom: 3px;
+                padding-left: 3px;
+                padding-right: 3px;
+                SceneRow {
+                    scene: scene;
+                    compact: root.compact;
+                }
+            }
+        }
+        if !root.compact: Rectangle {
+            height: 46px;
+            border-radius: Theme.radius-md;
+            background: add-touch.has-hover ? Theme.surface-3 : Theme.surface-2.transparentize(0.45);
+            border-width: 1px;
+            border-color: Theme.border;
+            accessible-role: AccessibleRole.button;
+            accessible-label: @tr("Add Scene");
+            accessible-action-default => { StudioBridge.add-scene(); }
+            add-touch := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { StudioBridge.add-scene(); }
+            }
+            HorizontalLayout {
+                padding-left: Theme.space-4;
+                spacing: Theme.space-4;
+                Icon {
+                    source: Icons.plus;
+                    size: Theme.icon-md;
+                    tint: Theme.text-secondary;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: @tr("Add Scene");
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-md;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+    }
+}
+
+// One source of the live scene: visibility and a menu.
+component SourceRow inherits Rectangle {
+    in property <StudioSource> source;
+    in property <bool> compact;
+    height: compact ? 36px : 42px;
+    border-radius: Theme.radius-md;
+    background: touch.has-hover ? Theme.surface-3 : Theme.surface-2.transparentize(0.45);
+    border-width: 1px;
+    border-color: Theme.border;
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: source.name;
+    accessible-description: source.error != "" ? source.error : source.info;
+    touch := TouchArea {
+        double-clicked => { StudioNav.edit-source(source.id); }
+        pointer-event(e) => {
+            if e.button == PointerEventButton.right && e.kind == PointerEventKind.up {
+                menu.show(self.mouse-x, self.mouse-y);
+            }
+        }
+        HorizontalLayout {
+            padding-left: Theme.space-3;
+            padding-right: Theme.space-1;
+            spacing: Theme.space-3;
+            Icon {
+                source: StudioKinds.icon(source.kind);
+                size: root.compact ? Theme.icon-sm : Theme.icon-md;
+                tint: source.visible ? Theme.icon : Theme.text-disabled;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: source.name;
+                color: source.visible ? Theme.text : Theme.text-muted;
+                font-size: root.compact ? Theme.font-sm : Theme.font-body;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            if source.locked: Icon {
+                source: Icons.lock;
+                size: 14px;
+                tint: Theme.text-muted;
+                y: (parent.height - self.height) / 2;
+            }
+            if source.error != "": Tooltip {
+                text: source.error;
+                width: 20px;
+                height: 20px;
+                y: (parent.height - self.height) / 2;
+                Icon {
+                    source: Icons.triangle-alert;
+                    size: 16px;
+                    tint: Theme.warning;
+                }
+            }
+            IconButton {
+                icon: source.visible ? Icons.eye : Icons.eye-off;
+                label: source.visible ? @tr("Hide {}", source.name) : @tr("Show {}", source.name);
+                size: root.compact ? 26px : 30px;
+                icon-size: Theme.icon-sm;
+                tint: source.visible ? Theme.accent-text : Theme.text-muted;
+                y: (parent.height - self.height) / 2;
+                clicked => { StudioBridge.toggle-source(source.id); }
+            }
+            IconButton {
+                icon: Icons.more-vertical;
+                label: @tr("Source menu");
+                size: root.compact ? 26px : 30px;
+                icon-size: Theme.icon-sm;
+                y: (parent.height - self.height) / 2;
+                clicked => { menu.show(root.width - 220px, root.height); }
+            }
+        }
+    }
+    menu := PopupMenu {
+        entries: [
+            { text: @tr("Transform…"), icon: Icons.maximize, enabled: !source.locked },
+            { text: @tr("Crop…"), icon: Icons.crop, enabled: !source.locked },
+            { text: @tr("Opacity…"), icon: Icons.circle, enabled: true },
+            { text: source.locked ? @tr("Unlock") : @tr("Lock"), icon: Icons.lock, enabled: true },
+            { text: source.background == "keep" ? @tr("Blur background") : @tr("Background effect off"), icon: Icons.sparkles, enabled: source.kind == "camera", separator: true },
+            { text: @tr("Background effect…"), icon: Icons.sliders-horizontal, enabled: source.kind == "camera" },
+            { text: @tr("Bring forward"), icon: Icons.chevron-up, enabled: !source.front, separator: true },
+            { text: @tr("Send backward"), icon: Icons.chevron-down, enabled: !source.back },
+            { text: @tr("Rename…"), icon: Icons.pencil, enabled: true, separator: true },
+            { text: @tr("Remove"), icon: Icons.trash-2, enabled: true, danger: true },
+        ];
+        activated(i) => {
+            if i == 0 || i == 1 || i == 2 || i == 5 || i == 8 {
+                StudioNav.edit-source(source.id);
+            } else if i == 3 {
+                StudioBridge.source-action(source.id, "lock");
+            } else if i == 4 {
+                StudioBridge.source-action(source.id, source.background == "keep" ? "bg-blur" : "bg-keep");
+            } else if i == 6 {
+                StudioBridge.source-action(source.id, "up");
+            } else if i == 7 {
+                StudioBridge.source-action(source.id, "down");
+            } else {
+                StudioBridge.source-action(source.id, "remove");
+            }
+        }
+    }
+}
+
+// Adds a source of the kind picked from its menu.
+export component AddSourceButton inherits Rectangle {
+    in property <length> size: 30px;
+    width: size;
+    height: size;
+    IconButton {
+        icon: Icons.plus;
+        label: @tr("Add source");
+        size: root.size;
+        clicked => { menu.show(root.width - 200px, root.height + 4px); }
+    }
+    menu := PopupMenu {
+        menu-width: 200px;
+        entries: [
+            { text: @tr("Screen"), icon: Icons.monitor, enabled: true },
+            { text: @tr("Window"), icon: Icons.app-window, enabled: true },
+            { text: @tr("Camera"), icon: Icons.video, enabled: true },
+            { text: @tr("Image"), icon: Icons.image, enabled: true, separator: true },
+            { text: @tr("Text"), icon: Icons.type, enabled: true },
+            { text: @tr("Colour"), icon: Icons.palette, enabled: true },
+        ];
+        activated(i) => {
+            if i == 0 {
+                StudioNav.pick("screen");
+            } else if i == 1 {
+                StudioNav.pick("window");
+            } else if i == 2 {
+                StudioNav.pick("camera");
+            } else if i == 3 {
+                StudioNav.new-source("image");
+            } else if i == 4 {
+                StudioNav.new-source("text");
+            } else {
+                StudioNav.new-source("colour");
+            }
+        }
+    }
+}
+
+// The sources of the live scene, front first.
+export component SourcesCard inherits StudioPanel {
+    in property <bool> compact;
+    VerticalLayout {
+        padding: root.compact ? Theme.space-3 : Theme.space-4;
+        spacing: Theme.space-3;
+        PanelTitle {
+            text: @tr("Sources");
+            compact: root.compact;
+            AddSourceButton {
+                y: (parent.height - self.height) / 2;
+            }
+        }
+        if StudioBridge.sources.length == 0: Text {
+            text: StudioBridge.scenes.length == 0 ? @tr("Add a scene first.") : @tr("Nothing in this scene yet: add a screen, a window, a camera, an image, text or a colour.");
+            color: Theme.text-muted;
+            font-size: Theme.font-sm;
+            wrap: word-wrap;
+        }
+        ListView {
+            vertical-stretch: 1;
+            accessible-label: @tr("Sources");
+            for source in StudioBridge.sources: VerticalLayout {
+                padding-top: 3px;
+                padding-bottom: 3px;
+                padding-left: 1px;
+                padding-right: 1px;
+                SourceRow {
+                    source: source;
+                    compact: root.compact;
+                }
+            }
+        }
+    }
+}
+
+// A dark chip over the preview (timer, viewers).
+component PreviewChip inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> large: true;
+    height: large ? 30px : 24px;
+    width: row.preferred-width;
+    border-radius: Theme.radius-sm;
+    background: #060a18c0;
+    border-width: 1px;
+    border-color: #ffffff1c;
+    accessible-role: AccessibleRole.text;
+    accessible-label: text;
+    row := HorizontalLayout {
+        padding-left: root.large ? Theme.space-3 : Theme.space-2;
+        padding-right: self.padding-left;
+        spacing: Theme.space-2;
+        if root.icon.width > 0: Icon {
+            source: root.icon;
+            size: root.large ? 16px : 13px;
+            tint: #ffffff;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: root.text;
+            color: #ffffff;
+            font-size: root.large ? Theme.font-body : Theme.font-xs;
+            font-weight: Theme.weight-medium;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// The live composite with its badges: LIVE and the time, viewers and
+// participants, the title.
+export component StudioPreview inherits Rectangle {
+    in property <bool> large: true;
+    // The title and destination at the bottom.
+    in property <bool> caption: true;
+    // Output size and rate on the picture (the detached window).
+    in property <bool> controls;
+    property <float> ratio: StudioBridge.status.output-height > 0 ? StudioBridge.status.output-width / StudioBridge.status.output-height : 16 / 9;
+    accessible-role: AccessibleRole.image;
+    accessible-label: @tr("Stream preview");
+    screen := Rectangle {
+        width: min(parent.width, parent.height * root.ratio);
+        height: self.width / root.ratio;
+        x: (parent.width - self.width) / 2;
+        y: 0;
+        border-radius: Theme.radius-md;
+        background: #03060f;
+        border-width: 1px;
+        border-color: Theme.border;
+        clip: true;
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: StudioBridge.preview;
+            image-fit: contain;
+            visible: StudioBridge.has-preview;
+        }
+        if !StudioBridge.has-preview: VerticalLayout {
+            alignment: center;
+            spacing: Theme.space-3;
+            HorizontalLayout {
+                alignment: center;
+                Spinner {
+                    size: 22px;
+                    running: StudioBridge.status.running;
+                }
+            }
+            Text {
+                text: StudioBridge.status.running ? @tr("Waiting for the first picture…") : @tr("Starting the studio…");
+                color: Theme.text-secondary;
+                horizontal-alignment: center;
+            }
+        }
+        // The caption: title • destination.
+        if root.caption && (StudioBridge.form.title != "" || StudioBridge.status.destination != ""): Rectangle {
+            y: parent.height - self.height;
+            height: root.large ? 64px : 44px;
+            background: @linear-gradient(180deg, #00000000 0%, #000000a0 100%);
+            HorizontalLayout {
+                padding-left: root.large ? Theme.space-5 : Theme.space-3;
+                padding-right: Theme.space-5;
+                padding-bottom: root.large ? Theme.space-4 : Theme.space-2;
+                alignment: start;
+                Text {
+                    vertical-alignment: bottom;
+                    text: StudioBridge.form.title != "" && StudioBridge.status.destination != "" ? StudioBridge.form.title + "  •  " + StudioBridge.status.destination
+                        : StudioBridge.form.title != "" ? StudioBridge.form.title : StudioBridge.status.destination;
+                    color: #ffffffe0;
+                    font-size: root.large ? Theme.font-sm : Theme.font-xs;
+                    overflow: elide;
+                }
+            }
+        }
+        // LIVE and the time, or REC.
+        HorizontalLayout {
+            x: root.large ? Theme.space-4 : Theme.space-3;
+            y: root.large ? Theme.space-4 : Theme.space-3;
+            width: self.preferred-width;
+            height: root.large ? 30px : 24px;
+            spacing: Theme.space-3;
+            if StudioBridge.status.live: LiveBadge {
+                large: true;
+                height: parent.height;
+            }
+            if StudioBridge.status.starting: LiveBadge {
+                text: @tr("STARTING");
+                large: true;
+                height: parent.height;
+                background: Theme.warning;
+            }
+            if StudioBridge.status.live: PreviewChip {
+                text: StudioBridge.status.elapsed;
+                large: root.large;
+            }
+            if StudioBridge.status.recording: PreviewChip {
+                icon: Icons.record;
+                text: @tr("REC {}", StudioBridge.status.recorded);
+                large: root.large;
+            }
+            if !StudioBridge.status.live && !StudioBridge.status.starting && !StudioBridge.status.recording: PreviewChip {
+                text: @tr("PREVIEW");
+                large: root.large;
+            }
+        }
+        // Viewers and participants.
+        if StudioBridge.status.live && !root.controls: HorizontalLayout {
+            x: parent.width - self.width - (root.large ? Theme.space-4 : Theme.space-3);
+            y: root.large ? Theme.space-4 : Theme.space-3;
+            width: self.preferred-width;
+            height: root.large ? 30px : 24px;
+            spacing: Theme.space-2;
+            PreviewChip {
+                icon: Icons.eye;
+                text: StudioBridge.status.viewers;
+                large: root.large;
+                accessible-label: @tr("{} watching", StudioBridge.status.viewers);
+            }
+            PreviewChip {
+                icon: Icons.user;
+                text: StudioBridge.status.participants;
+                large: root.large;
+                accessible-label: @tr("{} joined the stream", StudioBridge.status.participants);
+            }
+        }
+        // Output size and rate.
+        if root.controls: HorizontalLayout {
+            x: parent.width - self.width - Theme.space-3;
+            y: Theme.space-3;
+            width: self.preferred-width;
+            height: 30px;
+            spacing: 0px;
+            Rectangle {
+                width: res.preferred-width;
+                border-radius: Theme.radius-sm;
+                background: #060a18c8;
+                border-width: 1px;
+                border-color: #ffffff1c;
+                res := HorizontalLayout {
+                    padding-left: Theme.space-3;
+                    padding-right: Theme.space-3;
+                    spacing: Theme.space-3;
+                    Text {
+                        text: StudioBridge.status.output-height + "p";
+                        color: #ffffff;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                    }
+                    Rectangle {
+                        width: 1px;
+                        background: #ffffff30;
+                    }
+                    Text {
+                        text: @tr("{} FPS", StudioBridge.status.fps);
+                        color: #ffffff;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                    }
+                    Icon {
+                        source: Icons.chevron-down;
+                        size: 14px;
+                        tint: #ffffff;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+                TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => { output-menu.show(0, parent.height + 4px); }
+                }
+                output-menu := PopupMenu {
+                    menu-width: 180px;
+                    entries: [
+                        { text: "720p · 30 FPS", enabled: true },
+                        { text: "720p · 60 FPS", enabled: true },
+                        { text: "1080p · 30 FPS", enabled: true },
+                        { text: "1080p · 60 FPS", enabled: true },
+                        { text: "1440p · 60 FPS", enabled: true },
+                        { text: "2160p · 30 FPS", enabled: true },
+                    ];
+                    activated(i) => {
+                        if i == 0 {
+                            StudioBridge.set-output("1280", "720", "30");
+                        } else if i == 1 {
+                            StudioBridge.set-output("1280", "720", "60");
+                        } else if i == 2 {
+                            StudioBridge.set-output("1920", "1080", "30");
+                        } else if i == 3 {
+                            StudioBridge.set-output("1920", "1080", "60");
+                        } else if i == 4 {
+                            StudioBridge.set-output("2560", "1440", "60");
+                        } else {
+                            StudioBridge.set-output("3840", "2160", "30");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The broadcast mark of the studio's header.
+export component StudioMark inherits Rectangle {
+    in property <length> size: 44px;
+    width: size;
+    height: size;
+    Icon {
+        source: Icons.radio;
+        size: root.size * 0.8;
+        tint: Theme.accent-text;
+    }
+}
+
+// "Stream Studio — streaming to …", connection, format, pop out.
+export component StudioHeader inherits HorizontalLayout {
+    spacing: Theme.space-4;
+    min-height: 56px;
+    StudioMark {
+        y: (parent.height - self.height) / 2;
+    }
+    VerticalLayout {
+        alignment: center;
+        horizontal-stretch: 1;
+        spacing: 2px;
+        Text {
+            text: @tr("Stream Studio");
+            color: Theme.text;
+            font-size: Theme.font-xl;
+            font-weight: Theme.weight-semibold;
+            overflow: elide;
+        }
+        Text {
+            text: StudioBridge.status.destination != "" ? (StudioBridge.status.live ? @tr("Streaming to {}", StudioBridge.status.destination) : @tr("Goes live to {}", StudioBridge.status.destination)) : StudioBridge.status.hint;
+            color: StudioBridge.status.destination != "" ? Theme.accent-text : Theme.text-muted;
+            font-size: Theme.font-body;
+            overflow: elide;
+        }
+    }
+    VerticalLayout {
+        alignment: center;
+        spacing: Theme.space-2;
+        HorizontalLayout {
+            alignment: end;
+            spacing: Theme.space-2;
+            Rectangle {
+                width: 9px;
+                height: 9px;
+                y: (parent.height - self.height) / 2;
+                border-radius: 4.5px;
+                background: StudioBridge.status.quality >= 4 ? Theme.success : StudioBridge.status.quality == 3 ? Theme.success : StudioBridge.status.quality == 2 ? Theme.warning : StudioBridge.status.quality == 1 ? Theme.danger : Theme.offline;
+            }
+            Text {
+                text: StudioBridge.status.quality-text;
+                color: StudioBridge.status.quality >= 3 ? Theme.success : StudioBridge.status.quality == 2 ? Theme.warning : StudioBridge.status.quality == 1 ? Theme.danger : Theme.text-muted;
+                font-size: Theme.font-sm;
+                vertical-alignment: center;
+            }
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: Theme.space-3;
+            Text {
+                text: StudioBridge.status.format;
+                color: Theme.text-secondary;
+                font-size: Theme.font-sm;
+                vertical-alignment: center;
+            }
+            Tooltip {
+                text: StudioBridge.status.details;
+                below: true;
+                width: 20px;
+                height: 20px;
+                Icon {
+                    source: Icons.info;
+                    size: 18px;
+                    tint: Theme.text-secondary;
+                }
+            }
+        }
+    }
+    if StudioBridge.status.can-detach: IconButton {
+        icon: StudioBridge.status.detached ? Icons.minimize-2 : Icons.external-link;
+        label: StudioBridge.status.detached ? @tr("Back into the main window") : @tr("Open in its own window");
+        y: (parent.height - self.height) / 2;
+        clicked => {
+            if StudioBridge.status.detached {
+                StudioBridge.dock();
+            } else {
+                StudioBridge.detach();
+            }
+        }
+    }
+}
+
+// One audio source: meter, gain, mute, a menu.
+component MixerRow inherits Rectangle {
+    in property <StudioAudio> audio;
+    in property <int> index;
+    in property <bool> compact;
+    // The phone: a chevron opens the menu.
+    in property <bool> phone;
+    height: compact ? 56px : 68px;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: audio.name;
+    HorizontalLayout {
+        spacing: root.compact ? Theme.space-3 : Theme.space-4;
+        Rectangle {
+            width: root.compact ? 36px : 44px;
+            height: self.width;
+            y: (parent.height - self.height) / 2;
+            border-radius: Theme.radius-md;
+            background: Theme.surface-3;
+            Icon {
+                source: StudioKinds.icon(audio.kind);
+                size: root.compact ? 18px : 22px;
+                tint: audio.muted ? Theme.text-disabled : Theme.icon;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: Theme.space-2;
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                Text {
+                    text: audio.name;
+                    color: audio.muted ? Theme.text-muted : Theme.text;
+                    font-size: root.compact ? Theme.font-sm : Theme.font-body;
+                    font-weight: Theme.weight-medium;
+                    overflow: elide;
+                    max-width: self.preferred-width;
+                }
+                if audio.detail != "": Text {
+                    text: "(" + audio.detail + ")";
+                    color: Theme.text-muted;
+                    font-size: root.compact ? Theme.font-sm : Theme.font-body;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                if audio.detail == "": Rectangle {
+                    horizontal-stretch: 1;
+                }
+                if audio.error != "": Tooltip {
+                    text: audio.error;
+                    width: 18px;
+                    height: 18px;
+                    Icon {
+                        source: Icons.triangle-alert;
+                        size: 15px;
+                        tint: Theme.warning;
+                    }
+                }
+                Text {
+                    text: audio.muted ? @tr("muted") : @tr("{} dB", round(audio.gain-db * 10) / 10);
+                    color: Theme.text-secondary;
+                    font-size: root.compact ? Theme.font-xs : Theme.font-sm;
+                    horizontal-alignment: right;
+                    min-width: 52px;
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-4;
+                Meter {
+                    y: (parent.height - self.height) / 2;
+                    height: root.compact ? 8px : 9px;
+                    segments: 16;
+                    floor: -60;
+                    level: audio.level;
+                    active: !audio.muted;
+                    min-width: 60px;
+                    horizontal-stretch: 1;
+                    accessible-label: @tr("{} level", audio.name);
+                }
+                Slider {
+                    width: root.phone ? 46% : 44%;
+                    horizontal-stretch: 0;
+                    y: (parent.height - self.height) / 2;
+                    minimum: -60;
+                    maximum: 20;
+                    step: 0.5;
+                    value: audio.gain-db;
+                    label: @tr("{} gain", audio.name);
+                    changed(v) => { StudioBridge.set-gain(root.index, v, false); }
+                    released(v) => { StudioBridge.set-gain(root.index, v, true); }
+                }
+            }
+        }
+        if !root.phone: IconButton {
+            icon: audio.muted ? Icons.volume-x : Icons.volume-2;
+            label: audio.muted ? @tr("Unmute {}", audio.name) : @tr("Mute {}", audio.name);
+            checked: audio.muted;
+            danger: true;
+            size: 32px;
+            icon-size: Theme.icon-md;
+            y: (parent.height - self.height) / 2;
+            clicked => { StudioBridge.toggle-mute(root.index); }
+        }
+        IconButton {
+            icon: root.phone ? Icons.chevron-right : Icons.more-vertical;
+            label: @tr("{} menu", audio.name);
+            size: 30px;
+            icon-size: Theme.icon-sm;
+            y: (parent.height - self.height) / 2;
+            clicked => { menu.show(root.width - 200px, root.height - 8px); }
+        }
+    }
+    menu := PopupMenu {
+        menu-width: 200px;
+        entries: [
+            { text: audio.muted ? @tr("Unmute") : @tr("Mute"), icon: audio.muted ? Icons.volume-2 : Icons.volume-x, enabled: true },
+            { text: @tr("Reset to 0 dB"), icon: Icons.refresh-cw, enabled: audio.gain-db != 0 },
+            { text: @tr("Remove"), icon: Icons.trash-2, enabled: true, danger: true, separator: true },
+        ];
+        activated(i) => {
+            if i == 0 {
+                StudioBridge.toggle-mute(root.index);
+            } else if i == 1 {
+                StudioBridge.set-gain(root.index, 0, true);
+            } else {
+                StudioBridge.remove-audio(root.index);
+            }
+        }
+    }
+}
+
+// The audio of the stream (the streamer's mixer).
+export component MixerCard inherits StudioPanel {
+    in property <bool> compact;
+    VerticalLayout {
+        padding: root.compact ? Theme.space-3 : Theme.space-4;
+        padding-top: root.compact ? Theme.space-3 : Theme.space-3;
+        spacing: Theme.space-1;
+        PanelTitle {
+            text: @tr("Audio Mixer");
+            compact: root.compact;
+            IconButton {
+                icon: Icons.plus;
+                label: @tr("Add an audio source");
+                size: 30px;
+                y: (parent.height - self.height) / 2;
+                clicked => { StudioNav.pick-audio(); }
+            }
+            IconButton {
+                icon: Icons.settings;
+                label: @tr("Stream audio settings");
+                size: 30px;
+                y: (parent.height - self.height) / 2;
+                clicked => { StudioBridge.advanced-settings(); }
+            }
+        }
+        Divider { }
+        if StudioBridge.audio.length == 0: Text {
+            text: @tr("No audio: add your microphone, the desktop or an application.");
+            color: Theme.text-muted;
+            font-size: Theme.font-sm;
+            wrap: word-wrap;
+        }
+        ListView {
+            vertical-stretch: 1;
+            accessible-label: @tr("Audio sources");
+            for audio[i] in StudioBridge.audio: VerticalLayout {
+                MixerRow {
+                    audio: audio;
+                    index: i;
+                    compact: root.compact;
+                }
+                if i < StudioBridge.audio.length - 1: Divider { }
+            }
+        }
+    }
+}
+
+// A chat line, compact.
+component ChatRow inherits Rectangle {
+    in property <ChatLine> line;
+    min-height: body.preferred-height;
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: line.author + ": " + line.text;
+    body := HorizontalLayout {
+        padding-top: line.continued ? 1px : Theme.space-3;
+        padding-left: Theme.space-2;
+        padding-right: Theme.space-3;
+        spacing: Theme.space-3;
+        VerticalLayout {
+            width: 34px;
+            alignment: start;
+            if !line.continued: Avatar {
+                size: 34px;
+                initials: line.initials;
+                tint: line.tint;
+                label: line.author;
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 1px;
+            if !line.continued: HorizontalLayout {
+                spacing: Theme.space-3;
+                alignment: start;
+                Text {
+                    text: line.author;
+                    color: line.relayed ? Theme.accent-text : Theme.name-text;
+                    font-size: Theme.font-body;
+                    font-weight: Theme.weight-medium;
+                }
+                Text {
+                    text: line.time;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    vertical-alignment: center;
+                }
+            }
+            if !line.rich: Text {
+                text: line.text;
+                color: Theme.text;
+                font-size: Theme.font-body;
+                wrap: word-wrap;
+            }
+            if line.rich: RichText {
+                runs: line.runs;
+                emoji-size: line.jumbo ? 32px : Theme.font-body * 1.35;
+            }
+        }
+    }
+}
+
+// The chat of the channel the stream goes to.
+export component StudioChat inherits StudioPanel {
+    // New lines (and another chat) scroll to the end once the rows are laid
+    // out (a few tries).
+    property <int> lines: StudioBridge.chat.length;
+    property <int> tries;
+    property <int> passes;
+    changed lines => {
+        tries = 0;
+        passes = 0;
+        to-end.running = true;
+    }
+    init => { to-end.running = true; }
+    to-end := Timer {
+        interval: 50ms;
+        running: false;
+        // Again for a moment: rows are measured as they come into view, so
+        // the end moves while it is reached.
+        triggered => {
+            root.tries += 1;
+            if chat-list.content-height > 0 {
+                chat-list.content-y = min(0px, chat-list.visible-height - chat-list.content-height);
+                root.passes += 1;
+            }
+            if root.passes >= 6 || root.tries > 30 {
+                self.running = false;
+            }
+        }
+    }
+    VerticalLayout {
+        padding-top: Theme.space-3;
+        padding-bottom: Theme.space-3;
+        spacing: Theme.space-1;
+        HorizontalLayout {
+            padding-left: Theme.space-4;
+            padding-right: Theme.space-3;
+            PanelTitle {
+                icon: Icons.users;
+                text: @tr("Stream Chat");
+                note: StudioBridge.chat-name != "" ? "(" + StudioBridge.chat-name + ")" : "";
+                IconButton {
+                    icon: Icons.external-link;
+                    label: @tr("Open the channel chat");
+                    size: 30px;
+                    icon-size: Theme.icon-sm;
+                    enabled: StudioBridge.chat-name != "";
+                    y: (parent.height - self.height) / 2;
+                    clicked => { StudioBridge.open-chat(); }
+                }
+            }
+        }
+        Divider { }
+        Rectangle {
+            vertical-stretch: 1;
+            chat-list := ListView {
+                width: parent.width;
+                height: parent.height;
+                accessible-label: @tr("Stream chat");
+                for line in StudioBridge.chat: ChatRow {
+                    line: line;
+                }
+            }
+            if StudioBridge.chat-name == "": Text {
+                width: parent.width - 2 * Theme.space-5;
+                text: @tr("Join a voice channel on a TeamSpeak 6 server: its chat shows here.");
+                color: Theme.text-muted;
+                font-size: Theme.font-sm;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+        }
+        HorizontalLayout {
+            padding-left: Theme.space-3;
+            padding-right: Theme.space-3;
+            padding-top: Theme.space-2;
+            Rectangle {
+                height: 44px;
+                border-radius: Theme.radius-md;
+                background: Theme.surface-2;
+                border-width: 1px;
+                border-color: input.has-focus ? Theme.accent : Theme.border;
+                HorizontalLayout {
+                    padding-left: Theme.space-4;
+                    padding-right: Theme.space-1;
+                    spacing: Theme.space-1;
+                    input := TextField {
+                        bare: true;
+                        enabled: StudioBridge.chat-name != "";
+                        placeholder: StudioBridge.chat-name != "" ? @tr("Message goes to {}…", StudioBridge.chat-name) : @tr("No chat yet");
+                        label: @tr("Message to the stream chat");
+                        accepted(text) => {
+                            if text != "" {
+                                StudioBridge.send-chat(text);
+                                self.clear();
+                            }
+                        }
+                    }
+                    IconButton {
+                        icon: Icons.send;
+                        label: @tr("Send");
+                        enabled: input.text != "";
+                        tint: input.text != "" ? Theme.accent-text : Theme.text-muted;
+                        size: 36px;
+                        y: (parent.height - self.height) / 2;
+                        clicked => {
+                            if input.text != "" {
+                                StudioBridge.send-chat(input.text);
+                                input.clear();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The destination drop-down: channel and server of each choice.
+export component DestinationSelect inherits Rectangle {
+    in property <bool> compact;
+    property <bool> chosen: StudioBridge.form.destination >= 0 && StudioBridge.form.destination < StudioBridge.destinations.length;
+    property <string> current: chosen ? StudioBridge.destinations[StudioBridge.form.destination].name : "";
+    property <string> server: chosen ? StudioBridge.destinations[StudioBridge.form.destination].detail : "";
+    height: compact ? 40px : 52px;
+    border-radius: Theme.radius-md;
+    background: touch.has-hover ? Theme.surface-3 : Theme.surface-2;
+    border-width: 1px;
+    border-color: Theme.border;
+    accessible-role: AccessibleRole.combobox;
+    accessible-label: @tr("Destination");
+    accessible-value: current;
+    accessible-action-default => { popup.show(); }
+    touch := TouchArea {
+        enabled: StudioBridge.destinations.length > 0;
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { popup.show(); }
+    }
+    HorizontalLayout {
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-3;
+        spacing: Theme.space-3;
+        Image {
+            width: root.compact ? 22px : 30px;
+            height: self.width;
+            y: (parent.height - self.height) / 2;
+            source: Icons.logo;
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.current == "" ? @tr("No TeamSpeak 6 voice connection") : root.current;
+                color: root.current == "" ? Theme.text-muted : Theme.text;
+                font-size: root.compact ? Theme.font-sm : Theme.font-md;
+                font-weight: Theme.weight-medium;
+                overflow: elide;
+            }
+            if root.server != "" && !root.compact: Text {
+                text: root.server;
+                color: Theme.text-muted;
+                font-size: Theme.font-xs;
+                overflow: elide;
+            }
+        }
+        Icon {
+            source: Icons.chevron-down;
+            size: Theme.icon-sm;
+            tint: Theme.text-secondary;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        width: root.width;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+        Rectangle {
+            border-radius: Theme.radius-md;
+            background: Theme.surface-3;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            VerticalLayout {
+                padding: Theme.space-2;
+                for item[i] in StudioBridge.destinations: Rectangle {
+                    height: Theme.control-height;
+                    border-radius: Theme.radius-sm;
+                    background: i == StudioBridge.form.destination ? Theme.accent-soft : item-touch.has-hover ? Theme.surface-4 : transparent;
+                    item-touch := TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            StudioBridge.edit-form("destination", "" + i);
+                            popup.close();
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: Theme.space-3;
+                        Text {
+                            text: item.detail != "" ? item.name + "  •  " + item.detail : item.name;
+                            color: Theme.text;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// A label above a field.
+component FormLabel inherits Text {
+    color: Theme.text-secondary;
+    font-size: Theme.font-sm;
+    font-weight: Theme.weight-medium;
+}
+
+// A multi-line text box (the go-live message).
+component TextBox inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> placeholder;
+    callback edited(string);
+    min-height: 64px;
+    border-radius: Theme.radius-md;
+    background: Theme.surface-2;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.accent : Theme.border;
+    forward-focus: input;
+    TouchArea {
+        mouse-cursor: MouseCursor.text;
+        clicked => { input.focus(); }
+    }
+    HorizontalLayout {
+        padding: Theme.space-3;
+        padding-left: Theme.space-4;
+        Rectangle {
+            Text {
+                width: 100%;
+                height: 100%;
+                vertical-alignment: top;
+                text: input.text == "" ? root.placeholder : "";
+                color: Theme.text-muted;
+                wrap: word-wrap;
+            }
+            input := TextInput {
+                width: 100%;
+                height: 100%;
+                single-line: false;
+                wrap: word-wrap;
+                color: Theme.text;
+                selection-background-color: Theme.accent-soft;
+                selection-foreground-color: Theme.text;
+                accessible-label: root.placeholder;
+                edited => { root.edited(self.text); }
+            }
+        }
+    }
+}
+
+// A switch row of the settings panel.
+component SwitchRow inherits HorizontalLayout {
+    in property <string> text;
+    in property <bool> checked;
+    in property <string> key;
+    min-height: 36px;
+    spacing: Theme.space-3;
+    Text {
+        text: root.text;
+        color: Theme.text;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+        overflow: elide;
+    }
+    Toggle {
+        y: (parent.height - self.height) / 2;
+        checked: root.checked;
+        label: root.text;
+        toggled(on) => { StudioBridge.edit-form(root.key, on ? "true" : "false"); }
+    }
+}
+
+// One simulcast layer as fields.
+component LayerRow inherits HorizontalLayout {
+    in property <StudioLayer> layer;
+    in property <int> index;
+    spacing: Theme.space-2;
+    function apply() {
+        StudioBridge.set-layer(root.index, {
+            size: size.text,
+            scale: layer.scale,
+            fps: fps.text,
+            bitrate: bitrate.text,
+            min-bitrate: layer.min-bitrate,
+        });
+    }
+    size := TextField {
+        text: layer.size != "" ? layer.size : layer.scale + "×";
+        label: @tr("Layer size, or a scale like 0.5×");
+        placeholder: "1280x720";
+        font-size: Theme.font-sm;
+        accepted => { root.apply(); }
+    }
+    fps := TextField {
+        text: layer.fps;
+        label: @tr("Layer frame rate");
+        placeholder: @tr("fps");
+        font-size: Theme.font-sm;
+        max-width: 64px;
+        horizontal-stretch: 0;
+        accepted => { root.apply(); }
+    }
+    bitrate := TextField {
+        text: layer.bitrate;
+        label: @tr("Layer bitrate in kbit/s");
+        placeholder: "kbit/s";
+        font-size: Theme.font-sm;
+        accepted => { root.apply(); }
+    }
+    IconButton {
+        icon: Icons.x;
+        label: @tr("Remove the layer");
+        size: 28px;
+        icon-size: Theme.icon-sm;
+        y: (parent.height - self.height) / 2;
+        clicked => { StudioBridge.remove-layer(root.index); }
+    }
+}
+
+// Destination, title, game, go-live message, overlays, quality.
+export component StreamSettings inherits VerticalLayout {
+    // The detached window: destination, quality and title only.
+    in property <bool> compact;
+    alignment: start;
+    padding: root.compact ? Theme.space-3 : Theme.space-5;
+    spacing: root.compact ? Theme.space-2 : Theme.space-4;
+    PanelTitle {
+        text: @tr("Stream Settings");
+        compact: root.compact;
+    }
+    if root.compact: Divider { }
+    VerticalLayout {
+        spacing: Theme.space-2;
+        FormLabel { text: @tr("Destination"); }
+        DestinationSelect {
+            compact: root.compact;
+        }
+    }
+    if root.compact: VerticalLayout {
+        spacing: Theme.space-2;
+        FormLabel { text: @tr("Quality"); }
+        Select {
+            model: ["720p 30 FPS", "720p 60 FPS", "1080p 30 FPS", "1080p 60 FPS", "1440p 60 FPS", "2160p 30 FPS"];
+            current-value: StudioBridge.status.output-height + "p " + StudioBridge.status.fps + " FPS";
+            label: @tr("Output quality");
+            selected(v) => {
+                if v == "720p 30 FPS" {
+                    StudioBridge.set-output("1280", "720", "30");
+                } else if v == "720p 60 FPS" {
+                    StudioBridge.set-output("1280", "720", "60");
+                } else if v == "1080p 30 FPS" {
+                    StudioBridge.set-output("1920", "1080", "30");
+                } else if v == "1080p 60 FPS" {
+                    StudioBridge.set-output("1920", "1080", "60");
+                } else if v == "1440p 60 FPS" {
+                    StudioBridge.set-output("2560", "1440", "60");
+                } else {
+                    StudioBridge.set-output("3840", "2160", "30");
+                }
+            }
+        }
+    }
+    VerticalLayout {
+        spacing: Theme.space-2;
+        FormLabel { text: @tr("Stream Title"); }
+        TextField {
+            text: StudioBridge.form.title;
+            placeholder: @tr("What are you streaming?");
+            label: @tr("Stream title");
+            edited(t) => { StudioBridge.edit-form("title", t); }
+        }
+    }
+    if !root.compact: VerticalLayout {
+        spacing: Theme.space-2;
+        FormLabel { text: @tr("Game"); }
+        TextField {
+            text: StudioBridge.form.game;
+            placeholder: @tr("Game or category");
+            label: @tr("Game or category");
+            edited(t) => { StudioBridge.edit-form("game", t); }
+        }
+    }
+    if !root.compact: VerticalLayout {
+        spacing: Theme.space-2;
+        FormLabel { text: @tr("Go Live Message (optional)"); }
+        TextBox {
+            text: StudioBridge.form.message;
+            placeholder: @tr("Sent to the channel chat when you go live");
+            edited(t) => { StudioBridge.edit-form("message", t); }
+        }
+    }
+    if !root.compact: VerticalLayout {
+        spacing: Theme.space-1;
+        SwitchRow {
+            text: @tr("Show Viewer Count");
+            key: "show-viewers";
+            checked: StudioBridge.form.show-viewers;
+        }
+        SwitchRow {
+            text: @tr("Show Chat Overlay");
+            key: "show-chat";
+            checked: StudioBridge.form.show-chat;
+        }
+        SwitchRow {
+            text: @tr("Show Now Playing");
+            key: "show-now-playing";
+            checked: StudioBridge.form.show-now-playing;
+        }
+        SwitchRow {
+            text: @tr("Enable Stream Audio");
+            key: "audio";
+            checked: StudioBridge.form.audio;
+        }
+    }
+    if !root.compact: Divider { }
+    if !root.compact: Rectangle {
+        height: 44px;
+        border-radius: Theme.radius-md;
+        background: adv.has-hover ? Theme.surface-3 : transparent;
+        accessible-role: AccessibleRole.button;
+        accessible-label: @tr("Advanced Settings");
+        accessible-action-default => { StudioBridge.advanced-settings(); }
+        adv := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { StudioBridge.advanced-settings(); }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-4;
+            Icon {
+                source: Icons.settings;
+                size: Theme.icon-md;
+                tint: Theme.text-secondary;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: @tr("Advanced Settings");
+                color: Theme.text;
+                font-size: Theme.font-md;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Icon {
+                source: Icons.chevron-right;
+                size: Theme.icon-md;
+                tint: Theme.text-secondary;
+                y: (parent.height - self.height) / 2;
+            }
+        }
+    }
+    if !root.compact: Divider { }
+    // Output size and rate: presets, or any numbers.
+    if !root.compact: VerticalLayout {
+        spacing: Theme.space-2;
+        FormLabel { text: @tr("Output (width × height, FPS)"); }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            out-w := TextField {
+                text: StudioBridge.status.output-width;
+                input-type: number;
+                label: @tr("Output width");
+                accepted => { StudioBridge.set-output(out-w.text, out-h.text, out-fps.text); }
+            }
+            Text {
+                text: "×";
+                color: Theme.text-muted;
+                vertical-alignment: center;
+            }
+            out-h := TextField {
+                text: StudioBridge.status.output-height;
+                input-type: number;
+                label: @tr("Output height");
+                accepted => { StudioBridge.set-output(out-w.text, out-h.text, out-fps.text); }
+            }
+            out-fps := TextField {
+                text: StudioBridge.status.fps;
+                input-type: number;
+                label: @tr("Output frame rate");
+                max-width: 64px;
+                horizontal-stretch: 0;
+                accepted => { StudioBridge.set-output(out-w.text, out-h.text, out-fps.text); }
+            }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            Button {
+                small: true;
+                text: "720p";
+                horizontal-stretch: 1;
+                checked: StudioBridge.status.output-height == 720;
+                clicked => { StudioBridge.set-output("1280", "720", out-fps.text); }
+            }
+            Button {
+                small: true;
+                text: "1080p";
+                horizontal-stretch: 1;
+                checked: StudioBridge.status.output-height == 1080;
+                clicked => { StudioBridge.set-output("1920", "1080", out-fps.text); }
+            }
+            Button {
+                small: true;
+                text: "1440p";
+                horizontal-stretch: 1;
+                checked: StudioBridge.status.output-height == 1440;
+                clicked => { StudioBridge.set-output("2560", "1440", out-fps.text); }
+            }
+            Button {
+                small: true;
+                text: "30";
+                horizontal-stretch: 1;
+                checked: StudioBridge.status.fps == 30;
+                clicked => { StudioBridge.set-output(out-w.text, out-h.text, "30"); }
+            }
+            Button {
+                small: true;
+                text: "60";
+                horizontal-stretch: 1;
+                checked: StudioBridge.status.fps == 60;
+                clicked => { StudioBridge.set-output(out-w.text, out-h.text, "60"); }
+            }
+        }
+    }
+    if !root.compact: VerticalLayout {
+        spacing: Theme.space-2;
+        FormLabel { text: StudioBridge.layers.length == 0 ? @tr("Bitrate (kbit/s)") : @tr("Simulcast layers (size or scale, FPS, kbit/s)"); }
+        if StudioBridge.layers.length == 0: TextField {
+            text: StudioBridge.form.bitrate;
+            input-type: number;
+            label: @tr("Bitrate in kbit/s");
+            accepted(t) => { StudioBridge.edit-form("bitrate", t); }
+        }
+        for layer[i] in StudioBridge.layers: LayerRow {
+            layer: layer;
+            index: i;
+        }
+        Button {
+            small: true;
+            icon: Icons.layers;
+            text: StudioBridge.layers.length == 0 ? @tr("Add simulcast layers") : @tr("Add a layer");
+            clicked => { StudioBridge.add-layer(); }
+        }
+    }
+}
+
+// The Record Clip button and its menu: recording, replay length, folder.
+component RecordButton inherits Rectangle {
+    in property <bool> compact;
+    height: compact ? 44px : 52px;
+    width: row.preferred-width;
+    border-radius: Theme.radius-md;
+    background: main.has-hover ? Theme.surface-3 : Theme.surface-2;
+    border-width: 1px;
+    border-color: StudioBridge.status.recording ? Theme.live : Theme.border-strong;
+    accessible-role: AccessibleRole.button;
+    accessible-label: @tr("Record Clip");
+    accessible-description: StudioBridge.status.replay-seconds > 0 ? @tr("Saves the last {} seconds", StudioBridge.status.replay-seconds) : @tr("The replay buffer is off");
+    accessible-action-default => { StudioBridge.save-clip(); }
+    row := HorizontalLayout {
+        Rectangle {
+            width: inner.preferred-width;
+            main := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { StudioBridge.save-clip(); }
+            }
+            inner := HorizontalLayout {
+                padding-left: root.compact ? Theme.space-4 : Theme.space-5;
+                padding-right: Theme.space-4;
+                spacing: Theme.space-3;
+                Rectangle {
+                    width: 20px;
+                    height: 20px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 10px;
+                    border-width: 2px;
+                    border-color: Theme.live;
+                    Rectangle {
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 5px;
+                        background: Theme.live;
+                    }
+                }
+                Text {
+                    text: StudioBridge.status.recording ? @tr("Recording {}", StudioBridge.status.recorded) : @tr("Record Clip");
+                    color: Theme.text;
+                    font-size: root.compact ? Theme.font-body : Theme.font-md;
+                    font-weight: Theme.weight-medium;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        Rectangle {
+            width: 1px;
+            background: Theme.border-strong;
+        }
+        Rectangle {
+            width: 40px;
+            background: more.has-hover ? Theme.surface-4 : transparent;
+            border-top-right-radius: Theme.radius-md;
+            border-bottom-right-radius: Theme.radius-md;
+            accessible-role: AccessibleRole.button;
+            accessible-label: @tr("Recording options");
+            accessible-action-default => { menu.show(0, root.height + 4px); }
+            more := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { menu.show(root.width - 260px, root.height + 4px); }
+            }
+            Icon {
+                source: Icons.chevron-down;
+                size: Theme.icon-sm;
+                tint: Theme.text-secondary;
+            }
+        }
+    }
+    menu := PopupMenu {
+        menu-width: 260px;
+        entries: [
+            { text: StudioBridge.status.replay-seconds > 0 ? @tr("Save the last {} seconds", StudioBridge.status.replay-seconds) : @tr("Save clip (replay buffer off)"), icon: Icons.download, enabled: StudioBridge.status.replay-seconds > 0 },
+            { text: StudioBridge.status.recording ? @tr("Stop recording") : @tr("Start recording"), icon: StudioBridge.status.recording ? Icons.square : Icons.record, enabled: StudioBridge.status.running, separator: true },
+            { text: @tr("Replay length…"), icon: Icons.clock, enabled: true },
+            { text: @tr("Open the recordings folder"), icon: Icons.folder-open, enabled: true },
+        ];
+        activated(i) => {
+            if i == 0 {
+                StudioBridge.save-clip();
+            } else if i == 1 {
+                StudioBridge.toggle-recording();
+            } else if i == 2 {
+                StudioNav.open-settings();
+            } else {
+                StudioBridge.open-recordings();
+            }
+        }
+    }
+}
+
+// The bottom bar: share a window or the screen, record, go live, end.
+export component StudioActions inherits HorizontalLayout {
+    in property <bool> compact;
+    property <length> h: compact ? 44px : 52px;
+    spacing: compact ? Theme.space-3 : Theme.space-4;
+    alignment: center;
+    if !root.compact: Button {
+        min-height: root.h;
+        icon: Icons.app-window;
+        text: @tr("Share Window");
+        y: (parent.height - self.height) / 2;
+        clicked => { StudioNav.pick("window"); }
+    }
+    Button {
+        min-height: root.h;
+        icon: Icons.monitor;
+        text: @tr("Share Screen");
+        y: (parent.height - self.height) / 2;
+        clicked => { StudioNav.pick("screen"); }
+    }
+    RecordButton {
+        compact: root.compact;
+        y: (parent.height - self.height) / 2;
+    }
+    Rectangle {
+        min-width: root.compact ? 160px : 180px;
+        height: root.h;
+        y: (parent.height - self.height) / 2;
+        Rectangle {
+            x: -Theme.glow-width;
+            y: -Theme.glow-width;
+            width: parent.width + 2 * Theme.glow-width;
+            height: parent.height + 2 * Theme.glow-width;
+            border-radius: Theme.radius-md + Theme.glow-width;
+            border-width: StudioBridge.status.can-go-live ? Theme.glow-width : 0px;
+            border-color: Theme.glow;
+        }
+        Button {
+            width: parent.width;
+            min-height: root.h;
+            kind: ButtonKind.primary;
+            icon: Icons.radio;
+            text: StudioBridge.status.live ? @tr("Live") : StudioBridge.status.starting ? @tr("Starting…") : @tr("Go Live");
+            enabled: StudioBridge.status.can-go-live || StudioBridge.status.live;
+            checked: StudioBridge.status.live;
+            accessible-description: StudioBridge.status.hint;
+            clicked => { StudioBridge.go-live(); }
+        }
+    }
+    Button {
+        min-width: root.compact ? 160px : 180px;
+        min-height: root.h;
+        kind: ButtonKind.danger;
+        icon: Icons.square;
+        text: @tr("End Stream");
+        enabled: StudioBridge.status.live || StudioBridge.status.starting;
+        y: (parent.height - self.height) / 2;
+        clicked => { StudioBridge.end-stream(); }
+    }
+}
+
+// Requests to watch the stream (when not everyone is let in).
+export component ViewerRequests inherits VerticalLayout {
+    spacing: Theme.space-2;
+    for viewer in StudioBridge.viewers: HorizontalLayout {
+        spacing: Theme.space-2;
+        if viewer.state == "requested": Text {
+            text: @tr("{} wants to watch", viewer.name);
+            color: Theme.warning;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        if viewer.state == "requested": Button {
+            small: true;
+            kind: ButtonKind.primary;
+            text: @tr("Accept");
+            clicked => { StudioBridge.respond-viewer(viewer.client, true); }
+        }
+        if viewer.state == "requested": Button {
+            small: true;
+            text: @tr("Deny");
+            clicked => { StudioBridge.respond-viewer(viewer.client, false); }
+        }
+    }
+}
+
+// A labelled numeric field of the source dialog.
+component NumberField inherits VerticalLayout {
+    in property <string> label;
+    in-out property <string> value <=> field.text;
+    in property <string> placeholder;
+    alignment: start;
+    spacing: Theme.space-1;
+    Text {
+        text: root.label;
+        color: Theme.text-muted;
+        font-size: Theme.font-xs;
+    }
+    field := TextField {
+        placeholder: root.placeholder;
+        label: root.label;
+        font-size: Theme.font-sm;
+    }
+}
+
+// Add or edit a source: name, what it shows, where, crop, opacity,
+// background effect.
+component SourceDialog inherits Modal {
+    in-out property <StudioSourceForm> form;
+    callback done();
+    property <bool> adding: form.id < 0;
+    title: adding ? (form.kind == "text" ? @tr("Add text") : form.kind == "colour" ? @tr("Add a colour") : @tr("Add an image")) : form.name;
+    subtitle: adding ? @tr("Added to the live scene.") : @tr("Position, size and crop are in output pixels.");
+    icon: StudioKinds.icon(form.kind);
+    card-width: 560px;
+    card-height: form.kind == "camera" ? 760px : form.kind == "text" || form.kind == "colour" || form.kind == "image" ? 640px : 560px;
+    dismissed => { done(); }
+    ScrollView {
+        vertical-stretch: 1;
+        VerticalLayout {
+            alignment: start;
+            spacing: Theme.space-4;
+            padding-right: Theme.space-3;
+            Field {
+                label: @tr("Name");
+                TextField {
+                    text <=> form.name;
+                    label: @tr("Name");
+                }
+            }
+            if form.kind == "text": Field {
+                label: @tr("Text (a new line with \\n)");
+                TextField {
+                    text <=> form.text;
+                    label: @tr("Text");
+                }
+            }
+            if form.kind == "text" || form.kind == "colour": HorizontalLayout {
+                spacing: Theme.space-3;
+                if form.kind == "text": NumberField {
+                    label: @tr("Size (px)");
+                    value <=> form.text-size;
+                }
+                NumberField {
+                    label: @tr("Colour (#rrggbb or #rrggbbaa)");
+                    value <=> form.colour;
+                }
+            }
+            if form.kind == "image": Field {
+                label: @tr("Image file (PNG or JPEG)");
+                TextField {
+                    text <=> form.path;
+                    placeholder: "/home/you/Pictures/overlay.png";
+                    label: @tr("Image file");
+                    icon: Icons.image;
+                }
+            }
+            if form.kind == "camera": ToggleRow {
+                text: @tr("Mirror");
+                description: @tr("As in a mirror (front cameras)");
+                checked <=> form.mirror;
+            }
+            Text {
+                text: @tr("Transform");
+                color: Theme.text;
+                font-weight: Theme.weight-semibold;
+            }
+            HorizontalLayout {
+                spacing: Theme.space-3;
+                NumberField {
+                    label: "X";
+                    value <=> form.x;
+                }
+                NumberField {
+                    label: "Y";
+                    value <=> form.y;
+                }
+                NumberField {
+                    label: @tr("Width");
+                    value <=> form.width;
+                    placeholder: @tr("own");
+                }
+                NumberField {
+                    label: @tr("Height");
+                    value <=> form.height;
+                    placeholder: @tr("own");
+                }
+                NumberField {
+                    label: @tr("Scale");
+                    value <=> form.scale;
+                }
+            }
+            SegmentedTabs {
+                model: [@tr("Fit inside"), @tr("Fill (crop)"), @tr("Stretch")];
+                current-index: form.fit == "cover" ? 1 : form.fit == "stretch" ? 2 : 0;
+                label: @tr("How it fills its box");
+                selected(i) => { form.fit = i == 1 ? "cover" : i == 2 ? "stretch" : "contain"; }
+            }
+            Text {
+                text: @tr("Crop (source pixels)");
+                color: Theme.text;
+                font-weight: Theme.weight-semibold;
+            }
+            HorizontalLayout {
+                spacing: Theme.space-3;
+                NumberField {
+                    label: @tr("Left");
+                    value <=> form.crop-left;
+                }
+                NumberField {
+                    label: @tr("Top");
+                    value <=> form.crop-top;
+                }
+                NumberField {
+                    label: @tr("Right");
+                    value <=> form.crop-right;
+                }
+                NumberField {
+                    label: @tr("Bottom");
+                    value <=> form.crop-bottom;
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-4;
+                Text {
+                    text: @tr("Opacity");
+                    color: Theme.text;
+                    font-weight: Theme.weight-semibold;
+                    vertical-alignment: center;
+                }
+                Slider {
+                    y: (parent.height - self.height) / 2;
+                    minimum: 0;
+                    maximum: 100;
+                    value <=> form.opacity;
+                    label: @tr("Opacity");
+                }
+                Text {
+                    text: @tr("{}%", round(form.opacity));
+                    color: Theme.text-secondary;
+                    vertical-alignment: center;
+                    width: 44px;
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-6;
+                ToggleRow {
+                    text: @tr("Visible");
+                    checked <=> form.visible;
+                }
+                ToggleRow {
+                    text: @tr("Locked");
+                    checked <=> form.locked;
+                }
+            }
+            if form.kind == "camera": VerticalLayout {
+                spacing: Theme.space-3;
+                Text {
+                    text: @tr("Background effect");
+                    color: Theme.text;
+                    font-weight: Theme.weight-semibold;
+                }
+                SegmentedTabs {
+                    model: [@tr("Off"), @tr("Blur"), @tr("Image"), @tr("Colour")];
+                    current-index: form.background == "blur" ? 1 : form.background == "image" ? 2 : form.background == "colour" ? 3 : 0;
+                    label: @tr("Background effect");
+                    selected(i) => { form.background = i == 1 ? "blur" : i == 2 ? "image" : i == 3 ? "colour" : "keep"; }
+                }
+                if form.background == "blur": NumberField {
+                    label: @tr("Blur strength (% of the picture's height)");
+                    value <=> form.blur;
+                }
+                if form.background == "image": NumberField {
+                    label: @tr("Background image file");
+                    value <=> form.background-path;
+                }
+                if form.background == "colour": NumberField {
+                    label: @tr("Background colour (#rrggbb)");
+                    value <=> form.background-colour;
+                }
+                Text {
+                    text: @tr("The subject is found by a simple oval for now: what is outside it is replaced.");
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+    HorizontalLayout {
+        alignment: end;
+        spacing: Theme.space-3;
+        Button {
+            text: @tr("Cancel");
+            clicked => { root.done(); }
+        }
+        Button {
+            kind: ButtonKind.primary;
+            text: root.adding ? @tr("Add") : @tr("Apply");
+            clicked => {
+                if root.adding {
+                    StudioBridge.add-source(root.form);
+                } else {
+                    StudioBridge.apply-source(root.form);
+                }
+                root.done();
+            }
+        }
+    }
+}
+
+// Pick a screen, window, camera or audio source.
+component PickDialog inherits Modal {
+    in property <string> kind;
+    callback done();
+    title: kind == "screen" ? @tr("Share a screen") : kind == "window" ? @tr("Share a window") : kind == "camera" ? @tr("Add a camera") : @tr("Add an audio source");
+    subtitle: kind == "audio" ? @tr("Mixed into the stream's audio.") : @tr("Added to the live scene.");
+    icon: StudioKinds.icon(kind == "audio" ? "microphone" : kind);
+    card-width: 520px;
+    card-height: 540px;
+    dismissed => { done(); }
+    if StudioBridge.picks.length == 0: Text {
+        vertical-stretch: 1;
+        text: @tr("Nothing found.");
+        color: Theme.text-muted;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    if StudioBridge.picks.length > 0: ListView {
+        vertical-stretch: 1;
+        for pick[i] in StudioBridge.picks: Rectangle {
+            height: 52px;
+            border-radius: Theme.radius-md;
+            background: pick-touch.has-hover ? Theme.surface-3 : transparent;
+            accessible-role: AccessibleRole.button;
+            accessible-label: pick.name;
+            accessible-description: pick.detail;
+            accessible-action-default => {
+                if root.kind == "audio" {
+                    StudioBridge.add-audio(i);
+                } else {
+                    StudioBridge.add-picked(root.kind, i);
+                }
+                root.done();
+            }
+            pick-touch := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    if root.kind == "audio" {
+                        StudioBridge.add-audio(i);
+                    } else {
+                        StudioBridge.add-picked(root.kind, i);
+                    }
+                    root.done();
+                }
+            }
+            HorizontalLayout {
+                padding-left: Theme.space-3;
+                padding-right: Theme.space-3;
+                spacing: Theme.space-4;
+                Rectangle {
+                    width: 36px;
+                    height: 36px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: Theme.radius-md;
+                    background: Theme.surface-3;
+                    Icon {
+                        source: StudioKinds.icon(pick.kind);
+                        size: 18px;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: pick.name;
+                        color: Theme.text;
+                        overflow: elide;
+                    }
+                    if pick.detail != "": Text {
+                        text: pick.detail;
+                        color: Theme.text-muted;
+                        font-size: Theme.font-sm;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Rename a scene.
+component SceneDialog inherits Modal {
+    callback done();
+    title: @tr("Rename scene");
+    icon: Icons.pencil;
+    card-width: 420px;
+    card-height: 220px;
+    dismissed => { done(); }
+    name := TextField {
+        text: StudioNav.scene-name;
+        label: @tr("Scene name");
+        accepted(t) => {
+            StudioBridge.rename-scene(StudioNav.scene-id, t);
+            root.done();
+        }
+    }
+    HorizontalLayout {
+        alignment: end;
+        spacing: Theme.space-3;
+        Button {
+            text: @tr("Cancel");
+            clicked => { root.done(); }
+        }
+        Button {
+            kind: ButtonKind.primary;
+            text: @tr("Rename");
+            clicked => {
+                StudioBridge.rename-scene(StudioNav.scene-id, name.text);
+                root.done();
+            }
+        }
+    }
+}
+
+// The studio's own settings: replay buffer, recordings, preview.
+component StudioSettingsDialog inherits Modal {
+    in-out property <StudioSettingsForm> form;
+    callback done();
+    title: @tr("Studio Settings");
+    subtitle: @tr("Clips, recordings and the preview. Stream quality is in the stream settings.");
+    icon: Icons.settings;
+    card-width: 520px;
+    card-height: 560px;
+    dismissed => { done(); }
+    ScrollView {
+        vertical-stretch: 1;
+        VerticalLayout {
+            alignment: start;
+            spacing: Theme.space-4;
+            padding-right: Theme.space-3;
+            Field {
+                label: @tr("Replay buffer (seconds, 0: off)");
+                hint: @tr("Record Clip saves this much of what was streamed or composed.");
+                TextField {
+                    text <=> form.replay-seconds;
+                    input-type: number;
+                    icon: Icons.clock;
+                    label: @tr("Replay buffer in seconds");
+                }
+            }
+            Field {
+                label: @tr("Replay memory (MB)");
+                hint: @tr("Beyond this the oldest part goes to a temporary file.");
+                TextField {
+                    text <=> form.replay-memory;
+                    input-type: number;
+                    icon: Icons.hard-drive;
+                    label: @tr("Replay memory in megabytes");
+                }
+            }
+            Field {
+                label: @tr("Recordings and clips folder");
+                hint: @tr("Empty: a Voelin folder in your videos folder.");
+                TextField {
+                    text <=> form.recording-dir;
+                    icon: Icons.folder-open;
+                    label: @tr("Recordings folder");
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-3;
+                Field {
+                    label: @tr("Preview width (pixels)");
+                    TextField {
+                        text <=> form.preview-width;
+                        input-type: number;
+                        label: @tr("Preview width");
+                    }
+                }
+                Field {
+                    label: @tr("Preview FPS");
+                    TextField {
+                        text <=> form.preview-fps;
+                        input-type: number;
+                        label: @tr("Preview frame rate");
+                    }
+                }
+            }
+        }
+    }
+    HorizontalLayout {
+        alignment: end;
+        spacing: Theme.space-3;
+        Button {
+            text: @tr("Cancel");
+            clicked => { root.done(); }
+        }
+        Button {
+            kind: ButtonKind.primary;
+            text: @tr("Save");
+            clicked => {
+                StudioBridge.apply-settings(root.form);
+                root.done();
+            }
+        }
+    }
+}
+
+// The dialog StudioNav asks for, over the whole studio.
+export component StudioDialogs inherits Rectangle {
+    if StudioNav.dialog == "pick": PickDialog {
+        kind: StudioNav.pick-kind;
+        done => { StudioNav.close(); }
+    }
+    if StudioNav.dialog == "source": SourceDialog {
+        form <=> StudioNav.source-form;
+        done => { StudioNav.close(); }
+    }
+    if StudioNav.dialog == "scene": SceneDialog {
+        done => { StudioNav.close(); }
+    }
+    if StudioNav.dialog == "settings": StudioSettingsDialog {
+        form <=> StudioNav.settings-form;
+        done => { StudioNav.close(); }
+    }
+}

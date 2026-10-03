@@ -13,6 +13,7 @@ mod servers;
 mod settings;
 mod settings_page;
 mod streams;
+mod studio;
 mod video;
 mod vm;
 
