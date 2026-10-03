@@ -159,18 +159,26 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
 - `peer_config(&codecs, config)` makes a viewer accept only what we decode
   and a streamer offer its stream codec (the first of `config.video_codecs`
   it can encode) followed by `offer_codecs`: the codecs of hardware
-  encoders, VP8 through libvpx (every TeamSpeak client decodes it), and HEVC
+  encoders and VP8 through libvpx that every TeamSpeak client decodes
+  (`decoded_everywhere`: AV1, VP9, VP8), then H.264 from hardware, and HEVC
   last. Other software encoders (x264, SVT-AV1, libvpx VP9, ...) are only
   ever the stream codec, so a viewer's answer never starts an expensive
   second encoder. Answers keep the offer's order, so viewers take the stream
   codec when they decode it. `preferred_codec(&codecs, configured)` picks the
   stream codec: `stream.codec` if encodable, else the preference's first
-  (hardware first when enabled, VP8 in software; never HEVC);
-  `encoder_preference(&settings)` and `configured_codec(&settings)` read the
-  settings. H.264 is offered as Constrained High at the level the stream
-  needs (`PeerConfig::set_h264_format(profile, width, height, fps, bitrate)`:
+  codec every TeamSpeak client decodes (hardware first when enabled, VP8 in
+  software), else any but HEVC; `encoder_preference(&settings)` and
+  `configured_codec(&settings)` read the settings. The official client
+  decodes H.264 only with an OpenH264 library it downloads at start-up; when
+  that fails it still answers H.264 and shows nothing (see
+  `docs/protocol-notes/ts6-streaming.md`), so H.264 never comes before a
+  codec it always decodes. H.264 is offered as one variant, Constrained High
+  (packetization mode 1) at the level the stream needs
+  (`PeerConfig::set_h264_format(profile, width, height, fps, bitrate)`:
   macroblocks per second and per frame, and bitrate, per H.264 Table A-1;
-  never below 3.1, the level offered before).
+  never below 3.1, the level offered before); str0m's other H.264 variants
+  are only accepted, never offered, so a viewer cannot answer a profile we
+  do not send.
 - `VideoPipeline` decodes on its own thread. It starts at a keyframe, and
   after a lost frame (`contiguous == false`, a lagging frame bus, a queue
   longer than 30 frames) or a decoder error it skips to the next keyframe,

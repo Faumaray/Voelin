@@ -10,14 +10,22 @@
 //   candidates            candidates gathered so far -> {candidates: [{candidate, sdpMid, sdpMLineIndex}]}
 //   accept {sdp}          apply the answer to our offer
 //   candidate {candidate, sdpMid, sdpMLineIndex}   add a remote candidate
-//   stats                 connection state, inbound/outbound RTP counters,
+//   stats                 connection state, inbound/outbound RTP counters
+//                         (incl. the decoder and decoded frame size),
 //                         frames shown by a <video> element, the DTLS/SRTP
 //                         parameters of the transport
 //   quit
 'use strict';
 
 const readline = require('node:readline');
-const { chromium } = require('playwright');
+// Playwright, or playwright-core driving a browser it did not download
+// (`VOELIN_CHROMIUM`, e.g. a system Chromium that decodes H.264).
+let chromium;
+try {
+	({ chromium } = require('playwright'));
+} catch {
+	({ chromium } = require('playwright-core'));
+}
 
 // Runs in the page.
 const PAGE_SCRIPT = `
@@ -151,7 +159,7 @@ window.peer = {
 		out.transport = {};
 		['dtlsState', 'dtlsRole', 'tlsVersion', 'dtlsCipher', 'srtpCipher'].forEach((k) => (out.transport[k] = transport[k]));
 		for (const k in inbound) {
-			out.inbound[k] = pick(inbound[k], ['packetsReceived', 'bytesReceived', 'packetsLost', 'framesReceived', 'framesDecoded', 'keyFramesDecoded', 'pliCount', 'totalSamplesReceived']);
+			out.inbound[k] = pick(inbound[k], ['packetsReceived', 'bytesReceived', 'packetsLost', 'framesReceived', 'framesDecoded', 'keyFramesDecoded', 'framesDropped', 'frameWidth', 'frameHeight', 'decoderImplementation', 'freezeCount', 'pliCount', 'totalSamplesReceived']);
 		}
 		for (const k in outbound) {
 			out.outbound[k] = pick(outbound[k], ['packetsSent', 'bytesSent', 'framesEncoded', 'keyFramesEncoded', 'pliCount']);
@@ -169,6 +177,7 @@ window.peer = {
 async function main() {
 	const browser = await chromium.launch({
 		headless: true,
+		executablePath: process.env.VOELIN_CHROMIUM || undefined,
 		args: [
 			// Real host candidates instead of mDNS names (no getUserMedia permission here).
 			'--disable-features=WebRtcHideLocalIpsWithMdns',

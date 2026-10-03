@@ -4,82 +4,23 @@
 //!
 //! Runs only with `VOELIN_INTEROP=1` (see `tests/interop/README.md`).
 
-use std::path::PathBuf;
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use serde_json::json;
 use tokio::time::timeout;
 use voelin_stream::{
 	Codec, FrameSource, MediaKind, Peer, PeerConfig, PeerEvent, Signal, SrtpProfile,
 	SyntheticSource,
 };
 
-fn enabled() -> bool {
-	std::env::var("VOELIN_INTEROP").is_ok_and(|v| v == "1")
-}
+#[path = "../../../tests/interop/browser.rs"]
+mod browser;
+use browser::{Browser, enabled};
 
-/// The Node.js side (headless Chromium).
-struct Browser {
-	_child: Child,
-	stdin: ChildStdin,
-	stdout: Lines<BufReader<ChildStdout>>,
-}
-
-impl Browser {
-	async fn start() -> Self {
-		let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-			.join("../../tests/interop/browser-peer.cjs")
-			.canonicalize()
-			.expect("tests/interop/browser-peer.cjs");
-		let node = std::env::var("VOELIN_NODE").unwrap_or_else(|_| "node".into());
-		let mut command = Command::new(node);
-		command
-			.arg(script)
-			.stdin(Stdio::piped())
-			.stdout(Stdio::piped())
-			.stderr(Stdio::inherit())
-			.kill_on_drop(true);
-		// Playwright is usually installed globally.
-		if std::env::var_os("NODE_PATH").is_none()
-			&& let Ok(out) = std::process::Command::new("npm").args(["root", "-g"]).output()
-		{
-			command.env("NODE_PATH", String::from_utf8_lossy(&out.stdout).trim());
-		}
-		let mut child = command.spawn().expect("cannot start node (set VOELIN_NODE)");
-		let stdin = child.stdin.take().unwrap();
-		let stdout = BufReader::new(child.stdout.take().unwrap()).lines();
-		let mut browser = Self { _child: child, stdin, stdout };
-		let ready = browser.read().await;
-		eprintln!("browser: {}", ready["userAgent"]);
-		browser
-	}
-
-	async fn read(&mut self) -> Value {
-		let line = timeout(Duration::from_secs(60), self.stdout.next_line())
-			.await
-			.expect("browser did not answer")
-			.unwrap()
-			.expect("browser exited");
-		let value: Value = serde_json::from_str(&line).unwrap();
-		if let Some(error) = value.get("error") {
-			panic!("browser: {error}");
-		}
-		value
-	}
-
-	async fn call(&mut self, command: Value) -> Value {
-		let mut line = command.to_string();
-		line.push('\n');
-		self.stdin.write_all(line.as_bytes()).await.unwrap();
-		self.read().await
-	}
-
-	async fn quit(mut self) {
-		let _ = self.call(json!({ "op": "quit" })).await;
-	}
+/// The `srtpCipher` of `getStats()` for AES_CM_128_HMAC_SHA1_80, as Chromium
+/// 141 and 152 name it.
+fn aes_cm_128_sha1_80(cipher: &serde_json::Value) -> bool {
+	["AES_CM_128_HMAC_SHA1_80", "SRTP_AES128_CM_HMAC_SHA1_80"].iter().any(|name| cipher == name)
 }
 
 async fn wait_connected(peer: &mut Peer) {
@@ -139,7 +80,7 @@ async fn rust_streams_to_browser() {
 	eprintln!("browser stats: {stats:#}\nkeyframe requests from the browser: {keyframe_requests}");
 	eprintln!("bandwidth estimates (bit/s): {estimates:?}");
 	assert_eq!(stats["connectionState"], "connected");
-	assert_eq!(stats["transport"]["srtpCipher"], "AES_CM_128_HMAC_SHA1_80", "{stats:#}");
+	assert!(aes_cm_128_sha1_80(&stats["transport"]["srtpCipher"]), "{stats:#}");
 	assert_eq!(peer.srtp_profile(), Some(SrtpProfile::Aes128CmSha1_80));
 	assert!(!estimates.is_empty(), "no bandwidth estimate from the browser's feedback");
 	let video = &stats["inbound"]["video"];
@@ -329,6 +270,6 @@ async fn browser_streams_to_rust() {
 	}
 	assert!(tested.contains(&"VP8") && tested.contains(&"VP9"), "tested {tested:?}");
 	let stats = browser.call(json!({ "op": "stats" })).await;
-	assert_eq!(stats["transport"]["srtpCipher"], "AES_CM_128_HMAC_SHA1_80", "{stats:#}");
+	assert!(aes_cm_128_sha1_80(&stats["transport"]["srtpCipher"]), "{stats:#}");
 	browser.quit().await;
 }

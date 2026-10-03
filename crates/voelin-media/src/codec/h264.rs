@@ -9,7 +9,9 @@
 //! disable it (see docs/media.md).
 //!
 //! TeamSpeak clients only decode H.264 Constrained High; OpenH264 encodes
-//! without B-frames, so its High profile output qualifies.
+//! without B-frames, so its High profile output qualifies. The official
+//! client decodes H.264 only once it downloaded OpenH264 itself, so streams
+//! prefer codecs it always decodes (`voelin_core::media::decoded_everywhere`).
 
 use std::path::{Path, PathBuf};
 
