@@ -20,7 +20,8 @@ video, recording, a replay buffer, WHIP) is described in
 | `AudioBuffer { samples, channels, timestamp }` | interleaved `f32`, 48 kHz |
 | `convert::to_rgba(&frame, out, stride)`, `to_rgba_vec`, `to_i420`, `psnr` | BT.601 limited range (the WebRTC default). `to_rgba` writes straight into a Slint `SharedPixelBuffer<Rgba8Pixel>` (`make_mut_bytes()`, stride `width * 4`) |
 | `Codec` | `Vp8`, `Vp9`, `H264`, `Av1`; `FromStr` for SDP/MIME names; `From`/`TryFrom` `str0m::format::Codec` with feature `str0m` |
-| `VideoEncoder` | `encode(&frame, force_keyframe) -> Vec<EncodedFrame>`; `encode_with(&frame, force_keyframe, &mut |EncodedChunk| ..)` hands out the encoder's own buffer (no copy); `set_bitrate(bps)` (libvpx: in place, no keyframe), `set_fps`, `speed()`, `codec()`, `backend()` |
+| `VideoEncoder` | `encode(&frame, force_keyframe) -> Vec<EncodedFrame>`; `encode_with(&frame, force_keyframe, &mut |EncodedChunk| ..)` hands out the encoder's own buffer (no copy); `set_bitrate(bps)` (libvpx: in place, no keyframe), `set_fps`, `speed()`, `codec()`, `backend()`; `gpu_alignment()` / `encode_gpu(&GpuFrame, ..)` for encoders that take frames in GPU memory (VA-API) |
+| `GpuFrame` | a picture in GPU memory (an NV12 VA-API surface), made by `ffmpeg::GpuConverter` from a captured DMA-BUF; `width`, `height`, `timestamp`, `at(timestamp)` (the same surface at another time) |
 | `EncodedFrame { data, keyframe, pts_90khz }` | one frame for `Peer::write` |
 | `VideoDecoder` | `decode(&[u8]) -> Option<VideoFrame>` (timestamp zero; the caller knows the RTP time) |
 | `EncoderConfig { fps, bitrate_bps, keyframe_interval, content, threads, speed }` | resolution follows the frames; a size change restarts with a keyframe; `threads` is a maximum (0: all CPUs but one), still capped at one per 320x240 pixels; `speed: None` adapts libvpx `cpu-used` to the encode time |
@@ -29,8 +30,9 @@ video, recording, a replay buffer, WHIP) is described in
 | `EncoderReport { ffmpeg, zero_copy, encoders: Vec<EncoderInfo> }` | for the UI: FFmpeg's release and path (or why none), whether DMA-BUF import works, and per backend `name`, `api`, `codec`, `hardware`, `status` (self-test result or why it cannot be used) and `rank` under the current preference |
 | `EncoderBackend` | `Libvpx`, `OpenH264`, `Ffmpeg("h264_vaapi")`, `Hardware("mediacodec")`; `name()` is the settings spelling |
 | `ffmpeg::{Ffmpeg, probe, FfmpegEncoder, BACKENDS}` | FFmpeg loaded at runtime (feature `ffmpeg`), see [FFmpeg encoders](#ffmpeg-encoders-loaded-at-runtime) |
+| `ffmpeg::{GpuConverter, GpuLayer}` | an RGB DMA-BUF converted to NV12 and scaled for every simulcast layer on the GPU (`convert(&DmaBufRef, &[GpuLayer], out)`), `modifiers()` it imports; see zero-copy under [FFmpeg encoders](#ffmpeg-encoders-loaded-at-runtime) |
 | `ScreenCapture` | `sources()`, `start_sink(&SourceId, &CaptureOptions, Box<dyn FrameSink>)` (frames borrowed from the capture buffer, on the backend's thread), `start(..)` (copies into a queue), `stop()`; async: the portal asks the user |
-| `FrameSink` | `max_fps()` (may change while capturing), `wants(timestamp)` (asked before anything is mapped or copied), `frame(FrameRef) -> bool` |
+| `FrameSink` | `max_fps()` (may change while capturing), `wants(timestamp)` (asked before anything is mapped or copied), `frame(FrameRef) -> bool`; `accepts_dmabuf()`, `dmabuf(&DmaBufRef) -> Option<bool>` (a frame still in GPU memory, offered before it is mapped) and `dmabuf_modifiers()` (tiled layouts the sink imports) |
 | `FramePacer` | frame-rate cap by timestamps, evenly spaced |
 | `convert::Converter` | `to_i420_into(&FrameRef, &mut VideoFrame)`: any stride, BGRx/BGRA/RGBx/RGBA/I420/NV12, row bands on all cores, no allocation |
 | `scale::{PlaneScaler, Pyramid, scale_i420}` | area-average downscaling (bilinear up), 2x2 box fast path; `Pyramid::process(&FrameRef, sizes, due, out)` converts once and derives every size from the nearest larger one |
@@ -65,7 +67,8 @@ PipeWire). The desktop app and voelinctl use `media-desktop`, the Android app
 
 ```
 streamer: capture thread ── FrameSink: pace, convert + scale (Pyramid on all cores)
-            │ one Handoff per layer (newest frame wins)
+            │   or, for a DMA-BUF and VA-API encoders: GpuConverter (on the GPU)
+            │ one Handoff per layer (newest frame wins; one more for GPU frames)
             ├─ encoder thread, layer 0 ─┐
             ├─ encoder thread, layer 1 ─┤
             └─ ...                      ├─ MediaSink: StreamSink / EncodedSource
@@ -80,7 +83,8 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   stream is live. The audio is mixed from `StreamerConfig::audio_sources`
   (see [Stream audio](#stream-audio)); without any, it is desktop audio
   without Voelin, or a quiet sine tone with the test pattern
-  (`SourceId::Synthetic`, `synthetic_pattern`). The portal's restore token
+  (`SourceId::Synthetic`, `synthetic_pattern`; `synthetic_dmabuf` hands it
+  over as DMA-BUFs, as the portal does). The portal's restore token
   is available afterwards (`restore_token()`) to store.
   `Streamer::start_studio(&codecs, config, studio)` streams the Stream
   Studio's composite instead, encoded from the start for the studio's
@@ -93,6 +97,22 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   layer's newest frame goes through a one-slot handoff to that layer's
   encoder thread; a frame the encoder was too busy for is replaced and
   counted, never queued, so latency stays one frame.
+- GPU path (Linux): a frame still in a DMA-BUF (the portal's) is taken as
+  it is when every encoder of every layer takes GPU frames (VA-API; each
+  encoder thread publishes what its encoders take, `Layer::gpu`). One
+  `GpuConverter` call on the capture thread converts it to NV12 and scales
+  it for every layer that is due, into surfaces of our own at sizes the
+  layer's encoders encode exactly, and returns once the GPU is done, so
+  the buffer goes straight back to the compositor; the CPU never reads it.
+  Each layer's surface reaches its encoder thread through a second
+  handoff (the thread waits on both) and is encoded as it is
+  (`encode_gpu`). Anything else takes the CPU path as before, and the
+  capture switches between the two by itself: an encoder that needs frames
+  in memory (libvpx, x264, or one made for a viewer of another codec)
+  makes the sink decline the next DMA-BUF, so the portal maps it, and a
+  conversion that fails turns the GPU path off for the capture
+  (`StreamerStats::gpu_error`). Nothing is allocated per frame on this
+  path either (the surfaces' frames are recycled).
 - Simulcast: `StreamerConfig::layers` (`voelin_stream::LayerSpec`; empty:
   one layer 0 at `bitrate_kbps`) are all encoded, each with its own encoder
   at `output_size()` of the source, its own frame-rate cap (`max_fps`,
@@ -125,6 +145,7 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   tell codecs apart (`EncodedSource`, a `FrameSource`) get the stream codec
   only, so their offers must list it alone (`voelinctl stream start` does).
 - `stats()`: `StreamerStats` with capture fps, convert time and threads,
+  the GPU path (`gpu_frames`, `gpu_convert_time`, `gpu_error`),
   dropped frames, codec, and per layer (`LayerStats`) size, frames,
   keyframes, dropped, fps, kbit/s, encode time, target bitrate, threads,
   encoder speed, the stream codec's `backend` and the `codecs` encoded; the audio mix's level and limiter gain, and per audio
@@ -416,17 +437,24 @@ the software encoders above are used as before.
   in: FFmpeg 9's `h264_vaapi` crashes (SIGSEGV in `avcodec_send_frame`)
   when drained before its first frame, which is what dropping an encoder
   whose first frame failed used to do.
-- Zero-copy (Linux): `FfmpegEncoder::encode_dmabuf(&DmaBufRef, ...)` maps a
-  DRM PRIME frame onto a VA-API surface (`av_hwframe_map`), so the CPU never
-  reads the buffer. NV12 buffers (one layer of two planes, which is how a
-  compositor hands one over) go to the encoder as they are. RGB buffers
-  (`XR24`, `AR24`, `XB24`, `AB24`: what screen capture delivers) are
-  mapped onto a surface of their own size and converted into the session's
-  NV12 surface by VA-API video processing (`ffmpeg/vpp.rs`: libva's
-  `VAEntrypointVideoProc` on FFmpeg's own `VADisplay`, found through
-  `AVHWDeviceContext.hwctx`), cropped to the coded size on the way; the
-  call returns once the GPU has read the buffer, so it can go back to the
-  compositor. libva is the library FFmpeg's VA-API support already loaded
+- Zero-copy (Linux): a DMA-BUF is mapped as a DRM PRIME frame onto a
+  VA-API surface (`av_hwframe_map`), so the CPU never reads it. RGB buffers
+  (`XR24`, `AR24`, `XB24`, `AB24`: what screen capture delivers) go through
+  `GpuConverter` (`ffmpeg/gpu.rs`): mapped onto a surface of their own
+  size, then converted to NV12 by VA-API video processing (`ffmpeg/vpp.rs`:
+  libva's `VAEntrypointVideoProc` on FFmpeg's own `VADisplay`, found
+  through `AVHWDeviceContext.hwctx`) once per simulcast layer, the whole
+  picture scaled to the layer's size and cropped to its encoders'
+  alignment, into NV12 surfaces from pools of our own. They travel as
+  `GpuFrame`s, recycled once nothing holds them, and VA-API encoders take
+  them as they are (`encode_gpu`; FFmpeg's VA-API encoders accept surfaces
+  from any pool of the device). The call returns once the GPU has read the
+  buffer, so it can go back to the compositor. The streamer's sink drives
+  this for every layer (see the GPU path in [the pipeline](#the-pipeline-in-voelin-core-media-module));
+  `FfmpegEncoder::encode_dmabuf(&DmaBufRef, ...)` does the same for one
+  encoder, and takes NV12 buffers (one layer of two planes, which is how a
+  compositor hands one over) straight into the encoder.
+  libva is the library FFmpeg's VA-API support already loaded
   (`libva.so.2`, ABI unchanged since libva 2); FFmpeg itself has this
   conversion only in libavfilter (`scale_vaapi`), which would be another
   library and a filter graph for one call. The input is described with
@@ -435,14 +463,11 @@ the software encoders above are used as before.
   the transfer function and every dark pixel came out about 5 levels too
   bright. Anything else (another format, an encoder that is not VA-API)
   fails with `Error::CodecUnavailable` and the caller maps the buffer for
-  the CPU path. The capture side has the hook (`FrameSink::accepts_dmabuf`
-  / `dmabuf`: the portal offers a buffer before mapping it), but the
-  streamer's sink (`Ingest` in voelin-core) does not accept DMA-BUFs yet,
-  so no captured frame takes this path in the app. The portal negotiates
-  LINEAR DMA-BUFs, which the import takes (tested); tiled ones would save
-  the compositor a copy but need the modifiers the encoder's driver
-  imports, which are not known on the capture side. See [the
-  measurements](#zero-copy-measured).
+  the CPU path. Tiled buffers: `GpuConverter::modifiers()` is the layout
+  the driver gives its own RGB surfaces (it imports what it makes; on the
+  RX 7900 GRE `0x200000028a01f04`), offered only if it needs a single plane
+  (no compression metadata); the portal offers it ahead of LINEAR (see
+  [Capture](#capture)). See [the measurements](#zero-copy-measured).
 
 Installing FFmpeg (runtime libraries only, no `-dev` packages):
 
@@ -553,16 +578,22 @@ Notes:
   desktop's picker. Choices persist with `PersistMode::ExplicitlyRevoked`: store
   `PortalCapture::restore_token()` (e.g. in `voelin-store` settings) and pass it to
   `PortalCapture::with_restore_token` next time. The cursor is embedded when
-  the portal supports it. Buffers: LINEAR DMA-BUFs are offered first (a
-  mandatory modifier property we fixate; mapped once per buffer, read
-  between `DMA_BUF_IOCTL_SYNC` start and end), shared memory
-  (BGRx/BGRA/RGBx/RGBA) second. If reading DMA-BUFs is slower than 1 ns per
-  pixel over the first 30 frames (uncached VRAM), the stream renegotiates to
-  shared memory; `VOELIN_PORTAL_DMABUF=0` or `with_dmabuf(false)` skips them.
-  A sink that accepts DMA-BUFs gets them before anything is mapped (with
-  the buffer object's size, which compositors leave out of `maxsize`), and
-  then the CPU never reads them. Tiled modifiers are not offered (see
-  zero-copy above). The frame rate
+  the portal supports it. Buffers: DMA-BUFs are offered first (a
+  mandatory modifier property we fixate: the sink's tiled modifiers, best
+  first, then LINEAR), shared memory (BGRx/BGRA/RGBx/RGBA) second. A sink
+  that accepts DMA-BUFs (the streamer's, while its encoders take GPU
+  frames) gets them before anything is mapped (with the buffer object's
+  size, which compositors leave out of `maxsize`), and then the CPU never
+  reads them; its tiled modifiers (`FrameSink::dmabuf_modifiers`) are
+  offered from the second frame, and when the compositor leaves the choice
+  to us the first of ours it can make is taken. When the sink's list
+  changes (a switch to an encoder that needs frames in memory, a failed GPU
+  conversion) the formats are offered again, so LINEAR buffers come back
+  before the CPU has to read one. LINEAR buffers the sink does not take
+  are mapped once per buffer and read between `DMA_BUF_IOCTL_SYNC` start
+  and end; if that is slower than 1 ns per pixel over the first 30 frames
+  (uncached VRAM), the stream renegotiates to shared memory.
+  `VOELIN_PORTAL_DMABUF=0` or `with_dmabuf(false)` skips DMA-BUFs. The frame rate
   asked of the compositor is the sink's cap, renegotiated when it changes;
   compositors send frames only when the screen changes. Without a session
   bus or portal, `start` returns `Error::CaptureUnavailable`; a cancelled
@@ -603,6 +634,9 @@ voelinctl stream bench --res 1280x720 --encoder h264_vaapi
 voelinctl stream bench --res 2560x1440 --fps 30 \
     --layer scale=1,bitrate=6M --layer scale=0.5,bitrate=1500k,fps=30 \
     --layer size=640x360,bitrate=400k,fps=15
+# The pattern handed over as DMA-BUFs, as the portal hands over the screen
+# (Linux, /dev/udmabuf): with VA-API encoders the GPU path, no portal needed
+voelinctl stream bench --res 2560x1440 --fps 60 --encoder h264_vaapi --dmabuf
 # A real screen capture instead of the pattern (the portal asks the user;
 # --start-timeout bounds the wait so it cannot hang):
 voelinctl stream bench --source portal --fps 60 --encoder h264_vaapi
@@ -614,7 +648,8 @@ cargo bench -p voelin-media --bench convert
 `--pattern desktop` (default) is a code-editor-like picture whose document
 scrolls three pixels per frame, about as costly to encode as real screen
 content; `--pattern simple` is the flat test pattern. The bench prints
-capture fps, convert time and threads, per layer fps, kbit/s, keyframes,
+capture fps, how many frames each path converted (CPU, or GPU for
+DMA-BUFs no CPU read) and the time per frame of each, per layer fps, kbit/s, keyframes,
 frames dropped by the handoff, encode time, threads and `cpu-used`, CPU use
 and allocations per captured and per encoded frame.
 
@@ -754,8 +789,8 @@ the CPU reads its memory uncached, so the same conversion costs 44 times the
 time and 48 times the CPU. `SLOW_DMABUF_NS_PER_PIXEL` exists for exactly
 this, but at 6.0 ns per pixel it never fired against the DMA-BUF path's
 3.24; it now sits between the two measurements. Zero-copy is the real answer
-for this hardware — the buffer would never be read by the CPU at all; the
-next section measures the encoder's half of it.
+for this hardware — the buffer is never read by the CPU at all; the next
+section measures it, without a portal so far.
 
 ### Zero-copy, measured
 
@@ -763,7 +798,7 @@ Same machine, `h264_vaapi`, release build: what the CPU spends per
 2560x1440 frame on its way into the encoder, 600 frames after 30 of
 warm-up, CPU time of every thread of the process
 (`ffmpeg::encoder::tests::zero_copy_cpu_cost`, run with `--ignored`).
-"Shared memory" is the path a captured frame takes today: the picture
+"Shared memory" is the CPU path of a captured frame: the picture
 converted to I420 on every core (`convert::Converter`), interleaved to NV12
 and uploaded into a VA-API surface by `encode_with`. "DMA-BUF" is an RGB
 (`XR24`) DMA-BUF of the same picture through `encode_dmabuf`: imported,
@@ -784,10 +819,41 @@ within 0.7 on average (another chroma filter at edges), and through
 buffer and from a LINEAR one with a padded pitch (`/dev/udmabuf`), which is
 what the portal negotiates.
 
-What this does not show yet is a real capture through it: the streamer's
-sink does not take DMA-BUFs yet (see the zero-copy bullet above), so the
-Wayland numbers above are all shared memory. A capture through the GPU
-path needs that sink and another portal run.
+The whole streamer, both paths: `voelinctl stream bench` (release), the
+desktop pattern drawn into memory (CPU path) or into a LINEAR `XR24`
+DMA-BUF of ordinary memory, as a compositor hands one over (`--dmabuf`,
+GPU path), 10 s after 2 s of warm-up unless said otherwise. "Capture
+thread" is the time per frame spent converting: on the CPU path the
+pyramid's wall time on 32 threads, on the GPU path the wait for the GPU.
+"cores" is the whole process, the pattern's own drawing included on both
+paths (with a real capture the compositor draws).
+
+| run | path | frames converted | capture thread | layers: fps, kbit/s, encode ms | cores |
+|---|---|---|---|---|---|
+| 1440p60 `h264_vaapi`, 10 Mbit/s | CPU | 600 of 600 | 0.27-0.28 ms | 60.0, 10112, 4.09-4.16 | 0.34-0.52 |
+| | GPU | 600 of 600 on the GPU, none on the CPU | 2.02-2.73 ms | 60.0, 9972, 2.61-2.62 | 0.10 |
+| simulcast 1440p30 8 Mbit/s + 720p30 2 Mbit/s + 360p15 600 kbit/s, `h264_vaapi` | CPU | 300 of 300 | 0.44-0.49 ms | 30.0, 7666, 4.57; 30.0, 2121, 1.95-2.06; 15.0, 596, 1.11-1.32 | 0.26-0.38 |
+| | GPU | 300 of 300 on the GPU | 3.72-5.87 ms (three conversions) | 30.0, 7472-7740, 2.73-2.79; 30.0, 2097-2108, 0.99-1.01; 15.0, 596-597, 1.84-2.48 | 0.06 |
+| 1080p60 `av1_vaapi`, 6 Mbit/s, 5 s | CPU | 300 of 300 | 0.17 ms | 60.0, 5916, 2.30 (1920x1072 encoded) | 0.29 |
+| | GPU | 300 of 300 on the GPU | 3.38 ms | 60.0, 5894, 1.43 (made at 1920x1072) | 0.06 |
+
+Two runs each except AV1 (one). Every run held the full frame rate with
+nothing dropped, and both paths allocate 1.02 times per encoded frame (the
+`Arc<[u8]>` of `EncodedFrame`). The GPU path takes a quarter to a fifth of
+the CPU, and that is with the pattern still drawn by this process; what is
+left is mostly that drawing. Its capture-thread time is the thread waiting
+for the GPU, once per layer: 2-6 ms of the 16.7 or 33 ms a frame may take,
+during which the CPU is idle. These buffers live in system memory, which
+the GPU reads over PCIe; a compositor's are normally in video memory. The
+encoders get a little faster too (no upload in front of them).
+
+What this does not show yet is a real capture through it: the portal has
+not been run since the sink takes DMA-BUFs (it shows a dialog on the
+desktop), so the Wayland numbers above are all the CPU path.
+`voelinctl stream bench --source portal --encoder h264_vaapi` prints
+whether frames took the GPU path; with
+`RUST_LOG=voelin_media::capture::portal=debug` also the modifiers offered
+and chosen.
 
 Build profiles: the dev profile builds the media hot path (yuv,
 voelin-media, str0m, x11rb-protocol, pipewire, wayland-client, ...) with
@@ -847,7 +913,7 @@ has not run on Windows yet.
 | wlroots capture (wlr-screencopy v3): outputs, pixels, a change arriving as a new frame, queue API | `tests/wlroots_capture.rs` against headless sway 1.9 (`VOELIN_WLROOTS_TEST_DISPLAY`) | tested; the ext-image-copy-capture path is untested (sway 1.9 predates it) |
 | Converter (strides, unpadded last row, odd sizes, RGBA/I420/NV12), scaler (flat, area average, half), pyramid (sharing, recycling, steady-state pools) | unit tests | tested |
 | Simulcast layers (sizes, fps caps, per-layer keyframes), reconfigure (codec, layers, fps) | `voelin-core` `media::tests::simulcast_layers_and_reconfigure` | tested |
-| Portal DMA-BUF negotiation | unit test of the offered formats; a real capture (row below) | formats parse; LINEAR DMA-BUFs negotiated with the compositor of the 2560x1440 desktop below |
+| Portal DMA-BUF negotiation | unit test of the offered formats (a tiled modifier ahead of LINEAR, read back as a compositor's choice); a real capture (row below) | formats parse; LINEAR DMA-BUFs negotiated with the compositor of the 2560x1440 desktop below. The tiled offer and the renegotiation when the sink's modifiers change have not met a compositor yet |
 | Portal / PipeWire error paths (no bus, bus without portal, no daemon) | unit tests, manual probe | tested |
 | Portal capture (shared memory and DMA-BUF), PipeWire video and audio streams | `voelinctl stream bench --source portal` on a 2560x1440 Wayland desktop | tested: it delivered no frames at all (the DMA-BUF mapping length), and the DMA-BUF path cost 19.5 cores where shared memory costs 0.41. Both fixed; 1440p60 now runs on 0.55 cores (see the table above). Portal audio is still untested |
 | Windows Graphics Capture, WASAPI | – | type-checked for `x86_64-pc-windows-gnu` only |
@@ -869,7 +935,10 @@ has not run on Windows yet.
 | RGB DMA-BUFs converted to NV12 on the GPU (VA-API video processing): against the CPU conversion, then through `h264_vaapi` and `av1_vaapi` (cropping 642x362 to 640x352) to our decoders, from a tiled buffer and from a LINEAR one with a padded pitch | `ffmpeg::encoder::tests::an_rgb_dmabuf_is_converted_on_the_gpu`, `vpp::tests` (the parameter struct against libva 2.24's header) | tested on the Radeon RX 7900 GRE: Y identical to the CPU's, U/V within 0.7 on average, within 0.3 dB of the CPU path after encoding. It found Mesa converting the transfer function by default (dark pixels 5 levels too bright), now described away |
 | CPU cost of the GPU path | `zero_copy_cpu_cost` (`--ignored`) | measured: 0.08-0.09 ms per 2560x1440 frame against 4.3-5.2 ms through shared memory (see above) |
 | A failed DMA-BUF import: an error, the encoder goes on, and drops cleanly | `tests/ffmpeg.rs` `dmabuf_import_is_refused_cleanly` (`/dev/null` as the buffer) | tested: it found FFmpeg 9's `h264_vaapi` crashing when a session that never got a frame is flushed; such sessions are no longer flushed |
-| Zero-copy from screen capture | – | not reached: the encoder side works (rows above) and the portal hands a DMA-BUF to a sink that accepts one, but the streamer's sink (`Ingest` in voelin-core) does not, so no captured frame has gone through it |
+| GPU frames for every simulcast layer: converted and scaled from one DMA-BUF, cropped to each encoder's alignment, recycled, encoded from their surfaces (`encode_gpu`) and decoded | `ffmpeg::encoder::tests::gpu_frames_for_every_layer` | tested on the Radeon RX 7900 GRE: 40.4 dB (full size) and 48.5 dB (scaled) against the CPU pyramid's pictures; the driver's tiled RGB layout `0x200000028a01f04` reported for the portal |
+| The streamer's GPU path: DMA-BUFs taken while every encoder takes GPU frames, the CPU path after a switch to libvpx | `voelin-core` `media::tests::dmabufs_take_the_gpu_path_while_every_encoder_does` (the test pattern as DMA-BUFs, two layers, `h264_vaapi`) | tested: every frame of both layers on the GPU at their own sizes; after the switch the CPU converts again and the VP8 stream decodes |
+| The test pattern as DMA-BUFs (`/dev/udmabuf`), taken or declined | `capture::synthetic::tests::the_pattern_as_dmabufs` | tested |
+| Zero-copy from a real screen capture | `voelinctl stream bench --source portal --encoder h264_vaapi` | not run yet (a portal capture asks the person at the desktop); everything up to the portal is tested with the test pattern as DMA-BUFs (rows above, and the measurements) |
 | Offer [VP9, VP8], a viewer that decodes only VP8 → its own VP8 encoder, VP9 idle, pictures decoded | `voelin-core/tests/media_live.rs` `ts6_viewer_gets_the_codec_it_chose` (`VOELIN_LIVE=1`) | tested against the TeamSpeak 6 dev server (our client on both ends) |
 | Several codecs against official TeamSpeak viewers | – | not tested (no official client here) |
 | Test pattern → VP8 → decoder, rectangle position and colour | `voelin-core` `media::tests::local_preview_decodes_the_pattern` | tested |

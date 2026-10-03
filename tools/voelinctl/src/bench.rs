@@ -71,6 +71,11 @@ struct BenchArgs {
 	/// as real screen content) or `simple` (a flat background).
 	#[arg(long, default_value = "desktop")]
 	pattern: String,
+	/// Hand the test pattern over as DMA-BUFs of ordinary memory, as the
+	/// portal hands over the screen (Linux, `/dev/udmabuf`): with VA-API
+	/// encoders the frames are then converted and scaled on the GPU.
+	#[arg(long)]
+	dmabuf: bool,
 	/// Video codec: vp8, vp9, h264, av1 or h265 [default: the codec of
 	/// --encoder if named, else the first the encoder choice gives].
 	#[arg(long)]
@@ -293,6 +298,8 @@ struct Sample {
 	layers: Vec<(LayerId, LayerSnapshot)>,
 	sent: u64,
 	captured: u64,
+	/// Captured frames converted on the GPU (never read by the CPU).
+	gpu: u64,
 	/// Frames the handoffs to the encoders dropped, per layer.
 	dropped: Vec<(LayerId, u64)>,
 }
@@ -309,6 +316,7 @@ fn sample(sink: &BenchSink, streamer: &Streamer) -> Sample {
 		layers: sink.snapshot(),
 		sent: stats.video_frames,
 		captured: stats.captured_frames,
+		gpu: stats.gpu_frames,
 		dropped: stats.layers.iter().map(|l| (l.id, l.dropped)).collect(),
 	}
 }
@@ -345,6 +353,7 @@ fn bench(args: BenchArgs) -> Result<()> {
 		source: source.clone(),
 		synthetic_size: (width, height),
 		synthetic_pattern: pattern,
+		synthetic_dmabuf: args.dmabuf,
 		fps: args.fps,
 		bitrate_kbps: args.bitrate,
 		codec,
@@ -411,13 +420,20 @@ fn bench(args: BenchArgs) -> Result<()> {
 
 	let secs = (end.at - start.at).as_secs_f64();
 	let captured = end.captured - start.captured;
+	let gpu = end.gpu - start.gpu;
 	let ms = |d: Duration| d.as_secs_f64() * 1000.0;
 	println!(
-		"capture: {:.1} fps; convert + scale: {:.2} ms per frame on {} threads",
+		"capture: {:.1} fps; convert + scale: CPU {} frames, {:.2} ms per frame on {} threads; \
+		 GPU (DMA-BUF, never read by the CPU) {gpu} frames, {:.2} ms per frame",
 		captured as f64 / secs,
+		captured - gpu.min(captured),
 		ms(stats.convert_time),
 		stats.convert_threads,
+		ms(stats.gpu_convert_time),
 	);
+	if let Some(e) = &stats.gpu_error {
+		println!("GPU path stopped: {e}");
+	}
 	let mut output_frames = 0;
 	for ((id, a), (_, b)) in start.layers.iter().zip(&end.layers) {
 		let frames = b.frames - a.frames;

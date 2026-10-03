@@ -171,14 +171,12 @@ impl Va {
 }
 
 /// A VA-API video processing context that converts RGB surfaces into NV12
-/// ones of `width` x `height`.
+/// ones, cropping and scaling on the way.
 pub struct Converter {
 	va: &'static Va,
 	display: Display,
 	config: c_uint,
 	context: c_uint,
-	width: u32,
-	height: u32,
 }
 
 // SAFETY: libva serialises calls per display; the context is used from one
@@ -187,8 +185,8 @@ unsafe impl Send for Converter {}
 
 impl Converter {
 	/// A context on `display` (FFmpeg's, see
-	/// [`layout::device_hwctx`](super::layout::device_hwctx)) for output
-	/// surfaces of `width` x `height`.
+	/// [`layout::device_hwctx`](super::layout::device_hwctx)) for pictures of
+	/// up to `width` x `height`.
 	pub fn new(display: Display, width: u32, height: u32) -> Result<Self, String> {
 		let va = Va::get()?;
 		let mut config = 0;
@@ -224,24 +222,36 @@ impl Converter {
 			unsafe { (va.destroy_config)(display, config) };
 			return Err(e);
 		}
-		Ok(Self { va, display, config, context, width, height })
+		Ok(Self { va, display, config, context })
 	}
 
-	/// Convert the top-left `width` x `height` of RGB surface `input` into
-	/// NV12 surface `output` (both of this display): BT.601, limited range,
-	/// what the encoders signal and the CPU path ([`crate::convert`])
-	/// produces.
+	/// Convert the top-left `src` (width, height) of RGB surface `input`
+	/// into the top-left `dst` of NV12 surface `output` (both of this
+	/// display), scaled if the two differ: BT.601, limited range, what the
+	/// encoders signal and the CPU path ([`crate::convert`]) produces.
 	///
 	/// Returns once the GPU has read `input`, so a captured buffer can go
 	/// back to the compositor; `output` is ready for an encoder of the same
 	/// display, which orders its reads after this.
-	pub fn convert(&self, input: c_uint, output: c_uint) -> Result<(), String> {
+	pub fn convert(
+		&self,
+		input: c_uint,
+		src: (u32, u32),
+		output: c_uint,
+		dst: (u32, u32),
+	) -> Result<(), String> {
 		let va = self.va;
-		let region = Rectangle { x: 0, y: 0, width: self.width as u16, height: self.height as u16 };
+		let rect = |(width, height): (u32, u32)| Rectangle {
+			x: 0,
+			y: 0,
+			width: width.min(u32::from(u16::MAX)) as u16,
+			height: height.min(u32::from(u16::MAX)) as u16,
+		};
+		let (src, dst) = (rect(src), rect(dst));
 		let mut parameters = PipelineParameters {
 			surface: input,
-			surface_region: &region,
-			output_region: &region,
+			surface_region: &src,
+			output_region: &dst,
 			output_background_color: 0xff00_0000,
 			output_color_standard: COLOR_STANDARD_BT601,
 			pipeline_flags: 0,

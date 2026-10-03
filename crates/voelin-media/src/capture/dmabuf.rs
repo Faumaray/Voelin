@@ -1,11 +1,13 @@
 //! CPU access to LINEAR DMA-BUFs (screen capture buffers a compositor
 //! shares): a read-only mapping, and `DMA_BUF_IOCTL_SYNC` around each read
 //! so caches are coherent with what the GPU wrote. Tiled buffers cannot be
-//! read like this; they need a GPU import (not done here).
+//! read like this; they go to the GPU (`ffmpeg::GpuConverter`). Also
+//! DMA-BUFs of ordinary memory ([`Udmabuf`]), to drive that path without a
+//! compositor.
 #![allow(unsafe_code)]
 
 use std::io;
-use std::os::fd::{BorrowedFd, RawFd};
+use std::os::fd::{BorrowedFd, OwnedFd, RawFd};
 
 use memmap2::{Mmap, MmapOptions};
 
@@ -20,6 +22,92 @@ const DMA_BUF_SYNC_START: u64 = 0 << 2;
 const DMA_BUF_SYNC_END: u64 = 1 << 2;
 /// `DMA_BUF_IOCTL_SYNC`: `_IOW('b', 0, struct dma_buf_sync)`.
 const SYNC: rustix::ioctl::Opcode = rustix::ioctl::opcode::write::<DmaBufSync>(b'b', 0);
+
+/// `struct udmabuf_create` of `<linux/udmabuf.h>`; `UDMABUF_CREATE` returns
+/// the new DMA-BUF.
+#[repr(C)]
+struct UdmabufCreate {
+	memfd: u32,
+	flags: u32,
+	offset: u64,
+	size: u64,
+}
+
+/// `UDMABUF_FLAGS_CLOEXEC`.
+const UDMABUF_CLOEXEC: u32 = 1;
+
+// SAFETY: `UDMABUF_CREATE` (`_IOW('u', 0x42, struct udmabuf_create)`) only
+// reads the struct and returns a new descriptor.
+unsafe impl rustix::ioctl::Ioctl for UdmabufCreate {
+	type Output = OwnedFd;
+	const IS_MUTATING: bool = false;
+
+	fn opcode(&self) -> rustix::ioctl::Opcode {
+		rustix::ioctl::opcode::write::<UdmabufCreate>(b'u', 0x42)
+	}
+
+	fn as_ptr(&mut self) -> *mut std::ffi::c_void {
+		(&raw mut *self).cast()
+	}
+
+	unsafe fn output_from_ptr(
+		out: rustix::ioctl::IoctlOutput,
+		_: *mut std::ffi::c_void,
+	) -> rustix::io::Result<OwnedFd> {
+		// SAFETY: the descriptor the kernel just made, ours to own.
+		Ok(unsafe { std::os::fd::FromRawFd::from_raw_fd(out) })
+	}
+}
+
+/// A DMA-BUF of ordinary memory that the CPU writes into: a sealed memfd
+/// shared through `/dev/udmabuf` (LINEAR rows, any pitch). What a
+/// compositor that renders on the CPU hands over, and the way to drive the
+/// DMA-BUF path without one (the test pattern's
+/// [`with_dmabuf`](super::synthetic::SyntheticScreen::with_dmabuf)). Needs
+/// read and write access to `/dev/udmabuf`.
+pub(crate) struct Udmabuf {
+	map: memmap2::MmapMut,
+	dmabuf: OwnedFd,
+}
+
+impl Udmabuf {
+	/// A buffer of at least `len` bytes (whole pages).
+	pub fn new(len: usize) -> io::Result<Self> {
+		use rustix::fs::{MemfdFlags, SealFlags};
+
+		let len = len.max(1).next_multiple_of(4096);
+		let flags = MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING;
+		let memfd = std::fs::File::from(rustix::fs::memfd_create("voelin-udmabuf", flags)?);
+		memfd.set_len(len as u64)?;
+		// udmabuf only takes memory that cannot shrink under it.
+		rustix::fs::fcntl_add_seals(&memfd, SealFlags::SHRINK)?;
+		let device = std::fs::OpenOptions::new().read(true).write(true).open("/dev/udmabuf")?;
+		let create = UdmabufCreate {
+			memfd: std::os::fd::AsRawFd::as_raw_fd(&memfd) as u32,
+			flags: UDMABUF_CLOEXEC,
+			offset: 0,
+			size: len as u64,
+		};
+		// SAFETY: see the `Ioctl` impl; `device` is /dev/udmabuf.
+		let dmabuf = unsafe { rustix::ioctl::ioctl(&device, create) }?;
+		// SAFETY: our own sealed memfd, which nothing else writes or
+		// truncates; the mapping keeps its pages after the file is closed.
+		let map = unsafe { memmap2::MmapOptions::new().len(len).map_mut(&memfd) }?;
+		Ok(Self { map, dmabuf })
+	}
+
+	pub fn fd(&self) -> RawFd {
+		std::os::fd::AsRawFd::as_raw_fd(&self.dmabuf)
+	}
+
+	pub fn len(&self) -> usize {
+		self.map.len()
+	}
+
+	pub fn bytes_mut(&mut self) -> &mut [u8] {
+		&mut self.map
+	}
+}
 
 /// The size of DMA-BUF `fd` in bytes (`lseek(fd, 0, SEEK_END)`, which a
 /// DMA-BUF answers with its buffer object's size without moving anything).

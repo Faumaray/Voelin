@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::capture::{
-	AudioCapture, BoxFuture, CaptureOptions, CaptureSource, FrameSink, QueueSink, ScreenCapture,
-	SourceId, Ticker, Worker,
+	AudioCapture, BoxFuture, CaptureOptions, CaptureSource, DmaBufRef, FrameSink, QueueSink,
+	ScreenCapture, SourceId, Ticker, Worker,
 };
 use crate::frame::{AUDIO_SAMPLE_RATE, AudioBuffer, FrameRef, PixelsRef, PlaneRef, VideoFrame};
 use crate::queue::{FrameReceiver, frame_channel};
@@ -224,6 +224,7 @@ pub struct SyntheticScreen {
 	pattern: Pattern,
 	desktop: Option<Arc<Desktop>>,
 	worker: Option<Worker>,
+	dmabuf: bool,
 }
 
 impl SyntheticScreen {
@@ -236,7 +237,18 @@ impl SyntheticScreen {
 		let (width, height) = (width.max(16), height.max(16));
 		let desktop = (pattern == Pattern::Desktop)
 			.then(|| Arc::new(Desktop::render(width as usize, height as usize)));
-		Self { width, height, pattern, desktop, worker: None }
+		Self { width, height, pattern, desktop, worker: None, dmabuf: false }
+	}
+
+	/// Draw into a DMA-BUF of ordinary memory and offer it to sinks that
+	/// take DMA-BUFs ([`FrameSink::accepts_dmabuf`]) as a LINEAR `XR24`
+	/// buffer, as the ScreenCast portal does; sinks that do not, or decline
+	/// it, get the same memory as a frame. Linux with the `pipewire`
+	/// feature and access to `/dev/udmabuf`; elsewhere frames are handed
+	/// over as before.
+	pub fn with_dmabuf(mut self, enabled: bool) -> Self {
+		self.dmabuf = enabled;
+		self
 	}
 
 	pub fn pattern(&self) -> Pattern {
@@ -251,6 +263,7 @@ impl SyntheticScreen {
 			pattern: self.pattern,
 			desktop: self.desktop.clone(),
 			worker: None,
+			dmabuf: self.dmabuf,
 		}
 	}
 
@@ -268,8 +281,15 @@ impl SyntheticScreen {
 	/// Draw frame `n` as BGRA (`width * 4` bytes per row) into `out`, reusing
 	/// its memory.
 	pub fn render(&self, n: u64, out: &mut Vec<u8>) {
+		out.resize(self.width as usize * self.height as usize * 4, 0);
+		self.draw(n, out);
+	}
+
+	/// [`render`](Self::render) into the first `width * height * 4` bytes of
+	/// `out`.
+	fn draw(&self, n: u64, out: &mut [u8]) {
 		let (w, h) = (self.width as usize, self.height as usize);
-		out.resize(w * h * 4, 0);
+		let out = &mut out[..w * h * 4];
 		match &self.desktop {
 			Some(desktop) => desktop.draw(out, w, n as usize * 3),
 			None => {
@@ -349,17 +369,28 @@ impl ScreenCapture for SyntheticScreen {
 				let (width, height) = (pattern.width, pattern.height);
 				let mut fps = sink.max_fps();
 				let mut ticker = Ticker::new(fps);
-				let mut buffer = Vec::new();
+				let mut buffer = Buffer::new(&pattern);
 				let started = Instant::now();
 				let mut n = 0;
 				loop {
 					let timestamp = started.elapsed();
 					if sink.wants(timestamp) {
-						pattern.render(n, &mut buffer);
-						let plane = PlaneRef::new(&buffer, width as usize * 4);
-						let frame =
-							FrameRef { width, height, timestamp, pixels: PixelsRef::Bgra(plane) };
-						if !sink.frame(frame) {
+						let bytes = buffer.bytes();
+						pattern.draw(n, bytes);
+						let taken = match buffer.dmabuf(&pattern, timestamp) {
+							Some(frame) if sink.accepts_dmabuf() => sink.dmabuf(&frame),
+							_ => None,
+						};
+						let more = taken.unwrap_or_else(|| {
+							let plane = PlaneRef::new(buffer.bytes(), width as usize * 4);
+							sink.frame(FrameRef {
+								width,
+								height,
+								timestamp,
+								pixels: PixelsRef::Bgra(plane),
+							})
+						});
+						if !more {
 							break;
 						}
 						n += 1;
@@ -379,6 +410,58 @@ impl ScreenCapture for SyntheticScreen {
 
 	fn stop(&mut self) {
 		self.worker = None;
+	}
+}
+
+/// Where the test pattern is drawn: plain memory, or a DMA-BUF of ordinary
+/// memory ([`SyntheticScreen::with_dmabuf`]).
+enum Buffer {
+	Memory(Vec<u8>),
+	#[cfg(all(target_os = "linux", feature = "pipewire"))]
+	Dmabuf(super::dmabuf::Udmabuf),
+}
+
+impl Buffer {
+	fn new(pattern: &SyntheticScreen) -> Self {
+		let len = pattern.width as usize * pattern.height as usize * 4;
+		#[cfg(all(target_os = "linux", feature = "pipewire"))]
+		if pattern.dmabuf {
+			match super::dmabuf::Udmabuf::new(len) {
+				Ok(buffer) => return Self::Dmabuf(buffer),
+				Err(e) => tracing::warn!("test pattern without DMA-BUFs (/dev/udmabuf): {e}"),
+			}
+		}
+		Self::Memory(vec![0; len])
+	}
+
+	fn bytes(&mut self) -> &mut [u8] {
+		match self {
+			Self::Memory(bytes) => bytes,
+			#[cfg(all(target_os = "linux", feature = "pipewire"))]
+			Self::Dmabuf(buffer) => buffer.bytes_mut(),
+		}
+	}
+
+	/// The buffer as a LINEAR `XR24` DMA-BUF, if it is one.
+	fn dmabuf(&self, pattern: &SyntheticScreen, timestamp: Duration) -> Option<DmaBufRef> {
+		match self {
+			Self::Memory(_) => {
+				let _ = (pattern, timestamp);
+				None
+			}
+			#[cfg(all(target_os = "linux", feature = "pipewire"))]
+			Self::Dmabuf(buffer) => Some(DmaBufRef {
+				width: pattern.width,
+				height: pattern.height,
+				timestamp,
+				fourcc: super::drm_fourcc(b"XR24"),
+				modifier: super::DRM_MOD_LINEAR,
+				fd: buffer.fd(),
+				size: buffer.len(),
+				planes: [(0, pattern.width as usize * 4), (0, 0), (0, 0), (0, 0)],
+				plane_count: 1,
+			}),
+		}
 	}
 }
 
@@ -522,5 +605,62 @@ mod tests {
 		let buffer = audio.recv_timeout(Duration::from_secs(2)).unwrap();
 		assert_eq!((buffer.channels, buffer.frames()), (2, 480));
 		tone.stop();
+	}
+
+	/// With DMA-BUFs, a sink that takes them gets the pattern as a LINEAR
+	/// `XR24` DMA-BUF that reads back as the pattern; one that declines it
+	/// gets the same picture as a frame.
+	#[cfg(all(target_os = "linux", feature = "pipewire"))]
+	#[tokio::test]
+	async fn the_pattern_as_dmabufs() {
+		use std::sync::mpsc;
+
+		/// Takes DMA-BUFs (or declines them) and reports what it got.
+		struct Sink {
+			take: bool,
+			got: mpsc::Sender<(bool, Vec<u8>)>,
+		}
+		impl FrameSink for Sink {
+			fn max_fps(&self) -> u32 {
+				50
+			}
+			fn frame(&mut self, frame: FrameRef<'_>) -> bool {
+				let PixelsRef::Bgra(plane) = frame.pixels else { panic!("BGRA") };
+				self.got.send((false, plane.row(0, 64 * 4).to_vec())).is_ok()
+			}
+			fn accepts_dmabuf(&self) -> bool {
+				true
+			}
+			fn dmabuf(&mut self, frame: &DmaBufRef) -> Option<bool> {
+				assert_eq!(frame.fourcc, crate::capture::drm_fourcc(b"XR24"));
+				assert_eq!((frame.width, frame.height, frame.planes[0].1), (64, 48, 256));
+				if !self.take {
+					return None;
+				}
+				let map = super::super::dmabuf::DmaBufMap::new(frame.fd, frame.size).unwrap();
+				let row = map.read(|bytes| bytes[..64 * 4].to_vec());
+				Some(self.got.send((true, row)).is_ok())
+			}
+		}
+
+		if !std::path::Path::new("/dev/udmabuf").exists() {
+			eprintln!("no /dev/udmabuf, skipped");
+			return;
+		}
+		let mut expected = Vec::new();
+		SyntheticScreen::new(64, 48).render(0, &mut expected);
+		for take in [true, false] {
+			let mut screen = SyntheticScreen::new(64, 48).with_dmabuf(true);
+			let (got, frames) = mpsc::channel();
+			let sink = Box::new(Sink { take, got });
+			screen
+				.start_sink(&SourceId::Synthetic, &CaptureOptions::default(), sink)
+				.await
+				.unwrap();
+			let (dmabuf, row) = frames.recv_timeout(Duration::from_secs(5)).unwrap();
+			screen.stop();
+			assert_eq!(dmabuf, take, "taken as a DMA-BUF");
+			assert_eq!(row, expected[..64 * 4], "the first row of frame 0");
+		}
 	}
 }

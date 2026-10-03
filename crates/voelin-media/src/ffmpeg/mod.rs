@@ -19,9 +19,13 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 pub mod encoder;
+mod gpu;
 mod layout;
 pub mod sys;
 mod vpp;
+
+pub(crate) use gpu::Surface;
+pub use gpu::{GpuConverter, GpuLayer};
 
 pub use encoder::{
 	BACKENDS, BackendKind, BackendSpec, BackendStatus, FfmpegEncoder, FfmpegFactory, Input, probe,

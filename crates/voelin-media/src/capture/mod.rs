@@ -28,7 +28,7 @@ use crate::queue::{FrameReceiver, FrameSender, frame_channel};
 use crate::{Error, Result};
 
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
-mod dmabuf;
+pub(crate) mod dmabuf;
 pub mod external;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod pipewire_audio;
@@ -128,6 +128,15 @@ pub trait FrameSink: Send {
 	fn dmabuf(&mut self, frame: &DmaBufRef) -> Option<bool> {
 		let _ = frame;
 		None
+	}
+
+	/// Tiled DRM format modifiers of RGB buffers the sink takes now
+	/// ([`accepts_dmabuf`](Self::accepts_dmabuf)), best first; backends that
+	/// negotiate buffers (the portal) offer them ahead of LINEAR, and offer
+	/// again when this changes. The CPU cannot read tiled buffers, so a sink
+	/// lists only what it imports.
+	fn dmabuf_modifiers(&self) -> &[u64] {
+		&[]
 	}
 }
 
