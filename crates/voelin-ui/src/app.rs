@@ -254,6 +254,19 @@ impl SessionView {
 		self.capabilities.streams && self.state.voice == VoiceState::Connected
 	}
 
+	/// The channel a client is in.
+	pub fn channel_of(&self, client: u16) -> Option<u64> {
+		self.presence.clients.get(&client).map(|c| c.channel)
+	}
+
+	/// The name of a client's channel when it is not ours; empty in ours.
+	pub fn other_channel_name(&self, client: u16) -> String {
+		self.channel_of(client)
+			.filter(|c| Some(*c) != self.state.own_channel)
+			.and_then(|c| self.presence.channels.get(&c))
+			.map_or_else(String::new, |c| c.name.clone())
+	}
+
 	/// A client's nickname, or its id.
 	pub fn nickname(&self, client: u16) -> String {
 		self.presence

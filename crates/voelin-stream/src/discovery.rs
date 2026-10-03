@@ -7,12 +7,17 @@
 //! per stream of that client, for any client on the server (see
 //! `docs/research/ts6-late-join.md`).
 //!
+//! The answer works from any channel, and so does `joinstreamrequest`: a
+//! client can watch a stream in another channel, as the official client does.
+//!
 //! [`Discovery`] follows the clients on the server (their channel and
 //! streaming flag, fed by [`Streams::update_clients`](crate::Streams::update_clients)),
-//! keeps the [`StreamDirectory`] to the streams in our channel, and looks up
-//! the streams of clients that stream in our channel but whose stream we were
-//! not told: after connecting, after we or they change channels, and when a
-//! streamer's announcement did not come. Where it looks them up is a
+//! keeps the [`StreamDirectory`] to the streams of clients that are on the
+//! server and stream, in any channel, and looks up the streams of clients
+//! that stream but whose stream we were not told: after connecting, when a
+//! client in another channel starts streaming (the server announces it only
+//! in that channel), after we or they change channels, and when a streamer's
+//! announcement in our channel did not come. Where it looks them up is a
 //! [`StreamLookup`]: the server ([`ServerLookup`]) now; another directory
 //! (e.g. a gateway's) can be added with
 //! [`Streams::add_lookup`](crate::Streams::add_lookup) and hands what it finds
@@ -118,19 +123,16 @@ impl Discovery {
 		self.clients.get(&client.0).map(|c| c.channel)
 	}
 
-	/// Whether a stream of `streamer` belongs in the directory: it is in our
-	/// channel (or the clients are not known yet).
-	pub fn in_our_channel(&self, streamer: ClientId) -> bool {
-		match self.own_channel() {
-			None => true,
-			Some(own) => self.clients.get(&streamer.0).is_some_and(|c| c.channel == own),
-		}
+	/// Whether a stream of `streamer` belongs in the directory: the client is
+	/// on the server (or the clients are not known yet).
+	pub fn knows(&self, streamer: ClientId) -> bool {
+		self.clients.is_empty() || self.clients.contains_key(&streamer.0)
 	}
 
 	/// The clients on the server changed (full list). Updates the streaming
-	/// flags in `directory`, drops the streams of clients that left or are
-	/// not in our channel, and looks up the streams we were not told.
-	/// Returns whether the directory's streams changed.
+	/// flags in `directory`, drops the streams of clients that left, and
+	/// looks up the streams we were not told, in every channel. Returns
+	/// whether the directory's streams changed.
 	pub fn update(
 		&mut self,
 		clients: BTreeMap<u16, ClientState>,
@@ -140,7 +142,7 @@ impl Discovery {
 		let old_channel = self.own_channel();
 		let new_channel = clients.get(&self.own.0).map(|c| c.channel);
 		let mut changed = false;
-		// Streams announced to us but whose streamer went away or out of our channel.
+		// Streams announced to us but whose streamer stopped or went away.
 		let first = self.clients.is_empty();
 		for (id, now) in &clients {
 			let was = self.clients.get(id);
@@ -163,9 +165,7 @@ impl Discovery {
 			self.asked.clear();
 		}
 		self.asked.retain(|id| clients.contains_key(id));
-		changed |= directory.retain_streamers(|c| {
-			clients.get(&c.0).is_some_and(|s| new_channel.is_none_or(|own| s.channel == own))
-		});
+		changed |= directory.retain_streamers(|c| clients.contains_key(&c.0));
 
 		// A client in our channel that just started streaming is announced
 		// by the server itself; look it up only if the announcement has not
@@ -177,12 +177,13 @@ impl Discovery {
 					was.streaming != Some(true) && Some(was.channel) == old_channel
 				}) && Some(now.channel) == new_channel
 		};
+		// Once we are on the server ourselves: every channel.
 		let candidates: Vec<u16> = clients
 			.iter()
 			.filter(|(id, c)| {
 				**id != self.own.0
 					&& c.streaming == Some(true)
-					&& new_channel.is_some_and(|own| c.channel == own)
+					&& new_channel.is_some()
 					&& directory.by_streamer(ClientId(**id)).is_none()
 					&& !self.asked.contains(id)
 					&& !just_started(id, c)
@@ -256,9 +257,10 @@ mod tests {
 		let mut dir = StreamDirectory::default();
 		let mut out = Outbox::default();
 
-		// Connected: 2 streams in our channel, 3 in another one.
+		// Connected: 2 streams in our channel, 3 in another one; both are
+		// looked up (a stream can be watched from any channel).
 		d.update(clients(&[(OWN, 1, false), (2, 1, true), (3, 5, true)]), &mut dir, &mut out);
-		assert_eq!(looked_up(&mut out), [2]);
+		assert_eq!(looked_up(&mut out), [2, 3]);
 		// Asked once, not again on the next update.
 		d.update(
 			clients(&[(OWN, 1, false), (2, 1, true), (3, 5, true), (4, 1, false)]),
@@ -266,15 +268,28 @@ mod tests {
 			&mut out,
 		);
 		assert_eq!(looked_up(&mut out), [] as [u16; 0]);
-		// The answer fills the directory.
+		// The answers fill the directory.
 		assert!(dir.apply(&started("s-2", 2)));
+		assert!(dir.apply(&started("s-3", 3)));
 
-		// We move to 3's channel: 3 is looked up, 2's stream leaves the list.
+		// We move to 3's channel: both streams stay, nothing is asked again.
 		let moved = clients(&[(OWN, 5, false), (2, 1, true), (3, 5, true), (4, 1, false)]);
-		assert!(d.update(moved.clone(), &mut dir, &mut out));
-		assert_eq!(looked_up(&mut out), [3]);
-		assert!(dir.get("s-2").is_none());
-		assert!(d.in_our_channel(ClientId(3)) && !d.in_our_channel(ClientId(2)));
+		assert!(!d.update(moved.clone(), &mut dir, &mut out));
+		assert_eq!(looked_up(&mut out), [] as [u16; 0]);
+		assert!(dir.get("s-2").is_some() && dir.get("s-3").is_some());
+		assert!(d.knows(ClientId(2)) && !d.knows(ClientId(7)));
+		assert_eq!((d.channel_of(ClientId(2)), d.own_channel()), (Some(1), Some(5)));
+
+		// A client in another channel starts streaming: the server does not
+		// announce it to us, so it is looked up at once.
+		let mut now = moved.clone();
+		now.insert(6, ClientState { channel: 1, streaming: Some(false) });
+		d.update(now.clone(), &mut dir, &mut out);
+		now.insert(6, ClientState { channel: 1, streaming: Some(true) });
+		d.update(now.clone(), &mut dir, &mut out);
+		assert_eq!(looked_up(&mut out), [6]);
+		now.remove(&6);
+		d.update(now, &mut dir, &mut out);
 
 		// 4 comes to our channel and starts streaming there: announced by
 		// the server, so not looked up at once...
@@ -294,8 +309,10 @@ mod tests {
 		now.insert(4, ClientState { channel: 5, streaming: Some(false) });
 		assert!(d.update(now.clone(), &mut dir, &mut out));
 		assert!(dir.get("s-4").is_none());
-		assert!(dir.apply(&started("s-3", 3)));
 		now.remove(&3);
+		assert!(d.update(now.clone(), &mut dir, &mut out));
+		assert!(dir.get("s-3").is_none());
+		now.insert(2, ClientState { channel: 1, streaming: Some(false) });
 		assert!(d.update(now, &mut dir, &mut out));
 		assert_eq!(dir.iter().count(), 0);
 	}

@@ -964,7 +964,8 @@ pub enum CodecChoice {
 pub static STREAM_CODEC: Key<CodecChoice> = Key::new(
 	"stream.codec",
 	Kind::Choice(&["auto", "vp8", "vp9", "h264", "av1"]),
-	"Video codec of our stream.",
+	"Video codec of our stream. Official TeamSpeak clients always decode VP8, VP9 and AV1; \
+	 H.264 only when they could download OpenH264.",
 	CodecChoice::default,
 );
 
@@ -1047,7 +1048,8 @@ pub enum StreamPermissions {
 	/// Friends (contacts marked friend) are accepted; others are shown to
 	/// the user ([`crate::Event::StreamViewerRequest`]).
 	Friends,
-	/// Clients in our channel are accepted, others denied.
+	/// Clients in our channel are accepted; others (a stream can be watched
+	/// from any channel) are shown to the user.
 	#[default]
 	Channel,
 	/// Every join request is denied.

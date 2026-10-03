@@ -142,29 +142,37 @@ pub fn peer_config(codecs: &Codecs, mut config: PeerConfig) -> PeerConfig {
 	config
 }
 
+/// Whether every official TeamSpeak client decodes `codec`: their WebRTC
+/// stack has VP8, VP9 and AV1 decoders built in. H.264 needs an OpenH264
+/// library the official client downloads at start-up and may not get; it
+/// still answers H.264 then, and decodes nothing (libwebrtc's
+/// `NullVideoDecoder`). HEVC needs a hardware decoder.
+pub fn decoded_everywhere(codec: Codec) -> bool {
+	matches!(codec, Codec::Vp8 | Codec::Vp9 | Codec::Av1)
+}
+
 /// What a streamer with `primary` as its stream codec offers, in order:
-/// `primary`, the codecs of hardware encoders, VP8 through libvpx (every
-/// TeamSpeak client decodes it), and HEVC last (for peers that take nothing
-/// else). Other software encoders are only ever the stream codec, so no
-/// viewer's answer starts one of them on top of it.
+/// `primary`; the codecs of hardware encoders and VP8 through libvpx that
+/// every TeamSpeak client decodes ([`decoded_everywhere`]), so that a
+/// viewer, which answers with the first codec it supports, never picks
+/// H.264 while one of them is there; H.264 from hardware; HEVC last (for
+/// peers that take nothing else). Other software encoders are only ever the
+/// stream codec, so no viewer's answer starts one of them on top of it.
 pub fn offer_codecs(codecs: &Codecs, primary: Codec) -> Vec<Codec> {
 	let mut offer = vec![primary];
-	let mut hevc = false;
 	for (codec, backend) in codecs.encoders() {
 		let cheap = codecs.is_hardware(backend)
 			|| (codec == Codec::Vp8 && backend == voelin_media::EncoderBackend::Libvpx);
-		if !cheap || offer.contains(&codec) {
-			continue;
-		}
-		if codec == Codec::H265 {
-			hevc = true;
-		} else {
+		if cheap && !offer.contains(&codec) {
 			offer.push(codec);
 		}
 	}
-	if hevc && primary != Codec::H265 {
-		offer.push(Codec::H265);
-	}
+	// Stable: the encoder preference orders codecs of the same rank.
+	offer[1..].sort_by_key(|&codec| match codec {
+		_ if decoded_everywhere(codec) => 0,
+		Codec::H265 => 2,
+		_ => 1,
+	});
 	offer
 }
 
@@ -180,12 +188,14 @@ pub fn encoder_preference(settings: &crate::settings::Settings) -> voelin_media:
 
 /// The stream codec: `configured` if we can encode it, else the first codec
 /// of the encoder preference (hardware first when enabled; VP8 through
-/// libvpx without hardware), never HEVC (offered last only). Put it first in
-/// `PeerConfig::video_codecs` before [`peer_config`].
+/// libvpx without hardware) that every TeamSpeak client decodes
+/// ([`decoded_everywhere`]), else any but HEVC (offered last only). Put it
+/// first in `PeerConfig::video_codecs` before [`peer_config`].
 pub fn preferred_codec(codecs: &Codecs, configured: Option<Codec>) -> Option<Codec> {
 	let encodable = codecs.encoder_codecs();
 	configured
 		.filter(|c| encodable.contains(c))
+		.or_else(|| encodable.iter().copied().find(|&c| decoded_everywhere(c)))
 		.or_else(|| encodable.into_iter().find(|c| *c != Codec::H265))
 }
 
@@ -2827,6 +2837,21 @@ mod tests {
 		if all.encoder_codecs().contains(&Codec::H264) && !offer.contains(&Codec::H264) {
 			assert_eq!(offer_codecs(&all, Codec::H264)[..2], [Codec::H264, Codec::Vp8]);
 		}
+		// Whatever this machine has: codecs every TeamSpeak client decodes
+		// come before H.264, HEVC last, and the automatic stream codec is
+		// one of the first.
+		let rank = |c: &Codec| match c {
+			_ if decoded_everywhere(*c) => 0,
+			Codec::H265 => 2,
+			_ => 1,
+		};
+		let ranks: Vec<_> = offer[1..].iter().map(rank).collect();
+		assert!(ranks.is_sorted(), "{offer:?}");
+		assert!(preferred_codec(&all, None).is_some_and(decoded_everywhere), "{all:?}");
+		assert_eq!(
+			preferred_codec(&all, Some(Codec::H264)).is_some(),
+			all.encoder_codecs().contains(&Codec::H264)
+		);
 	}
 
 	/// A sink whose viewers chose `codecs`; keeps every video frame with its

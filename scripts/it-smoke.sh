@@ -22,7 +22,8 @@
 #      later finds it there and watches it
 #  11. stream (TeamSpeak 6 only): a viewer watches a synthetic VP8 + Opus stream
 #  12. late stream (TeamSpeak 6 only): a viewer that connects after the stream
-#      started finds it (requeststreaminfo) and watches it
+#      started finds it (requeststreaminfo) and watches it; a viewer in the
+#      default channel finds and watches a stream in another channel
 #  13. the engine's voice features (voelinctl engine): upload a file and
 #      post its link in chat, another client lists the channel's files and
 #      downloads the linked file (compared byte for byte), the file is
@@ -166,6 +167,31 @@ stream_late_check() {
 		fail "late viewer did not receive the running stream"
 	fi
 	# SIGINT: the streamer stops its stream properly.
+	kill -INT "$streamer_pid" 2>/dev/null || true
+	wait "$streamer_pid" 2>/dev/null || true
+	grep -E "watching|received" "$out"
+}
+
+# TeamSpeak 6: the stream runs in another channel. The server announces a
+# stream only in its channel; a viewer elsewhere looks it up and watches it
+# from where it is, as the official client can.
+stream_elsewhere_check() {
+	local addr=$1 admin=$2 out="$STATE_DIR/stream-elsewhere-watch.log"
+	local streamer_out="$STATE_DIR/stream-elsewhere-start.log" streamer="far-$$-$RANDOM"
+	# Semi-permanent, so it outlives this command; it already exists after the first run.
+	# shellcheck disable=SC2086
+	"$VOELINCTL" connect "$addr" $admin --nick admin raw \
+		"channelcreate channel_name=smoke-elsewhere channel_flag_semi_permanent=1" >/dev/null 2>&1 || true
+	"$VOELINCTL" connect "$addr" --nick "$streamer" --channel smoke-elsewhere stream --loopback start \
+		--synthetic --auto-accept --seconds 30 >"$streamer_out" 2>&1 &
+	local streamer_pid=$!
+	for _ in $(seq 1 60); do grep -q "is live" "$streamer_out" 2>/dev/null && break; sleep 0.25; done
+	grep -q "is live" "$streamer_out" || { cat "$streamer_out"; fail "streamer in another channel did not go live"; }
+	if ! "$VOELINCTL" connect "$addr" --nick "elsewhere-$$" stream --loopback watch --streamer-nick "$streamer" \
+		--expect-frames 60 --timeout 25 >"$out" 2>&1; then
+		cat "$out" "$streamer_out"
+		fail "viewer in the default channel did not receive the stream in another channel"
+	fi
 	kill -INT "$streamer_pid" 2>/dev/null || true
 	wait "$streamer_pid" 2>/dev/null || true
 	grep -E "watching|received" "$out"
@@ -488,6 +514,7 @@ for svc in "${SERVERS[@]}"; do
 	if [[ $svc == ts6 ]]; then
 		stream_check "$addr"
 		stream_late_check "$addr"
+		stream_elsewhere_check "$addr" "$admin"
 	fi
 done
 

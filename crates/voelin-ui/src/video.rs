@@ -10,7 +10,7 @@ use std::sync::Arc;
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 use tokio::runtime::Handle;
 use tracing::warn;
-use voelin_core::media::voelin_media::capture::SourceId;
+use voelin_core::media::voelin_media::capture::{CaptureSource, SourceId};
 use voelin_core::media::voelin_media::{Codec, Codecs, VideoFrame, convert};
 use voelin_core::media::{
 	self, AudioSourceSpec, EncoderPreference, Latest, LocalPreview, Streamer, StreamerConfig,
@@ -63,7 +63,7 @@ pub(crate) struct Video {
 	encoder: EncoderPreference,
 	codec: Option<Codec>,
 	/// Sources of the share dialog, by index.
-	sources: Vec<(SourceId, String)>,
+	sources: Vec<ShareEntry>,
 }
 
 impl Video {
@@ -192,8 +192,14 @@ impl Video {
 	}
 
 	/// Screens and windows to share, as (name, detail); the test pattern too
-	/// when asked for.
-	pub fn sources(&mut self, test_pattern: bool) -> Result<Vec<(String, String)>, String> {
+	/// when asked for. With `restorable` (a portal restore token from an
+	/// earlier share) the portal comes twice: its dialog, which always asks,
+	/// and the last choice again without the dialog.
+	pub fn sources(
+		&mut self,
+		test_pattern: bool,
+		restorable: bool,
+	) -> Result<Vec<(String, String)>, String> {
 		let mut error = None;
 		let mut sources = match media::screen_sources() {
 			Ok(list) => list,
@@ -208,26 +214,9 @@ impl Video {
 		if sources.is_empty() {
 			return Err(error.unwrap_or_else(|| "Nothing to share was found.".into()));
 		}
-		self.sources = sources.iter().map(|s| (s.id.clone(), s.name.clone())).collect();
-		Ok(sources
-			.iter()
-			.map(|s| {
-				let name = match s.id {
-					SourceId::Portal => "Choose via system dialog".to_owned(),
-					_ => s.name.clone(),
-				};
-				let detail = match (&s.id, s.primary) {
-					(SourceId::Monitor(_), true) => {
-						format!("{} · primary", size_text(s.width, s.height))
-					}
-					(SourceId::Window(_), _) => {
-						format!("window {}", size_text(s.width, s.height)).trim().to_owned()
-					}
-					_ => size_text(s.width, s.height),
-				};
-				(name, detail)
-			})
-			.collect())
+		let (rows, entries) = share_rows(&sources, restorable);
+		self.sources = entries;
+		Ok(rows)
 	}
 
 	/// Start capturing source `index` of [`Video::sources`]; `done` runs on
@@ -239,7 +228,7 @@ impl Video {
 		options: CaptureRequest,
 		done: impl FnOnce(Result<Capture, String>) + Send + 'static,
 	) {
-		let Some((source, name)) = self.sources.get(index).cloned() else {
+		let Some((source, name, restore)) = self.sources.get(index).cloned() else {
 			done(Err("Pick something to share.".into()));
 			return;
 		};
@@ -257,7 +246,8 @@ impl Video {
 			encoder: self.encoder.clone(),
 			audio: options.audio,
 			audio_sources: options.audio_sources,
-			restore_token: options.restore_token,
+			// The portal skips its dialog with a token: only when asked to.
+			restore_token: options.restore_token.filter(|_| restore),
 			..StreamerConfig::default()
 		};
 		runtime.spawn(async move {
@@ -359,6 +349,40 @@ fn deliver(
 			wake();
 		}
 	}
+}
+
+/// What a row of the share dialog starts: the source, its name, and whether
+/// to restore the portal's last choice instead of asking.
+type ShareEntry = (SourceId, String, bool);
+
+/// The share dialog's rows (name, detail) for `sources`, and what each row
+/// starts (restoring only in the extra portal row with `restorable`).
+fn share_rows(
+	sources: &[CaptureSource],
+	restorable: bool,
+) -> (Vec<(String, String)>, Vec<ShareEntry>) {
+	let mut rows = Vec::with_capacity(sources.len() + 1);
+	let mut entries = Vec::with_capacity(sources.len() + 1);
+	for s in sources {
+		let name = match s.id {
+			SourceId::Portal => "Choose via system dialog".to_owned(),
+			_ => s.name.clone(),
+		};
+		let detail = match (&s.id, s.primary) {
+			(SourceId::Monitor(_), true) => format!("{} · primary", size_text(s.width, s.height)),
+			(SourceId::Window(_), _) => {
+				format!("window {}", size_text(s.width, s.height)).trim().to_owned()
+			}
+			_ => size_text(s.width, s.height),
+		};
+		rows.push((name, detail));
+		entries.push((s.id.clone(), s.name.clone(), false));
+		if s.id == SourceId::Portal && restorable {
+			rows.push(("Same as last time".to_owned(), "without the dialog".to_owned()));
+			entries.push((s.id.clone(), s.name.clone(), true));
+		}
+	}
+	(rows, entries)
 }
 
 /// Share settings from the dialog.
@@ -464,5 +488,32 @@ impl Decoder {
 	pub fn error(&self) -> Option<String> {
 		let stats = self.stats();
 		stats.error.filter(|_| stats.decoded == 0)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// "Choose via system dialog" never passes the restore token, so the
+	/// portal always asks; with a token the last choice gets its own row.
+	#[test]
+	fn the_portal_dialog_always_asks() {
+		let portal = CaptureSource {
+			id: SourceId::Portal,
+			name: "Screen".into(),
+			width: 0,
+			height: 0,
+			primary: false,
+		};
+		let (rows, entries) = share_rows(std::slice::from_ref(&portal), false);
+		assert_eq!(rows.len(), 1);
+		assert_eq!(rows[0].0, "Choose via system dialog");
+		assert!(!entries[0].2);
+		let (rows, entries) = share_rows(&[portal], true);
+		let names: Vec<_> = rows.iter().map(|(name, _)| name.as_str()).collect();
+		assert_eq!(names, ["Choose via system dialog", "Same as last time"]);
+		let restore: Vec<_> = entries.iter().map(|e| e.2).collect();
+		assert_eq!(restore, [false, true]);
 	}
 }

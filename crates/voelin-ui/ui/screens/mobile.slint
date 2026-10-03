@@ -9,6 +9,8 @@ import { Icon, Button, ButtonKind, IconButton, Avatar, Status, CountBadge, LiveB
 import { ServerHeader, ConnectActions, ChannelTree } from "channels.slint";
 import { StreamsPanel } from "streams.slint";
 import { VoiceCard, VoiceButtons } from "../shells/common.slint";
+import { StudioBridge } from "../studio-bridge.slint";
+import { ShareMenu } from "../share-menu.slint";
 
 // Servers as a horizontal strip, the current server, its channels.
 export component MobileServers inherits VerticalLayout {
@@ -166,11 +168,15 @@ export component YouPage inherits ScrollView {
                     enabled: Bridge.voice-connected;
                     clicked => { Bridge.set-output-muted(!Bridge.output-muted); }
                 }
-                if Bridge.streams-available && Bridge.can-share: ActionButton {
-                    icon: Icons.radio;
-                    text: Bridge.share-state == "live" ? @tr("Live") : @tr("Go Live");
-                    checked: Bridge.share-state == "live";
-                    clicked => { Nav.open-share(); }
+                // A screen or the Stream Studio (ShareMenu).
+                if Bridge.streams-available && Bridge.can-share: VerticalLayout {
+                    live := ActionButton {
+                        icon: Icons.radio;
+                        text: Bridge.share-state == "live" || StudioBridge.status.live ? @tr("Live") : @tr("Go Live");
+                        checked: Bridge.share-state == "live" || StudioBridge.status.live;
+                        clicked => { share-menu.open(0, - live.height - share-menu.menu-height - 4px); }
+                    }
+                    share-menu := ShareMenu { }
                 }
                 ActionButton {
                     icon: Icons.phone-off;

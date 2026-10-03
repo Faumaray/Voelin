@@ -886,7 +886,7 @@ impl App {
 
 	/// The screens and windows that can be shared (Devices).
 	fn load_capture_sources(&mut self) {
-		let names: Vec<SharedString> = match self.video.sources(false) {
+		let names: Vec<SharedString> = match self.video.sources(false, false) {
 			Ok(list) => list
 				.into_iter()
 				.map(|(n, d)| {

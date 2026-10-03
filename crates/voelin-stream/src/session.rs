@@ -1672,10 +1672,10 @@ impl Streams {
 
 	/// Feed a stream notification from the connection.
 	pub async fn handle_notification(&mut self, n: StreamNotification) {
-		// Looked up streams of clients that have left our channel since.
-		let elsewhere = matches!(&n, StreamNotification::Info(info)
-			if !self.discovery.in_our_channel(info.streamer));
-		if !elsewhere && self.directory.apply(&n) {
+		// Looked up streams of clients that have left the server since.
+		let gone = matches!(&n, StreamNotification::Info(info)
+			if !self.discovery.knows(info.streamer));
+		if !gone && self.directory.apply(&n) {
 			self.emit_streams();
 		}
 		if let Some(s) = &mut self.streamer
@@ -1706,8 +1706,9 @@ impl Streams {
 	}
 
 	/// The clients on the server changed (full list, with ourselves): keeps
-	/// the directory to the streams in our channel and looks up the streams
-	/// the server did not announce to us (see [`crate::discovery`]). Covers
+	/// the directory to the streams of clients that are on the server and
+	/// stream, in any channel, and looks up the streams the server did not
+	/// announce to us (see [`crate::discovery`]). Covers
 	/// [`Self::set_client_streaming`] and [`Self::retain_streamers`].
 	pub fn update_clients(&mut self, clients: BTreeMap<u16, ClientState>) {
 		if self.discovery.update(clients, &mut self.directory, &mut self.out) {
@@ -1717,7 +1718,7 @@ impl Streams {
 
 	/// A stream found by another [`StreamLookup`] (e.g. a gateway's directory).
 	pub fn discovered(&mut self, info: StreamInfo) {
-		if self.discovery.in_our_channel(info.streamer)
+		if self.discovery.knows(info.streamer)
 			&& self.directory.apply(&StreamNotification::Info(info))
 		{
 			self.emit_streams();

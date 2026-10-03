@@ -2,8 +2,10 @@
 //! (MIT-SHM and GetImage), checks pixels, and sends a window capture through
 //! VP8 and back.
 //!
-//! Needs `DISPLAY` (e.g. `Xvfb :101 -screen 0 1280x720x24 & DISPLAY=:101
-//! cargo test -p voelin-media --test x11_capture`); skipped without it.
+//! Needs a test X server in `VOELIN_X11_TEST_DISPLAY`, never the desktop's
+//! `DISPLAY` (it maps windows and moves the pointer): e.g. `xvfb-run -a bash
+//! -c 'VOELIN_X11_TEST_DISPLAY=$DISPLAY cargo test -p voelin-media --test
+//! x11_capture'`, as CI does; skipped without it.
 #![cfg(all(target_os = "linux", feature = "x11", feature = "vpx"))]
 
 use std::time::Duration;
@@ -150,8 +152,9 @@ async fn check_monitor(capture: &mut X11Capture, scene: &Scene) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn x11_capture_end_to_end() {
-	let Some(display) = std::env::var("DISPLAY").ok().filter(|d| !d.is_empty()) else {
-		eprintln!("skipped: DISPLAY is not set");
+	let Some(display) = std::env::var("VOELIN_X11_TEST_DISPLAY").ok().filter(|d| !d.is_empty())
+	else {
+		eprintln!("skipped: VOELIN_X11_TEST_DISPLAY is not set");
 		return;
 	};
 	let scene = Scene::create(&display);

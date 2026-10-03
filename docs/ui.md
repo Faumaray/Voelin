@@ -149,7 +149,9 @@ Activity tab.
 ![Stream Studio](screenshots/desktop-studio-live.png)
 
 The studio (mockups 09, 10 and the phone's 04) is a page of the main window
-(the radio button in the top bar), a window of its own (the button in its
+(the Share button's menu: "Share screen" for a quick share of a screen or
+window, "Stream Studio" for the studio; while a share runs the button opens
+its dialog), a window of its own (the button in its
 header; closing that window brings it back) and a phone page. Its controller
 is `src/studio.rs` on the engine's studio ([studio.md](studio.md)): the
 studio runs while it is shown, live or recording, and a `Streamer` started

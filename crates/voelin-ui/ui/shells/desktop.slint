@@ -223,13 +223,6 @@ export component TopBar inherits Rectangle {
             clicked => { Nav.notifications-open = !Nav.notifications-open; }
         }
         IconButton {
-            icon: Icons.radio;
-            label: @tr("Stream Studio");
-            checked: Nav.page == Page.studio;
-            y: (parent.height - self.height) / 2;
-            clicked => { Nav.open-studio(); }
-        }
-        IconButton {
             icon: Icons.users;
             label: @tr("Members");
             checked: Nav.right-panel-open && !Nav.pins-open && !Nav.topics-open && Nav.page == Page.server;
