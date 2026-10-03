@@ -582,7 +582,7 @@ on (`Video::set_decoder_preference`); a running watch keeps its decoder.
   from there into the caller's `VideoFrame` (`decode_into` reuses its
   buffers): no Rust allocation per picture for any decoder
   (`tests/decoder_alloc.rs`). Zero-copy display was not the goal; both
-  copies are part of the 2.4-2.5 ms per 1440p picture measured in
+  copies are part of the 2.4-3.3 ms per 1440p picture measured in
   [Decoders, measured](#decoders-measured).
 - Packets are handed over without a reference, so FFmpeg copies them into
   its own padded buffer; pictures come out as `yuv420p` (or `yuvj420p`)
@@ -1003,13 +1003,14 @@ build, Radeon RX 7900 GRE, FFmpeg 9.0.1, Cisco's OpenH264 2.6.0.
 
 Decoding as fast as it goes (`tests/ffmpeg_decoders.rs`
 `h264_with_b_frames_at_1440p60`, `--ignored`): pictures out of 600 frames,
-pictures per second of decoding (copied into a `VideoFrame`), the slowest
-frame. Both FFmpeg decoders give the same pictures, in order.
+pictures per second of decoding (copied into a `VideoFrame`; two runs on
+a desktop in use), the slowest frame. Both FFmpeg decoders give the same
+pictures, in order.
 
 | Decoder | x264 stream | `h264_vaapi` stream |
 |---|---|---|
-| `h264_vaapi` | 598, 424 fps, 6.8 ms | 599, 398 fps, 4.0 ms |
-| `h264` (software) | 598, 276 fps, 8.0 ms | 599, 302 fps, 6.6 ms |
+| `h264_vaapi` | 598, 368-424 fps, 6.8-9.0 ms | 599, 355-398 fps, 4.0-8.8 ms |
+| `h264` (software) | 598, 276-283 fps, 4.9-8.0 ms | 599, 268-302 fps, 6.6-8.7 ms |
 | OpenH264 | 8, 592 errors | 8, 592 errors |
 
 Played in real time into a `VideoPipeline` whose consumer converts every
@@ -1025,6 +1026,22 @@ OpenH264 does not decode B-frames: every B-frame is an error, and the
 pipeline then waited for keyframes the encoder sends every few seconds at
 most. That was the "very bad frame rate" of an official client's stream in
 the app.
+
+AV1 at 2560x1440 and 60 fps, which the official client sends from GPUs that
+encode it (`av1_at_1440p60`, `--ignored`; streams from `av1_vaapi` and
+SVT-AV1 preset 10, 8 Mbit/s): every decoder gave all 600 pictures, the same
+as dav1d's.
+
+| Decoder | `av1_vaapi` stream | SVT-AV1 stream |
+|---|---|---|
+| `av1_vaapi` | 309 fps, 11.4 ms | 301 fps, 15.4 ms |
+| `libdav1d` (8 threads) | 412 fps, 8.6 ms | 426 fps, 31.2 ms |
+| `libaom-av1` | 240 fps, 24.7 ms | 286 fps, 49.6 ms |
+
+dav1d on 8 of the 32 cores outruns the GPU here, whose pictures also have to
+be copied out of it; the ladder still takes the GPU first, for the CPU it
+leaves free (the rule of the whole project: the best first, the others as
+fallbacks). Every decoder has 4-7 times the 60 fps it needs.
 
 ### Wayland screen capture, measured
 
@@ -1180,7 +1197,7 @@ has not run on Windows yet.
 | No allocation per picture in any FFmpeg decoder | `tests/decoder_alloc.rs` (counting allocator) | tested: 0 allocations over 30 pictures for each of the ten decoders that work here |
 | What a viewer accepts with and without FFmpeg (`VOELIN_FFMPEG=0`) | `tests/ffmpeg_decoders.rs` `decoders_with_and_without_ffmpeg` (the second half in a child process) | tested: AV1, HEVC, VP9, H.264, VP8 with FFmpeg; VP9, VP8 (libvpx) without |
 | A failing decoder replaced by the next of the ladder (errors, or no pictures), pictures going on; after a loss a concealing decoder goes on and one that does not skips to the keyframe, keyframes asked for every 500 ms until one comes | `voelin-core` `media::tests::a_failing_decoder_is_replaced_by_the_next`, `losses_ask_for_keyframes_until_one_comes` | tested (a decoder made to fail ahead of libvpx) |
-| H.264 with B-frames at 1440p60: every decoder, and the pipeline in real time with and without losses | `tests/ffmpeg_decoders.rs` `h264_with_b_frames_at_1440p60`, `voelin-core/tests/decode_rate.rs` (both `--ignored`, `--release`) | measured, see [Decoders, measured](#decoders-measured) |
+| H.264 with B-frames and AV1 at 1440p60: every decoder, and (H.264) the pipeline in real time with and without losses | `tests/ffmpeg_decoders.rs` `h264_with_b_frames_at_1440p60`, `av1_at_1440p60`, `voelin-core/tests/decode_rate.rs` (all `--ignored`, `--release`) | measured, see [Decoders, measured](#decoders-measured) |
 | Chromium's AV1, VP9 and H.264 → our viewer → the pipeline, at their size | `voelin-core/tests/browser_codecs.rs` `browser_streams_decode_in_the_pipeline` (`VOELIN_INTEROP=1`, system Chromium 152) | tested: decoded by `av1_vaapi`, `vp9_vaapi`, `h264_vaapi` |
 | Hardware decoders NVDEC, D3D11VA, DXVA2, VideoToolbox | – | not tested (no such hardware here); NVDEC is skipped by the vendor check, the Windows table type-checks for `x86_64-pc-windows-gnu`, the macOS one is not compiled here |
 | X11 capture (MIT-SHM and GetImage), sources, window capture → VP8 → decode, cursor | `tests/x11_capture.rs` under Xvfb (`VOELIN_X11_TEST_DISPLAY`) | tested |

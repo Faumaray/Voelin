@@ -299,32 +299,51 @@ fn ffmpeg_command(path: &std::path::Path, args: &[&str]) -> bool {
 	true
 }
 
-/// H.264 with B-frames at 2560x1440 and 60 fps, like the official client's
-/// stream (AMF with B-frames and rare keyframes): every H.264 decoder of
-/// the ladder, and Cisco's OpenH264 with `VOELIN_OPENH264_LIB`, decodes it;
-/// how fast, the slowest frame, and whether every picture comes out, in
-/// order (against FFmpeg's software decoder). The streams come from the
-/// `ffmpeg` command: x264 with 3 B-frames, `h264_vaapi` with 2, ten
-/// seconds of `testsrc2` at 8 Mbit/s, keyframes every ten seconds. Run with
-/// `--release`.
-#[test]
-#[ignore = "a measurement: needs the ffmpeg command; run with --release"]
-fn h264_with_b_frames_at_1440p60() {
-	if ffmpeg().is_none() {
-		return;
+/// The temporal units of a low-overhead AV1 stream (`-f obu`), each
+/// starting with a temporal delimiter OBU.
+fn temporal_units(stream: &[u8]) -> Vec<&[u8]> {
+	let mut starts = Vec::new();
+	let mut pos = 0;
+	while pos < stream.len() {
+		let header = stream[pos];
+		if (header >> 3) & 0xf == 2 {
+			starts.push(pos);
+		}
+		// Every OBU of such a stream has its size (LEB128).
+		let (mut at, mut size, mut shift) = (pos + 1 + usize::from(header & 4 != 0), 0, 0);
+		loop {
+			let byte = stream[at];
+			at += 1;
+			size |= usize::from(byte & 0x7f) << shift;
+			shift += 7;
+			if byte & 0x80 == 0 {
+				break;
+			}
+		}
+		pos = at + size;
 	}
+	starts.push(stream.len());
+	starts.windows(2).map(|w| &stream[w[0]..w[1]]).collect()
+}
+
+/// Streams of ten seconds of `testsrc2` at 2560x1440 and 60 fps, made with
+/// the `ffmpeg` command from each encoder's `args` (kept in the temporary
+/// directory, made again only when missing).
+fn streams_1440p60(
+	encoders: &[(&'static str, &str)],
+	format: &str,
+) -> Vec<(&'static str, Vec<u8>)> {
 	let dir = std::env::temp_dir().join("voelin-h264-bframes");
 	std::fs::create_dir_all(&dir).unwrap();
 	let source = "-f lavfi -i testsrc2=size=2560x1440:rate=60 -t 10";
-	let rate = "-g 600 -b:v 8M -maxrate 9M -bufsize 9M -f h264";
-	let x264 = "-c:v libx264 -preset veryfast -profile:v high -bf 3 -x264-params aud=1";
-	let vaapi = "-vf format=nv12,hwupload -c:v h264_vaapi -profile:v high -bf 2 -aud 1";
 	let mut streams = Vec::new();
-	for (name, args) in [
-		("x264", format!("{source} {x264} -pix_fmt yuv420p {rate}")),
-		("h264_vaapi", format!("-vaapi_device /dev/dri/renderD128 {source} {vaapi} {rate}")),
-	] {
-		let path = dir.join(format!("{name}-bframes-1440p60.h264"));
+	for &(name, args) in encoders {
+		let vaapi = name.ends_with("_vaapi");
+		let device = if vaapi { "-vaapi_device /dev/dri/renderD128 " } else { "" };
+		let upload = if vaapi { "-vf format=nv12,hwupload " } else { "" };
+		let args = format!("{device}{source} {upload}{args} -g 600 -b:v 8M -f {format}");
+		let suffix = if format == "h264" { "-bframes" } else { "" };
+		let path = dir.join(format!("{name}{suffix}-1440p60.{format}"));
 		let args: Vec<&str> = args.split(' ').collect();
 		if ffmpeg_command(&path, &args) {
 			streams.push((name, std::fs::read(&path).unwrap()));
@@ -332,22 +351,40 @@ fn h264_with_b_frames_at_1440p60() {
 			eprintln!("{name}: the ffmpeg command did not make the stream, skipped");
 		}
 	}
+	streams
+}
+
+/// Every decoder of `codec`'s ladder (and OpenH264 with
+/// `VOELIN_OPENH264_LIB`, for H.264) on each of `streams` (frames as
+/// `split` cuts them), as fast as it goes: pictures, errors, pictures per
+/// second of decoding (copied into a `VideoFrame`), the slowest frame, and
+/// the pictures that differ from those of `reference`, which comes first
+/// in the ladder's software part. Hardware decoders must decode every
+/// picture.
+fn decode_rates(
+	codec: Codec,
+	what: &str,
+	streams: &[(&str, Vec<u8>)],
+	split: fn(&[u8]) -> Vec<&[u8]>,
+	reference: &str,
+) {
 	let codecs = Codecs::new();
 	let openh264 = std::env::var_os("VOELIN_OPENH264_LIB")
+		.filter(|_| codec == Codec::H264)
 		.map(|path| voelin_media::codec::h264::OpenH264::load(path).unwrap());
-	let mut names: Vec<String> =
-		codecs.decoders_for(Codec::H264).iter().map(|b| b.to_string()).collect();
+	let mut names: Vec<String> = codecs.decoders_for(codec).iter().map(|b| b.to_string()).collect();
+	// The reference first, so that every other decoder is compared with it.
+	names.sort_by_key(|n| n != reference);
 	names.extend(openh264.as_ref().map(|_| "openh264".to_owned()));
-	for (stream, data) in &streams {
-		let units = access_units(data);
+	for (stream, data) in streams {
+		let units = split(data);
 		let mut reference: Option<Vec<Vec<u8>>> = None;
 		for name in &names {
 			let mut decoder: Box<dyn VideoDecoder> = match (name.as_str(), &openh264) {
 				("openh264", Some(library)) => Box::new(library.decoder().unwrap()),
 				_ => {
-					let backend =
-						codecs.decoders_for(Codec::H264).into_iter().find(|b| b.name() == name);
-					codecs.new_decoder_with(Codec::H264, backend.unwrap()).unwrap()
+					let backend = codecs.decoders_for(codec).into_iter().find(|b| b.name() == name);
+					codecs.new_decoder_with(codec, backend.unwrap()).unwrap()
 				}
 			};
 			let mut picture = VideoFrame::black_i420(0, 0);
@@ -375,20 +412,48 @@ fn h264_with_b_frames_at_1440p60() {
 				thumbnails.iter().zip(reference).filter(differs).count()
 			});
 			eprintln!(
-				"{stream} 2560x1440@60 with B-frames, {name}: {} of {} pictures, {errors} errors, \
-				 {fps:.0} fps, slowest frame {:.1} ms, {differing} differ from FFmpeg's software decoder",
+				"{stream} 2560x1440@60{what}, {name}: {} of {} pictures, {errors} errors, {fps:.0} \
+				 fps, slowest frame {:.1} ms, {differing} differ from the reference decoder",
 				thumbnails.len(),
 				units.len(),
 				slowest.as_secs_f64() * 1000.0,
 			);
-			if name == "h264" {
+			if reference.is_none() {
 				reference = Some(thumbnails);
 			} else if name.ends_with("_vaapi") {
 				assert_eq!(errors, 0, "{name}");
 				assert!(thumbnails.len() + 3 >= units.len(), "{name}: pictures missing");
+				assert_eq!(differing, 0, "{name}");
 			}
 		}
 	}
+}
+
+/// H.264 with B-frames at 2560x1440 and 60 fps, like the official client's
+/// stream (AMF with B-frames and rare keyframes): every H.264 decoder of
+/// the ladder, and Cisco's OpenH264 with `VOELIN_OPENH264_LIB`, decodes it;
+/// how fast, the slowest frame, and whether every picture comes out, in
+/// order (against FFmpeg's software decoder). The streams come from the
+/// `ffmpeg` command: x264 with 3 B-frames, `h264_vaapi` with 2, ten
+/// seconds of `testsrc2` at 8 Mbit/s, keyframes every ten seconds. Run with
+/// `--release`.
+#[test]
+#[ignore = "a measurement: needs the ffmpeg command; run with --release"]
+fn h264_with_b_frames_at_1440p60() {
+	if ffmpeg().is_none() {
+		return;
+	}
+	let streams = streams_1440p60(
+		&[
+			(
+				"x264",
+				"-c:v libx264 -preset veryfast -profile:v high -bf 3 -x264-params aud=1 -pix_fmt yuv420p -maxrate 9M -bufsize 9M",
+			),
+			("h264_vaapi", "-c:v h264_vaapi -profile:v high -bf 2 -aud 1 -maxrate 9M"),
+		],
+		"h264",
+	);
+	decode_rates(Codec::H264, " with B-frames", &streams, access_units, "h264");
 	// What a viewer adds per picture: the NV12 or I420 picture to RGBA.
 	let mut rgba = vec![0; 2560 * 1440 * 4];
 	let i420 = VideoFrame::black_i420(2560, 1440);
@@ -397,4 +462,21 @@ fn h264_with_b_frames_at_1440p60() {
 		convert::to_rgba(&i420, &mut rgba, 2560 * 4).unwrap();
 	}
 	eprintln!("to RGBA at 2560x1440: {:.1} ms", started.elapsed().as_secs_f64() * 1000.0 / 30.0);
+}
+
+/// AV1 at 2560x1440 and 60 fps, which the official client sends from GPUs
+/// that encode it: every AV1 decoder of the ladder, against dav1d. Streams
+/// from `av1_vaapi` (hardware, as the official client's AMF) and SVT-AV1.
+/// Run with `--release`.
+#[test]
+#[ignore = "a measurement: needs the ffmpeg command; run with --release"]
+fn av1_at_1440p60() {
+	if ffmpeg().is_none() {
+		return;
+	}
+	let streams = streams_1440p60(
+		&[("av1_vaapi", "-c:v av1_vaapi"), ("libsvtav1", "-c:v libsvtav1 -preset 10")],
+		"obu",
+	);
+	decode_rates(Codec::Av1, "", &streams, temporal_units, "libdav1d");
 }
