@@ -42,6 +42,12 @@ impl SrtpProfile {
 	/// clients, then the GCM profiles for peers that do not offer it.
 	pub const DEFAULT_ORDER: [Self; 3] = Self::ALL;
 
+	/// An AEAD profile (AES-GCM, RFC 7714): an SRTP library either has both
+	/// or neither.
+	pub fn is_aead(self) -> bool {
+		matches!(self, Self::AeadAes128Gcm | Self::AeadAes256Gcm)
+	}
+
 	/// The profile's name as in RFC 5764/7714 and WebRTC statistics
 	/// (`srtpCipher`).
 	pub fn name(self) -> &'static str {

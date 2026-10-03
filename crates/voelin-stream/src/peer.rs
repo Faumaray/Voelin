@@ -43,6 +43,11 @@ pub const DEFAULT_START_BITRATE: u64 = 1_000_000;
 /// Socket buffers a peer asks for by default ([`PeerConfig::udp_buffer`]).
 pub const DEFAULT_UDP_BUFFER: usize = 4 << 20;
 
+/// How long a connected viewer waits for video by default
+/// ([`PeerConfig::stall_timeout`]): a streamer sends a keyframe as soon as
+/// a viewer connects.
+pub const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Video codecs a peer can negotiate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VideoCodec {
@@ -207,6 +212,11 @@ pub struct PeerConfig {
 	/// the peer task is busy overflows it, and every lost packet costs the
 	/// viewer a retransmission or a keyframe.
 	pub udp_buffer: usize,
+	/// How long a connected viewer waits for video before its peer reports
+	/// [`PeerEvent::NoVideo`]; a streamer's peer waits twice as long for
+	/// the viewer to report any of our video ([`PeerEvent::NoFeedback`]),
+	/// so a Voelin viewer steps down first. `Duration::MAX` turns both off.
+	pub stall_timeout: Duration,
 }
 
 impl Default for PeerConfig {
@@ -226,6 +236,7 @@ impl Default for PeerConfig {
 				.map(|p| h264::profile_level_id(*p, h264::MIN_OFFER_LEVEL))
 				.collect(),
 			udp_buffer: DEFAULT_UDP_BUFFER,
+			stall_timeout: DEFAULT_STALL_TIMEOUT,
 		}
 	}
 }
@@ -314,6 +325,16 @@ pub enum PeerEvent {
 	/// profile: the first of our offer the viewer took. Video written to
 	/// this peer must be in it.
 	VideoCodec(VideoFormat),
+	/// Viewer side: connected, but no video arrived within
+	/// [`PeerConfig::stall_timeout`]. `audio`: audio did, so SRTP works
+	/// and the video codec is the suspect. Once per connection.
+	NoVideo { audio: bool },
+	/// Streamer side: connected and sending video for twice
+	/// [`PeerConfig::stall_timeout`], yet the viewer reported none of it
+	/// (no receiver report of our video, no REMB): its SRTP fails or
+	/// nothing reaches it. Keyframe requests do not count: a viewer that
+	/// gets nothing keeps asking. Once per connection.
+	NoFeedback,
 	/// The connection is gone.
 	Closed,
 }
@@ -361,6 +382,16 @@ impl Peer {
 		stream_id: &str,
 		options: &OfferOptions<'_>,
 	) -> Result<(Self, String), PeerError> {
+		Self::offer_now(config, stream_id, options)
+	}
+
+	/// [`offer_with`](Self::offer_with), which never waits: for the stream
+	/// sessions, which offer again from peer events.
+	pub(crate) fn offer_now(
+		config: &PeerConfig,
+		stream_id: &str,
+		options: &OfferOptions<'_>,
+	) -> Result<(Self, String), PeerError> {
 		let start = options.start_bitrate.unwrap_or(DEFAULT_START_BITRATE).max(1);
 		let bwe = config.bandwidth_estimation.then_some(start);
 		let (mut rtc, srtp_profile) = build_rtc(config, &config.video_codecs, true, bwe);
@@ -368,7 +399,7 @@ impl Peer {
 			let desired = options.desired_bitrate.unwrap_or(start);
 			rtc.bwe().set_desired_bitrate(Bitrate::bps(desired));
 		}
-		let net = Net::bind(config, &mut rtc).await?;
+		let net = Net::bind(config, &mut rtc)?;
 		let mut api = rtc.sdp_api();
 		let msid = Some(stream_id.to_owned());
 		let mut mids = Vec::new();
@@ -415,7 +446,7 @@ impl Peer {
 		}
 		let offer = SdpOffer::from_sdp_string(offer).map_err(|e| PeerError::Sdp(e.to_string()))?;
 		let (mut rtc, srtp_profile) = build_rtc(config, &codecs, false, None);
-		let net = Net::bind(config, &mut rtc).await?;
+		let net = Net::bind(config, &mut rtc)?;
 		let answer = rtc.sdp_api().accept_offer(offer)?;
 		let peer = Self::spawn(rtc, net, config, None, Vec::new(), srtp_profile);
 		Ok((peer, answer.to_sdp_string()))
@@ -434,6 +465,7 @@ impl Peer {
 		let task = Task {
 			rtc,
 			net,
+			offerer: pending.is_some(),
 			pending,
 			cmd: cmd_rx,
 			events: event_tx,
@@ -441,6 +473,7 @@ impl Peer {
 			writers: HashMap::new(),
 			stun: Vec::new(),
 			twcc: false,
+			stall: Stall { timeout: config.stall_timeout, ..Stall::default() },
 		};
 		tokio::spawn(task.run(config.stun_servers.clone()));
 		Self { cmd: cmd_tx, events: event_rx, srtp_profile }
@@ -569,6 +602,10 @@ fn build_rtc(
 ) -> (Rtc, NegotiatedProfile) {
 	let mut rtc_config =
 		RtcConfig::new().clear_codecs().enable_opus(config.audio).enable_bwe(bwe.map(Bitrate::bps));
+	if offer {
+		// The viewer's receiver reports ([`PeerEvent::NoFeedback`]).
+		rtc_config = rtc_config.set_stats_interval(Some(Duration::from_secs(1)));
+	}
 	for codec in video {
 		rtc_config = match codec {
 			VideoCodec::Vp8 => rtc_config.enable_vp8(true),
@@ -627,7 +664,7 @@ fn order_like_offer(answer: &str, offer: &str) -> String {
 }
 
 /// The video codecs of the first video media line of `sdp`, in offered order.
-fn offered_video_codecs(sdp: &str) -> Vec<VideoCodec> {
+pub(crate) fn offered_video_codecs(sdp: &str) -> Vec<VideoCodec> {
 	let mut pts: Vec<&str> = Vec::new();
 	let mut names: Vec<(&str, VideoCodec)> = Vec::new();
 	let mut in_video = false;
@@ -678,7 +715,7 @@ struct Net {
 }
 
 impl Net {
-	async fn bind(config: &PeerConfig, rtc: &mut Rtc) -> Result<Self, PeerError> {
+	fn bind(config: &PeerConfig, rtc: &mut Rtc) -> Result<Self, PeerError> {
 		let hosts = if config.hosts.is_empty() {
 			primary_ipv4().into_iter().collect()
 		} else {
@@ -782,6 +819,46 @@ struct Task {
 	stun: Vec<PendingStun>,
 	/// A transport-cc estimate arrived: REMB is ignored from then on.
 	twcc: bool,
+	/// Made the offer: the streamer's side.
+	offerer: bool,
+	stall: Stall,
+}
+
+/// Whether media gets through once connected ([`PeerEvent::NoVideo`],
+/// [`PeerEvent::NoFeedback`]).
+#[derive(Debug, Default)]
+struct Stall {
+	timeout: Duration,
+	connected: Option<Instant>,
+	/// Checked already (once per connection).
+	checked: bool,
+	audio_in: bool,
+	video_in: bool,
+	video_out: bool,
+	/// The viewer reported our video (receiver report, REMB).
+	acknowledged: bool,
+}
+
+impl Stall {
+	/// When the check is due: after the timeout for a viewer, twice it for
+	/// a streamer.
+	fn due(&self, offerer: bool) -> Option<Instant> {
+		let wait = if offerer { self.timeout.saturating_mul(2) } else { self.timeout };
+		self.connected.filter(|_| !self.checked)?.checked_add(wait)
+	}
+
+	/// The event to report at `now`, once, if media does not get through.
+	fn check(&mut self, now: Instant, offerer: bool, video: bool) -> Option<PeerEvent> {
+		if self.due(offerer).is_none_or(|due| now < due) {
+			return None;
+		}
+		self.checked = true;
+		if offerer {
+			(self.video_out && !self.acknowledged).then_some(PeerEvent::NoFeedback)
+		} else {
+			(video && !self.video_in).then_some(PeerEvent::NoVideo { audio: self.audio_in })
+		}
+	}
 }
 
 fn transaction_id() -> stun::TransactionId {
@@ -875,7 +952,13 @@ impl Task {
 		mut stun_servers: mpsc::UnboundedReceiver<SocketAddr>,
 	) -> Result<(), PeerError> {
 		loop {
-			self.rtc.handle_input(Input::Timeout(Instant::now()))?;
+			let now = Instant::now();
+			self.rtc.handle_input(Input::Timeout(now))?;
+			let video = self.mids.iter().any(|(_, kind)| *kind == MediaKind::Video);
+			if let Some(event) = self.stall.check(now, self.offerer, video) {
+				debug!(?event, "connected, but the media does not get through");
+				let _ = self.events.send(event);
+			}
 			let deadline = loop {
 				if !self.rtc.is_alive() {
 					return Ok(());
@@ -896,6 +979,7 @@ impl Task {
 					}
 				}
 			};
+			let deadline = self.stall.due(self.offerer).map_or(deadline, |due| due.min(deadline));
 			let sleep = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
 			tokio::select! {
 				packet = self.net.incoming.recv() => {
@@ -930,6 +1014,7 @@ impl Task {
 	fn handle_event(&mut self, event: Event) -> bool {
 		match event {
 			Event::Connected => {
+				self.stall.connected = Some(Instant::now());
 				let _ = self.events.send(PeerEvent::Connected);
 			}
 			Event::IceConnectionStateChange(IceConnectionState::Disconnected) => return false,
@@ -940,8 +1025,10 @@ impl Task {
 			}
 			Event::MediaData(d) => {
 				let kind = if d.params.spec().codec.is_audio() {
+					self.stall.audio_in = true;
 					MediaKind::Audio
 				} else {
+					self.stall.video_in = true;
 					MediaKind::Video
 				};
 				let frame = MediaFrame {
@@ -964,17 +1051,28 @@ impl Task {
 				});
 			}
 			Event::EgressBitrateEstimate(estimate) => {
+				// Transport-cc estimates also come from the estimator's own
+				// timer; a REMB only from the viewer.
 				let bitrate = match estimate {
 					BweKind::Twcc(b) => {
 						self.twcc = true;
 						Some(b)
 					}
-					BweKind::Remb(_, b) if !self.twcc => Some(b),
+					BweKind::Remb(_, b) => {
+						self.stall.acknowledged = true;
+						(!self.twcc).then_some(b)
+					}
 					_ => None,
 				};
 				if let Some(b) = bitrate {
 					let _ = self.events.send(PeerEvent::BitrateEstimate(b.as_u64()));
 				}
+			}
+			// A receiver report of our video: the viewer decrypts it.
+			Event::MediaEgressStats(stats)
+				if stats.remote.is_some() && self.mids.contains(&(stats.mid, MediaKind::Video)) =>
+			{
+				self.stall.acknowledged = true;
 			}
 			_ => {}
 		}
@@ -1069,8 +1167,9 @@ impl Task {
 			if let Some(rid) = rid {
 				writer = writer.rid(rid);
 			}
-			if let Err(e) = writer.write(pt, Instant::now(), time, data) {
-				debug!(?kind, ?rid, "frame not sent: {e}");
+			match writer.write(pt, Instant::now(), time, data) {
+				Ok(()) => self.stall.video_out |= kind == MediaKind::Video,
+				Err(e) => debug!(?kind, ?rid, "frame not sent: {e}"),
 			}
 		}
 	}
