@@ -331,7 +331,9 @@ fn on_audio_input<'local>(
 	channels: jint,
 ) -> Result<jboolean> {
 	thread_local! {
-		// One per capture thread, reused for every call.
+		// One per capture thread, reused for every call. (It is `const`;
+		// clippy for Android does not see that through the expansion.)
+		#[allow(clippy::missing_const_for_thread_local)]
 		static BUFFER: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
 	}
 	let id = id as u64;

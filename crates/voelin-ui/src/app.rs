@@ -395,6 +395,9 @@ pub(crate) struct App {
 }
 
 thread_local! {
+	// It is `const`; clippy for Android targets does not see that through
+	// the macro's expansion there.
+	#[allow(clippy::missing_const_for_thread_local)]
 	static APP: RefCell<Option<App>> = const { RefCell::new(None) };
 }
 
