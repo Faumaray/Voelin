@@ -82,3 +82,21 @@ against or offered back to upstream.
    tracing setup used `init`, which panics when quickcheck (`use_logging`) has
    already installed a `log` logger; the panic poisoned the `Lazy` and failed every
    later test of the binary, depending on test order. It uses `try_init` now.
+11. **TSDNS without an SRV record, as the official client resolves**
+   (`tsclientlib/src/resolver.rs`). Without an SRV record at `_tsdns._tcp.<domain>`
+   the official client asks a TSDNS server directly on TCP 41144 at the address's
+   parent domains (`A/AAAA DNS resolve for possible TSDNS successful, "example.com"`,
+   `TSDNS found at <ip>:41144 and queried successfully` in its log); upstream went
+   straight to the address on port 9987, so servers published only through TSDNS
+   (on another port) could not be reached without typing the port. Now: SRV
+   `_ts3._udp.<address>`, then TSDNS (the servers `_tsdns._tcp` names, else the
+   ones at each parent domain down to the last two labels), then A/AAAA on 9987.
+   The steps start at once and come out in that order; each is given up after
+   10 s, a TSDNS server after 3 s (connect and answer), so a port a firewall drops
+   does not stall connecting. A port typed with the address now overrides the port
+   of every result (the `_ts3._udp` one too). The TSDNS query sends the host
+   without the port, and the answer is trimmed. SRV records of weight 0, the
+   common weight, were dropped by the weighted ordering; they are kept now
+   (RFC 2782 order). A CNAME among the SRV answers no longer panics. The lookups
+   are injectable inside the module, and the tests use a fake TSDNS server and
+   fake names; the upstream tests that need DNS and the internet are `#[ignore]`d.
