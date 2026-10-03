@@ -1569,14 +1569,14 @@ export component StudioActions inherits HorizontalLayout {
         icon: Icons.app-window;
         text: @tr("Share Window");
         y: (parent.height - self.height) / 2;
-        clicked => { StudioBridge.share("window"); }
+        clicked => { StudioNav.pick("window"); }
     }
     Button {
         min-height: root.h;
         icon: Icons.monitor;
         text: @tr("Share Screen");
         y: (parent.height - self.height) / 2;
-        clicked => { StudioBridge.share("screen"); }
+        clicked => { StudioNav.pick("screen"); }
     }
     RecordButton {
         compact: root.compact;

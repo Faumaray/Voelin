@@ -32,6 +32,7 @@ impl App {
 			image_cache_mb: cache_mb as f32,
 		});
 		bridge.set_image_cache_usage(images::usage_text().into());
+		self.studio_theme();
 	}
 
 	/// The settings page changed the form: store the keys (they apply

@@ -195,8 +195,6 @@ export global StudioBridge {
     in property <string> chat-name;
     // Filled right before a picker shows.
     in property <[StudioPick]> picks;
-    // Where recordings and clips go.
-    in property <string> recordings-dir;
 
     // The studio page or window appeared: start the engine.
     callback open();
@@ -242,7 +240,6 @@ export global StudioBridge {
     callback advanced-settings();
 
     // Bottom bar.
-    callback share(string);
     callback save-clip();
     callback toggle-recording();
     callback open-recordings();

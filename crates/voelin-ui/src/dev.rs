@@ -15,7 +15,13 @@
 //!   appearance, or 0-4), `about`, `share`, `bookmark` (add a server),
 //!   `emoji` (the picker), `client` (the volume dialog of the first other
 //!   client once connected), `panel` / `no-panel` (the right panel),
-//!   `tab:<home|servers|chat|activity|you>` (phone layout).
+//!   `tab:<home|servers|chat|activity|you>` (phone layout),
+//!   `studio[:<what>]`: the Stream Studio (with `VOELIN_DEMO_UI` a demo
+//!   studio from synthetic sources), `studio:window` in a window of its own,
+//!   `studio:live` going live, `studio:record`, or a dialog: `studio:source`,
+//!   `studio:audio`, `studio:camera`, `studio:scene`, `studio:settings`.
+//!   A screenshot also saves the studio's window (`<name>-window.png`) and
+//!   draws it over the main window.
 //! - `VOELIN_AUTOWATCH=1`: watch the first stream that shows up.
 //! - `VOELIN_AUTOSHARE=test-pattern`: share the test pattern (accepting
 //!   everyone) once connected to a TeamSpeak 6 server.
@@ -24,7 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use slint::ComponentHandle;
+use slint::{ComponentHandle, Rgba8Pixel, SharedPixelBuffer};
 use voelin_core::stream::{StreamInfo, StreamKind};
 use voelin_core::{Event, ObserveState, SessionState, Source, VoiceState};
 use voelin_model::{ChannelInfo, ChatMessage, ChatTarget, ClientInfo, Presence, ServerFlavor};
@@ -137,6 +143,12 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 			"panel" => nav.set_right_panel_open(true),
 			"no-panel" => nav.set_right_panel_open(false),
 			"tab" => nav.set_mobile_tab(mobile_tab(arg)),
+			"studio" => {
+				if arg != "window" {
+					nav.invoke_open_studio();
+				}
+				with_app(|app| app.studio_dev(arg));
+			}
 			// Opened once connected (settings_page.rs).
 			"client" => {}
 			other => eprintln!("VOELIN_OPEN: unknown screen {other:?}"),
@@ -163,7 +175,33 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 }
 
 fn save_screenshot(ui: &MainWindow, path: &std::path::Path) -> Result<()> {
-	let image = ui.window().take_snapshot()?;
+	let mut image = ui.window().take_snapshot()?;
+	if let Some(studio) = with_app(|app| app.studio_snapshot()).flatten() {
+		let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+		save_png(&studio, &path.with_file_name(format!("{stem}-window.png")))?;
+		paste(&mut image, &studio);
+	}
+	save_png(&image, path)
+}
+
+/// Draw `top` over the bottom right of `image` with a border, as a second
+/// window sits on a desktop.
+fn paste(image: &mut SharedPixelBuffer<Rgba8Pixel>, top: &SharedPixelBuffer<Rgba8Pixel>) {
+	let (w, h) = (image.width() as usize, image.height() as usize);
+	let (tw, th) = (top.width() as usize, top.height() as usize);
+	let (x0, y0) = (w.saturating_sub(tw + 24), h.saturating_sub(th + 24));
+	let border = Rgba8Pixel { r: 0x3f, g: 0x7b, b: 0xff, a: 0xff };
+	let pixels = image.make_mut_slice();
+	for y in y0.saturating_sub(1)..(y0 + th + 1).min(h) {
+		for x in x0.saturating_sub(1)..(x0 + tw + 1).min(w) {
+			let (ty, tx) = (y.wrapping_sub(y0), x.wrapping_sub(x0));
+			pixels[y * w + x] =
+				if ty < th && tx < tw { top.as_slice()[ty * tw + tx] } else { border };
+		}
+	}
+}
+
+fn save_png(image: &SharedPixelBuffer<Rgba8Pixel>, path: &std::path::Path) -> Result<()> {
 	let file = std::io::BufWriter::new(std::fs::File::create(path)?);
 	let mut encoder = png::Encoder::new(file, image.width(), image.height());
 	encoder.set_color(png::ColorType::Rgba);
