@@ -657,7 +657,7 @@ Simulcast, 1440p30 source, three layers (1440p30 at 8 Mbit/s, 720p30 at
 
 What the numbers say: every encoder, hardware and software, holds the full
 frame rate at both sizes on this machine, so the difference is CPU, not
-throughput. Hardware costs 0.20-0.42 cores against 1.16-2.55 for software,
+throughput. Hardware costs 0.20-0.52 cores against 1.16-2.55 for software,
 a factor of four to eight, and the gap widens with size — at 1440p60 x264
 needs 2.17 cores and is the only encoder that dropped a frame. Every backend
 honoured the target bitrate within 2 % except `av1_vaapi`, which overshot by
