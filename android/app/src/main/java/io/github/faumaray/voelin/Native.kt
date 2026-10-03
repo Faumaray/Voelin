@@ -57,4 +57,12 @@ object Native {
     /** The voice notification was tapped: show the voice channel. */
     @JvmStatic
     external fun onOpenVoice()
+
+    /**
+     * Shared to the app ("Share to Voelin"): text for the current chat's
+     * composer, and copies of the shared files (one path per line) for the
+     * current channel.
+     */
+    @JvmStatic
+    external fun onShare(text: String?, paths: String?)
 }

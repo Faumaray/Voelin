@@ -1,18 +1,26 @@
 //! Requests from the platform around the window: on Android a tapped
-//! notification. They can come from any thread and before the window runs;
-//! [`request`] keeps them until the window takes them on its thread.
+//! notification or something shared to the app ("Share to Voelin"). They
+//! can come from any thread and before the window runs; [`request`] keeps
+//! them until the window takes them on its thread.
 
+use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};
 
 use slint::ComponentHandle;
+use voelin_model::ChatTarget;
 
-use crate::app::{Nav, Page, with_app};
+use crate::app::{App, MobileTab, Nav, Page, with_app};
 
 /// What the platform asks the window to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
 	/// Show the voice channel we are in (the phone's voice screen).
 	ShowVoice,
+	/// Shared to the app: the text goes into the current chat's composer
+	/// (to send with one tap, or edit, as a mis-tap in the share sheet
+	/// should not post into a chat), the files are uploaded to the current
+	/// channel and linked there, as the composer's attach button does.
+	Share { text: Option<String>, files: Vec<PathBuf> },
 }
 
 static PENDING: Mutex<Vec<Request>> = Mutex::new(Vec::new());
@@ -38,6 +46,56 @@ pub(crate) fn take() {
 				nav.invoke_show(Page::Server);
 				nav.invoke_show_voice(true);
 			}
+			Request::Share { text, files } => {
+				// The phone shows the chat it went to.
+				nav.set_mobile_tab(MobileTab::Chat);
+				nav.invoke_show(Page::Server);
+				with_app(|app| app.share(&nav, text, files));
+			}
+		}
+	}
+}
+
+impl App {
+	fn share(&mut self, nav: &Nav<'_>, text: Option<String>, files: Vec<PathBuf>) {
+		let current = self.current.and_then(|id| {
+			let view = self.sessions.get(&id)?;
+			let tab = &view.tabs[view.current_tab];
+			// Files go to the channel of the chat, else to ours.
+			let channel = match tab.target {
+				ChatTarget::Channel(channel) => Some(channel),
+				_ => view.state.own_channel,
+			}
+			.map(|c| {
+				let name = view.presence.channels.get(&c).map(|c| c.name.as_str());
+				(c, name.map_or_else(|| "the channel".to_owned(), |n| format!("#{n}")))
+			});
+			Some((id, tab.title.clone(), channel))
+		});
+		if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
+			nav.set_draft(text.into());
+			self.set_status(match &current {
+				Some((_, title, _)) => format!("Shared text is ready to send to {title}"),
+				None => "Shared text is in the composer".to_owned(),
+			});
+		}
+		if files.is_empty() {
+			return;
+		}
+		match current {
+			Some((id, _, Some((channel, name)))) if !self.demo_ui => {
+				let count = files.len();
+				for file in files {
+					self.upload(id, channel, file);
+				}
+				let what = if count == 1 {
+					"the shared file".to_owned()
+				} else {
+					format!("{count} files")
+				};
+				self.set_status(format!("Uploading {what} to {name}"));
+			}
+			_ => self.set_status("Open a channel's chat (or join a channel) to share files there"),
 		}
 	}
 }

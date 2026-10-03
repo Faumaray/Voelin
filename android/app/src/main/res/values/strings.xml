@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Voelin</string>
+    <string name="share_label">Voelin</string>
     <string name="channel_voice">Voice connection</string>
     <string name="channel_screen">Screen sharing</string>
     <string name="voice_connected">Connected to voice</string>

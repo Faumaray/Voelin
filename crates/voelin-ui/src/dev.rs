@@ -16,7 +16,9 @@
 //!   `emoji` (the picker), `client` (the volume dialog of the first other
 //!   client once connected), `panel` / `no-panel` (the members panel),
 //!   `voice` (the voice channel view; on the phone its own screen),
-//!   `members` (the phone's members page), `pins`, `topics` (the drawers),
+//!   `members` (the phone's members page), `notification` (a tapped voice
+//!   notification), `shared:<text>` (text shared to the app on Android),
+//!   `pins`, `topics` (the drawers),
 //!   `topic:<id>` (a topic's messages), `member` (the member card of the
 //!   first other client), `watch` (the first stream; with sample data the
 //!   local test pattern in its place), `popout` (the same, popped out),
@@ -160,6 +162,13 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 			"pins" => nav.invoke_show_pins(true),
 			// The phone's members page.
 			"members" => nav.set_members_open(true),
+			// What Android hands over: a tapped voice notification, text
+			// shared to the app.
+			"notification" => crate::inbox::request(crate::inbox::Request::ShowVoice),
+			"shared" => crate::inbox::request(crate::inbox::Request::Share {
+				text: Some(arg.to_owned()),
+				files: Vec::new(),
+			}),
 			"topics" => nav.invoke_show_topics(true),
 			"topic" => {
 				with_app(|app| {

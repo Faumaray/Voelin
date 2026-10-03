@@ -750,7 +750,7 @@ impl App {
 	}
 
 	/// Upload a file into a channel and link it in the chat once it is up.
-	fn upload(&mut self, id: i64, channel: u64, from: PathBuf) {
+	pub(crate) fn upload(&mut self, id: i64, channel: u64, from: PathBuf) {
 		let Some(name) = from.file_name().map(|n| n.to_string_lossy().to_string()) else { return };
 		let view = self.sessions.entry(id).or_default();
 		let transfer = view.next_transfer;

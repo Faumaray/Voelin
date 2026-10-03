@@ -428,3 +428,23 @@ fn on_open_voice<'local>(_env: &mut Env<'local>, _class: JClass<'local>) -> Resu
 	voelin_ui::request(voelin_ui::Request::ShowVoice);
 	Ok(())
 }
+
+const _: jni::NativeMethod = native_method! {
+	java_type = "io.github.faumaray.voelin.Native",
+	static extern fn on_share(text: JString, paths: JString),
+};
+
+/// Shared to the app: text, and copies of the shared files (one path per
+/// line).
+fn on_share<'local>(
+	env: &mut Env<'local>,
+	_class: JClass<'local>,
+	text: JString<'local>,
+	paths: JString<'local>,
+) -> Result<()> {
+	let text = if text.is_null() { None } else { Some(text.try_to_string(env)?) };
+	let paths = if paths.is_null() { String::new() } else { paths.try_to_string(env)? };
+	let files = paths.lines().filter(|l| !l.is_empty()).map(std::path::PathBuf::from).collect();
+	voelin_ui::request(voelin_ui::Request::Share { text, files });
+	Ok(())
+}
