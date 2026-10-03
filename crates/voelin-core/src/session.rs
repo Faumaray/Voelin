@@ -30,7 +30,8 @@ use crate::history::{self, ChatCtx, HistoryMessage, MessageSource, SharedHistory
 use crate::query::{self, QueryCmd, QueryEvent};
 use crate::route::{ChatRoute, Dedup, route_chat};
 use crate::settings::{
-	BlockMode, CACHE_FETCH_IMAGES, CACHE_MAX_MB, PRIVACY_BLOCK_MODE, SharedSettings,
+	Allowed, BlockMode, CACHE_FETCH_IMAGES, CACHE_MAX_MB, Key, PRIVACY_BLOCK_MODE, PRIVACY_POKES,
+	PRIVACY_PRIVATE_MESSAGES, SharedSettings,
 };
 use crate::stream::{
 	LayerSpec, OwnStreamEvent, PeerConfig, SrtpProfile, StreamFrame, StreamHandle, StreamInfo,
@@ -47,6 +48,26 @@ type Groups = (Arc<Vec<GroupInfo>>, Arc<Vec<GroupInfo>>);
 /// `cache.max_mb` in bytes (0: no limit).
 fn max_cache_bytes(settings: &SharedSettings) -> u64 {
 	settings.current().get(&CACHE_MAX_MB).saturating_mul(1024 * 1024)
+}
+
+/// Whether a privacy setting lets someone with this relation (`None`: no
+/// unique id known) reach us.
+fn allows(setting: Allowed, relation: Option<Relation>) -> bool {
+	match setting {
+		Allowed::Everyone => true,
+		Allowed::Friends => relation == Some(Relation::Friend),
+		Allowed::Nobody => false,
+	}
+}
+
+#[cfg(test)]
+#[test]
+fn privacy_settings() {
+	assert!(allows(Allowed::Everyone, None));
+	assert!(allows(Allowed::Friends, Some(Relation::Friend)));
+	assert!(!allows(Allowed::Friends, Some(Relation::Neutral)));
+	assert!(!allows(Allowed::Friends, None));
+	assert!(!allows(Allowed::Nobody, Some(Relation::Friend)));
 }
 
 pub(crate) struct SessionHandle {
@@ -869,6 +890,12 @@ impl Session {
 		self.settings.current().get(&PRIVACY_BLOCK_MODE)
 	}
 
+	/// Whether `privacy.private_messages` or `privacy.pokes` (`key`) lets
+	/// the person with this unique id reach us.
+	fn allowed(&self, key: &'static Key<Allowed>, uid: Option<&str>) -> bool {
+		allows(self.settings.current().get(key), uid.map(|u| self.contacts.relation(u)))
+	}
+
 	fn stream_input(&self, input: StreamInput) {
 		match &self.streams {
 			Some(s) => s.send(input),
@@ -1339,6 +1366,10 @@ impl Session {
 					debug!(?from_uid, "poke of a blocked contact hidden");
 					return;
 				}
+				if !self.allowed(&PRIVACY_POKES, from_uid.as_deref()) {
+					debug!(?from_uid, "poke dropped (privacy.pokes)");
+					return;
+				}
 				let session = self.id;
 				self.emit(Event::Poke { session, from, from_uid, from_name, message, blocked });
 			}
@@ -1538,6 +1569,13 @@ impl Session {
 			&& self.block_mode() == BlockMode::Hide
 		{
 			debug!(author = ?msg.author_uid, "private message of a blocked contact hidden");
+			return;
+		}
+		if matches!(msg.target, ChatTarget::Private(_))
+			&& msg.author_id != self.state.own_client
+			&& !self.allowed(&PRIVACY_PRIVATE_MESSAGES, msg.author_uid.as_deref())
+		{
+			debug!(author = ?msg.author_uid, "private message dropped (privacy.private_messages)");
 			return;
 		}
 		if let Some(ctx) = self.chat_ctx() {

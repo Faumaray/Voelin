@@ -47,6 +47,8 @@ voelin-query = { path = "../voelin-query" }
 voelin-store = { path = "../voelin-store" }
 voelin-stream = { path = "../voelin-stream" }
 tsclientlib = { path = "../proto/tsclientlib" }
+# The hash cash level, for raising an identity's security level.
+tsproto = { path = "../proto/tsproto" }
 tsproto-packets = { path = "../proto/tsproto-packets" }
 tsproto-types = { path = "../proto/tsproto-types" }
 

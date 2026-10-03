@@ -1141,6 +1141,33 @@ pub static PRIVACY_BLOCK_MODE: Key<BlockMode> = Key::new(
 	BlockMode::default,
 );
 
+/// Who may reach us with private messages or pokes; the others' are
+/// dropped (neither reported nor stored).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Allowed {
+	/// Anyone (blocked contacts still follow `privacy.block_mode`).
+	#[default]
+	Everyone,
+	/// Contacts marked friend.
+	Friends,
+	Nobody,
+}
+
+pub static PRIVACY_PRIVATE_MESSAGES: Key<Allowed> = Key::new(
+	"privacy.private_messages",
+	Kind::Choice(&["everyone", "friends", "nobody"]),
+	"Who may send us private messages: everyone, friends or nobody.",
+	Allowed::default,
+);
+
+pub static PRIVACY_POKES: Key<Allowed> = Key::new(
+	"privacy.pokes",
+	Kind::Choice(&["everyone", "friends", "nobody"]),
+	"Who may poke us: everyone, friends or nobody.",
+	Allowed::default,
+);
+
 /// What an audio source of our stream captures, as stored; see
 /// [`AudioSourceSetting`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1290,6 +1317,8 @@ pub fn builtin_keys() -> Vec<&'static dyn Setting> {
 		&CACHE_FETCH_IMAGES,
 		&FILES_PROGRESS_MS,
 		&PRIVACY_BLOCK_MODE,
+		&PRIVACY_PRIVATE_MESSAGES,
+		&PRIVACY_POKES,
 		#[cfg(feature = "media")]
 		&STUDIO_SCENES,
 		#[cfg(feature = "media")]
