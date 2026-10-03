@@ -41,8 +41,9 @@ use voelin_core::studio::scene::{
 	Align, Background, Colour, Fit, Scene, Scenes, Source, SourceKind, Transform,
 };
 use voelin_core::studio::{self, SourceChange, Stats, Status, Studio, camera};
-use voelin_core::{Command, StreamState};
+use voelin_core::{Command, HistoryMessage, HistorySource, StreamState};
 use voelin_model::{ChatMessage, ChatTarget};
+use voelin_store::MessageSource;
 
 use crate::app::{
 	App, ChatLine, Nav, Page, StudioAudio, StudioBridge, StudioForm, StudioLayer, StudioNav,
@@ -110,8 +111,8 @@ struct Models {
 	viewers: Rc<VecModel<StudioViewer>>,
 	destinations: Rc<VecModel<StudioPick>>,
 	picks: Rc<VecModel<StudioPick>>,
-	/// The chat while there is no destination.
-	no_chat: Rc<VecModel<ChatLine>>,
+	/// The destination channel's chat (`studio_sync_chat`).
+	chat: Rc<VecModel<ChatLine>>,
 }
 
 /// What a picker row adds.
@@ -467,7 +468,7 @@ impl App {
 		bridge.set_viewers(ModelRc::from(m.viewers.clone()));
 		bridge.set_destinations(ModelRc::from(m.destinations.clone()));
 		bridge.set_picks(ModelRc::from(m.picks.clone()));
-		bridge.set_chat(ModelRc::from(m.no_chat.clone()));
+		bridge.set_chat(ModelRc::from(m.chat.clone()));
 	}
 
 	/// Whether a studio page or window is on screen.
@@ -843,37 +844,59 @@ impl App {
 		Some((id, self.sessions.get(&id)?.state.own_channel?))
 	}
 
-	/// Show the destination channel's chat: its tab's lines (opened if need
-	/// be, with its history).
+	/// Show the destination channel's chat (its tab opened, with its
+	/// history, if need be).
 	fn studio_bind_chat(&mut self) {
-		let (model, name) = match self.studio_chat_target() {
+		let name = match self.studio_chat_target() {
 			Some((id, channel)) => {
 				let target = ChatTarget::Channel(channel);
 				let demo = self.demo_ui;
 				let view = self.sessions.entry(id).or_default();
 				let name = view.presence.channels.get(&channel).map(|c| c.name.clone());
 				let name = name.unwrap_or_default();
-				let index = match view.tabs.iter().position(|t| t.target == target) {
-					Some(i) => i,
-					None => {
-						view.tabs.push(Tab::new(target.clone(), format!("#{name}")));
-						if !demo {
-							self.engine.send(Command::OpenChat { session: id as u64, target });
-						}
-						view.tabs.len() - 1
+				if !view.tabs.iter().any(|t| t.target == target) {
+					view.tabs.push(Tab::new(target.clone(), format!("#{name}")));
+					if !demo {
+						self.engine.send(Command::OpenChat { session: id as u64, target });
 					}
-				};
-				let lines = ModelRc::from(view.tabs[index].lines.clone());
-				(lines, name)
+				}
+				name
 			}
-			None => (ModelRc::from(self.studio.models.no_chat.clone()), String::new()),
+			None => String::new(),
 		};
-		self.studio_each(|b| {
-			if b.get_chat() != model {
-				b.set_chat(model.clone());
-			}
-			b.set_chat_name(name.clone().into());
+		self.studio_each(|b| b.set_chat_name(name.clone().into()));
+		self.studio_sync_chat();
+	}
+
+	/// The stream chat's lines: the destination tab's, made as the chat
+	/// view makes them. The main window keeps only its shown tab's lines up
+	/// to date, and the stream's channel need not be that tab.
+	fn studio_sync_chat(&self) {
+		let tab = self.studio_chat_target().and_then(|(id, channel)| {
+			let view = self.sessions.get(&id)?;
+			let tab = view.tabs.iter().find(|t| t.target == ChatTarget::Channel(channel))?;
+			Some((view, tab))
 		});
+		let lines: Vec<ChatLine> = match tab {
+			Some((view, tab)) if view.has_history() => self.lines_of(view, tab, &tab.messages),
+			// Without stored history the tab's lines are pushed as they come.
+			Some((_, tab)) => tab.lines.iter().collect(),
+			None => Vec::new(),
+		};
+		vm::list::sync(&self.studio.models.chat, &lines);
+	}
+
+	/// A chat of session `id` changed (chat.rs): follow it if it is the
+	/// stream's.
+	pub(crate) fn studio_chat_changed(&mut self, id: i64, target: &ChatTarget) {
+		if self.studio.run.is_some()
+			&& let Some((session, channel)) = self.studio_chat_target()
+			&& session == id
+			&& *target == ChatTarget::Channel(channel)
+		{
+			self.studio_sync_chat();
+			self.studio_overlays(false);
+		}
 	}
 
 	fn studio_refresh_form(&self) {
@@ -1071,16 +1094,10 @@ impl App {
 
 	/// The last lines of the stream's chat, for the chat overlay.
 	fn studio_chat_tail(&self, lines: usize) -> Option<String> {
-		let (id, channel) = self.studio_chat_target()?;
-		let tab = self
-			.sessions
-			.get(&id)?
-			.tabs
-			.iter()
-			.find(|t| t.target == ChatTarget::Channel(channel))?;
-		let count = tab.lines.row_count();
+		let chat = &self.studio.models.chat;
+		let count = chat.row_count();
 		let text: Vec<String> = (count.saturating_sub(lines)..count)
-			.filter_map(|i| tab.lines.row_data(i))
+			.filter_map(|i| chat.row_data(i))
 			.map(|l| {
 				let line = format!("{}: {}", l.author, l.text);
 				match line.char_indices().nth(64) {
@@ -1863,19 +1880,38 @@ impl App {
 	pub(crate) fn studio_send_chat(&mut self, text: String) {
 		let Some((id, channel)) = self.studio_chat_target() else { return };
 		let target = ChatTarget::Channel(channel);
+		// Sample data has no engine to echo the message: shown as it would be.
 		if self.demo_ui {
+			let view = self.sessions.entry(id).or_default();
+			let (client, history) = (view.state.own_client, view.has_history());
 			let author = self.bookmark(id).map(|b| b.nickname.clone()).unwrap_or_default();
+			let ts_ms = chrono::Utc::now().timestamp_millis();
 			let message = ChatMessage {
-				target,
+				target: target.clone(),
 				author_name: author,
-				author_uid: None,
-				author_id: None,
+				author_uid: client.map(|c| format!("demo-{c}")),
+				author_id: client,
 				text,
-				ts_ms: chrono::Utc::now().timestamp_millis(),
+				ts_ms,
 				via_relay: false,
 				blocked: false,
 			};
-			self.add_message(id, message);
+			if history {
+				let stored = HistoryMessage {
+					// Negative: in memory only.
+					id: -ts_ms,
+					message,
+					source: MessageSource::Voice,
+					remote_id: None,
+					topic_id: None,
+					reactions: Vec::new(),
+					pinned: false,
+					rev: 0,
+				};
+				self.history_batch(id, &target, vec![stored], HistorySource::Live, false);
+			} else {
+				self.add_message(id, message);
+			}
 		} else {
 			self.engine.send(Command::SendChat { session: id as u64, target, text });
 		}
