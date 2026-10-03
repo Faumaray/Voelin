@@ -16,8 +16,11 @@
 //!   sink allows. [`Streamer::reconfigure`] changes frame rate, bitrate,
 //!   codec, layers and audio sources while streaming.
 //! - [`VideoPipeline`] decodes the video of a watched stream on its own
-//!   thread and hands every picture to a callback. After lost frames or
-//!   decoder errors it skips to the next keyframe and asks for one.
+//!   thread with the best decoder of its codec, falling back to the next
+//!   one when a decoder fails, and hands every picture to a callback. After
+//!   lost frames it asks for a keyframe; decoders that conceal what is
+//!   missing (FFmpeg's H.264 and HEVC) go on decoding meanwhile, the others
+//!   skip to it.
 //! - [`Viewer`] is a [`VideoPipeline`] fed from [`Engine::subscribe_frames`].
 //!   The stream's audio needs nothing here: the session plays it
 //!   ([`Command::SetStreamVolume`]).
@@ -59,7 +62,7 @@ use voelin_media::{
 	Codec, Codecs, ContentHint, EncodedChunk, EncoderConfig, FrameRef, GpuFrame, VideoEncoder,
 	VideoFrame,
 };
-pub use voelin_media::{EncoderBackend, EncoderPreference};
+pub use voelin_media::{DecoderBackend, DecoderPreference, EncoderBackend, EncoderPreference};
 use voelin_stream::{
 	EncodedFrame, FrameSource, Frequency, LayerId, LayerSet, LayerSpec, MediaFrame, MediaKind,
 	MediaTime, PeerConfig, VideoCodec,
@@ -79,6 +82,17 @@ const OPUS_BITRATE: i32 = 128_000;
 pub const MAX_QUEUED: usize = 30;
 /// Keyframe requests while waiting for one are at least this far apart.
 const KEYFRAME_RETRY: Duration = Duration::from_millis(500);
+/// Failures in a row (errors, or [`FRAMES_WITHOUT_PICTURE`] frames that
+/// gave none) after which a decoder is replaced by the next one of its
+/// codec's ladder.
+const DECODER_FAILURES: u32 = 3;
+/// Frames a decoder may take without giving a picture before that counts
+/// as a failure (and a keyframe is asked for): decoders of streams with
+/// B-frames hold a few.
+const FRAMES_WITHOUT_PICTURE: u32 = 10;
+/// Decoded pictures a [`VideoPipeline`] recycles; while the consumer holds
+/// them all, more are made.
+const PICTURE_POOL: usize = 4;
 /// The decoding rates of [`DecodeStats`] cover at least this long.
 const RATE_WINDOW: Duration = Duration::from_millis(500);
 
@@ -185,6 +199,16 @@ pub fn encoder_preference(settings: &crate::settings::Settings) -> voelin_media:
 	voelin_media::EncoderPreference {
 		hardware: settings.get(&STREAM_HARDWARE_ACCELERATION),
 		backend: settings.get(&STREAM_ENCODER_BACKEND).parse().unwrap_or_default(),
+	}
+}
+
+/// The decoder preference of the settings `stream.hardware_decoding` and
+/// `stream.decoder_backend` (for `Codecs::with_decoder_preference`).
+pub fn decoder_preference(settings: &crate::settings::Settings) -> DecoderPreference {
+	use crate::settings::{STREAM_DECODER_BACKEND, STREAM_HARDWARE_DECODING};
+	DecoderPreference {
+		hardware: settings.get(&STREAM_HARDWARE_DECODING),
+		backend: settings.get(&STREAM_DECODER_BACKEND).parse().unwrap_or_default(),
 	}
 }
 
@@ -2422,6 +2446,9 @@ pub struct DecodeStats {
 	pub skipped: u64,
 	pub keyframe_requests: u64,
 	pub codec: Option<Codec>,
+	/// The decoder in use ([`Codecs::decoders_for`]: the first of the
+	/// codec's that works).
+	pub decoder: Option<DecoderBackend>,
 	pub width: u32,
 	pub height: u32,
 	/// The last error (no decoder for the codec, decoding failed).
@@ -2500,12 +2527,14 @@ pub struct VideoPipeline {
 }
 
 impl VideoPipeline {
-	/// `on_frame` gets every decoded picture on the decoding thread;
-	/// `request_keyframe` is called when the decoder needs one (at most
-	/// every half second).
+	/// `on_frame` gets every decoded picture on the decoding thread, from a
+	/// pool: a picture comes back to it once the consumer drops it, so a
+	/// consumer that converts and drops each one costs no allocations.
+	/// `request_keyframe` is called when the decoder needs one (every half
+	/// second until one comes).
 	pub fn new(
 		codecs: Arc<Codecs>,
-		on_frame: impl FnMut(VideoFrame) + Send + 'static,
+		on_frame: impl FnMut(Arc<VideoFrame>) + Send + 'static,
 		request_keyframe: impl Fn() + Send + 'static,
 	) -> Self {
 		let queue = Arc::new(DecodeQueue::default());
@@ -2556,16 +2585,100 @@ impl Drop for VideoPipeline {
 	}
 }
 
+/// The decoder of a [`VideoPipeline`] and the rest of its codec's ladder.
+struct ActiveDecoder {
+	codec: Codec,
+	backend: DecoderBackend,
+	decoder: Box<dyn voelin_media::VideoDecoder>,
+	/// The codec's other decoders, best first, still to try.
+	rest: VecDeque<DecoderBackend>,
+	/// Failures since the last picture.
+	failures: u32,
+	/// Frames taken since the last picture or failure.
+	without_picture: u32,
+}
+
+impl ActiveDecoder {
+	/// The first decoder of `codec`'s ladder that opens.
+	fn start(codecs: &Codecs, codec: Codec) -> Result<Self, String> {
+		let mut rest: VecDeque<DecoderBackend> = codecs.decoders_for(codec).into();
+		let (backend, decoder) = Self::open_next(codecs, codec, &mut rest).map_err(|e| {
+			e.unwrap_or_else(|| {
+				codecs
+					.check_decoder(codec)
+					.err()
+					.map_or_else(|| format!("no decoder for {codec}"), |e| e.to_string())
+			})
+		})?;
+		Ok(Self { codec, backend, decoder, rest, failures: 0, without_picture: 0 })
+	}
+
+	/// The next decoder of `rest` that opens; the last error if none did.
+	fn open_next(
+		codecs: &Codecs,
+		codec: Codec,
+		rest: &mut VecDeque<DecoderBackend>,
+	) -> Result<(DecoderBackend, Box<dyn voelin_media::VideoDecoder>), Option<String>> {
+		let mut error = None;
+		while let Some(backend) = rest.pop_front() {
+			match codecs.new_decoder_with(codec, backend) {
+				Ok(decoder) => return Ok((backend, decoder)),
+				Err(e) => {
+					warn!(%codec, %backend, "the decoder does not open: {e}");
+					error = Some(e.to_string());
+				}
+			}
+		}
+		Err(error)
+	}
+
+	/// Replace the decoder by the next one of the ladder, after `reason`;
+	/// `false` (keeping this one) if there is none.
+	fn fall_back(&mut self, codecs: &Codecs, reason: &str) -> bool {
+		(self.failures, self.without_picture) = (0, 0);
+		let (codec, failed) = (self.codec, self.backend);
+		match Self::open_next(codecs, codec, &mut self.rest) {
+			Ok((backend, decoder)) => {
+				warn!(%codec, %failed, %backend, "the decoder failed ({reason}); trying the next");
+				(self.backend, self.decoder) = (backend, decoder);
+				true
+			}
+			Err(_) => {
+				warn!(%codec, %failed, "the decoder fails ({reason}), and no other is left");
+				false
+			}
+		}
+	}
+}
+
+/// A pooled picture nobody else holds, to decode into: one the consumer
+/// gave back, else a new one (when the pool is full, the oldest is left to
+/// whoever holds it).
+fn free_picture(pictures: &mut Vec<Arc<VideoFrame>>) -> usize {
+	if let Some(i) = pictures.iter_mut().position(|p| Arc::get_mut(p).is_some()) {
+		return i;
+	}
+	if pictures.len() >= PICTURE_POOL {
+		pictures.remove(0);
+	}
+	pictures.push(Arc::new(VideoFrame::black_i420(0, 0)));
+	pictures.len() - 1
+}
+
 fn decode_loop(
 	queue: &DecodeQueue,
 	codecs: &Codecs,
-	mut on_frame: impl FnMut(VideoFrame),
+	mut on_frame: impl FnMut(Arc<VideoFrame>),
 	request_keyframe: impl Fn(),
 ) {
-	let mut decoder: Option<(Codec, Box<dyn voelin_media::VideoDecoder>)> = None;
+	let mut active: Option<ActiveDecoder> = None;
 	// Start at a keyframe; the streamer sends one when a viewer connects.
 	let mut waiting = true;
+	// A keyframe is wanted (after a loss, or an error of a decoder that goes
+	// on), asked for until one decodes.
+	let mut wanted = false;
 	let mut last_request: Option<Instant> = None;
+	let mut pictures: Vec<Arc<VideoFrame>> = Vec::with_capacity(PICTURE_POOL);
 	let mut request = |stats: &Mutex<DecodeStats>| {
 		if last_request.is_none_or(|t| t.elapsed() >= KEYFRAME_RETRY) {
 			last_request = Some(Instant::now());
@@ -2575,19 +2688,22 @@ fn decode_loop(
 	};
 	let set_error = |message: String| lock(&queue.stats).error = Some(message);
 	loop {
-		let (frame, lost) = {
+		let next = {
 			let mut state = lock(&queue.state);
-			loop {
-				if state.closed {
-					return;
-				}
-				if let Some(frame) = state.frames.pop_front() {
-					break (frame, std::mem::take(&mut state.lost));
-				}
+			if state.frames.is_empty() && !state.closed {
 				state =
 					queue.cond.wait_timeout(state, POLL).unwrap_or_else(PoisonError::into_inner).0;
 			}
+			if state.closed {
+				return;
+			}
+			state.frames.pop_front().map(|frame| (frame, std::mem::take(&mut state.lost)))
 		};
+		// Asked for again while none comes, even while no frame does.
+		if (waiting || wanted) && active.is_some() {
+			request(&queue.stats);
+		}
+		let Some((frame, lost)) = next else { continue };
 		let codec = match Codec::try_from(frame.codec) {
 			Ok(codec) => codec,
 			Err(e) => {
@@ -2595,51 +2711,95 @@ fn decode_loop(
 				continue;
 			}
 		};
-		if decoder.as_ref().is_none_or(|(c, _)| *c != codec) {
-			match codecs.new_decoder(codec) {
-				Ok(d) => {
-					decoder = Some((codec, d));
+		if active.as_ref().is_none_or(|a| a.codec != codec) {
+			match ActiveDecoder::start(codecs, codec) {
+				Ok(started) => {
+					let mut stats = lock(&queue.stats);
+					(stats.codec, stats.decoder) = (Some(codec), Some(started.backend));
+					drop(stats);
+					active = Some(started);
 					waiting = true;
-					lock(&queue.stats).codec = Some(codec);
 				}
 				Err(e) => {
-					if decoder.is_some() || lock(&queue.stats).error.is_none() {
+					if active.is_some() || lock(&queue.stats).error.is_none() {
 						warn!("no decoder for the stream: {e}");
 					}
-					decoder = None;
-					set_error(e.to_string());
+					active = None;
+					set_error(e);
 					continue;
 				}
 			}
 		}
+		let Some(dec) = &mut active else { continue };
 		if lost || !frame.contiguous {
-			waiting = true;
+			// A decoder that conceals the loss goes on; the others would
+			// fail, or show garbage, until a keyframe.
+			if dec.decoder.conceals_errors() {
+				wanted = true;
+			} else {
+				waiting = true;
+			}
 		}
+		let keyframe = is_keyframe(codec, &frame.data);
 		if waiting {
-			if !is_keyframe(codec, &frame.data) {
+			if !keyframe {
 				lock(&queue.stats).skipped += 1;
 				request(&queue.stats);
 				continue;
 			}
 			waiting = false;
 		}
-		let Some((_, dec)) = &mut decoder else { continue };
-		match dec.decode(&frame.data) {
-			Ok(Some(picture)) => {
-				{
-					let mut stats = lock(&queue.stats);
-					stats.decoded += 1;
-					(stats.width, stats.height) = (picture.width, picture.height);
+		loop {
+			let slot = free_picture(&mut pictures);
+			let picture = Arc::get_mut(&mut pictures[slot]).expect("a free picture");
+			let failure = match dec.decoder.decode_into(&frame.data, picture) {
+				Ok(true) => {
+					(dec.failures, dec.without_picture) = (0, 0);
+					wanted &= !keyframe;
+					{
+						let mut stats = lock(&queue.stats);
+						stats.decoded += 1;
+						(stats.width, stats.height) = (picture.width, picture.height);
+					}
+					on_frame(pictures[slot].clone());
+					None
 				}
-				on_frame(picture);
+				Ok(false) => {
+					// Decoders with a delay (B-frames) give it a few frames
+					// later; one that gives nothing gets keyframes to try.
+					dec.without_picture += 1;
+					(dec.without_picture >= FRAMES_WITHOUT_PICTURE).then(|| {
+						dec.without_picture = 0;
+						wanted = true;
+						request(&queue.stats);
+						format!("no picture from {FRAMES_WITHOUT_PICTURE} frames")
+					})
+				}
+				Err(e) => {
+					debug!("decoding failed: {e}");
+					set_error(e.to_string());
+					if dec.decoder.conceals_errors() {
+						wanted = true;
+					} else {
+						waiting = true;
+					}
+					request(&queue.stats);
+					Some(e.to_string())
+				}
+			};
+			let Some(reason) = failure else { break };
+			dec.failures += 1;
+			if dec.failures < DECODER_FAILURES || !dec.fall_back(codecs, &reason) {
+				break;
 			}
-			Ok(None) => {}
-			Err(e) => {
-				debug!("decoding failed: {e}");
-				set_error(e.to_string());
+			lock(&queue.stats).decoder = Some(dec.backend);
+			if !keyframe {
 				waiting = true;
 				request(&queue.stats);
+				break;
 			}
+			// The keyframe that failed starts the next decoder at once.
+			waiting = false;
 		}
 	}
 }
@@ -2658,7 +2818,7 @@ impl Viewer {
 		session: SessionId,
 		stream_id: &str,
 		codecs: Arc<Codecs>,
-		on_frame: impl FnMut(VideoFrame) + Send + 'static,
+		on_frame: impl FnMut(Arc<VideoFrame>) + Send + 'static,
 	) -> Self {
 		let request = {
 			let engine = engine.clone();
@@ -2775,7 +2935,7 @@ impl LocalPreview {
 	pub async fn start(
 		codecs: Arc<Codecs>,
 		mut config: StreamerConfig,
-		on_frame: impl FnMut(VideoFrame) + Send + 'static,
+		on_frame: impl FnMut(Arc<VideoFrame>) + Send + 'static,
 	) -> Result<Self, MediaError> {
 		// The audio would go nowhere.
 		config.audio = false;
@@ -3042,6 +3202,144 @@ mod tests {
 		let stats = preview.stats();
 		assert!((20..=40).contains(&stats.fps), "{stats:?}");
 		assert!((100_000..5_000_000).contains(&stats.bitrate), "{stats:?}");
+	}
+
+	/// A VP8 decoder for the pipeline tests: fails (with errors, or giving
+	/// no picture), or gives a 2x2 picture per frame; conceals losses or not.
+	#[derive(Clone, Copy)]
+	struct FakeDecoder {
+		errors: bool,
+		pictures: bool,
+		conceals: bool,
+	}
+
+	impl voelin_media::VideoDecoder for FakeDecoder {
+		fn codec(&self) -> Codec {
+			Codec::Vp8
+		}
+
+		fn decode(&mut self, _: &[u8]) -> voelin_media::Result<Option<VideoFrame>> {
+			if self.errors {
+				let message = "made to fail".into();
+				return Err(voelin_media::Error::Decoder { codec: Codec::Vp8, message });
+			}
+			Ok(self.pictures.then(|| VideoFrame::black_i420(2, 2)))
+		}
+
+		fn conceals_errors(&self) -> bool {
+			self.conceals
+		}
+	}
+
+	impl voelin_media::codec::hw::DecoderFactory for FakeDecoder {
+		fn backend(&self) -> DecoderBackend {
+			DecoderBackend::Hardware("fake")
+		}
+
+		fn codec(&self) -> Codec {
+			Codec::Vp8
+		}
+
+		fn api(&self) -> &'static str {
+			"test"
+		}
+
+		fn is_hardware(&self) -> bool {
+			true
+		}
+
+		fn create(&self) -> voelin_media::Result<Box<dyn voelin_media::VideoDecoder>> {
+			Ok(Box::new(*self))
+		}
+	}
+
+	/// A decoder that fails, with errors or by giving no picture from
+	/// several keyframes, is replaced by the next of its codec's ladder
+	/// (libvpx here) without ending the stream: pictures go on.
+	#[cfg(feature = "media-desktop")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_failing_decoder_is_replaced_by_the_next() {
+		for errors in [true, false] {
+			let fake = FakeDecoder { errors, pictures: false, conceals: false };
+			let codecs = Arc::new(Codecs::builtin().with_decoder(Arc::new(fake)));
+			assert_eq!(codecs.decoders_for(Codec::Vp8)[0], DecoderBackend::Hardware("fake"));
+			assert_eq!(codecs.decoders_for(Codec::Vp8).last(), Some(&DecoderBackend::Libvpx));
+			let config = StreamerConfig {
+				source: SourceId::Synthetic,
+				synthetic_size: (320, 240),
+				..StreamerConfig::default()
+			};
+			let (tx, rx) = std_mpsc::channel();
+			let preview = LocalPreview::start(codecs, config, move |picture| {
+				let _ = tx.send(picture);
+			})
+			.await
+			.unwrap();
+			for _ in 0..10 {
+				let picture = rx.recv_timeout(Duration::from_secs(10)).expect("no picture");
+				assert_eq!((picture.width, picture.height), (320, 240));
+			}
+			let stats = preview.stats();
+			assert_eq!(stats.decoder, Some(DecoderBackend::Libvpx), "errors {errors}: {stats:?}");
+			assert!(stats.keyframe_requests > 0, "{stats:?}");
+		}
+	}
+
+	/// After a lost frame a decoder that conceals the loss goes on decoding
+	/// while a keyframe is asked for, again every half second until one
+	/// comes; one that does not skips to the keyframe.
+	#[test]
+	fn losses_ask_for_keyframes_until_one_comes() {
+		for conceals in [true, false] {
+			let fake = FakeDecoder { errors: false, pictures: true, conceals };
+			let codecs = Arc::new(Codecs::builtin().with_decoder(Arc::new(fake)));
+			let (tx, pictures) = std_mpsc::channel();
+			let requests = Arc::new(AtomicU32::new(0));
+			let pipeline = VideoPipeline::new(
+				codecs,
+				move |_| {
+					let _ = tx.send(());
+				},
+				{
+					let requests = requests.clone();
+					move || {
+						requests.fetch_add(1, Ordering::Relaxed);
+					}
+				},
+			);
+			let frame = |keyframe: bool, contiguous: bool| MediaFrame {
+				kind: MediaKind::Video,
+				codec: voelin_stream::Codec::Vp8,
+				time: MediaTime::new(0, Frequency::NINETY_KHZ),
+				network_time: Instant::now(),
+				contiguous,
+				// VP8's frame tag: bit 0 clear on keyframes.
+				data: Arc::from(if keyframe { &[0x10_u8, 0][..] } else { &[0x11, 0][..] }),
+			};
+			let got =
+				|n: usize| (0..n).all(|_| pictures.recv_timeout(Duration::from_secs(2)).is_ok());
+			pipeline.push(frame(true, true));
+			pipeline.push(frame(false, true));
+			assert!(got(2), "conceals {conceals}");
+			pipeline.push(frame(false, false));
+			pipeline.push(frame(false, true));
+			if conceals {
+				assert!(got(2), "decoding goes on");
+			} else {
+				assert!(pictures.recv_timeout(Duration::from_millis(300)).is_err(), "skipped");
+			}
+			std::thread::sleep(Duration::from_millis(1200));
+			let asked = requests.load(Ordering::Relaxed);
+			assert!(asked >= 2, "conceals {conceals}: {asked} requests");
+			pipeline.push(frame(true, true));
+			assert!(got(1), "the keyframe decodes");
+			let asked = requests.load(Ordering::Relaxed);
+			std::thread::sleep(Duration::from_millis(700));
+			assert_eq!(requests.load(Ordering::Relaxed), asked, "no more requests");
+			let stats = pipeline.stats();
+			assert_eq!(stats.skipped, if conceals { 0 } else { 2 }, "{stats:?}");
+			assert_eq!(stats.decoder, Some(DecoderBackend::Hardware("fake")));
+		}
 	}
 
 	fn layer(id: LayerId, scale: f32, max_fps: Option<u32>, bitrate: u64) -> LayerSpec {

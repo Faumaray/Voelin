@@ -17,7 +17,10 @@ use anyhow::{Context, Result};
 use slint::{ComponentHandle, ModelRc, VecModel};
 use tokio::runtime::Runtime;
 use tracing::warn;
-use voelin_core::settings::{AUDIO, CRASH_REPORTS, Settings};
+use voelin_core::media::decoder_preference;
+use voelin_core::settings::{
+	AUDIO, CRASH_REPORTS, STREAM_DECODER_BACKEND, STREAM_HARDWARE_DECODING, Settings,
+};
 use voelin_core::stream::StreamInfo;
 use voelin_core::{
 	AudioSettings, Command, Engine, Event, History, HistoryMessage, SessionState, VoiceState,
@@ -559,7 +562,8 @@ pub fn run(options: RunOptions) -> Result<()> {
 	if settings.global_ptt {
 		ptt.set(Some(settings.ptt_key.clone()));
 	}
-	let video = Video::new(&dir, settings.openh264);
+	let mut video = Video::new(&dir, settings.openh264);
+	video.set_decoder_preference(decoder_preference(&prefs));
 	let switches = crate::dev::Switches::from_env();
 	let app = App {
 		ui: ui.as_weak(),
@@ -730,6 +734,8 @@ impl App {
 			self.playback = self.prefs.get(&CLIENT_PLAYBACK);
 		} else if appearance_keys().iter().any(|k| k.name() == key) {
 			self.apply_appearance();
+		} else if key == STREAM_HARDWARE_DECODING.name() || key == STREAM_DECODER_BACKEND.name() {
+			self.video.set_decoder_preference(decoder_preference(&self.prefs));
 		}
 	}
 
