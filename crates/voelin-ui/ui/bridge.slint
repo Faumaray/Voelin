@@ -508,8 +508,12 @@ export struct DmPeer {
     since: string,
     // Where they are now, or where they were last seen.
     servers: [string],
-    // Files linked in the conversation: "name · 2.4 MB".
-    files: [string],
+    // Pictures linked in the conversation that are downloaded, newest
+    // first (at most six; `media-more` counts the others), and the other
+    // files: name, "2.4 MB · Today at 11:36", picture.
+    media: [image],
+    media-more: int,
+    files: [FileItem],
     friend: bool,
     blocked: bool,
     volume: float,

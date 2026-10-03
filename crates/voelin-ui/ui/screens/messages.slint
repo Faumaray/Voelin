@@ -551,6 +551,62 @@ export component DmProfile inherits Rectangle {
                     wrap: word-wrap;
                 }
             }
+            if Bridge.dm.media.length > 0: Divider { }
+            if Bridge.dm.media.length > 0: Text {
+                text: @tr("Shared Media — {}", Bridge.dm.media.length + Bridge.dm.media-more);
+                color: Theme.text;
+                font-weight: Theme.weight-semibold;
+            }
+            // Three pictures a row; the last cell counts the ones left out.
+            if Bridge.dm.media.length > 0: grid := Rectangle {
+                property <length> gap: Theme.space-2;
+                property <length> cell-w: (self.width - 2 * self.gap) / 3;
+                property <length> cell-h: self.cell-w * 0.75;
+                property <int> cells: Bridge.dm.media.length + (Bridge.dm.media-more > 0 ? 1 : 0);
+                height: ceil(self.cells / 3) * (self.cell-h + self.gap) - self.gap;
+                for picture[i] in Bridge.dm.media: Rectangle {
+                    x: mod(i, 3) * (grid.cell-w + grid.gap);
+                    y: floor(i / 3) * (grid.cell-h + grid.gap);
+                    width: grid.cell-w;
+                    height: grid.cell-h;
+                    border-radius: Theme.radius-md;
+                    clip: true;
+                    background: Theme.surface-2;
+                    accessible-role: AccessibleRole.image;
+                    accessible-label: @tr("Picture {}", i + 1);
+                    accessible-action-default => {
+                        Nav.lightbox = picture;
+                        Nav.lightbox-open = true;
+                    }
+                    Image {
+                        width: parent.width;
+                        height: parent.height;
+                        source: picture;
+                        image-fit: cover;
+                    }
+                    TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            Nav.lightbox = picture;
+                            Nav.lightbox-open = true;
+                        }
+                    }
+                }
+                if Bridge.dm.media-more > 0: Rectangle {
+                    x: mod(Bridge.dm.media.length, 3) * (grid.cell-w + grid.gap);
+                    y: floor(Bridge.dm.media.length / 3) * (grid.cell-h + grid.gap);
+                    width: grid.cell-w;
+                    height: grid.cell-h;
+                    border-radius: Theme.radius-md;
+                    background: Theme.surface-3;
+                    Text {
+                        text: "+" + Bridge.dm.media-more;
+                        color: Theme.text;
+                        font-size: Theme.font-lg;
+                        font-weight: Theme.weight-semibold;
+                    }
+                }
+            }
             Divider { }
             Text {
                 text: @tr("Shared Files — {}", Bridge.dm.files.length);
@@ -562,21 +618,31 @@ export component DmProfile inherits Rectangle {
                 Rectangle {
                     width: 34px;
                     height: 34px;
+                    y: (parent.height - self.height) / 2;
                     border-radius: Theme.radius-md;
-                    background: Theme.danger-soft;
+                    background: file.picture ? Theme.accent-soft : Theme.danger-soft;
                     Icon {
-                        source: Icons.file-text;
+                        source: file.picture ? Icons.image : Icons.file-text;
                         size: Theme.icon-sm;
-                        tint: Theme.danger;
+                        tint: file.picture ? Theme.accent-text : Theme.danger;
                     }
                 }
-                Text {
-                    text: file;
-                    color: Theme.text-secondary;
-                    font-size: Theme.font-sm;
-                    vertical-alignment: center;
+                VerticalLayout {
+                    alignment: center;
                     horizontal-stretch: 1;
-                    overflow: elide;
+                    spacing: 1px;
+                    Text {
+                        text: file.name;
+                        color: Theme.text;
+                        font-size: Theme.font-sm;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: file.detail;
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        overflow: elide;
+                    }
                 }
             }
             if Bridge.dm.files.length == 0: Text {

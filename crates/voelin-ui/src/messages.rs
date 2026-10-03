@@ -16,7 +16,7 @@ use voelin_core::{Command, HistoryMessage, OfflineMessage, OfflineMessageInfo, V
 use voelin_model::ChatTarget;
 use voelin_store::PageQuery;
 
-use crate::app::{App, Bridge, ConversationItem, DmPeer, Nav, OfflineForm, Page, later};
+use crate::app::{App, Bridge, ConversationItem, DmPeer, FileItem, Nav, OfflineForm, Page, later};
 use crate::vm;
 use crate::vm::social::{ago, list_time, matches, plain, preview};
 
@@ -500,18 +500,33 @@ impl App {
 				})
 				.collect()
 		};
-		let files: Vec<SharedString> = tab
-			.map(|t| {
-				t.messages
-					.iter()
-					.flat_map(|m| m.message.message.file_refs())
-					.map(|f| match f.size {
-						Some(size) => format!("{} · {}", f.name, vm::chat::size_text(size)).into(),
-						None => f.name.into(),
-					})
-					.collect()
-			})
-			.unwrap_or_default();
+		// The pictures that are here (newest first), and the other files.
+		let mut media = Vec::new();
+		let mut files = Vec::new();
+		for m in tab.iter().flat_map(|t| t.messages.iter().rev()) {
+			let message = &m.message.message;
+			for f in message.file_refs() {
+				if let Some(image) = view.and_then(|v| crate::previews::image_of(v, &f)) {
+					media.push(image);
+					continue;
+				}
+				let when = vm::chat::time_of(message.ts_ms);
+				files.push(FileItem {
+					picture: vm::chat::is_picture(&f.name),
+					detail: match f.size {
+						Some(size) => format!("{} · {when}", vm::chat::size_text(size)),
+						None => when,
+					}
+					.into(),
+					name: f.name.into(),
+					..Default::default()
+				});
+			}
+		}
+		let media_more = if media.len() > 6 { media.len() - 5 } else { 0 };
+		if media_more > 0 {
+			media.truncate(5);
+		}
 		let can_send = voice && here.is_some() && !blocked;
 		let offline =
 			voice && here.is_none() && view.is_some_and(|v| v.capabilities.offline_messages);
@@ -559,6 +574,8 @@ impl App {
 				.unwrap_or_default()
 				.into(),
 			servers: crate::app::model(servers),
+			media: crate::app::model(media),
+			media_more: media_more as i32,
 			files: crate::app::model(files),
 			friend: contact.is_some_and(|c| c.relation == voelin_core::Relation::Friend),
 			blocked,
