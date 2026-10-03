@@ -9472,6 +9472,7 @@ dependencies = [
  "base64 0.22.1",
  "dirs",
  "futures",
+ "hickory-resolver",
  "md5",
  "rusqlite",
  "serde",

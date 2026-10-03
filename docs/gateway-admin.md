@@ -80,7 +80,61 @@ Every login, post and settings change is written to the audit table.
 5. Install tsgw ([below](#install)), copy the example config to
    `/etc/tsgw/tsgw.toml` and set the query address and credentials
    (`TSGW_QUERY_PASSWORD` or `password_file`).
-6. Run it behind TLS (Caddy, nginx) and give users the `wss://…/v1` URL.
+6. Run it behind TLS (Caddy, nginx) and publish it in DNS
+   ([below](#letting-voelin-find-the-gateway)), so users only add the
+   server's address; or give them the `wss://…/v1` URL.
+
+## Letting Voelin find the gateway
+
+When a user adds a server by its address (`ts.example.org`), Voelin looks
+for its gateway the way TeamSpeak looks for the voice server (SRV
+`_ts3._udp`, then TSDNS), and uses what it finds as if the user had typed
+the URL (the field stays editable under *Advanced*). It asks at the
+server's host name and then at each parent domain down to the registered
+domain, the most specific name first; for `ts.example.org` that is
+`ts.example.org`, then `example.org`. It looks again when the server is
+saved with an empty gateway URL and when it connects with voice.
+
+**DNS records** (preferred). An SRV record names the gateway's host and
+port, the service name says whether it speaks TLS:
+
+| Record | Gives |
+|---|---|
+| `_tsgws._tcp.<name>  SRV <prio> <weight> <port> <host>` | `wss://<host>:<port>/v1` (TLS, e.g. behind Caddy or nginx) |
+| `_tsgw._tcp.<name>  SRV <prio> <weight> <port> <host>` | `ws://<host>:<port>/v1` (plain, e.g. tsgw itself on 7788) |
+| `_tsgws._tcp.<name>  TXT "path=/<path>"` (optional, same for `_tsgw`) | another path than `/v1`, e.g. behind a reverse proxy |
+
+At the same name TLS wins; among several records of one name the lowest
+priority. A target of `.` means "no gateway here" and the search goes on at
+the parent domain. Examples (zone of `example.org`):
+
+```dns
+; Behind a TLS proxy at gw.example.org that forwards /tsgw/v1 to tsgw:
+_tsgws._tcp.example.org.  3600 IN SRV 0 0 443 gw.example.org.
+_tsgws._tcp.example.org.  3600 IN TXT "path=/tsgw/v1"
+;   -> wss://gw.example.org:443/tsgw/v1 for ts.example.org, voice.example.org, …
+
+; tsgw itself, without TLS, next to the server ts.example.org:
+_tsgw._tcp.ts.example.org.  3600 IN SRV 0 0 7788 ts.example.org.
+;   -> ws://ts.example.org:7788/v1, only for ts.example.org
+```
+
+One domain with several servers and several gateways: publish one record
+per server host (`_tsgws._tcp.ts1.example.org`, `_tsgws._tcp.ts2.example.org`);
+a record at the domain itself applies to every host below it that has none
+of its own.
+
+**Without DNS records** (like TSDNS on port 41144): Voelin asks
+`http://<name>:7788/.well-known/tsgw` at the same names (and at an IP
+address the server was added by). tsgw answers there with its URL,
+`{"url": "…"}`: `listen.public_url` if set, else the address the request
+came in on (`ws://<host>:7788/v1`). So a tsgw that listens on the default
+port on the server's host is found with no setup at all; behind a proxy,
+set `listen.public_url` so the answer points at the proxy.
+
+Discovery is as trustworthy as DNS and the network, like TSDNS: prefer a
+`_tsgws` record, so TLS proves the gateway is yours. A user logs in with
+their own identity, and only when they choose to observe the server.
 
 ## Install
 

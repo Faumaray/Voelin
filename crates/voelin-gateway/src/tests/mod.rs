@@ -533,3 +533,37 @@ async fn admin_settings_apply_live() {
 	let stored = fx.hub.db.config_values().unwrap();
 	assert!(stored.iter().any(|(k, v)| k == "relay.nickname" && v == "Bridge"));
 }
+
+/// The gateway's answer at `/.well-known/tsgw`, as an app asks for it.
+async fn well_known(fx: &Fixture) -> String {
+	use tokio::io::{AsyncReadExt, AsyncWriteExt};
+	let host = fx.url.trim_start_matches("ws://").trim_end_matches("/v1");
+	let mut stream = tokio::net::TcpStream::connect(host).await.unwrap();
+	let request =
+		format!("GET /.well-known/tsgw HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+	stream.write_all(request.as_bytes()).await.unwrap();
+	let mut response = String::new();
+	stream.read_to_string(&mut response).await.unwrap();
+	assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+	let body = response.split_once("\r\n\r\n").unwrap().1;
+	let answer: serde_json::Value = serde_json::from_str(body).unwrap();
+	answer["url"].as_str().unwrap().to_owned()
+}
+
+/// Apps that know only the server's host ask the gateway on its port where
+/// it is (`voelin_core::discover`), then log in there.
+#[tokio::test(flavor = "multi_thread")]
+async fn tells_apps_where_it_is() {
+	let fx = Fixture::start("well-known", "").await;
+	let url = well_known(&fx).await;
+	assert_eq!(url, fx.url);
+	let (alice, _, _) = fx.people();
+	let login = Login::Identity { key: alice.key.clone(), key_offset: 0 };
+	let (client, _pushes) = connect(&url, login).await.unwrap();
+	assert!(client.has(feature::PRESENCE));
+
+	// Behind a proxy it gives the public URL instead.
+	let public = "[listen]\npublic_url = \"wss://gw.example.test/v1\"\n";
+	let fx = Fixture::start("well-known-public", public).await;
+	assert_eq!(well_known(&fx).await, "wss://gw.example.test/v1");
+}
