@@ -882,6 +882,13 @@ impl Stall {
 		self.connected.filter(|_| !self.checked)?.checked_add(wait)
 	}
 
+	/// A renegotiated connection waits from `now` again, if it is connected.
+	fn restart(&mut self, now: Instant) {
+		if self.connected.is_some() {
+			*self = Self { timeout: self.timeout, connected: Some(now), ..Self::default() };
+		}
+	}
+
 	/// The event to report at `now`, once, if media does not get through.
 	fn check(&mut self, now: Instant, offerer: bool, video: bool) -> Option<PeerEvent> {
 		if self.due(offerer).is_none_or(|due| now < due) {
@@ -1126,6 +1133,10 @@ impl Task {
 					.map_err(|e| PeerError::Sdp(e.to_string()))
 					.and_then(|offer| Ok(self.rtc.sdp_api().accept_offer(offer)?.to_sdp_string()))
 					.map(|answer| order_like_offer(&answer, &sdp));
+				if result.is_ok() {
+					// Another codec, maybe: it gets the whole wait anew.
+					self.stall.restart(Instant::now());
+				}
 				let _ = reply.send(result);
 			}
 			Cmd::RemoteCandidate(line) => {
@@ -1413,6 +1424,43 @@ mod tests {
 		});
 		assert_eq!(bits.count_ones(), 6);
 		assert_eq!(VideoFormat::from(VideoCodec::H264).bit(), VideoCodec::H264.bit());
+	}
+
+	/// Once per connection, after the timeout (twice it for a streamer),
+	/// anew after a renegotiation; never with `Duration::MAX`.
+	#[test]
+	fn stall_checks() {
+		let t0 = Instant::now();
+		let second = Duration::from_secs(1);
+		let mut viewer = Stall { timeout: second, ..Stall::default() };
+		assert!(viewer.check(t0 + 10 * second, false, true).is_none(), "not connected");
+		viewer.connected = Some(t0);
+		viewer.audio_in = true;
+		assert!(viewer.check(t0 + second / 2, false, true).is_none());
+		let event = viewer.check(t0 + second, false, true);
+		assert!(matches!(event, Some(PeerEvent::NoVideo { audio: true })), "{event:?}");
+		assert!(viewer.check(t0 + 2 * second, false, true).is_none(), "once");
+		// A new offer on the connection: the new codec gets its own wait.
+		viewer.restart(t0 + 2 * second);
+		viewer.video_in = true;
+		assert!(viewer.check(t0 + 4 * second, false, true).is_none(), "video came");
+		assert_eq!(viewer.due(false), None);
+
+		let mut streamer = Stall { timeout: second, connected: Some(t0), ..Stall::default() };
+		streamer.video_out = true;
+		assert!(streamer.check(t0 + second, true, true).is_none(), "a streamer waits longer");
+		assert!(matches!(streamer.check(t0 + 2 * second, true, true), Some(PeerEvent::NoFeedback)));
+		let mut working = Stall {
+			timeout: second,
+			connected: Some(t0),
+			video_out: true,
+			acknowledged: true,
+			..Stall::default()
+		};
+		assert!(working.check(t0 + 2 * second, true, true).is_none(), "the viewer reported");
+
+		let off = Stall { timeout: Duration::MAX, connected: Some(t0), ..Stall::default() };
+		assert_eq!(off.due(false), None);
 	}
 
 	/// The SDP lines that make up the media description (not the random ids,
