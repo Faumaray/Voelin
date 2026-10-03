@@ -9204,6 +9204,8 @@ dependencies = [
  "windows-capture",
  "x11rb",
  "yuv",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

@@ -27,7 +27,9 @@ av1 = ["dep:dav1d"]
 x11 = ["dep:x11rb", "dep:memmap2", "dep:rustix"]
 # Wayland screen capture (ScreenCast portal + PipeWire, shared memory or
 # LINEAR DMA-BUFs) and PipeWire system audio (Linux).
-pipewire = ["dep:ashpd", "dep:pipewire", "dep:memmap2", "dep:rustix"]
+# MJPEG cameras are decoded with zune-jpeg (already in the tree through
+# `image`).
+pipewire = ["dep:ashpd", "dep:pipewire", "dep:memmap2", "dep:rustix", "dep:zune-core", "dep:zune-jpeg"]
 # Screen capture on wlroots compositors (Sway, Hyprland, river, ...) without
 # the portal: ext-image-copy-capture-v1 or wlr-screencopy-unstable-v1 (Linux).
 wlroots = ["dep:wayland-client", "dep:wayland-protocols", "dep:wayland-protocols-wlr", "dep:memmap2", "dep:rustix"]
@@ -67,6 +69,8 @@ wayland-client = { version = "0.31.15", optional = true }
 wayland-protocols = { version = "0.32.13", features = ["client", "staging"], optional = true }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"], optional = true }
 x11rb = { version = "0.13.2", features = ["randr", "shm", "xfixes"], optional = true }
+zune-core = { version = "0.5.3", default-features = false, optional = true }
+zune-jpeg = { version = "0.5.15", optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 ndk = { version = "0.9.0", default-features = false, features = ["media", "api-level-29"] }

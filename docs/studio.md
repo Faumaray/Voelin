@@ -104,9 +104,22 @@ only three read-only enumeration ioctls are written by hand. Capture goes
 through PipeWire, which owns the devices on a current desktop: from the
 user's daemon, or in a sandbox from the XDG Camera portal (`ashpd`), both on
 the same PipeWire thread as screen capture. Raw formats (YUYV, UYVY, NV12,
-I420, packed RGB) are converted into pooled frames; MJPEG is not offered, so
-a camera that has both gives its raw format (often at a lower size at the
-highest rates). `camera::SYNTHETIC` is always listed: the test pattern, for
+I420, packed RGB) are converted into pooled frames. MJPEG, which many USB
+cameras offer for their large sizes only (the Fifine K420: 2560x1440 and
+1920x1080 only as MJPEG, raw up to 1280x720), is decoded by `zune-jpeg`
+straight into pooled RGBA frames on a thread of its own, latest-wins, so a
+decode that falls behind drops pictures rather than holding up the camera;
+the background filter then runs on that thread. A camera-like 1440p
+picture takes about 30 ms to decode (one core), so 1440p at 30 fps is about
+what that thread does.
+
+What PipeWire is offered comes from the V4L2 list, best first: the wanted
+size at the wanted rate in a raw format (nothing to decode), then the
+wanted size at any rate with MJPEG first, then every format at the sizes it
+lists, nearest the wanted size first. Every offer names sizes the driver
+lists for that format: PipeWire's V4L2 source takes a size on trust and
+then fails to set it (NV12 at 2560x1440 on a camera that has that size only
+as MJPEG). `camera::SYNTHETIC` is always listed: the test pattern, for
 tests and machines without a camera. `voelinctl studio cameras` prints the
 list.
 
@@ -314,6 +327,8 @@ two threads) takes about 3 ms at its own rate (15 fps by default).
 | Settings ⇄ studio in both directions | `voelin-core` `studio::tests` | tested |
 | WHIP: offer, answer, ICE, DTLS, VP8 and Opus arriving, refusal with the service's reason, `DELETE` on stop | `tests/studio_whip.rs` against a WHIP server built on str0m in the test (`--features whip`) | tested; no public WHIP service tried |
 | Real camera through the user's PipeWire (Fifine K420, 1280x720) | `camera::tests::a_real_camera_delivers` (`--ignored`) | tested on one webcam |
+| MJPEG: decoded into pooled frames (one frame reused), broken pictures refused, the decoder thread takes the newest | `camera::mjpeg::tests` | tested |
+| MJPEG from a real camera (Fifine K420) at 2560x1440, 1920x1080 and 1280x720 | `camera::tests::a_real_camera_delivers_its_largest_mjpeg_size` (`--ignored`, `VOELIN_CAMERA_SIZE` picks a size) | tested on one webcam: each size arrived at 10 fps, which is what the camera sent in that light (`v4l2-ctl` measured the same 10 fps) |
 | Camera through the XDG Camera portal (sandboxes) | – | compiles only |
 | Screen, window and portal sources | the existing capture backends ([media.md](media.md#capture)) | as tested there; not run inside the studio here |
 | Background blur, image and colour backdrops on the oval mask | `segment::tests` | tested; **no person segmentation model** (see above) |
