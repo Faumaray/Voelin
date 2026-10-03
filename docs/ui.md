@@ -302,7 +302,7 @@ the window's size so the pointer is not over the window, and passes
 | Phone layout | | | | |
 |---|---|---|---|---|
 | ![chat](screenshots/mobile-chat.png) | ![servers](screenshots/mobile-servers.png) | ![home](screenshots/mobile-home.png) | ![you](screenshots/mobile-you.png) | ![settings](screenshots/mobile-settings.png) |
-| ![studio](screenshots/mobile-studio.png) | | | | |
+| ![voice channel](screenshots/mobile-voice.png) | ![activity](screenshots/mobile-activity.png) | ![studio](screenshots/mobile-studio.png) | | |
 
 ## Limits
 

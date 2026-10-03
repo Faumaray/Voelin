@@ -9,6 +9,7 @@ import { Bridge, MemberItem, StreamItem } from "../bridge.slint";
 import { Nav, MobileTab } from "../nav.slint";
 import { Icon, IconButton, Button, ButtonKind, Avatar, LiveBadge, Select, Slider, SpeakingBars, ScrollView } from "../components/index.slint";
 import { MessageList, Composer } from "chat.slint";
+import { StudioBridge } from "../studio-bridge.slint";
 
 // Back to the navigation; a stream we watch goes on behind it.
 export global PhoneVoice {
@@ -505,8 +506,8 @@ component VoiceControl inherits VerticalLayout {
     }
 }
 
-// Mute, Deafen, Go Live (the Stream Studio), Share (the screen, at once)
-// and Leave.
+// Mute, Deafen, Go Live (the Stream Studio; "Live" while it or a share
+// is), Share (the screen, at once) and Leave.
 component VoiceBar inherits Rectangle {
     height: 84px;
     background: Theme.surface;
@@ -557,7 +558,7 @@ component VoiceBar inherits Rectangle {
                 }
             }
             Text {
-                text: Bridge.share-state == "live" ? @tr("Live") : @tr("Go Live");
+                text: Bridge.share-state == "live" || StudioBridge.status.live ? @tr("Live") : @tr("Go Live");
                 color: Theme.text;
                 font-size: Theme.font-xs;
                 font-weight: Theme.weight-semibold;
