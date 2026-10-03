@@ -44,8 +44,8 @@ use slint::{ComponentHandle, Rgba8Pixel, SharedPixelBuffer};
 use voelin_core::gateway::Pin;
 use voelin_core::stream::{StreamInfo, StreamKind};
 use voelin_core::{
-	Contact, Event, GatewayUpdate, HistoryMessage, HistorySource, ObserveState, Relation,
-	SessionState, Source, VoiceState,
+	Contact, Event, GatewayUpdate, HistoryMessage, HistorySource, ObserveState, OfflineMessageInfo,
+	Relation, SessionState, Source, VoiceState,
 };
 use voelin_gateway_proto::{
 	Action, Attendee, ConfigEntry, ConfigSource, EventInfo, EventKind, EventSpec, PermRule,
@@ -718,6 +718,23 @@ fn demo_social(app: &mut App) {
 	if let Some(p) = app.social.pokes.last_mut() {
 		p.ts_ms = now - 7 * min;
 	}
+	// Offline messages the server keeps (the Inbox tab).
+	let mail = |id: u32, from: &str, subject: &str, ago_min: i64, read: bool| OfflineMessageInfo {
+		id,
+		from_uid: from.into(),
+		subject: subject.into(),
+		ts_s: (now - ago_min * min) / 1000,
+		read,
+	};
+	app.handle_event(Event::OfflineMessages {
+		session,
+		request: 0,
+		result: Ok(vec![
+			mail(1, "demo-ari", "Raid roster for Friday", 3 * 60, false),
+			mail(2, "demo-neon", "The config for the dev server", 26 * 60, true),
+			mail(3, "demo-4", "Thumbnails for the stream", 3 * 24 * 60, true),
+		]),
+	});
 
 	// The pictures of the links, as if downloaded.
 	if let Some(view) = app.sessions.get_mut(&DEMO) {

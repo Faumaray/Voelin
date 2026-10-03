@@ -264,7 +264,7 @@ component HomeBanner inherits Rectangle {
         }
     }
     VerticalLayout {
-        padding: root.compact ? Theme.space-5 : Theme.space-7;
+        padding: Theme.space-5;
         padding-left: root.compact ? Theme.space-5 : 44px;
         spacing: Theme.space-3;
         alignment: center;
@@ -380,7 +380,7 @@ component FriendBubble inherits Rectangle {
     in property <ContactItem> friend;
     // The phone: smaller, the name only.
     in property <bool> compact;
-    width: compact ? 62px : 88px;
+    width: compact ? 62px : 82px;
     height: compact ? 80px : 118px;
     accessible-role: AccessibleRole.button;
     accessible-label: friend.name;
@@ -435,7 +435,8 @@ component FriendBubble inherits Rectangle {
     }
 }
 
-// A live stream on one of our servers.
+// A live stream on one of our servers: the picture fills the card, the
+// title, the streamer and where it is over its darker lower part.
 component LiveCard inherits Rectangle {
     in property <LiveItem> room;
     width: 256px;
@@ -443,8 +444,6 @@ component LiveCard inherits Rectangle {
     border-radius: Theme.radius-lg;
     clip: true;
     background: Theme.surface-2;
-    border-width: 1px;
-    border-color: touch.has-hover ? Theme.border-strong : Theme.border;
     accessible-role: AccessibleRole.button;
     accessible-label: room.title;
     accessible-description: room.streamer;
@@ -453,75 +452,67 @@ component LiveCard inherits Rectangle {
         mouse-cursor: MouseCursor.pointer;
         clicked => { Bridge.watch-live(root.room.session, root.room.id); }
     }
-    // The picture: a painted scene in the server's colour.
+    // A painted scene in the server's colour.
+    Art {
+        source: Icons.art-scenes[mod(root.room.session + root.room.streamer.character-count, 3)];
+        cover-width: parent.width;
+        cover-height: parent.height;
+        align-y: 0.3;
+    }
     Rectangle {
-        y: 0;
-        height: 104px;
-        clip: true;
-        Art {
-            source: Icons.art-scenes[mod(root.room.session + root.room.streamer.character-count, 3)];
-            cover-width: parent.width;
-            cover-height: parent.height;
-        }
-        Rectangle {
-            background: root.room.backdrop.with-alpha(0.2);
-        }
-        Rectangle {
-            y: parent.height - 50px;
-            height: 50px;
-            background: @linear-gradient(180deg, transparent 0%, #060a18e0 100%);
-        }
-        HorizontalLayout {
-            x: Theme.space-3;
-            y: Theme.space-3;
+        background: root.room.backdrop.with-alpha(0.2);
+    }
+    Rectangle {
+        y: parent.height * 0.3;
+        height: parent.height * 0.7;
+        background: @linear-gradient(180deg, transparent 0%, #060a18b0 45%, #060a18f0 100%);
+    }
+    HorizontalLayout {
+        x: Theme.space-3;
+        y: Theme.space-3;
+        height: 22px;
+        spacing: Theme.space-2;
+        LiveBadge {
+            large: true;
             height: 22px;
-            spacing: Theme.space-2;
-            LiveBadge {
-                large: true;
-                height: 22px;
-            }
-            if root.room.viewers > 0: Rectangle {
-                width: views.preferred-width + 14px;
-                border-radius: Theme.radius-xs;
-                background: #060a18a0;
-                views := HorizontalLayout {
-                    padding-left: 7px;
-                    spacing: Theme.space-2;
-                    Icon {
-                        source: Icons.eye;
-                        size: 13px;
-                        tint: #ffffff;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    Text {
-                        text: root.room.viewers;
-                        color: #ffffff;
-                        font-size: Theme.font-xs;
-                        vertical-alignment: center;
-                    }
+        }
+        if root.room.viewers > 0: Rectangle {
+            width: views.preferred-width + 14px;
+            border-radius: Theme.radius-xs;
+            background: #060a18a0;
+            views := HorizontalLayout {
+                padding-left: 7px;
+                spacing: Theme.space-2;
+                Icon {
+                    source: Icons.eye;
+                    size: 13px;
+                    tint: #ffffff;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: root.room.viewers;
+                    color: #ffffff;
+                    font-size: Theme.font-xs;
+                    vertical-alignment: center;
                 }
             }
         }
+    }
+    VerticalLayout {
+        alignment: end;
+        padding: Theme.space-3;
+        spacing: Theme.space-2;
         Text {
-            x: Theme.space-3;
-            y: parent.height - 30px;
-            width: parent.width - 2 * Theme.space-3;
             text: root.room.title;
             color: #ffffff;
             font-size: Theme.font-md;
             font-weight: Theme.weight-semibold;
             overflow: elide;
         }
-    }
-    VerticalLayout {
-        y: 104px;
-        height: parent.height - 104px;
-        padding: Theme.space-3;
-        spacing: Theme.space-2;
         HorizontalLayout {
-            spacing: Theme.space-3;
+            spacing: Theme.space-2;
             Avatar {
-                size: 24px;
+                size: 22px;
                 initials: root.room.initials;
                 tint: root.room.tint;
                 image: root.room.avatar;
@@ -529,29 +520,45 @@ component LiveCard inherits Rectangle {
             }
             Text {
                 text: root.room.streamer;
-                color: Theme.accent-text;
+                color: #8fb4ff;
                 font-size: Theme.font-sm;
                 font-weight: Theme.weight-medium;
                 vertical-alignment: center;
                 overflow: elide;
             }
         }
-        HorizontalLayout {
-            spacing: Theme.space-2;
-            alignment: start;
-            Chip {
-                text: root.room.server;
-                outlined: true;
-            }
-            if root.room.channel != "": Chip {
-                text: root.room.channel;
-                outlined: true;
-            }
-            if root.room.kind != "": Chip {
-                text: root.room.kind;
-                outlined: true;
+        // Where it is: the server, the channel, what is shared; cut at
+        // the card's edge.
+        Rectangle {
+            height: 22px;
+            clip: true;
+            HorizontalLayout {
+                x: 0;
+                width: self.preferred-width;
+                spacing: Theme.space-2;
+                Chip {
+                    text: root.room.server;
+                    tint: #dce4ff;
+                    fill: #ffffff1c;
+                }
+                if root.room.channel != "": Chip {
+                    text: root.room.channel;
+                    tint: #dce4ff;
+                    fill: #ffffff1c;
+                }
+                if root.room.kind != "": Chip {
+                    text: root.room.kind;
+                    tint: #dce4ff;
+                    fill: #ffffff1c;
+                }
             }
         }
+    }
+    // The hover ring over the picture.
+    Rectangle {
+        border-radius: parent.border-radius;
+        border-width: 1px;
+        border-color: touch.has-hover ? Theme.border-strong : #ffffff14;
     }
 }
 
@@ -665,9 +672,11 @@ component ServerCard inherits Rectangle {
 // A recent chat as a small card.
 component ChatCard inherits Rectangle {
     in property <ConversationItem> chat;
-    min-width: 180px;
+    // The four share the row evenly.
+    min-width: 120px;
+    preferred-width: 120px;
     horizontal-stretch: 1;
-    height: 76px;
+    height: 70px;
     border-radius: Theme.radius-lg;
     background: touch.has-hover ? Theme.surface-3 : Theme.surface-2;
     border-width: 1px;
@@ -805,9 +814,11 @@ component ChatRow inherits Rectangle {
     }
 }
 
-// A section title with an icon and a "See All" link.
+// A section title with an icon and a "See All" link, as low as its text so
+// the home page fits a window as in the design.
 component Section inherits SectionHeader {
     small: false;
+    min-height: 26px;
 }
 
 // What a friend does (the right column).
@@ -877,10 +888,18 @@ component ActivityRow inherits Rectangle {
 export component HomePage inherits Rectangle {
     // The phone layout: one column with the messages and the activity.
     in property <bool> compact;
+    // The column inside its padding; a friend's bubble and the gap after it.
+    property <length> row-width: sv.visible-width - 2 * Theme.space-4;
+    property <length> friend-gap: 6px;
+    property <length> friend-step: 82px + root.friend-gap;
+    // The next live stream into view.
+    function more-live() {
+        live-list.content-x = max(live-list.width - live-list.content-width, live-list.content-x - 268px);
+    }
     sv := ScrollView {
         VerticalLayout {
             width: sv.visible-width;
-            padding: root.compact ? Theme.space-4 : Theme.space-4;
+            padding: Theme.space-4;
             spacing: Theme.space-4;
             alignment: start;
             HomeBanner {
@@ -902,48 +921,56 @@ export component HomePage inherits Rectangle {
                 font-size: Theme.font-sm;
                 wrap: word-wrap;
             }
-            if Bridge.friends-online.length > 0: Flickable {
-                height: root.compact ? 80px : 118px;
-                content-width: max(self.width, friends-row.preferred-width);
-                content-height: self.height;
-                friends-row := HorizontalLayout {
-                    spacing: Theme.space-3;
-                    alignment: start;
-                    for friend in Bridge.friends-online: FriendBubble {
-                        friend: friend;
-                        compact: root.compact;
+            if Bridge.friends-online.length > 0: HorizontalLayout {
+                spacing: root.friend-gap;
+                alignment: start;
+                // On the desktop as many whole bubbles as fit (the rest
+                // scroll in), Find Friends right after the last one; the
+                // phone swipes through them all.
+                Flickable {
+                    width: root.compact ? root.row-width
+                        : min(Bridge.friends-online.length, max(1, floor((root.row-width - root.friend-step) / root.friend-step))) * root.friend-step - root.friend-gap;
+                    height: root.compact ? 80px : 118px;
+                    content-width: max(self.width, friends-row.preferred-width);
+                    content-height: self.height;
+                    friends-row := HorizontalLayout {
+                        spacing: root.compact ? Theme.space-3 : root.friend-gap;
+                        alignment: start;
+                        for friend in Bridge.friends-online: FriendBubble {
+                            friend: friend;
+                            compact: root.compact;
+                        }
                     }
-                    // Find friends.
-                    if !root.compact: Rectangle {
-                        width: 88px;
-                        accessible-role: AccessibleRole.button;
-                        accessible-label: @tr("Find Friends");
-                        accessible-action-default => { Nav.show(Page.friends); }
-                        VerticalLayout {
-                            alignment: start;
-                            spacing: Theme.space-3;
-                            HorizontalLayout {
-                                alignment: center;
-                                IconButton {
-                                    icon: Icons.plus;
-                                    label: @tr("Find Friends");
-                                    round: true;
-                                    filled: true;
-                                    size: 60px;
-                                    icon-size: Theme.icon-lg;
-                                    clicked => {
-                                        Nav.friends-tab = 1;
-                                        Bridge.friends-tab(1);
-                                        Nav.show(Page.friends);
-                                    }
+                }
+                if !root.compact: Rectangle {
+                    width: root.friend-step - root.friend-gap;
+                    accessible-role: AccessibleRole.button;
+                    accessible-label: @tr("Find Friends");
+                    accessible-action-default => { Nav.show(Page.friends); }
+                    VerticalLayout {
+                        alignment: start;
+                        spacing: Theme.space-3;
+                        HorizontalLayout {
+                            alignment: center;
+                            IconButton {
+                                icon: Icons.plus;
+                                label: @tr("Find Friends");
+                                round: true;
+                                filled: true;
+                                size: 60px;
+                                icon-size: Theme.icon-lg;
+                                clicked => {
+                                    Nav.friends-tab = 1;
+                                    Bridge.friends-tab(1);
+                                    Nav.show(Page.friends);
                                 }
                             }
-                            Text {
-                                text: @tr("Find Friends");
-                                color: Theme.text-secondary;
-                                font-size: Theme.font-sm;
-                                horizontal-alignment: center;
-                            }
+                        }
+                        Text {
+                            text: @tr("Find Friends");
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-sm;
+                            horizontal-alignment: center;
                         }
                     }
                 }
@@ -964,7 +991,7 @@ export component HomePage inherits Rectangle {
                 text: root.compact ? @tr("Live Now") : @tr("Featured Live Rooms");
                 icon: Icons.radio;
                 action: Bridge.live-rooms.length > 0 ? @tr("See More Live") : "";
-                action-clicked => { live-list.content-x = max(live-list.width - live-list.content-width, live-list.content-x - 268px); }
+                action-clicked => { root.more-live(); }
             }
             if Bridge.live-rooms.length == 0: Text {
                 text: @tr("No one is live on your servers right now. Streams of TeamSpeak 6 servers and those a gateway lists show up here.");
@@ -972,16 +999,28 @@ export component HomePage inherits Rectangle {
                 font-size: Theme.font-sm;
                 wrap: word-wrap;
             }
-            live-list := Flickable {
+            Rectangle {
                 height: Bridge.live-rooms.length > 0 ? 170px : 0px;
-                content-width: max(self.width, live-row.preferred-width);
-                content-height: self.height;
-                live-row := HorizontalLayout {
-                    spacing: Theme.space-3;
-                    alignment: start;
-                    for room in Bridge.live-rooms: LiveCard {
-                        room: room;
+                live-list := Flickable {
+                    content-width: max(self.width, live-row.preferred-width);
+                    content-height: self.height;
+                    live-row := HorizontalLayout {
+                        spacing: Theme.space-3;
+                        alignment: start;
+                        for room in Bridge.live-rooms: LiveCard {
+                            room: room;
+                        }
                     }
+                }
+                // More to the right: a round arrow over the edge.
+                if !root.compact && live-list.content-x > live-list.width - live-list.content-width + 1px: BannerArrow {
+                    width: 34px;
+                    height: 34px;
+                    x: parent.width - self.width - Theme.space-2;
+                    y: (parent.height - self.height) / 2;
+                    icon: Icons.chevron-right;
+                    label: @tr("See More Live");
+                    clicked => { root.more-live(); }
                 }
             }
             Section {
@@ -1198,8 +1237,12 @@ export component HomeAside inherits Rectangle {
                 font-size: Theme.font-sm;
                 wrap: word-wrap;
             }
-            for friend in Bridge.friend-activity: ActivityRow {
-                friend: friend;
+            // Close together, as in the design (each row lights up under
+            // the pointer).
+            VerticalLayout {
+                for friend in Bridge.friend-activity: ActivityRow {
+                    friend: friend;
+                }
             }
             Divider { }
             Section {

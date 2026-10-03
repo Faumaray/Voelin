@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use slint::{ComponentHandle, SharedString};
+use slint::{ComponentHandle, Image, SharedString};
 use voelin_core::{Command, HistoryMessage, OfflineMessage, OfflineMessageInfo, VoiceState};
 use voelin_model::ChatTarget;
 use voelin_store::PageQuery;
@@ -264,9 +264,11 @@ impl App {
 						time: list_time(m.ts_s * 1000).into(),
 						ago: ago(m.ts_s * 1000).into(),
 						unread: i32::from(!m.read),
-						initials: vm::avatar::initials(&name).into(),
+						// A letter in the sender's colour, no initials or
+						// picture under it.
+						initials: SharedString::new(),
 						tint: vm::avatar::tint(&name),
-						avatar: self.avatar_of(&m.from_uid),
+						avatar: Image::default(),
 						online: false,
 						selected: dm
 							.open

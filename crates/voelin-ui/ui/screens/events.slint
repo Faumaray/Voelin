@@ -18,10 +18,11 @@ export component ServerLinks inherits VerticalLayout {
         selected: Nav.page == Page.events;
         clicked => { Nav.show(Page.events); }
     }
+    // Not marked while the panel is open, as in the design: the header's
+    // members button shows that.
     NavItem {
         icon: Icons.users;
         text: @tr("Members");
-        selected: Nav.page == Page.server && Nav.right-panel-open && !Nav.pins-open && !Nav.topics-open;
         clicked => { Nav.show-members(); }
     }
 }
