@@ -391,9 +391,7 @@ impl App {
 				later(move |app| app.stored_dm(&uid, page.unwrap_or_default()));
 			});
 		}
-		if let Some(ui) = self.ui.upgrade() {
-			ui.global::<Nav>().invoke_show(Page::Messages);
-		}
+		self.navigate(|nav| nav.invoke_show(Page::Messages));
 		self.refresh_chats();
 	}
 

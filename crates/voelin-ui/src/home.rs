@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use slint::ComponentHandle;
 use voelin_core::VoiceState;
 
-use crate::app::{App, Bridge, HappeningItem, LiveItem, Nav, Page, RecordingItem};
+use crate::app::{App, Bridge, HappeningItem, LiveItem, Page, RecordingItem};
 use crate::vm;
 use crate::vm::social::{event_when, plain};
 
@@ -234,9 +234,7 @@ impl App {
 		match target {
 			Happening::Event(session, _) => {
 				self.select_server(session);
-				if let Some(ui) = self.ui.upgrade() {
-					ui.global::<Nav>().invoke_show(Page::Events);
-				}
+				self.navigate(|nav| nav.invoke_show(Page::Events));
 			}
 			Happening::News(session) => self.show_server(session),
 		}

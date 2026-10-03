@@ -181,6 +181,17 @@ mod tests {
 	}
 
 	#[test]
+	fn pictures_decode() {
+		let mut png = Vec::new();
+		let mut encoder = png::Encoder::new(&mut png, 4, 2);
+		encoder.set_color(png::ColorType::Rgba);
+		encoder.set_depth(png::BitDepth::Eight);
+		encoder.write_header().unwrap().write_image_data(&[200; 32]).unwrap();
+		assert_eq!(picture("test:4x2", &png).size().width, 4);
+		assert_eq!(picture("test:junk", b"not a picture").size().width, 0);
+	}
+
+	#[test]
 	fn emoji_images_decode() {
 		let image = emoji("1f600");
 		assert!(image.size().width > 0);

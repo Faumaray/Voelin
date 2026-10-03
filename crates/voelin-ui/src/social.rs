@@ -576,9 +576,18 @@ impl App {
 		if self.current != Some(session) {
 			self.select_server(session);
 		}
-		if let Some(ui) = self.ui.upgrade() {
-			ui.global::<Nav>().invoke_show(Page::Server);
-		}
+		self.navigate(|nav| nav.invoke_show(Page::Server));
+	}
+
+	/// Navigate after the current callback: `Nav`'s functions call back
+	/// into the app (`Bridge.open-*`), which is borrowed now.
+	pub(crate) fn navigate(&self, f: impl FnOnce(&Nav) + Send + 'static) {
+		let weak = self.ui.clone();
+		let _ = slint::invoke_from_event_loop(move || {
+			if let Some(ui) = weak.upgrade() {
+				f(&ui.global::<Nav>());
+			}
+		});
 	}
 
 	/// The pending watch (see [`Self::watch_person`]) once its stream shows.
@@ -700,16 +709,12 @@ impl App {
 			NoticeTarget::Dm(session, uid) => self.open_dm_with(Some(session), &uid),
 			NoticeTarget::Event(session, _) => {
 				self.select_server(session);
-				if let Some(ui) = self.ui.upgrade() {
-					ui.global::<Nav>().invoke_show(Page::Events);
-				}
+				self.navigate(|nav| nav.invoke_show(Page::Events));
 			}
 			NoticeTarget::Contact(uid) => {
 				self.social.selected = Some(uid);
 				self.refresh_people();
-				if let Some(ui) = self.ui.upgrade() {
-					ui.global::<Nav>().invoke_show(Page::Friends);
-				}
+				self.navigate(|nav| nav.invoke_show(Page::Friends));
 			}
 		}
 	}
@@ -1090,8 +1095,6 @@ impl App {
 		else {
 			return;
 		};
-		let Some(ui) = self.ui.upgrade() else { return };
-		let nav = ui.global::<Nav>();
 		match found {
 			Found::Server(id) => self.show_server(id),
 			Found::Channel(id, channel) => {
@@ -1109,9 +1112,9 @@ impl App {
 			Found::Contact(uid) => {
 				self.social.selected = Some(uid);
 				self.refresh_people();
-				nav.invoke_show(Page::Friends);
+				self.navigate(|nav| nav.invoke_show(Page::Friends));
 			}
-			Found::Setting(section) => nav.invoke_open_settings(section),
+			Found::Setting(section) => self.navigate(move |nav| nav.invoke_open_settings(section)),
 		}
 	}
 }
