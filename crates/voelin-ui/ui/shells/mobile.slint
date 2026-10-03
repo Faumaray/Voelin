@@ -164,34 +164,34 @@ export component MobileShell inherits Rectangle {
                 NavTab {
                     icon: Icons.home;
                     text: @tr("Home");
-                    selected: Nav.mobile-tab == MobileTab.home && Nav.page != Page.settings;
+                    selected: Nav.page == Page.home || Nav.page == Page.friends || Nav.page == Page.messages || Nav.page == Page.library || (Nav.mobile-tab == MobileTab.home && Nav.page == Page.server);
                     clicked => { Nav.show(Page.home); Nav.mobile-tab = MobileTab.home; }
                 }
                 NavTab {
                     icon: Icons.server;
                     text: @tr("Servers");
-                    selected: Nav.mobile-tab == MobileTab.servers && Nav.page != Page.settings;
+                    selected: (Nav.mobile-tab == MobileTab.servers && Nav.page == Page.server) || Nav.page == Page.events;
                     dot: Bridge.voice-connected;
                     clicked => { Nav.show(Page.server); Nav.mobile-tab = MobileTab.servers; }
                 }
                 NavTab {
                     icon: Bridge.viewer-open ? Icons.monitor : Icons.message-circle;
                     text: Bridge.viewer-open ? @tr("Stream") : @tr("Chat");
-                    selected: Nav.mobile-tab == MobileTab.chat && Nav.page != Page.settings;
+                    selected: Nav.mobile-tab == MobileTab.chat && Nav.page == Page.server;
                     badge: root.unread;
                     clicked => { Nav.show(Page.server); Nav.mobile-tab = MobileTab.chat; }
                 }
                 NavTab {
                     icon: Icons.activity;
                     text: @tr("Activity");
-                    selected: Nav.mobile-tab == MobileTab.activity && Nav.page != Page.settings;
+                    selected: Nav.mobile-tab == MobileTab.activity && Nav.page == Page.server;
                     badge: Bridge.share-requests;
                     clicked => { Nav.show(Page.server); Nav.mobile-tab = MobileTab.activity; }
                 }
                 NavTab {
                     icon: Icons.user;
                     text: @tr("You");
-                    selected: Nav.mobile-tab == MobileTab.you || Nav.page == Page.settings;
+                    selected: (Nav.mobile-tab == MobileTab.you && Nav.page == Page.server) || Nav.page == Page.settings;
                     clicked => { Nav.show(Page.server); Nav.mobile-tab = MobileTab.you; }
                 }
             }

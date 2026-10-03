@@ -893,6 +893,8 @@ impl App {
 			Event::Transfer { session, transfer, state } => {
 				self.transfer_progress(session as i64, transfer, state);
 			}
+			// The engine's contacts would replace the sample ones.
+			Event::ContactsChanged { .. } if self.demo_ui && !self.contacts.is_empty() => {}
 			Event::ContactsChanged { contacts } => {
 				self.contacts = contacts.iter().map(|c| (c.uid.clone(), c.clone())).collect();
 				self.refresh_member_card();

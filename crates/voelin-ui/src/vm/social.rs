@@ -66,7 +66,15 @@ pub fn plain(text: &str) -> String {
 		}
 	}
 	out.push_str(rest);
+	// Plain text draws no emoji (they are pictures in the chat): leave
+	// them out of one-line previews.
+	let out: String = out.chars().filter(|c| !is_emoji(*c)).collect();
 	out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Pictographs, symbols and their joiners and variation selectors.
+fn is_emoji(c: char) -> bool {
+	matches!(u32::from(c), 0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0xFE0F | 0x200D)
 }
 
 /// `b`, `/url`, `URL=https://…`, `color=#f00`: a BBCode tag.
@@ -195,6 +203,7 @@ mod tests {
 		assert_eq!(plain("see [URL=https://x.org]this[/URL]"), "see this");
 		assert_eq!(plain("a [not a tag here] b"), "a [not a tag here] b");
 		assert_eq!(plain("[1] item"), "[1] item");
+		assert_eq!(plain("later? 👀 Posting ❤️"), "later? Posting");
 		assert_eq!(preview("Hello", true, &[]), "You: Hello");
 		let file = |name: &str| voelin_model::FileRef { name: name.into(), ..Default::default() };
 		assert_eq!(

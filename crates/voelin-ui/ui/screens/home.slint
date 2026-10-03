@@ -208,7 +208,7 @@ component HomeBanner inherits Rectangle {
     property <int> slide: 0;
     property <int> count: Bridge.servers.length + 1;
     property <ServerItem> server: Bridge.servers[max(0, root.slide - 1)];
-    min-height: compact ? 200px : 236px;
+    min-height: compact ? 200px : 212px;
     border-radius: Theme.radius-xl;
     clip: true;
     background: root.slide == 0
@@ -363,8 +363,10 @@ component HomeBanner inherits Rectangle {
 // A friend in the "Friends Online" row.
 component FriendBubble inherits Rectangle {
     in property <ContactItem> friend;
-    width: 88px;
-    height: 128px;
+    // The phone: smaller, the name only.
+    in property <bool> compact;
+    width: compact ? 62px : 88px;
+    height: compact ? 80px : 118px;
     accessible-role: AccessibleRole.button;
     accessible-label: friend.name;
     accessible-description: friend.status;
@@ -382,7 +384,7 @@ component FriendBubble inherits Rectangle {
         HorizontalLayout {
             alignment: center;
             Avatar {
-                size: 60px;
+                size: root.compact ? 50px : 60px;
                 initials: root.friend.initials;
                 tint: root.friend.tint;
                 image: root.friend.avatar;
@@ -401,14 +403,19 @@ component FriendBubble inherits Rectangle {
             horizontal-alignment: center;
             overflow: elide;
         }
-        Text {
-            text: root.friend.status;
-            color: Theme.text-muted;
-            font-size: Theme.font-xs;
-            horizontal-alignment: center;
-            wrap: word-wrap;
-            overflow: elide;
-            max-height: 30px * Theme.font-scale;
+        // Two lines at most.
+        if !root.compact: Rectangle {
+            height: 27px * Theme.font-scale;
+            clip: true;
+            Text {
+                y: 0;
+                width: parent.width;
+                text: root.friend.status;
+                color: Theme.text-muted;
+                font-size: Theme.font-xs;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
         }
     }
 }
@@ -417,7 +424,7 @@ component FriendBubble inherits Rectangle {
 component LiveCard inherits Rectangle {
     in property <LiveItem> room;
     width: 256px;
-    height: 182px;
+    height: 170px;
     border-radius: Theme.radius-lg;
     clip: true;
     background: Theme.surface-2;
@@ -434,7 +441,7 @@ component LiveCard inherits Rectangle {
     // The picture: the server's colour, a sky and the kind of stream.
     Rectangle {
         y: 0;
-        height: 112px;
+        height: 104px;
         background: @linear-gradient(150deg, root.room.backdrop.darker(0.2) 0%, #1c1470 60%, #070c1d 100%);
         Stars { }
         Icon {
@@ -490,8 +497,8 @@ component LiveCard inherits Rectangle {
         }
     }
     VerticalLayout {
-        y: 112px;
-        height: parent.height - 112px;
+        y: 104px;
+        height: parent.height - 104px;
         padding: Theme.space-3;
         spacing: Theme.space-2;
         HorizontalLayout {
@@ -537,7 +544,7 @@ component ServerCard inherits Rectangle {
     min-width: 180px;
     max-width: 280px;
     horizontal-stretch: 1;
-    height: 172px;
+    height: 158px;
     border-radius: Theme.radius-lg;
     clip: true;
     background: Theme.surface-2;
@@ -770,7 +777,7 @@ export component HomePage inherits Rectangle {
         VerticalLayout {
             width: sv.visible-width;
             padding: root.compact ? Theme.space-4 : Theme.space-4;
-            spacing: root.compact ? Theme.space-4 : Theme.space-5;
+            spacing: Theme.space-4;
             alignment: start;
             HomeBanner {
                 compact: root.compact;
@@ -778,7 +785,7 @@ export component HomePage inherits Rectangle {
             Section {
                 text: @tr("Friends Online");
                 icon: Icons.users;
-                action: @tr("View All ({})", Bridge.contacts-online);
+                action: @tr("View All ({})", Bridge.friends-online.length);
                 action-clicked => {
                     Nav.friends-tab = 0;
                     Bridge.friends-tab(0);
@@ -792,7 +799,7 @@ export component HomePage inherits Rectangle {
                 wrap: word-wrap;
             }
             if Bridge.friends-online.length > 0: Flickable {
-                height: 128px;
+                height: root.compact ? 80px : 118px;
                 content-width: max(self.width, friends-row.preferred-width);
                 content-height: self.height;
                 friends-row := HorizontalLayout {
@@ -800,9 +807,10 @@ export component HomePage inherits Rectangle {
                     alignment: start;
                     for friend in Bridge.friends-online: FriendBubble {
                         friend: friend;
+                        compact: root.compact;
                     }
                     // Find friends.
-                    Rectangle {
+                    if !root.compact: Rectangle {
                         width: 88px;
                         accessible-role: AccessibleRole.button;
                         accessible-label: @tr("Find Friends");
@@ -861,7 +869,7 @@ export component HomePage inherits Rectangle {
                 wrap: word-wrap;
             }
             live-list := Flickable {
-                height: Bridge.live-rooms.length > 0 ? 182px : 0px;
+                height: Bridge.live-rooms.length > 0 ? 170px : 0px;
                 content-width: max(self.width, live-row.preferred-width);
                 content-height: self.height;
                 live-row := HorizontalLayout {

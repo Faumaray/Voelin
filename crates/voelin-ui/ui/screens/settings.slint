@@ -387,11 +387,6 @@ component CameraCard inherits Card {
                 Bridge.video-changed(Bridge.video);
             }
         }
-        Button {
-            icon: Icons.settings;
-            text: @tr("Camera Settings");
-            clicked => { Nav.open-settings(SettingsSection.devices); }
-        }
     }
 }
 
