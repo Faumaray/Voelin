@@ -91,9 +91,18 @@ pub static UI_IMAGE_CACHE_MB: Key<u32> = Key::new(
 	|| 64,
 );
 
+/// `ui.members_width`: how wide the members and streams panel is, in
+/// pixels. Dragging its handle stores it; there is no built-in maximum.
+pub static UI_MEMBERS_WIDTH: Key<u32> = Key::new(
+	"ui.members_width",
+	Kind::UInt { min: 0 },
+	"Width of the members and streams panel in pixels.",
+	|| 280,
+);
+
 /// The UI's keys besides [`UI`] and [`CLIENT_PLAYBACK`], for registering.
-pub fn appearance_keys() -> [&'static dyn voelin_core::settings::Setting; 4] {
-	[&UI_THEME, &UI_FONT_SCALE, &UI_NARROW_BREAKPOINT, &UI_IMAGE_CACHE_MB]
+pub fn appearance_keys() -> [&'static dyn voelin_core::settings::Setting; 5] {
+	[&UI_THEME, &UI_FONT_SCALE, &UI_NARROW_BREAKPOINT, &UI_IMAGE_CACHE_MB, &UI_MEMBERS_WIDTH]
 }
 
 /// Frame rates and bitrates (kbit/s) the share dialog offers; any other

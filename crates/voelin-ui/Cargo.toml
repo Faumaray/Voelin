@@ -31,6 +31,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 unicode-segmentation = "1.13"
 voelin-audio = { path = "../voelin-audio" }
 voelin-core = { path = "../voelin-core", default-features = false, features = ["audio-device"] }
+# Gateway data types (topics, pins, reactions, capability names).
+voelin-gateway-proto = { path = "../voelin-gateway-proto" }
 voelin-model = { path = "../voelin-model" }
 # Crash reports and notices everywhere; hotkey backends on desktop (below).
 voelin-platform = { path = "../voelin-platform", default-features = false }

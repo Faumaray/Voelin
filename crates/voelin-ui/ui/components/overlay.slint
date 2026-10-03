@@ -286,11 +286,13 @@ export component ResizeHandle inherits Rectangle {
     accessible-value: round(size / 1px);
     accessible-action-increment => { size = min(maximum, size + 16px); }
     accessible-action-decrement => { size = max(minimum, size - 16px); }
-    Rectangle {
-        width: 2px;
-        height: 36px;
-        border-radius: 1px;
-        background: touch.has-hover || touch.pressed ? Theme.accent : Theme.border-strong;
+    // Three dots, as a grip.
+    for i in 3: Rectangle {
+        y: (parent.height - 22px) / 2 + i * 9px;
+        width: 4px;
+        height: 4px;
+        border-radius: 2px;
+        background: touch.has-hover || touch.pressed ? Theme.accent : Theme.text-muted;
     }
     // The handle moves with the edge, so each move adds the distance from
     // where it was pressed.

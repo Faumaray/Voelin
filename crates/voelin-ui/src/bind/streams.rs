@@ -37,4 +37,7 @@ pub(super) fn wire(ui: &MainWindow) {
 	bridge.on_toggle_fullscreen(|| {
 		with_app(|app| app.toggle_fullscreen());
 	});
+	bridge.on_set_stream_quality(|index| {
+		with_app(|app| app.set_stream_quality(index));
+	});
 }

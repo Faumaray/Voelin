@@ -226,11 +226,15 @@ impl App {
 				.into(),
 		);
 		bridge.set_nickname(bookmark.map(|b| b.nickname.clone()).unwrap_or_default().into());
-		let own_channel = view
-			.and_then(|v| state.own_channel.and_then(|c| v.presence.channels.get(&c)))
-			.map(|c| c.name.clone())
-			.unwrap_or_default();
-		bridge.set_own_channel(own_channel.into());
+		let own_channel =
+			view.and_then(|v| state.own_channel.and_then(|c| v.presence.channels.get(&c)));
+		bridge.set_own_channel(own_channel.map(|c| c.name.clone()).unwrap_or_default().into());
+		bridge.set_own_channel_topic(
+			own_channel.and_then(|c| c.topic.clone()).unwrap_or_default().into(),
+		);
+		bridge.set_own_channel_limit(
+			own_channel.and_then(|c| c.max_clients).filter(|m| *m >= 0).unwrap_or(-1),
+		);
 		bridge.set_voice_connected(state.voice == VoiceState::Connected);
 		bridge.set_voice_connecting(state.voice == VoiceState::Connecting);
 		bridge.set_observing(state.observe != ObserveState::Off);
@@ -255,11 +259,13 @@ impl App {
 		}
 	}
 
-	/// The channel tree and the members of our channel.
+	/// The channel tree, the members of our channel and everyone on the
+	/// server.
 	pub(crate) fn refresh_tree(&self) {
 		let Some(view) = self.view() else {
 			vm::list::sync(&self.models.tree, &[]);
 			vm::list::sync(&self.models.members, &[]);
+			vm::list::sync(&self.models.server_members, &[]);
 			return;
 		};
 		let input = vm::tree::TreeInput {
@@ -270,14 +276,44 @@ impl App {
 			own_channel: view.state.own_channel,
 			own_client: view.state.own_client,
 			filter: &self.tree_filter,
+			avatars: &view.avatars,
+			icons: &view.icons,
+			groups: &view.server_groups,
 		};
 		vm::list::sync(&self.models.tree, &vm::tree::rows(&input));
-		let members = if view.state.voice == VoiceState::Connected {
-			vm::tree::members(&input)
-		} else {
-			Vec::new()
-		};
+		let connected = view.state.voice == VoiceState::Connected;
+		let members = if connected { vm::tree::members(&input) } else { Vec::new() };
 		vm::list::sync(&self.models.members, &members);
+		// The people in our channel first while their view is shown.
+		let watching = self.watch.as_ref().is_some_and(|w| w.shown);
+		let voice_first = connected && (self.voice_view || watching);
+		let everyone = vm::tree::server_members(&input, voice_first);
+		let filter = self.member_filter.trim().to_lowercase();
+		let shown =
+			if filter.is_empty() { everyone } else { vm::tree::matching(everyone, &filter) };
+		vm::list::sync(&self.models.server_members, &shown);
+		if let Some(ui) = self.ui.upgrade() {
+			let total = view.presence.clients.values().filter(|c| !c.is_query).count();
+			ui.global::<crate::app::Bridge>().set_member_total(total as i32);
+		}
+	}
+
+	/// The members panel's search.
+	pub(crate) fn search_members(&mut self, text: String) {
+		if self.member_filter != text {
+			self.member_filter = text;
+			self.refresh_tree();
+		}
+	}
+
+	/// The voice channel view was opened or closed: its chat is our
+	/// channel's, and its people lead the members panel.
+	pub(crate) fn show_voice_view(&mut self, on: bool) {
+		self.voice_view = on;
+		if on && let Some(channel) = self.view().and_then(|v| v.state.own_channel) {
+			self.open_chat(voelin_model::ChatTarget::Channel(channel), true);
+		}
+		self.refresh_tree();
 	}
 
 	pub(crate) fn toggle_collapse(&mut self, channel: u64) {

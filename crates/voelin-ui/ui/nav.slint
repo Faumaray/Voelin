@@ -42,6 +42,18 @@ export global Nav {
     in-out property <length> right-panel-width: 280px;
     // Incremented to focus the search field (Ctrl+K).
     in-out property <int> search-requests;
+    // The voice channel we are in (people, streams, its chat) instead of
+    // the plain chat.
+    in-out property <bool> voice-view: false;
+    // Drawers in place of the members panel (gateway features).
+    in-out property <bool> pins-open;
+    in-out property <bool> topics-open;
+    // The message the emoji picker reacts to; 0: it fills the composer.
+    in-out property <int> react-key;
+    // "Start a topic" asks for a title first.
+    in-out property <bool> topic-form-open;
+    in-out property <int> topic-form-key;
+    in-out property <string> topic-form-title;
 
     // Dialogs.
     in-out property <bool> about-open;
@@ -102,6 +114,48 @@ export global Nav {
         if Bridge.open-client(id) {
             client-open = true;
         }
+    }
+
+    // The pins and the topics share the drawer, so opening one closes the
+    // other.
+    public function show-pins(on: bool) {
+        pins-open = on;
+        if on {
+            topics-open = false;
+            Bridge.open-pins();
+        }
+    }
+
+    public function show-topics(on: bool) {
+        topics-open = on;
+        if on {
+            pins-open = false;
+            Bridge.open-topics();
+        }
+    }
+
+    // The members button: back from a drawer, or the panel on and off.
+    public function toggle-members() {
+        if pins-open || topics-open {
+            pins-open = false;
+            topics-open = false;
+            right-panel-open = true;
+        } else {
+            right-panel-open = !right-panel-open;
+        }
+    }
+
+    // The voice channel view, or back to the chat (Rust opens the
+    // channel's chat and puts the people in it first in the panel).
+    public function show-voice(on: bool) {
+        voice-view = on;
+        Bridge.show-voice-view(on);
+    }
+
+    public function start-topic(key: int) {
+        topic-form-key = key;
+        topic-form-title = "";
+        topic-form-open = true;
     }
 
     public function select-server(id: int) {

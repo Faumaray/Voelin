@@ -1,11 +1,12 @@
-// The chat: header, chat tabs, messages (virtualised), the composer with
-// the emoji picker.
+// The chat: header, chat tabs, the compact voice bar, messages
+// (virtualised) with reactions, pins and file cards, and the composer with
+// the emoji picker and the file attachment.
 
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
-import { Bridge, ChatLine } from "../bridge.slint";
+import { Bridge, ChatLine, ReactionItem, FileItem, Images } from "../bridge.slint";
 import { Nav } from "../nav.slint";
-import { Icon, IconButton, Avatar, Chip, TabItem, TextField, RichText, Banner, Button, ButtonKind, ListView } from "../components/index.slint";
+import { Icon, IconButton, Avatar, Chip, TabItem, TextField, RichText, Banner, Button, ButtonKind, Spinner, Tooltip, ListView } from "../components/index.slint";
 
 // The header of the main area: an icon, a title and a description, and
 // actions (@children) at the right.
@@ -57,19 +58,230 @@ export component PageHeader inherits Rectangle {
     }
 }
 
+// The emoji under a message; clicking one adds or removes ours, the last
+// pill picks another.
+export component Reactions inherits HorizontalLayout {
+    in property <int> key;
+    in property <[ReactionItem]> model;
+    spacing: Theme.space-3;
+    alignment: start;
+    for reaction in root.model: Rectangle {
+        width: pill.preferred-width + 22px;
+        height: 30px;
+        border-radius: Theme.radius-pill;
+        background: reaction.me ? Theme.accent-soft : area.has-hover ? Theme.surface-3 : Theme.surface-2;
+        border-width: 1px;
+        border-color: reaction.me ? Theme.accent : Theme.border-strong;
+        accessible-role: AccessibleRole.button;
+        accessible-label: @tr("{} reacted {} times", reaction.text, reaction.count);
+        accessible-checkable: true;
+        accessible-checked: reaction.me;
+        accessible-action-default => { Bridge.react(root.key, reaction.text); }
+        area := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { Bridge.react(root.key, reaction.text); }
+        }
+        pill := HorizontalLayout {
+            spacing: Theme.space-3;
+            alignment: center;
+            if reaction.key != "": Image {
+                width: 18px;
+                height: 18px;
+                source: Images.emoji(reaction.key);
+                y: (parent.height - self.height) / 2;
+            }
+            if reaction.key == "": Text {
+                text: reaction.text;
+                font-size: Theme.font-body;
+                vertical-alignment: center;
+            }
+            Text {
+                text: reaction.count;
+                color: reaction.me ? Theme.accent-text : Theme.text-secondary;
+                font-size: Theme.font-sm;
+                font-weight: Theme.weight-semibold;
+                vertical-alignment: center;
+            }
+        }
+    }
+    if Bridge.has-reactions: Rectangle {
+        width: 40px;
+        height: 30px;
+        border-radius: Theme.radius-pill;
+        background: add.has-hover ? Theme.surface-3 : Theme.surface-2;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        accessible-role: AccessibleRole.button;
+        accessible-label: @tr("Add a reaction");
+        accessible-action-default => {
+            Nav.react-key = root.key;
+            Nav.emoji-open = true;
+        }
+        Icon {
+            source: Icons.smile-plus;
+            size: 18px;
+            tint: Theme.text-secondary;
+        }
+        add := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                Nav.react-key = root.key;
+                Nav.emoji-open = true;
+            }
+        }
+    }
+}
+
+// A file a message links: name, size or progress, and a download button.
+component FileCard inherits Rectangle {
+    in property <int> key;
+    in property <FileItem> file;
+    height: 64px;
+    border-radius: Theme.radius-lg;
+    background: Theme.surface-2;
+    border-width: 1px;
+    border-color: file.state == "failed" ? Theme.danger : Theme.border-strong;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: file.name;
+    HorizontalLayout {
+        padding: Theme.space-3;
+        padding-left: Theme.space-4;
+        spacing: Theme.space-4;
+        Rectangle {
+            width: 40px;
+            height: 40px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 20px;
+            background: Theme.surface-4;
+            Icon {
+                source: file.picture ? Icons.image : Icons.file-text;
+                size: Theme.icon-md;
+                tint: Theme.accent-text;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: 2px;
+            Text {
+                text: file.name;
+                color: Theme.text;
+                font-size: Theme.font-md;
+                font-weight: Theme.weight-medium;
+                overflow: elide;
+            }
+            Text {
+                text: file.detail;
+                color: file.state == "failed" ? Theme.danger : Theme.text-secondary;
+                font-size: Theme.font-sm;
+                overflow: elide;
+            }
+            if file.state == "running": Rectangle {
+                height: 3px;
+                border-radius: 1.5px;
+                background: Theme.surface-4;
+                Rectangle {
+                    x: 0;
+                    width: parent.width * file.progress;
+                    height: parent.height;
+                    border-radius: parent.border-radius;
+                    background: Theme.accent;
+                }
+            }
+        }
+        if file.state != "running": IconButton {
+            icon: file.state == "done" ? Icons.folder-open : Icons.download;
+            label: file.state == "done" ? @tr("Downloaded") : @tr("Download {}", file.name);
+            y: (parent.height - self.height) / 2;
+            clicked => { Bridge.download-file(root.key, file.index); }
+        }
+        if file.state == "running": Spinner {
+            size: 18px;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+}
+
+// Quick reactions, pin and "start a topic" on a hovered message.
+component MessageActions inherits Rectangle {
+    in property <int> key;
+    in property <bool> pinned;
+    width: row.preferred-width;
+    height: 30px;
+    border-radius: Theme.radius-md;
+    background: Theme.surface-3;
+    border-width: 1px;
+    border-color: Theme.border-strong;
+    row := HorizontalLayout {
+        padding-left: 2px;
+        padding-right: 2px;
+        spacing: 0px;
+        if Bridge.has-reactions: HorizontalLayout {
+            spacing: 0px;
+            for quick in ["1f44d", "2764", "1f389", "1f602", "1f440"]: Rectangle {
+                width: 26px;
+                accessible-role: AccessibleRole.button;
+                accessible-label: @tr("React");
+                accessible-action-default => { Bridge.react(root.key, Images.emoji-text(quick)); }
+                Image {
+                    width: 16px;
+                    height: 16px;
+                    source: Images.emoji(quick);
+                }
+                TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => { Bridge.react(root.key, Images.emoji-text(quick)); }
+                }
+            }
+        }
+        if Bridge.has-reactions: IconButton {
+            icon: Icons.smile-plus;
+            label: @tr("More emoji");
+            size: 26px;
+            icon-size: Theme.icon-sm;
+            clicked => {
+                Nav.react-key = root.key;
+                Nav.emoji-open = true;
+            }
+        }
+        if Bridge.has-pins: IconButton {
+            icon: Icons.pin;
+            label: root.pinned ? @tr("Unpin") : @tr("Pin");
+            checked: root.pinned;
+            size: 26px;
+            icon-size: Theme.icon-sm;
+            clicked => { Bridge.pin(root.key, !root.pinned); }
+        }
+        if Bridge.has-topics: IconButton {
+            icon: Icons.messages-square;
+            label: @tr("Start a topic");
+            size: 26px;
+            icon-size: Theme.icon-sm;
+            clicked => { Nav.start-topic(root.key); }
+        }
+    }
+}
+
 // One message; `continued` lines (same author just before) omit the header.
-component MessageRow inherits Rectangle {
+export component MessageRow inherits Rectangle {
     in property <ChatLine> line;
-    property <length> avatar: 40px;
+    // The pins and topic lists show messages without their actions.
+    in property <bool> actions: true;
+    property <length> avatar: 44px;
     min-height: body.preferred-height;
+    background: line.marked ? Theme.accent-soft : hover.has-hover ? Theme.surface-2.transparentize(0.6) : transparent;
     accessible-role: AccessibleRole.list-item;
     accessible-label: line.author + ": " + line.text;
     accessible-description: line.time;
+    hover := TouchArea {
+        // Let clicks through to the buttons inside.
+        mouse-cursor: MouseCursor.default;
+    }
     body := HorizontalLayout {
         padding-left: Theme.space-6;
         padding-right: Theme.space-6;
-        padding-top: line.continued ? 1px : Theme.space-4;
-        padding-bottom: 1px;
+        padding-top: line.continued ? 2px : Theme.space-5;
+        padding-bottom: 2px;
         spacing: Theme.space-4;
         VerticalLayout {
             width: root.avatar;
@@ -78,6 +290,7 @@ component MessageRow inherits Rectangle {
                 size: root.avatar;
                 initials: line.initials;
                 tint: line.tint;
+                image: line.avatar;
                 label: line.author;
             }
         }
@@ -90,14 +303,14 @@ component MessageRow inherits Rectangle {
                 Text {
                     text: line.author;
                     color: line.relayed ? Theme.accent-text : Theme.name-text;
-                    font-size: Theme.font-md;
-                    font-weight: Theme.weight-semibold;
+                    font-size: Theme.font-lg;
+                    font-weight: Theme.weight-medium;
                     vertical-alignment: center;
                 }
                 Text {
                     text: line.time;
                     color: Theme.text-muted;
-                    font-size: Theme.font-xs;
+                    font-size: Theme.font-sm;
                     vertical-alignment: center;
                 }
                 if line.relayed: Chip {
@@ -106,15 +319,213 @@ component MessageRow inherits Rectangle {
                     tint: Theme.accent-text;
                     y: (parent.height - self.height) / 2;
                 }
+                if line.pinned: Chip {
+                    text: @tr("pinned");
+                    icon: Icons.pin;
+                    tint: Theme.warning;
+                    y: (parent.height - self.height) / 2;
+                }
+                if line.topic != "": Chip {
+                    text: line.topic;
+                    icon: Icons.messages-square;
+                    tint: Theme.accent-text;
+                    y: (parent.height - self.height) / 2;
+                }
             }
-            if !line.rich: Text {
+            if line.blocked: Text {
+                text: @tr("Message from a blocked contact.");
+                color: Theme.text-disabled;
+                font-size: Theme.font-sm;
+                font-italic: true;
+            }
+            if !line.blocked && !line.rich && line.text != "": Text {
                 text: line.text;
                 color: Theme.text;
+                font-size: Theme.font-md;
                 wrap: word-wrap;
             }
-            if line.rich: RichText {
+            if !line.blocked && line.rich: RichText {
                 runs: line.runs;
-                emoji-size: line.jumbo ? 44px : Theme.font-body * 1.4;
+                font-size: Theme.font-md;
+                emoji-size: line.jumbo ? 44px : Theme.font-md * 1.4;
+            }
+            if line.files.length > 0 && !line.blocked: VerticalLayout {
+                padding-top: Theme.space-2;
+                padding-bottom: Theme.space-1;
+                spacing: Theme.space-2;
+                for file in line.files: FileCard {
+                    key: line.key;
+                    file: file;
+                    max-width: 440px;
+                }
+            }
+            if line.reactions.length > 0: VerticalLayout {
+                padding-top: Theme.space-2;
+                padding-bottom: Theme.space-1;
+                Reactions {
+                    key: line.key;
+                    model: line.reactions;
+                }
+            }
+        }
+    }
+    if root.actions && line.remote && hover.has-hover: MessageActions {
+        x: parent.width - self.width - Theme.space-6;
+        y: -12px;
+        key: line.key;
+        pinned: line.pinned;
+    }
+}
+
+// The messages of the current chat (or of an open topic). The list starts
+// at the newest message and follows new ones while it is at the end;
+// scrolling up stops that until the end is reached again.
+export component MessageList inherits VerticalLayout {
+    in property <[ChatLine]> model;
+    in property <bool> older;
+    property <bool> follow: true;
+    property <length> end: min(0px, list.visible-height - list.content-height);
+    property <length> scrolled: list.content-y;
+    changed end => {
+        if root.follow {
+            list.content-y = root.end;
+        }
+    }
+    changed scrolled => { root.follow = root.scrolled <= root.end + 2px; }
+    // Another chat: start at its end.
+    property <int> tab: Bridge.current-tab;
+    changed tab => {
+        root.follow = true;
+        list.content-y = root.end;
+    }
+    // A pinned message was jumped to: scroll to where its row is. Rows
+    // differ in height, so this is the place of an average row (as the
+    // standard list estimates it); the row itself is highlighted.
+    property <int> jumps: Bridge.jump-requests;
+    changed jumps => {
+        if root.older && root.model.length > 0 {
+            list.content-y = max(root.end, min(0px, list.visible-height / 3 - Bridge.jump-index * list.content-height / root.model.length));
+        }
+    }
+    if Bridge.local-history: Rectangle {
+        height: 30px;
+        background: Theme.warning-soft;
+        HorizontalLayout {
+            padding-left: Theme.space-6;
+            spacing: Theme.space-2;
+            Icon {
+                source: Icons.hard-drive;
+                size: 14px;
+                tint: Theme.warning;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: @tr("Only messages seen by this device.");
+                color: Theme.warning;
+                font-size: Theme.font-xs;
+                vertical-alignment: center;
+            }
+        }
+    }
+    if root.older && Bridge.more-history: Rectangle {
+        height: 40px;
+        HorizontalLayout {
+            alignment: center;
+            Button {
+                small: true;
+                icon: Icons.chevron-up;
+                text: Bridge.loading-history ? @tr("Loading…") : @tr("Older messages");
+                enabled: !Bridge.loading-history;
+                y: (parent.height - self.height) / 2;
+                clicked => { Bridge.load-older(); }
+            }
+        }
+    }
+    list := ListView {
+        vertical-stretch: 1;
+        // A long chat must not make the window taller: the list scrolls.
+        preferred-height: 0px;
+        accessible-label: @tr("Messages");
+        for line in root.model: MessageRow {
+            line: line;
+        }
+    }
+}
+
+// The composer: a round attach button, the text field with the emoji
+// picker and send.
+export component Composer inherits HorizontalLayout {
+    in property <string> placeholder;
+    in property <bool> topic;
+    padding: Theme.space-4;
+    padding-left: Theme.space-5;
+    padding-right: Theme.space-5;
+    spacing: Theme.space-3;
+    // Files go to the channel's file browser and a link into the chat.
+    if !root.topic: IconButton {
+        icon: Icons.plus;
+        label: @tr("Attach a file");
+        round: true;
+        filled: true;
+        size: 44px;
+        y: (parent.height - self.height) / 2;
+        clicked => { Bridge.attach-file(); }
+    }
+    Rectangle {
+        horizontal-stretch: 1;
+        min-height: 48px;
+        border-radius: Theme.radius-lg;
+        background: Theme.surface-2;
+        border-width: 1px;
+        border-color: input.has-focus ? Theme.accent : Theme.border-strong;
+        HorizontalLayout {
+            padding-left: Theme.space-5;
+            padding-right: Theme.space-2;
+            spacing: Theme.space-2;
+            input := TextField {
+                text <=> Nav.draft;
+                bare: true;
+                placeholder: root.placeholder;
+                label: @tr("Message");
+                accepted(text) => {
+                    if text != "" {
+                        if root.topic {
+                            Bridge.send-topic-message(text);
+                        } else {
+                            Bridge.send-message(text);
+                        }
+                        self.clear();
+                    }
+                }
+            }
+            IconButton {
+                icon: Icons.smile;
+                label: @tr("Emoji");
+                checked: Nav.emoji-open;
+                y: (parent.height - self.height) / 2;
+                clicked => {
+                    Nav.react-key = 0;
+                    Nav.emoji-open = !Nav.emoji-open;
+                }
+            }
+            IconButton {
+                icon: Icons.send;
+                label: @tr("Send");
+                round: true;
+                enabled: input.text != "";
+                tint: input.text != "" ? Theme.on-accent : Theme.accent-text;
+                filled: input.text != "";
+                y: (parent.height - self.height) / 2;
+                clicked => {
+                    if input.text != "" {
+                        if root.topic {
+                            Bridge.send-topic-message(input.text);
+                        } else {
+                            Bridge.send-message(input.text);
+                        }
+                        input.clear();
+                    }
+                }
             }
         }
     }
@@ -133,25 +544,41 @@ export component ChatView inherits VerticalLayout {
         icon: root.tab-kind == 1 ? Icons.hash : root.tab-kind == 2 ? Icons.at-sign : Icons.message-square;
         title: root.tab-name;
         description: root.tab-topic != "" ? root.tab-topic : Bridge.server-title;
-        if Bridge.presence-source != "": Chip {
+        // Only when the chat does not come through our voice connection
+        // (an invisible observer or a relay).
+        if Bridge.presence-source != "" && !Bridge.voice-connected: Chip {
             text: Bridge.presence-source;
             icon: Icons.radio;
             tint: Theme.accent-text;
             y: (parent.height - self.height) / 2;
         }
-        if Bridge.viewer-open == false && Bridge.streams.length > 0: Button {
-            small: true;
-            icon: Icons.monitor-up;
-            text: @tr("Streams ({})", Bridge.streams.length);
+        if Bridge.has-pins: Button {
+            icon: Icons.pin;
+            text: @tr("Pinned Messages");
+            checked: Nav.pins-open;
             y: (parent.height - self.height) / 2;
-            clicked => { Nav.right-panel-open = true; }
+            clicked => { Nav.show-pins(!Nav.pins-open); }
+        }
+        if Bridge.has-topics: Button {
+            icon: Icons.book-open;
+            text: @tr("Topics");
+            checked: Nav.topics-open;
+            y: (parent.height - self.height) / 2;
+            clicked => { Nav.show-topics(!Nav.topics-open); }
+        }
+        // The voice channel we are in, with the people and the streams.
+        if Bridge.voice-connected: IconButton {
+            icon: Icons.volume-2;
+            label: @tr("Voice channel");
+            y: (parent.height - self.height) / 2;
+            clicked => { Nav.show-voice(true); }
         }
         IconButton {
             icon: Icons.users;
-            label: @tr("Members and streams");
-            checked: Nav.right-panel-open;
+            label: @tr("Members");
+            checked: Nav.right-panel-open && !Nav.pins-open && !Nav.topics-open;
             y: (parent.height - self.height) / 2;
-            clicked => { Nav.right-panel-open = !Nav.right-panel-open; }
+            clicked => { Nav.toggle-members(); }
         }
     }
     if Bridge.crash-notice != "": Rectangle {
@@ -207,65 +634,50 @@ export component ChatView inherits VerticalLayout {
             }
         }
     }
-    messages := ListView {
-        vertical-stretch: 1;
-        accessible-label: @tr("Messages");
-        for line in Bridge.messages: MessageRow {
-            line: line;
-        }
-    }
-    // Composer.
-    HorizontalLayout {
-        padding: Theme.space-4;
-        padding-left: Theme.space-5;
-        padding-right: Theme.space-5;
-        spacing: Theme.space-3;
-        composer := Rectangle {
-            horizontal-stretch: 1;
-            min-height: 48px;
-            border-radius: Theme.radius-lg;
-            background: Theme.surface-2;
-            border-width: 1px;
-            border-color: input.has-focus ? Theme.accent : Theme.border;
-            HorizontalLayout {
-                padding-left: Theme.space-5;
-                padding-right: Theme.space-2;
-                spacing: Theme.space-2;
-                input := TextField {
-                    text <=> Nav.draft;
-                    bare: true;
-                    placeholder: root.tab-title != "" ? @tr("Message {}", root.tab-title) : @tr("Message");
-                    label: @tr("Message");
-                    accepted(text) => {
-                        if text != "" {
-                            Bridge.send-message(text);
-                            self.clear();
-                        }
-                    }
-                }
-                IconButton {
-                    icon: Icons.smile;
-                    label: @tr("Emoji");
-                    checked: Nav.emoji-open;
-                    y: (parent.height - self.height) / 2;
-                    clicked => { Nav.emoji-open = !Nav.emoji-open; }
-                }
-                IconButton {
-                    icon: Icons.send;
-                    label: @tr("Send");
-                    round: true;
-                    enabled: input.text != "";
-                    tint: input.text != "" ? Theme.on-accent : Theme.text-muted;
-                    filled: input.text != "";
-                    y: (parent.height - self.height) / 2;
-                    clicked => {
-                        if input.text != "" {
-                            Bridge.send-message(input.text);
-                            input.clear();
-                        }
-                    }
-                }
+    // The open topic replaces the chat.
+    if Bridge.current-topic >= 0: Rectangle {
+        height: 44px;
+        background: Theme.surface-2.transparentize(0.4);
+        HorizontalLayout {
+            padding-left: Theme.space-4;
+            padding-right: Theme.space-4;
+            spacing: Theme.space-3;
+            IconButton {
+                icon: Icons.arrow-left;
+                label: @tr("Back to the chat");
+                size: 28px;
+                icon-size: Theme.icon-sm;
+                y: (parent.height - self.height) / 2;
+                clicked => { Bridge.open-topic(-1); }
+            }
+            Icon {
+                source: Icons.messages-square;
+                size: Theme.icon-sm;
+                tint: Theme.accent-text;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: Bridge.topic-title;
+                color: Theme.text;
+                font-weight: Theme.weight-semibold;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
             }
         }
+    }
+    if Bridge.current-topic >= 0: MessageList {
+        vertical-stretch: 1;
+        model: Bridge.topic-messages;
+    }
+    if Bridge.current-topic < 0: MessageList {
+        vertical-stretch: 1;
+        model: Bridge.messages;
+        older: true;
+    }
+    Composer {
+        topic: Bridge.current-topic >= 0;
+        placeholder: Bridge.current-topic >= 0 ? @tr("Reply in {}", Bridge.topic-title)
+            : root.tab-title != "" ? @tr("Message {}", root.tab-title) : @tr("Message");
     }
 }

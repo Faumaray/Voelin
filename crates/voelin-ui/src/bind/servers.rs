@@ -14,6 +14,12 @@ pub(super) fn wire(ui: &MainWindow) {
 	bridge.on_search(|text| {
 		with_app(|app| app.search(text.to_string()));
 	});
+	bridge.on_search_members(|text| {
+		with_app(|app| app.search_members(text.to_string()));
+	});
+	bridge.on_show_voice_view(|on| {
+		with_app(|app| app.show_voice_view(on));
+	});
 	bridge.on_connect_voice(|| {
 		with_app(|app| app.connect_voice());
 	});
