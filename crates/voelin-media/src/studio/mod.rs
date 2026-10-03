@@ -798,8 +798,10 @@ impl Studio {
 				wanted.iter().any(|(w, kind, background)| {
 					w == id
 						&& input.kind().same_input(kind)
-						// A background filter is set up when the input starts.
-						&& input.background().needs_mask() == background.needs_mask()
+						// A background filter is set up when the input starts,
+						// with the effect it applies: another effect (or
+						// strength, image, colour) needs a new input.
+						&& input.background() == background
 				})
 			});
 		}
@@ -1194,6 +1196,25 @@ mod tests {
 		assert_eq!(studio.scenes().scenes.len(), 1);
 		assert!(studio.apply(Command::SetActiveScene { scene: 99 }).await.is_err());
 		assert!(studio.apply(Command::RenameScene { scene: 99, name: "x".into() }).await.is_err());
+	}
+
+	#[tokio::test]
+	async fn a_new_background_effect_reaches_the_input() {
+		let studio = Studio::start(one_colour_scene()).await.unwrap();
+		for background in [
+			Background::Blur { strength: 0.02 },
+			Background::Blur { strength: 0.08 },
+			Background::Colour { colour: Colour::rgb(0, 200, 0) },
+			Background::Keep,
+		] {
+			let change =
+				SourceChange { background: Some(background.clone()), ..Default::default() };
+			let command = Command::UpdateSource { scene: 1, source: 1, change: Box::new(change) };
+			studio.apply(command).await.unwrap();
+			let graph = lock(&studio.graph);
+			assert_eq!(graph.inputs.len(), 1);
+			assert_eq!(graph.inputs[0].1.background(), &background);
+		}
 	}
 
 	#[tokio::test]
