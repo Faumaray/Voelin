@@ -9182,6 +9182,7 @@ dependencies = [
  "memmap2",
  "ndk 0.9.0",
  "openh264",
+ "opus2",
  "pipewire",
  "reqwest",
  "rtrb",

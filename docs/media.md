@@ -30,6 +30,7 @@ video, recording, a replay buffer, WHIP) is described in
 | `EncoderReport { ffmpeg, zero_copy, encoders: Vec<EncoderInfo> }` | for the UI: FFmpeg's release and path (or why none), whether DMA-BUF import works, and per backend `name`, `api`, `codec`, `hardware`, `status` (self-test result or why it cannot be used) and `rank` under the current preference |
 | `EncoderBackend` | `Libvpx`, `OpenH264`, `Ffmpeg("h264_vaapi")`, `Hardware("mediacodec")`; `name()` is the settings spelling |
 | `ffmpeg::{Ffmpeg, probe, FfmpegEncoder, BACKENDS}` | FFmpeg loaded at runtime (feature `ffmpeg`), see [FFmpeg encoders](#ffmpeg-encoders-loaded-at-runtime) |
+| `ffmpeg::avio::Connection`, `ffmpeg::audio::AacEncoder` | bytes written through libavformat's protocols (`rtmp://`, `rtmps://`) with their write errors and an abort flag; the studio's Opus as AAC through FFmpeg's own codecs. See [RTMP output](#rtmp-output) |
 | `ffmpeg::{GpuConverter, GpuLayer}` | an RGB DMA-BUF converted to NV12 and scaled for every simulcast layer on the GPU (`convert(&DmaBufRef, &[GpuLayer], out)`), `modifiers()` it imports; see zero-copy under [FFmpeg encoders](#ffmpeg-encoders-loaded-at-runtime) |
 | `ScreenCapture` | `sources()`, `start_sink(&SourceId, &CaptureOptions, Box<dyn FrameSink>)` (frames borrowed from the capture buffer, on the backend's thread), `start(..)` (copies into a queue), `stop()`; async: the portal asks the user |
 | `FrameSink` | `max_fps()` (may change while capturing), `wants(timestamp)` (asked before anything is mapped or copied), `frame(FrameRef) -> bool`; `accepts_dmabuf()`, `dmabuf(&DmaBufRef) -> Option<bool>` (a frame still in GPU memory, offered before it is mapped) and `dmabuf_modifiers()` (tiled layouts the sink imports) |
@@ -289,8 +290,8 @@ the software encoders above are used as before.
   `/usr/local/lib`) and MacPorts (`/opt/local/lib`) (macOS). No version is
   refused. libavutil's functions come from the libavutil libavcodec itself
   loaded (through its handle; on Windows the already loaded DLL), so the two
-  always match; libavformat of the same major is opened if present (for RTMP
-  output later). `VOELIN_FFMPEG=0` disables FFmpeg. Only functions are
+  always match; libavformat of the same major is opened if present (for
+  [RTMP output](#rtmp-output)). `VOELIN_FFMPEG=0` disables FFmpeg. Only functions are
   looked up by name (`sys.rs`); FFmpeg's warnings and errors go to
   `tracing` (target `ffmpeg`) and into the self-test's failure reasons.
 - ABI across major versions: every codec setting goes through AVOptions
@@ -468,6 +469,56 @@ the software encoders above are used as before.
   RX 7900 GRE `0x200000028a01f04`), offered only if it needs a single plane
   (no compression metadata); the portal offers it ahead of LINEAR (see
   [Capture](#capture)). See [the measurements](#zero-copy-measured).
+
+### RTMP output
+
+The studio's RTMP output ([studio.md](studio.md#outputs-studiooutput))
+goes through the same runtime-loaded FFmpeg, libavformat included, and
+links nothing.
+
+- Connection (`ffmpeg/avio.rs`): `avio_open2` with libavformat's own
+  `rtmp://` / `rtmps://` protocols (handshake, `connect`, `publish`, TLS),
+  `avio_write`, `avio_flush`, `avio_closep` (unpublish). Five functions and
+  `AVIOInterruptCB` (two fields, unchanged since libavformat 53): every
+  blocking call polls an abort flag, so a stop or a stuck network never
+  holds a thread for longer than FFmpeg's 100 ms poll once it is set;
+  `rw_timeout` (10 s) bounds a connect or a send to a server that stopped
+  answering. Protocol options go in as an `AVDictionary` (`rtmp_app`,
+  `rtmp_playpath` for a key given apart, `tcp_nodelay`).
+- What it sends is FLV (`studio/output/flv.rs`): libavformat's RTMP writer
+  reads an FLV byte stream and sends each tag as an RTMP message, so the
+  FLV is written by us like the recordings' Matroska and no muxer
+  (`AVFormatContext`, `AVStream`, codec parameters, all of which moved
+  between releases) is ever used.
+- Write errors: `avio_write` and `avio_flush` return nothing; a failed
+  write is only stored in `AVIOContext.error`, which moved (120 bytes in
+  libavformat 58, 84 in 63). It is found at load by search
+  (`layout::avio_error`): a context of our own whose write callback fails
+  with a sentinel value is flushed, and the one `int` of its first 200
+  bytes that changed to the sentinel is the field. Checked against the
+  `offsetof` of FFmpeg 4.4.8 and 9.0.1.
+- Audio (`ffmpeg/audio.rs`): RTMP services take AAC, so the studio's Opus
+  is decoded by FFmpeg's `opus` decoder and encoded by its native `aac`
+  encoder (AAC-LC, 48 kHz stereo, 160 kbit/s; `AudioSpecificConfig`
+  `11 90`). An audio encoder needs its sample format before it opens, and
+  `AVCodecContext.sample_fmt` has no AVOption: it is located like
+  `hw_frames_ctx`, from the option offsets of its neighbours (after
+  `sample_rate` directly from libavcodec 61 with `ch_layout` after it;
+  after `channels` up to 60), and checked to be `NONE` in a new context.
+  The encoder takes 1024-sample frames and Opus gives 960, so the samples
+  are queued and cut into frames of our own; such a frame needs its
+  channel layout, whose field also moved (`ch_layout` from libavutil 57,
+  `channels` and `channel_layout` before), and `avcodec_send_frame` copies
+  frames with `av_frame_ref`, which refuses one without a layout unless its
+  buffers are reference-counted. So the encoder's input frame is a
+  reference to the first frame the decoder made (FFmpeg filled in layout,
+  rate, format and buffer references), with only its leading fields
+  (`data`, `linesize`, `nb_samples`, unchanged since libavutil 51) and
+  `pts` pointed at our planes; the decoded buffers it keeps are never read.
+  The AAC frames carry the Opus packets' clock (less the encoder's 1024
+  samples of priming), and a gap in the studio's audio restarts it.
+- Without libavformat, or when a check fails, `LibraryInfo::rtmp` says why
+  and adding an RTMP output fails with that reason.
 
 Installing FFmpeg (runtime libraries only, no `-dev` packages):
 
@@ -917,6 +968,7 @@ has not run on Windows yet.
 | Portal / PipeWire error paths (no bus, bus without portal, no daemon) | unit tests, manual probe | tested |
 | Portal capture (shared memory and DMA-BUF), PipeWire video and audio streams | `voelinctl stream bench --source portal` on a 2560x1440 Wayland desktop | tested: it delivered no frames at all (the DMA-BUF mapping length), and the DMA-BUF path cost 19.5 cores where shared memory costs 0.41. Both fixed; 1440p60 now runs on 0.55 cores (see the table above). Portal audio is still untested |
 | Windows Graphics Capture, WASAPI | – | type-checked for `x86_64-pc-windows-gnu` only |
+| RTMP through libavformat: write errors from `AVIOContext.error`, an abort ending a stuck connect, `AVCodecContext.sample_fmt`, Opus → AAC, FLV tags, a studio stream to FFmpeg's own RTMP server read back by ffprobe, a reconnect | `ffmpeg::avio`, `ffmpeg::audio`, `ffmpeg::tests`, `studio::output::{flv, rtmp}` tests, `voelin-core/tests/studio.rs` (see [studio.md](studio.md#status)) | tested with FFmpeg 9.0.1 and 4.4.8 (`VOELIN_FFMPEG_DIR`); no public service tried. FFmpeg 4.4.8 also showed that the existing `hw_frames_ctx` check refuses its layout there (VA-API off, as designed for a failed check) |
 | FFmpeg loader: sonames, missing FFmpeg, layout checks on a real release | `ffmpeg::sys` / `ffmpeg` unit tests; mirrors compared with offsets compiled from the 4.4-9.0 headers | tested (FFmpeg 6.1.1 on Ubuntu 24.04; FFmpeg 9.0.1 / libavutil 61 / libavcodec 63 on Arch, every offset compared with that release's own headers) |
 | FFmpeg software encoders → our decoders: x264 → OpenH264, SVT-AV1 / rav1e / libaom → dav1d (PSNR > 28 dB, keyframes at start and on request, timestamps, bitrate change, size change, odd sizes, Constrained High / Baseline) | `tests/ffmpeg.rs` (`VOELIN_OPENH264_LIB`, `--features av1`) | tested |
 | Self-test failures (NVENC without CUDA, Quick Sync without a session, VA-API without a render node, encoders not in the build) | `tests/ffmpeg.rs`, `voelinctl stream encoders` | tested: each fails alone with FFmpeg's reason |

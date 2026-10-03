@@ -91,7 +91,8 @@ pub struct SourceChange {
 pub enum OutputSpec {
 	/// Record to a file; the name decides WebM or Matroska.
 	Record { path: PathBuf },
-	/// WHIP (or RTMP, which says it is not implemented yet).
+	/// WHIP (`http(s)://`, `token`: the bearer token) or RTMP
+	/// (`rtmp(s)://`, `token`: the stream key, unless it ends the URL).
 	Url { url: String, token: Option<String> },
 }
 
@@ -724,11 +725,12 @@ impl Studio {
 			OutputSpec::Record { path } => {
 				(Box::new(output::record::Recorder::start(path, layer, 2)?), false)
 			}
+			OutputSpec::Url { url, token } if output::rtmp::Rtmp::handles(url) => {
+				let codec = *lock(&self.shared.codec);
+				let rtmp = output::rtmp::Rtmp::start(url, token.as_deref(), layer, codec).await?;
+				(Box::new(rtmp), true)
+			}
 			OutputSpec::Url { url, token } => {
-				if output::rtmp::Rtmp::handles(url) {
-					return Err(output::rtmp::Rtmp::connect(url, token.as_deref())
-						.expect_err("the RTMP seam always refuses"));
-				}
 				#[cfg(feature = "whip")]
 				{
 					let codec = self.stream_codec();
@@ -738,6 +740,7 @@ impl Studio {
 				}
 				#[cfg(not(feature = "whip"))]
 				{
+					let _ = (url, token);
 					return Err(Error::CaptureUnavailable {
 						backend: "whip",
 						reason: "this build has no WHIP output (feature `whip`)".into(),
@@ -1052,7 +1055,7 @@ fn stats_loop(shared: &Shared) {
 					name: output.sink.name().to_owned(),
 					bytes,
 					kbps: output.kbps,
-					error: output.error.clone(),
+					error: output.error.clone().or_else(|| output.sink.error()),
 				});
 			}
 			stats
@@ -1308,7 +1311,8 @@ mod tests {
 			assert!(outputs[0].sink.bytes() > 0);
 		}
 		assert!(lock(&studio.shared.replay).stats().packets > 0);
-		// An RTMP url is refused with its reason, not silently dropped.
+		// RTMP carries H.264: with VP8 as the stream codec it is refused
+		// with that reason, before anything connects.
 		let e = studio
 			.apply(Command::AddOutput(OutputSpec::Url {
 				url: "rtmp://live.example/app".into(),
@@ -1317,7 +1321,7 @@ mod tests {
 			.await
 			.unwrap_err()
 			.to_string();
-		assert!(e.contains("FFmpeg"), "{e}");
+		assert!(e.contains("H.264") && e.contains("VP8"), "{e}");
 
 		// The studio is a capture backend the streamer can use unchanged.
 		let mut capture = studio.capture();

@@ -32,8 +32,9 @@ pub struct StudioArgs {
 #[derive(Subcommand, Debug)]
 enum StudioCommand {
 	/// Run a scene file for a while: composite it, encode it as a stream
-	/// would, and save a preview, record, save a replay clip or push to WHIP.
-	Run(RunArgs),
+	/// would, and save a preview, record, save a replay clip or push to WHIP
+	/// or RTMP.
+	Run(Box<RunArgs>),
 	/// Composite N sources (a screen, a camera, an image, text, ...) into the
 	/// output size at its frame rate, without encoding; print the compose
 	/// time and heap allocations per frame.
@@ -72,7 +73,11 @@ struct RunArgs {
 	/// Push to this WHIP endpoint.
 	#[arg(long)]
 	whip: Option<String>,
-	/// Bearer token for --whip.
+	/// Push to this RTMP(S) server (`rtmp://host/app/key`, or the key in
+	/// --token). Needs --codec h264 unless H.264 is the first codec.
+	#[arg(long)]
+	rtmp: Option<String>,
+	/// Bearer token for --whip, stream key for --rtmp.
 	#[arg(long, env = "VOELIN_WHIP_TOKEN", hide_env_values = true)]
 	token: Option<String>,
 	/// Video codec: vp8, vp9, h264, av1 [default: the first the encoders give].
@@ -112,7 +117,7 @@ struct BenchArgs {
 
 pub fn run(args: StudioArgs) -> Result<()> {
 	match args.command {
-		StudioCommand::Run(args) => tokio::runtime::Runtime::new()?.block_on(run_scenes(args)),
+		StudioCommand::Run(args) => tokio::runtime::Runtime::new()?.block_on(run_scenes(*args)),
 		StudioCommand::Bench(args) => bench(&args),
 		StudioCommand::Cameras => {
 			for camera in camera::list() {
@@ -193,7 +198,10 @@ async fn run_scenes(args: RunArgs) -> Result<()> {
 					let outputs: Vec<String> = stats
 						.outputs
 						.iter()
-						.map(|o| format!("{} {:.0} kbit/s", o.name, o.kbps))
+						.map(|o| match &o.error {
+							Some(e) => format!("{} {:.0} kbit/s ({e})", o.name, o.kbps),
+							None => format!("{} {:.0} kbit/s", o.name, o.kbps),
+						})
 						.collect();
 					println!(
 						"composed {:.0} fps, {:.2} ms; sources: {}; outputs: {}; replay {:.1} s",
@@ -223,9 +231,12 @@ async fn run_scenes(args: RunArgs) -> Result<()> {
 	if let Some(path) = &args.record {
 		studio.apply(Command::StartRecording { path: path.clone() }).await?;
 	}
-	if let Some(url) = &args.whip {
-		let spec = OutputSpec::Url { url: url.clone(), token: args.token.clone() };
+	let pushes: Vec<&String> = args.whip.iter().chain(&args.rtmp).collect();
+	for url in &pushes {
+		let spec = OutputSpec::Url { url: (*url).clone(), token: args.token.clone() };
 		studio.apply(Command::AddOutput(spec)).await?;
+	}
+	if !pushes.is_empty() {
 		studio.apply(Command::GoLive).await?;
 	}
 	let run = Duration::from_secs(args.seconds);
@@ -248,7 +259,7 @@ async fn run_scenes(args: RunArgs) -> Result<()> {
 		save_png(&picture, path)?;
 		println!("preview saved: {} ({}x{})", path.display(), picture.width, picture.height);
 	}
-	if args.whip.is_some() {
+	if !pushes.is_empty() {
 		studio.apply(Command::EndStream).await?;
 	}
 	let stats = streamer.stats();

@@ -9,7 +9,8 @@
 //!   out as a clip without re-encoding
 //! - [`whip`]: WHIP (WebRTC-HTTP ingestion) to a broadcast service (feature
 //!   `whip`)
-//! - [`rtmp`]: the seam for RTMP, which will go through the FFmpeg loader
+//! - [`rtmp`]: RTMP and RTMPS through libavformat loaded at runtime, with
+//!   FLV of our own ([`flv`]) and the audio as AAC
 //!
 //! A sink never stalls the encoder: [`OutputSink::write`] returns an error
 //! instead of blocking for long, and the studio drops the sink and reports
@@ -19,6 +20,7 @@ use crate::Result;
 use crate::codec::Codec;
 
 pub mod ebml;
+pub mod flv;
 pub mod record;
 pub mod replay;
 pub mod rtmp;
@@ -100,6 +102,12 @@ pub trait OutputSink: Send {
 	/// Bytes written so far, for the stats.
 	fn bytes(&self) -> u64 {
 		0
+	}
+
+	/// A problem the output reports while it keeps going (a connection
+	/// being made again), for the stats.
+	fn error(&self) -> Option<String> {
+		None
 	}
 }
 

@@ -79,6 +79,9 @@ windows-capture = "2.0.1"
 
 [dev-dependencies]
 criterion = "0.8"
+# Opus packets to feed the RTMP output's AAC encoder in tests (the voice
+# codec's crate, already in the tree through voelin-audio).
+opus2 = "0.4"
 serde_json = "1"
 # The H.264 `profile-level-id` the signalling offers, to check it against the
 # SPS the encoders really emit (`tests/ffmpeg.rs`). No cycle: voelin-stream

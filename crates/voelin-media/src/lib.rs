@@ -70,6 +70,9 @@ pub enum Error {
 	CaptureUnavailable { backend: &'static str, reason: String },
 	#[error("{backend} capture: {message}")]
 	Capture { backend: &'static str, message: String },
+	/// A studio output (WHIP, RTMP) failed or was refused.
+	#[error("{output}: {message}")]
+	Output { output: &'static str, message: String },
 	#[error("capture source not found: {0:?}")]
 	SourceNotFound(SourceId),
 	#[error("the user cancelled the capture")]

@@ -87,6 +87,15 @@ pub struct BufferRefHead {
 	pub data: *mut u8,
 }
 
+/// The leading fields of `AVIOContext` (`av_class`, `buffer`), unchanged
+/// since libavformat 53. Only `buffer` is read, to free the buffer of a
+/// context made with `avio_alloc_context`.
+#[repr(C)]
+pub struct AvioHead {
+	pub av_class: Ptr,
+	pub buffer: *mut u8,
+}
+
 /// `AVDRMObjectDescriptor` (`libavutil/hwcontext_drm.h`, unchanged since it
 /// was added in libavutil 55).
 #[repr(C)]
@@ -167,17 +176,17 @@ pub const EOF: c_int = err_tag(b'E', b'O', b'F', b' ');
 /// `AVERROR_OPTION_NOT_FOUND`.
 pub const OPTION_NOT_FOUND: c_int = err_tag(0xF8, b'O', b'P', b'T');
 
-/// Declares the function table: every function, its library, its C
+/// Declares a function table: every function, its library, its C
 /// signature. `resolve` looks all of them up; a missing one fails the load.
 macro_rules! api {
-	($($lib:ident { $(fn $name:ident($($arg:ident: $ty:ty),*) $(-> $ret:ty)?;)* })*) => {
-		/// FFmpeg functions used by this crate.
+	($(#[$doc:meta])* $api:ident { $($lib:ident { $(fn $name:ident($($arg:ident: $ty:ty),*) $(-> $ret:ty)?;)* })* }) => {
+		$(#[$doc])*
 		#[allow(non_snake_case, dead_code)]
-		pub struct Api {
+		pub struct $api {
 			$($(pub $name: unsafe extern "C" fn($($ty),*) $(-> $ret)?,)*)*
 		}
 
-		impl Api {
+		impl $api {
 			/// # Safety
 			/// The libraries must be FFmpeg's, so the symbols have the
 			/// declared signatures.
@@ -191,6 +200,8 @@ macro_rules! api {
 }
 
 api! {
+	/// FFmpeg functions used by this crate (libavutil and libavcodec).
+	Api {
 	Util {
 	fn avutil_version() -> c_uint;
 	fn av_version_info() -> *const c_char;
@@ -243,6 +254,11 @@ api! {
 	fn av_hwframe_get_buffer(frames: Ptr, frame: Ptr, flags: c_int) -> c_int;
 	fn av_hwframe_transfer_data(dst: Ptr, src: Ptr, flags: c_int) -> c_int;
 	fn av_hwframe_map(dst: Ptr, src: Ptr, flags: c_int) -> c_int;
+	fn av_get_sample_fmt(name: *const c_char) -> c_int;
+	fn av_malloc(size: usize) -> *mut c_void;
+	fn av_freep(ptr: *mut c_void);
+	fn av_dict_set(dict: *mut Ptr, key: *const c_char, value: *const c_char, flags: c_int) -> c_int;
+	fn av_dict_free(dict: *mut Ptr);
 	}
 
 	Codec {
@@ -256,8 +272,63 @@ api! {
 	fn av_packet_alloc() -> Ptr;
 	fn av_packet_free(packet: *mut Ptr);
 	fn av_packet_unref(packet: Ptr);
+	fn avcodec_find_decoder_by_name(name: *const c_char) -> Ptr;
+	fn avcodec_send_packet(ctx: Ptr, packet: Ptr) -> c_int;
+	fn avcodec_receive_frame(ctx: Ptr, frame: Ptr) -> c_int;
+	}
 	}
 }
+
+api! {
+	/// libavformat's I/O functions, for RTMP output: the connection is
+	/// libavformat's (`rtmp://`, `rtmps://`); the FLV inside it is ours
+	/// (`studio::output::flv`), so no muxer struct is ever touched.
+	FormatApi {
+	Format {
+	fn avformat_version() -> c_uint;
+	fn avformat_network_init() -> c_int;
+	fn avio_open2(
+		ctx: *mut Ptr,
+		url: *const c_char,
+		flags: c_int,
+		interrupt: *const InterruptCallback,
+		options: *mut Ptr
+	) -> c_int;
+	fn avio_write(ctx: Ptr, data: *const u8, size: c_int);
+	fn avio_flush(ctx: Ptr);
+	fn avio_closep(ctx: *mut Ptr) -> c_int;
+	fn avio_alloc_context(
+		buffer: *mut u8,
+		size: c_int,
+		write_flag: c_int,
+		opaque: Ptr,
+		read: Option<IoCallback>,
+		write: Option<IoCallback>,
+		seek: Option<SeekCallback>
+	) -> Ptr;
+	fn avio_context_free(ctx: *mut Ptr);
+	}
+	}
+}
+
+/// `int (*)(void *opaque, uint8_t *buf, int size)`: `read_packet` and
+/// `write_packet` of `avio_alloc_context` (`const uint8_t *` for writing
+/// since libavformat 61, the same in the ABI).
+pub type IoCallback = unsafe extern "C" fn(Ptr, *mut u8, c_int) -> c_int;
+/// `int64_t (*)(void *opaque, int64_t offset, int whence)`.
+pub type SeekCallback = unsafe extern "C" fn(Ptr, i64, c_int) -> i64;
+
+/// `AVIOInterruptCB` (`int (*callback)(void *); void *opaque;`), unchanged
+/// since it was added (libavformat 53). FFmpeg calls it while it waits for
+/// the network; a non-zero return aborts the operation.
+#[repr(C)]
+pub struct InterruptCallback {
+	pub callback: Option<unsafe extern "C" fn(Ptr) -> c_int>,
+	pub opaque: Ptr,
+}
+
+/// `AVIO_FLAG_WRITE`.
+pub const AVIO_FLAG_WRITE: c_int = 2;
 
 /// `void (*)(void *avcl, int level, const char *fmt, va_list vl)`.
 pub type LogCallback = unsafe extern "C" fn(Ptr, c_int, *const c_char, VaList);
@@ -266,6 +337,7 @@ pub type LogCallback = unsafe extern "C" fn(Ptr, c_int, *const c_char, VaList);
 enum Lib {
 	Util,
 	Codec,
+	Format,
 }
 
 /// The opened libraries. Never closed: FFmpeg keeps global state (codec
@@ -275,19 +347,30 @@ pub struct Libs {
 	/// libavutil where symbols are not found through libavcodec's handle
 	/// (Windows: `GetProcAddress` does not search dependencies).
 	avutil: Option<Library>,
-	/// libavformat, if present (for later use: RTMP output).
+	/// libavformat, if present (RTMP output).
 	pub avformat: Option<Library>,
 	/// Where libavcodec was found.
 	pub path: PathBuf,
 }
 
 impl Libs {
+	/// libavformat's functions, if libavformat was found and has them all.
+	pub fn format_api(&self) -> Result<FormatApi, String> {
+		if self.avformat.is_none() {
+			return Err(format!("no libavformat of the release of {}", self.path.display()));
+		}
+		// SAFETY: the library is libavformat (found by its file name, of
+		// libavcodec's major), whose functions have the declared signatures.
+		unsafe { FormatApi::resolve(self) }
+	}
+
 	/// # Safety
 	/// `T` must be the symbol's actual type.
 	unsafe fn symbol<T: Copy>(&self, lib: Lib, name: &str) -> Result<T, String> {
 		let library = match lib {
 			Lib::Util => self.avutil.as_ref().unwrap_or(&self.avcodec),
 			Lib::Codec => &self.avcodec,
+			Lib::Format => self.avformat.as_ref().ok_or("no libavformat")?,
 		};
 		// SAFETY: the caller guarantees the type; the library stays loaded
 		// for the life of the process (it is never dropped, see `Libs`).
