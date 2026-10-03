@@ -656,7 +656,10 @@ pub struct FfmpegEncoder {
 /// `size` cropped to a multiple of `alignment` (even at least, for 4:2:0
 /// chroma; at least 2x2): what an encoder of that alignment encodes exactly.
 pub(crate) fn exact_size(size: (u32, u32), alignment: (u32, u32)) -> (u32, u32) {
-	let crop = |v: u32, a: u32| if v >= a { v / a * a } else { (v & !1).max(2) };
+	let crop = |v: u32, a: u32| {
+		let a = a.max(2);
+		if v >= a { v / a * a } else { (v & !1).max(2) }
+	};
 	(crop(size.0, alignment.0), crop(size.1, alignment.1))
 }
 

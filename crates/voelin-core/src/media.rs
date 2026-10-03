@@ -1708,6 +1708,19 @@ impl FrameSink for Ingest {
 		self.gpu_path()
 	}
 
+	/// The tiled layout the GPU's own RGB surfaces have, once the GPU stage
+	/// runs (its first DMA-BUF is LINEAR); none on the CPU path, which
+	/// cannot read tiled buffers.
+	fn dmabuf_modifiers(&self) -> &[u64] {
+		#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+		if self.gpu_path()
+			&& let Some(Ok(converter)) = &self.gpu.converter
+		{
+			return converter.modifiers();
+		}
+		&[]
+	}
+
 	fn dmabuf(&mut self, frame: &DmaBufRef) -> Option<bool> {
 		#[cfg(all(target_os = "linux", feature = "media-desktop"))]
 		return self.gpu_frame(frame);

@@ -129,6 +129,15 @@ pub trait FrameSink: Send {
 		let _ = frame;
 		None
 	}
+
+	/// Tiled DRM format modifiers of RGB buffers the sink takes now
+	/// ([`accepts_dmabuf`](Self::accepts_dmabuf)), best first; backends that
+	/// negotiate buffers (the portal) offer them ahead of LINEAR, and offer
+	/// again when this changes. The CPU cannot read tiled buffers, so a sink
+	/// lists only what it imports.
+	fn dmabuf_modifiers(&self) -> &[u64] {
+		&[]
+	}
 }
 
 /// `fourcc_code(a, b, c, d)` of `drm_fourcc.h`.
