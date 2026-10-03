@@ -12,7 +12,7 @@
 //! VecModels) and get the same values; their callbacks come here
 //! (bind/studio.rs). Commands go to the studio through one task, in order.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
@@ -831,7 +831,12 @@ impl App {
 			.iter()
 			.map(|(id, _)| {
 				let (channel, server) = self.studio_destination_parts(*id);
-				StudioPick { name: channel.into(), detail: server.into(), kind: "server".into() }
+				StudioPick {
+					name: channel.into(),
+					detail: server.into(),
+					kind: "server".into(),
+					..Default::default()
+				}
 			})
 			.collect();
 		vm::list::sync(&self.studio.models.destinations, &rows);
@@ -1453,6 +1458,7 @@ impl App {
 			name: name.into(),
 			detail: detail.into(),
 			kind: icon.into(),
+			..Default::default()
 		};
 		let mut picks: Vec<(Pick, StudioPick)> = Vec::new();
 		let source = |name: &str, kind: SourceKind| Pick::Source { name: name.into(), kind };
@@ -1611,11 +1617,24 @@ impl App {
 		let settings = self.studio_settings();
 		let current = settings.get(&STREAM_AUDIO_SOURCES);
 		let mut picks: Vec<(Pick, StudioPick)> = Vec::new();
-		let mut add = |setting: AudioSourceSetting, name: String, detail: String| {
-			let (_, _, kind) = vm::studio::audio_label(&setting.kind);
-			let row = StudioPick { name: name.into(), detail: detail.into(), kind: kind.into() };
-			picks.push((Pick::Audio(setting), row));
-		};
+		let mut add =
+			|setting: AudioSourceSetting, name: String, detail: String, icon: Option<&str>| {
+				let (_, _, kind) = vm::studio::audio_label(&setting.kind);
+				let row = StudioPick {
+					name: name.into(),
+					detail: detail.into(),
+					kind: kind.into(),
+					// An application's own icon, when it gave a file (Android
+					// does; a desktop icon theme name is left out).
+					icon: icon
+						.map(Path::new)
+						.filter(|p| p.is_absolute())
+						.map(crate::images::file)
+						.unwrap_or_default(),
+					selected: current.iter().any(|s| s.kind == setting.kind),
+				};
+				picks.push((Pick::Audio(setting), row));
+			};
 		let fixed = [
 			(AudioSourceKindSetting::Microphone, "Microphone", "What you say in voice, cleaned up"),
 			(
@@ -1630,14 +1649,17 @@ impl App {
 			),
 		];
 		for (kind, name, detail) in fixed {
-			if !current.iter().any(|s| s.kind == kind) {
-				add(AudioSourceSetting::new(kind), name.into(), detail.into());
+			// A phone shares the whole screen: there is no window's app.
+			if cfg!(target_os = "android") && kind == AudioSourceKindSetting::Window {
+				continue;
 			}
+			add(AudioSourceSetting::new(kind), name.into(), detail.into(), None);
 		}
 		if self.demo_ui {
-			for frequency in [330, 550] {
+			for frequency in [440, 660, 330] {
 				let kind = AudioSourceKindSetting::Synthetic { frequency };
-				add(AudioSourceSetting::new(kind), "Test tone".into(), format!("{frequency} Hz"));
+				let detail = format!("{frequency} Hz");
+				add(AudioSourceSetting::new(kind), "Test tone".into(), detail, None);
 			}
 		} else {
 			if self.studio.apps.is_none() {
@@ -1654,7 +1676,7 @@ impl App {
 					.media
 					.clone()
 					.unwrap_or_else(|| if app.playing { "playing".into() } else { String::new() });
-				add(AudioSourceSetting::new(kind), app.name, detail);
+				add(AudioSourceSetting::new(kind), app.name, detail, app.icon.as_deref());
 			}
 		}
 		self.studio_set_picks(picks);
@@ -1670,10 +1692,19 @@ impl App {
 		self.studio_refresh_audio();
 	}
 
-	pub(crate) fn studio_add_audio(&mut self, index: usize) {
+	/// Mix a picked source in, or take it out if it is (the picker
+	/// chooses several at once), and mark the picks again.
+	pub(crate) fn studio_toggle_audio(&mut self, index: usize) {
 		let Some(Pick::Audio(setting)) = self.studio.picks.get(index) else { return };
 		let setting = setting.clone();
-		self.studio_audio_sources(|sources| sources.push(setting));
+		self.studio_audio_sources(|sources| {
+			if sources.iter().any(|s| s.kind == setting.kind) {
+				sources.retain(|s| s.kind != setting.kind);
+			} else {
+				sources.push(setting);
+			}
+		});
+		self.studio_list_audio();
 	}
 
 	/// While dragging the gain goes to the mixer directly; at the end it is

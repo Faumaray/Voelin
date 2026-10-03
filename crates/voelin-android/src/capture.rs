@@ -196,9 +196,10 @@ impl AudioProvider for PlaybackAudio {
 		match bridge::launchable_apps() {
 			Ok(apps) => apps
 				.into_iter()
-				.map(|(name, package)| AudioApp {
+				.map(|(name, package, icon)| AudioApp {
 					name,
 					binary: Some(package),
+					icon: (!icon.is_empty()).then_some(icon),
 					..AudioApp::default()
 				})
 				.collect(),

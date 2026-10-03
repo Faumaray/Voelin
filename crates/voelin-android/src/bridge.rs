@@ -181,8 +181,9 @@ pub fn stop_audio_input(id: u64) -> Result<()> {
 	})
 }
 
-/// Launchable apps other than ours, as `(label, package)`, sorted by label.
-pub fn launchable_apps() -> Result<Vec<(String, String)>> {
+/// Launchable apps other than ours, as `(label, package, icon)`, sorted by
+/// label; `icon` is the path of a PNG in the app's cache, or empty.
+pub fn launchable_apps() -> Result<Vec<(String, String, String)>> {
 	let lines = with_bridge(|env, class| {
 		let value = env
 			.call_static_method(
@@ -201,15 +202,17 @@ pub fn launchable_apps() -> Result<Vec<(String, String)>> {
 	Ok(parse_apps(&lines))
 }
 
-/// `label<TAB>package` lines.
-fn parse_apps(lines: &str) -> Vec<(String, String)> {
+/// `label<TAB>package<TAB>icon` lines (the icon may be missing).
+fn parse_apps(lines: &str) -> Vec<(String, String, String)> {
 	lines
 		.lines()
 		.filter_map(|line| {
-			let (label, package) = line.split_once('\t')?;
-			let package = package.trim();
-			let label = if label.trim().is_empty() { package } else { label.trim() };
-			(!package.is_empty()).then(|| (label.to_owned(), package.to_owned()))
+			let mut parts = line.split('\t');
+			let label = parts.next()?.trim();
+			let package = parts.next()?.trim();
+			let icon = parts.next().unwrap_or_default().trim();
+			let label = if label.is_empty() { package } else { label };
+			(!package.is_empty()).then(|| (label.to_owned(), package.to_owned(), icon.to_owned()))
 		})
 		.collect()
 }
