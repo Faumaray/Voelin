@@ -2639,6 +2639,8 @@ struct ActiveDecoder {
 	failures: u32,
 	/// Frames taken since the last picture or failure.
 	without_picture: u32,
+	/// It failed with no other decoder left (logged once).
+	last_failed: bool,
 }
 
 impl ActiveDecoder {
@@ -2653,7 +2655,15 @@ impl ActiveDecoder {
 					.map_or_else(|| format!("no decoder for {codec}"), |e| e.to_string())
 			})
 		})?;
-		Ok(Self { codec, backend, decoder, rest, failures: 0, without_picture: 0 })
+		Ok(Self {
+			codec,
+			backend,
+			decoder,
+			rest,
+			failures: 0,
+			without_picture: 0,
+			last_failed: false,
+		})
 	}
 
 	/// The next decoder of `rest` that opens; the last error if none did.
@@ -2687,7 +2697,9 @@ impl ActiveDecoder {
 				true
 			}
 			Err(_) => {
-				warn!(%codec, %failed, "the decoder fails ({reason}), and no other is left");
+				if !std::mem::replace(&mut self.last_failed, true) {
+					warn!(%codec, %failed, "the decoder fails ({reason}), and no other is left");
+				}
 				false
 			}
 		}
