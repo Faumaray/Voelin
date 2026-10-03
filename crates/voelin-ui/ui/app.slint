@@ -130,7 +130,6 @@ export component MainWindow inherits Window {
                 context: Nav.page == Page.settings ? @tr("Settings") : Nav.page == Page.studio ? @tr("Stream Studio") : "";
                 if Nav.page == Page.home: Sidebar {
                     HomeNav { }
-                    Rectangle { vertical-stretch: 1; }
                 }
                 if Nav.page == Page.home: Panel {
                     horizontal-stretch: 1;

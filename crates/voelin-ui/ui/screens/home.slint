@@ -70,22 +70,31 @@ component QuickNav inherits Rectangle {
     }
 }
 
-// The painted card at the bottom of the home sidebar.
+// The painted picture at the bottom of the home sidebar.
 component SidebarArt inherits Rectangle {
     min-height: 140px;
-    border-radius: Theme.radius-lg;
-    clip: true;
-    Art {
-        source: Icons.art-sidebar;
-        cover-width: parent.width;
-        cover-height: parent.height;
-        align-y: 1;
-    }
-    // Fades into the sidebar at the top.
+    // Out to the panel's edges (over the sidebar's padding, not its
+    // border), so no side edges show; the top fades into the panel slowly,
+    // easing out.
     Rectangle {
-        y: 0;
-        height: min(parent.height * 0.3, 90px);
-        background: @linear-gradient(180deg, Theme.surface 0%, Theme.surface.transparentize(1) 100%);
+        x: 1px - Theme.space-3;
+        width: parent.width + 2 * (Theme.space-3 - 1px);
+        clip: true;
+        Art {
+            source: Icons.art-sidebar;
+            cover-width: parent.width;
+            cover-height: parent.height;
+            align-y: 1;
+        }
+        Rectangle {
+            y: 0;
+            height: min(parent.height * 0.55, 220px);
+            background: @linear-gradient(180deg,
+                Theme.surface 0%,
+                Theme.surface.transparentize(0.2) 30%,
+                Theme.surface.transparentize(0.65) 65%,
+                Theme.surface.transparentize(1) 100%);
+        }
     }
     VerticalLayout {
         alignment: end;
@@ -175,6 +184,30 @@ export component HomeNav inherits VerticalLayout {
     }
 }
 
+
+// A slide arrow of the banner: a dark round button with a light ring.
+component BannerArrow inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    callback clicked();
+    width: 28px;
+    height: 28px;
+    IconButton {
+        icon: root.icon;
+        label: root.label;
+        round: true;
+        filled: true;
+        size: root.width;
+        icon-size: Theme.icon-sm;
+        tint: #ffffff;
+        clicked => { root.clicked(); }
+    }
+    Rectangle {
+        border-radius: self.width / 2;
+        border-width: 1px;
+        border-color: #ffffff48;
+    }
+}
 
 // The banner: Voelin first, then each server; arrows and dots switch.
 component HomeBanner inherits Rectangle {
@@ -308,29 +341,24 @@ component HomeBanner inherits Rectangle {
             }
         }
     }
-    // At the bottom corners, by the dots. The phone has the dots only.
-    if root.count > 1 && !root.compact: IconButton {
-        x: Theme.space-2;
-        y: parent.height - self.height - Theme.space-3;
+    // Round buttons in the bottom corners, a little above the dots. The
+    // phone has the dots only.
+    if root.count > 1 && !root.compact: BannerArrow {
+        x: Theme.space-3;
+        y: parent.height - self.height - 12px;
         icon: Icons.chevron-left;
         label: @tr("Previous");
-        round: true;
-        size: 30px;
-        tint: #ffffff;
         clicked => { root.slide = mod(root.slide + root.count - 1, root.count); }
     }
-    if root.count > 1 && !root.compact: IconButton {
-        x: parent.width - self.width - Theme.space-2;
-        y: parent.height - self.height - Theme.space-3;
+    if root.count > 1 && !root.compact: BannerArrow {
+        x: parent.width - self.width - Theme.space-3;
+        y: parent.height - self.height - 12px;
         icon: Icons.chevron-right;
         label: @tr("Next");
-        round: true;
-        size: 30px;
-        tint: #ffffff;
         clicked => { root.slide = mod(root.slide + 1, root.count); }
     }
     if root.count > 1: HorizontalLayout {
-        y: parent.height - (root.compact ? 22px : Theme.space-3 + 20px);
+        y: parent.height - (root.compact ? 22px : 17px);
         height: 10px;
         alignment: center;
         spacing: Theme.space-3;
