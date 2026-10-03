@@ -13,11 +13,15 @@
 //! | `AVFrame.pict_type`, `AVFrame.pts` | forcing a keyframe, timestamps | right after the leading fields: `key_frame` (removed in libavutil 60), `pict_type`, `sample_aspect_ratio`, `pts` | a fresh frame must read `pict_type` 0, `sample_aspect_ratio` {0, 1}, `pts` `AV_NOPTS_VALUE` in exactly one of the two layouts |
 //! | `AVCodecContext.hw_frames_ctx` | VA-API input frames | next to fields that have AVOptions, whose offsets `av_opt_find` reports: before `hw_device_ctx`, `hwaccel_flags` (libavcodec 61 and later, after `err_recognition`), or two fields before `max_pixels` (up to 60) | the neighbours' option offsets must match the layout, and the field must be NULL in a new context |
 //! | `AVHWFramesContext` `initial_pool_size`, `format`, `sw_format`, `width`, `height` | creating a frame pool | after seven pointers (eight up to libavutil 58: `internal`) | `device_ctx` must equal the device and both formats must be `AV_PIX_FMT_NONE` in a new context |
-//! | `AVFrame.buf[0]`, `AVFrame.hw_frames_ctx` | importing DMA-BUFs (zero-copy) | a table per libavutil major (56-60, 64-bit only) | `buf[0]` of a frame from `av_frame_get_buffer` must hold that frame's `data[0]`; `hw_frames_ctx` of a frame from `av_hwframe_get_buffer` must reference the pool |
+//! | `AVFrame.buf[0]`, `AVFrame.hw_frames_ctx` | importing DMA-BUFs (zero-copy) | a table per libavutil major (56-61, 64-bit only; an unlisted major disables the import) | `buf[0]` of a frame from `av_frame_get_buffer` must hold that frame's `data[0]`; `hw_frames_ctx` of a frame from `av_hwframe_get_buffer` must reference the pool |
+//! | `AVHWDeviceContext.hwctx` | the `VADisplay`, for the GPU colour conversion of RGB DMA-BUFs | right after `type`, after one pointer (two up to libavutil 58: `internal`) | `type` must be the device's type in exactly that layout |
 //!
 //! A check that fails disables only what needs the field (VA-API, or the
-//! DMA-BUF import), with the reason in the probe results; a new major whose
-//! layout matches keeps working without a change here.
+//! DMA-BUF import), with the reason in the probe results. The first three
+//! rows are found by searching, so a new major whose layout matches keeps
+//! working without a change here; the last one is a table, because there is
+//! nothing to anchor those offsets to, and an unlisted major turns the
+//! DMA-BUF import off rather than guess (see [`frame_refs_table`]).
 #![allow(unsafe_code)]
 
 use std::ffi::c_int;
@@ -316,6 +320,51 @@ pub unsafe fn hw_frames_fields(frames: Ptr, device: Ptr) -> Result<HwFramesField
 	}
 }
 
+/// `AVHWDeviceContext` up to libavutil 58.
+#[repr(C)]
+struct DeviceWithInternal {
+	av_class: Ptr,
+	internal: Ptr,
+	kind: c_int,
+	hwctx: Ptr,
+}
+
+/// `AVHWDeviceContext` from libavutil 59 (`internal` removed).
+#[repr(C)]
+struct DevicePublic {
+	av_class: Ptr,
+	kind: c_int,
+	hwctx: Ptr,
+}
+
+/// `AVHWDeviceContext.hwctx` of `device`, a device of type `kind`: the
+/// API's own context (`AVVAAPIDeviceContext` for VA-API, whose first field
+/// is the `VADisplay`).
+///
+/// Found by `type`, which comes right before it: in the old layout the
+/// same offset holds the low half of the `internal` pointer, which is
+/// aligned and so never a small device type.
+///
+/// # Safety
+/// `device` must be a live buffer reference of an `AVHWDeviceContext`.
+pub unsafe fn device_hwctx(device: Ptr, kind: c_int) -> Result<Ptr, String> {
+	// SAFETY: guaranteed by the caller; `data` is the leading field pair,
+	// and both layouts lie within the smaller one (the current struct).
+	unsafe {
+		let ctx = (*device.cast::<BufferRefHead>()).data.cast::<std::ffi::c_void>();
+		for (kind_at, hwctx_at) in [
+			(offset_of!(DevicePublic, kind), offset_of!(DevicePublic, hwctx)),
+			(offset_of!(DeviceWithInternal, kind), offset_of!(DeviceWithInternal, hwctx)),
+		] {
+			if read::<c_int>(ctx, kind_at) == kind {
+				let hwctx: Ptr = read(ctx, hwctx_at);
+				return if hwctx.is_null() { Err("no device context".into()) } else { Ok(hwctx) };
+			}
+		}
+	}
+	Err("unknown AVHWDeviceContext layout".into())
+}
+
 /// Offsets of `buf[0]` and `hw_frames_ctx` in `AVFrame`, for importing
 /// DMA-BUFs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -324,8 +373,19 @@ pub struct FrameRefs {
 	pub hw_frames_ctx: usize,
 }
 
-/// The table of [`FrameRefs`] per libavutil major (64-bit targets). A newer
-/// major is tried with the newest entry and must pass the checks.
+/// The table of [`FrameRefs`] per libavutil major (64-bit targets).
+///
+/// Every entry is `offsetof` compiled from that release's own
+/// `libavutil/frame.h`; libavutil 61's was measured against the headers
+/// installed next to the library it describes (FFmpeg 9.0.1: `buf` 184,
+/// `hw_frames_ctx` 328, `sizeof(AVFrame)` 424).
+///
+/// A major that is not listed returns `None`, which disables the DMA-BUF
+/// import (and nothing else) with the reason in the probe results. It
+/// deliberately does not fall back to the newest entry: `AVFrame` has both
+/// grown and shrunk between majors (424 bytes in 61 against 536 in 56), so
+/// an offset guessed for an unknown layout could read past the end of the
+/// struct. Adding a major here needs its `offsetof` values, not a guess.
 fn frame_refs_table(avutil_major: u32) -> Option<FrameRefs> {
 	if size_of::<Ptr>() != 8 {
 		return None;
@@ -334,7 +394,7 @@ fn frame_refs_table(avutil_major: u32) -> Option<FrameRefs> {
 		56 => (288, 480),
 		57 | 58 => (224, 392),
 		59 => (200, 352),
-		60.. => (184, 328),
+		60 | 61 => (184, 328),
 		_ => return None,
 	};
 	Some(FrameRefs { buf, hw_frames_ctx })
@@ -346,8 +406,12 @@ fn frame_refs_table(avutil_major: u32) -> Option<FrameRefs> {
 pub fn frame_refs(api: &Api, yuv420p: c_int) -> Result<FrameRefs, String> {
 	// SAFETY: no arguments.
 	let major = unsafe { (api.avutil_version)() } >> 16;
-	let refs = frame_refs_table(major)
-		.ok_or_else(|| format!("AVFrame references not known for libavutil {major} here"))?;
+	let refs = frame_refs_table(major).ok_or_else(|| {
+		format!(
+			"AVFrame.buf / hw_frames_ctx offsets are not recorded for libavutil {major} (see \
+			 frame_refs_table); the import stays off until they are measured"
+		)
+	})?;
 	// SAFETY: a frame of 16x16 yuv420p pixels; the head fields are set
 	// before av_frame_get_buffer as its documentation asks; the offsets are
 	// inside AVFrame for this major (the table), pointer-aligned.
@@ -409,5 +473,36 @@ mod tests {
 		assert_eq!(offset_of!(HwFramesPublic, format), 60);
 		assert_eq!(frame_refs_table(58), Some(FrameRefs { buf: 224, hw_frames_ctx: 392 }));
 		assert_eq!(frame_refs_table(55), None);
+	}
+
+	/// libavutil 61 (FFmpeg 9), compiled from the installed headers on
+	/// x86-64: `AVFrame` `pict_type` 120, `pts` 136, `buf` 184,
+	/// `hw_frames_ctx` 328, `sizeof` 424; `AVCodecContext`
+	/// `err_recognition` 528, `hw_frames_ctx` 552, `hw_device_ctx` 560,
+	/// `hwaccel_flags` 568, `extra_hw_frames` 572; `AVHWFramesContext`
+	/// `pool` 48, `initial_pool_size` 56, `format` 60, `sw_format` 64,
+	/// `width` 68, `height` 72; `AVHWDeviceContext` `type` 8, `hwctx` 16.
+	#[cfg(target_pointer_width = "64")]
+	#[test]
+	fn libavutil_61_matches_the_headers() {
+		assert_eq!(frame_refs_table(61), Some(FrameRefs { buf: 184, hw_frames_ctx: 328 }));
+		assert_eq!(offset_of!(FrameWithoutKeyFrame, pict_type), 120);
+		assert_eq!(offset_of!(FrameWithoutKeyFrame, pts), 136);
+		let base = 528;
+		assert_eq!(base + offset_of!(HwFieldsNew, hw_frames_ctx), 552);
+		assert_eq!(base + offset_of!(HwFieldsNew, hw_device_ctx), 560);
+		assert_eq!(base + offset_of!(HwFieldsNew, hwaccel_flags), 568);
+		assert_eq!(base + offset_of!(HwFieldsNew, extra_hw_frames), 572);
+		assert_eq!(offset_of!(HwFramesPublic, pool), 48);
+		assert_eq!(offset_of!(HwFramesPublic, initial_pool_size), 56);
+		assert_eq!(offset_of!(HwFramesPublic, sw_format), 64);
+		assert_eq!(offset_of!(HwFramesPublic, height), 72);
+		assert_eq!(offset_of!(DevicePublic, kind), 8);
+		assert_eq!(offset_of!(DevicePublic, hwctx), 16);
+		// A major nobody measured must disable the import, not reuse 61's
+		// offsets: AVFrame has shrunk between majors (424 bytes in 61
+		// against 536 in 56), so reading at a guessed offset could leave
+		// the struct.
+		assert_eq!(frame_refs_table(62), None);
 	}
 }
