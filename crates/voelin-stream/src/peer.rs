@@ -178,6 +178,11 @@ pub enum PeerError {
 	Io(#[from] std::io::Error),
 	#[error("invalid SDP: {0}")]
 	Sdp(String),
+	/// The offer's video uses none of the codecs we decode.
+	#[error(
+		"no video codec in common: the stream offers {offered}, this client decodes {accepted}"
+	)]
+	NoCommonCodec { offered: String, accepted: String },
 	#[error("WebRTC: {0}")]
 	Rtc(#[from] RtcError),
 	#[error("no usable local address")]
@@ -304,10 +309,24 @@ impl Peer {
 	/// Viewer side: accept the streamer's offer; returns our SDP answer.
 	pub async fn answer(config: &PeerConfig, offer: &str) -> Result<(Self, String), PeerError> {
 		// Our codecs in the order of the offer, then the rest.
-		let mut codecs: Vec<_> = offered_video_codecs(offer)
-			.into_iter()
-			.filter(|c| config.accept_video_codecs.contains(c))
-			.collect();
+		let offered = offered_video_codecs(offer);
+		let mut codecs: Vec<_> =
+			offered.iter().copied().filter(|c| config.accept_video_codecs.contains(c)).collect();
+		// Without one, the answer's video section would list no payload type,
+		// which no peer (str0m included) can parse.
+		if config.video
+			&& codecs.is_empty()
+			&& offer.lines().any(|l| l.trim_start().starts_with("m=video "))
+		{
+			let names = |codecs: &[VideoCodec]| match codecs {
+				[] => "none we know".to_owned(),
+				_ => codecs.iter().map(|c| c.sdp_name()).collect::<Vec<_>>().join(", "),
+			};
+			return Err(PeerError::NoCommonCodec {
+				offered: names(&offered),
+				accepted: names(&config.accept_video_codecs),
+			});
+		}
 		for c in &config.accept_video_codecs {
 			if !codecs.contains(c) {
 				codecs.push(*c);
@@ -922,6 +941,23 @@ mod tests {
 			PeerConfig { accept_video_codecs: vec![VideoCodec::Vp8], ..PeerConfig::loopback() };
 		let (_peer, answer) = Peer::answer(&vp8_only, &offer).await.unwrap();
 		assert_eq!(offered_video_codecs(&answer), [VideoCodec::Vp8], "{answer}");
+	}
+
+	/// An offer of codecs we cannot decode is refused with the reason, not
+	/// answered with a video section the streamer cannot parse.
+	#[tokio::test]
+	async fn no_common_codec_is_refused() {
+		let streamer =
+			PeerConfig { video_codecs: vec![VideoCodec::H264], ..PeerConfig::loopback() };
+		let (_peer, offer) = Peer::offer(&streamer, "s").await.unwrap();
+		let vp8_only =
+			PeerConfig { accept_video_codecs: vec![VideoCodec::Vp8], ..PeerConfig::loopback() };
+		let error = Peer::answer(&vp8_only, &offer).await.err().expect("refused");
+		assert!(matches!(error, PeerError::NoCommonCodec { .. }), "{error}");
+		assert_eq!(
+			error.to_string(),
+			"no video codec in common: the stream offers H264, this client decodes VP8"
+		);
 	}
 
 	/// Several codecs offered: the streamer learns which one each viewer's

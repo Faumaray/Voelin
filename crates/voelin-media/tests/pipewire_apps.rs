@@ -200,7 +200,34 @@ impl Daemons {
 		std::fs::write(
 			conf.join("voelin-test-sink.conf"),
 			"context.objects = [ { factory = adapter args = { factory.name = support.null-audio-sink \
-			 node.name = voelin-test-sink media.class = Audio/Sink audio.position = [ FL FR ] } } ]\n",
+			 node.name = voelin-test-sink media.class = Audio/Sink audio.position = [ FL FR ] \
+			 priority.session = 3000 priority.driver = 3000 } } ]\n",
+		)
+		.unwrap();
+		// No hardware: WirePlumber's default profile monitors the sound
+		// cards, Bluetooth and cameras, and the tones would play on the
+		// machine's real speakers. 0.5 reads the profile, 0.4 the Lua
+		// fragments; each ignores the other's files.
+		let wireplumber_conf = dir.join("config/wireplumber");
+		for sub in ["wireplumber.conf.d", "main.lua.d", "bluetooth.lua.d"] {
+			std::fs::create_dir_all(wireplumber_conf.join(sub)).unwrap();
+		}
+		std::fs::write(
+			wireplumber_conf.join("wireplumber.conf.d/voelin-test.conf"),
+			"wireplumber.profiles = { main = { hardware.audio = disabled \
+			 hardware.bluetooth = disabled hardware.video-capture = disabled } }\n",
+		)
+		.unwrap();
+		std::fs::write(
+			wireplumber_conf.join("main.lua.d/51-voelin-test.lua"),
+			"if alsa_monitor then alsa_monitor.enabled = false end\n\
+			 if v4l2_monitor then v4l2_monitor.enabled = false end\n\
+			 if libcamera_monitor then libcamera_monitor.enabled = false end\n",
+		)
+		.unwrap();
+		std::fs::write(
+			wireplumber_conf.join("bluetooth.lua.d/51-voelin-test.lua"),
+			"if bluez_monitor then bluez_monitor.enabled = false end\n",
 		)
 		.unwrap();
 		let mut command = Command::new(pipewire);

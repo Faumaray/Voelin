@@ -41,19 +41,21 @@ fn decoder(codec: Codec) -> Option<Box<dyn VideoDecoder>> {
 	}
 }
 
-/// Twelve frames of the moving test pattern, a keyframe forced at 8, a
-/// bitrate change at 5: keyframes where asked, timestamps kept, and (with a
-/// decoder) every picture decodable at PSNR > 28 dB.
-fn roundtrip(name: &'static str) {
-	let screen = SyntheticScreen::new(W, H);
+/// Twelve frames of the moving test pattern at `w` x `h`, a keyframe forced
+/// at 8, a bitrate change at 5: keyframes where asked, timestamps kept, and
+/// (with a decoder) every picture decodable at its own size, PSNR > 28 dB.
+fn roundtrip(name: &'static str, w: u32, h: u32) {
+	let screen = SyntheticScreen::new(w, h);
 	let config = EncoderConfig { fps: 30, bitrate_bps: 1_500_000, ..EncoderConfig::default() };
 	let mut encoder = FfmpegEncoder::new(name, config).unwrap();
 	assert_eq!(encoder.backend(), EncoderBackend::Ffmpeg(name));
+	let (aw, ah) = probe().iter().find(|s| s.spec.name == name).unwrap().alignment;
 	let codec = encoder.codec();
 	let mut decoder = decoder(codec);
 	let mut keyframes = Vec::new();
 	let mut sent = Vec::new();
 	let mut decoded = 0;
+	let mut worst = f64::INFINITY;
 	let mut sources = Vec::new();
 	// Frames in until the first packet came out (the encoder's delay).
 	let mut delay = None;
@@ -81,15 +83,25 @@ fn roundtrip(name: &'static str) {
 			if let Some(decoder) = &mut decoder
 				&& let Some(picture) = decoder.decode(&f.data).unwrap()
 			{
-				assert_eq!((picture.width, picture.height), (W, H));
-				let psnr = convert::psnr(&sources[index], &picture).unwrap();
-				assert!(psnr > 28.0, "{name} frame {index}: PSNR {psnr:.1} dB");
+				// The top-left part the encoder's alignment allows, never
+				// padding (which the viewer would see).
+				let (pw, ph) = (picture.width, picture.height);
+				assert!(
+					pw <= w && ph <= h && w - pw < aw && h - ph < ah,
+					"{name}: {w}x{h} decoded as {pw}x{ph} (alignment {aw}x{ah})"
+				);
+				let mut source = sources[index].view();
+				(source.width, source.height) = (pw, ph);
+				let psnr = convert::psnr(&source.to_frame(), &picture).unwrap();
+				assert!(psnr > 28.0, "{name} {w}x{h} frame {index}: PSNR {psnr:.1} dB");
+				worst = worst.min(psnr);
 				decoded += 1;
 			}
 		}
 	}
 	eprintln!(
-		"{name}: {} packets from {} frames (first after {delay:?}), keyframes at {keyframes:?}, decoded {decoded}",
+		"{name} {w}x{h} (alignment {aw}x{ah}): {} packets from {} frames (first after \
+		 {delay:?}), keyframes at {keyframes:?}, decoded {decoded}, lowest PSNR {worst:.1} dB",
 		sent.len(),
 		sources.len()
 	);
@@ -139,13 +151,47 @@ fn software_encoders_roundtrip() {
 	let mut tested = Vec::new();
 	for name in ["libx264", "libopenh264", "libsvtav1", "librav1e", "libaom-av1"] {
 		if available(name) {
-			roundtrip(name);
+			roundtrip(name, W, H);
 			tested.push(name);
 		} else {
 			eprintln!("{name} skipped: not available");
 		}
 	}
 	eprintln!("tested: {tested:?}");
+}
+
+/// What the GPU encoders produce, through the same round-trip as the
+/// software ones: our own decoders have to decode it (OpenH264 for H.264 with
+/// `VOELIN_OPENH264_LIB`, dav1d for AV1 with `--features av1`), keyframes
+/// where asked, timestamps kept, PSNR above 28 dB.
+///
+/// Also at 1920x1080, which is not a whole number of 16-pixel macroblocks:
+/// the H.264 SPS has to crop the 1088 coded rows, and AV1 has no cropping at
+/// all, so a GPU that only encodes aligned sizes shows as a wrong decoded
+/// size.
+///
+/// Whatever hardware the machine has; skipped where none of it works. HEVC is
+/// left out, having no decoder here.
+#[test]
+fn hardware_encoders_roundtrip() {
+	if ffmpeg().is_none() {
+		return;
+	}
+	let names: Vec<&'static str> = BACKENDS
+		.iter()
+		.filter(|b| b.is_hardware() && matches!(b.codec, Codec::H264 | Codec::Av1))
+		.map(|b| b.name)
+		.filter(|name| available(name))
+		.collect();
+	if names.is_empty() {
+		eprintln!("no usable hardware encoder, skipped");
+		return;
+	}
+	for name in &names {
+		roundtrip(name, W, H);
+		roundtrip(name, 1920, 1080);
+	}
+	eprintln!("tested: {names:?}");
 }
 
 #[test]
@@ -183,11 +229,24 @@ fn x264_is_constrained_high_and_changes_size() {
 
 /// `profile_idc` of the first SPS in an Annex B stream.
 fn h264_profile(data: &[u8]) -> Option<u8> {
+	sps(data).map(|(profile, _, _)| profile)
+}
+
+/// `profile_idc`, the constraint-flag byte (`constraint_set0..5` in the top
+/// six bits) and `level_idc` of the first SPS in an Annex B stream: the very
+/// three bytes of `profile-level-id` in the SDP `a=fmtp` line.
+///
+/// They are the first three bytes of the SPS payload, so no bit reading is
+/// needed. Emulation prevention cannot touch them either: it only ever
+/// inserts a byte after two zeros, and no valid SPS starts
+/// `profile_idc == 0`.
+fn sps(data: &[u8]) -> Option<(u8, u8, u8)> {
 	let mut i = 0;
-	while i + 4 < data.len() {
+	while i + 3 < data.len() {
 		if data[i..i + 3] == [0, 0, 1] {
 			if data[i + 3] & 0x1f == 7 {
-				return data.get(i + 4).copied();
+				let p = data.get(i + 4..i + 7)?;
+				return Some((p[0], p[1], p[2]));
 			}
 			i += 3;
 		} else {
@@ -195,6 +254,92 @@ fn h264_profile(data: &[u8]) -> Option<u8> {
 		}
 	}
 	None
+}
+
+/// What every usable H.264 backend puts in the SPS against the
+/// `profile-level-id` the signalling offers for the same stream. A decoder
+/// set up from our offer must be able to decode what we send, so the
+/// emitted `level_idc` may never exceed the offered one, and `profile_idc`
+/// has to be the profile we claim.
+///
+/// The constraint-flag byte is only reported, not asserted: VA-API has no
+/// Constrained High profile at all (`h264_vaapi` offers `main`, `high`,
+/// `high10`, `constrained_baseline`), so it emits plain High with the flags
+/// clear, while AMF's `constrained_high` sets `constraint_set4` and
+/// `constraint_set5` as the offer says. See `docs/media.md`.
+#[test]
+fn sps_carries_the_offered_profile_and_level() {
+	use voelin_media::H264Profile;
+	if ffmpeg().is_none() {
+		return;
+	}
+	// 720p30 (offered level 3.1) and 1080p60 (4.2).
+	const CASES: [(u32, u32, u32, u32); 2] =
+		[(1280, 720, 30, 4_000_000), (1920, 1080, 60, 6_000_000)];
+	let mut tested = 0;
+	for status in probe().iter().filter(|s| s.available.is_ok()) {
+		if status.spec.codec != Codec::H264 {
+			continue;
+		}
+		for profile in [H264Profile::ConstrainedHigh, H264Profile::ConstrainedBaseline] {
+			let (offered_profile, want_idc) = match profile {
+				H264Profile::ConstrainedHigh => (voelin_stream::H264Profile::ConstrainedHigh, 100),
+				H264Profile::ConstrainedBaseline => {
+					(voelin_stream::H264Profile::ConstrainedBaseline, 66)
+				}
+			};
+			for (w, h, fps, bitrate) in CASES {
+				let config = EncoderConfig {
+					fps,
+					bitrate_bps: bitrate,
+					h264_profile: profile,
+					..EncoderConfig::default()
+				};
+				let mut encoder = FfmpegEncoder::new(status.spec.name, config).unwrap();
+				let screen = SyntheticScreen::new(w, h);
+				// Hardware encoders hold a frame or two before the first packet.
+				let mut packets = Vec::new();
+				for n in 0..8 {
+					packets.extend(encoder.encode(&screen.frame(n, fps), n == 0).unwrap());
+					if !packets.is_empty() {
+						break;
+					}
+				}
+				let Some(first) = packets.first() else {
+					panic!("{} produced no packet at {w}x{h}", status.spec.name)
+				};
+				let Some((idc, flags, level)) = sps(&first.data) else {
+					panic!("{} sent no SPS at {w}x{h}", status.spec.name)
+				};
+				let offered = voelin_stream::h264::offer_profile_level_id(
+					offered_profile,
+					w,
+					h,
+					fps,
+					u64::from(bitrate),
+				);
+				let offered_level = (offered & 0xff) as u8;
+				eprintln!(
+					"{:<12} {profile:?} {w}x{h}@{fps}: SPS {idc:02x} {flags:02x} {level:02x}, \
+					 offer {:06x}",
+					status.spec.name, offered
+				);
+				assert_eq!(
+					idc, want_idc,
+					"{} emits profile_idc {idc}, the offer claims {want_idc}",
+					status.spec.name
+				);
+				assert!(
+					level <= offered_level,
+					"{} emits level_idc {level} at {w}x{h}@{fps}, above the offered {offered_level}: \
+					 a decoder set up from our SDP could refuse it",
+					status.spec.name
+				);
+				tested += 1;
+			}
+		}
+	}
+	assert!(tested > 0, "no usable H.264 backend to check");
 }
 
 #[test]
@@ -255,29 +400,46 @@ fn bitrate_changes_without_live_reconfiguration() {
 	assert!(!key(&mut encoder, 6, false));
 }
 
-/// DMA-BUF import is for VA-API encoders and NV12 buffers; anything else is
-/// refused as unavailable, so the caller maps the buffer instead.
+/// DMA-BUF import is for VA-API encoders and NV12 or RGB buffers; anything
+/// else is refused as unavailable, so the caller maps the buffer instead. A
+/// buffer the driver cannot import is an error, not a crash: the encoder
+/// takes the next frame, and drops cleanly although nothing went in (FFmpeg
+/// 9's VA-API encoders crash when drained before their first frame).
 #[cfg(target_os = "linux")]
 #[test]
 fn dmabuf_import_is_refused_cleanly() {
+	use std::os::fd::AsRawFd;
 	use voelin_media::capture::{DRM_MOD_LINEAR, DmaBufRef, drm_fourcc};
 	if ffmpeg().is_none() {
 		return;
 	}
+	let not_a_dmabuf = std::fs::File::open("/dev/null").unwrap();
 	let frame = DmaBufRef {
 		width: W,
 		height: H,
 		timestamp: Duration::ZERO,
 		fourcc: drm_fourcc(b"XR24"),
 		modifier: DRM_MOD_LINEAR,
-		fd: -1,
+		fd: not_a_dmabuf.as_raw_fd(),
 		size: (W * H * 4) as usize,
 		planes: [(0, (W * 4) as usize), (0, 0), (0, 0), (0, 0)],
 		plane_count: 1,
 	};
-	for name in ["libx264", "h264_vaapi"] {
+	let unavailable = |name: &str, frame: &DmaBufRef| {
 		let mut encoder = FfmpegEncoder::new(name, EncoderConfig::default()).unwrap();
-		let err = encoder.encode_dmabuf(&frame, true, &mut |_| {}).unwrap_err();
+		let err = encoder.encode_dmabuf(frame, true, &mut |_| {}).unwrap_err();
 		assert!(matches!(err, voelin_media::Error::CodecUnavailable { .. }), "{name}: {err}");
+	};
+	unavailable("libx264", &frame);
+	unavailable("h264_vaapi", &DmaBufRef { fourcc: drm_fourcc(b"YUYV"), ..frame });
+	if !available("h264_vaapi") {
+		return;
 	}
+	let mut encoder = FfmpegEncoder::new("h264_vaapi", EncoderConfig::default()).unwrap();
+	assert!(encoder.encode_dmabuf(&frame, true, &mut |_| {}).is_err(), "/dev/null imported");
+	drop(encoder);
+	let mut encoder = FfmpegEncoder::new("h264_vaapi", EncoderConfig::default()).unwrap();
+	assert!(encoder.encode_dmabuf(&frame, true, &mut |_| {}).is_err());
+	let black = voelin_media::VideoFrame::black_i420(W, H);
+	assert!(!encoder.encode(&black, true).unwrap().is_empty(), "no packet after a failed import");
 }

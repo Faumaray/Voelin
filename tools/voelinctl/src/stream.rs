@@ -14,7 +14,7 @@ use tokio::time::{Instant, Interval, sleep_until};
 use tsclientlib::prelude::*;
 use tsclientlib::{ClientId, Connection, MessageHandle, StreamItem};
 use voelin_core::media::voelin_media::capture::SourceId;
-use voelin_core::media::voelin_media::{Codecs, VideoFrame, convert};
+use voelin_core::media::voelin_media::{Codec, Codecs, VideoFrame, convert};
 use voelin_core::media::{
 	CaptureBackend, EncodedSource, EncoderPreference, Latest, Streamer, StreamerConfig,
 	VideoPipeline, peer_config, preferred_codec, stream_codec, video_codec,
@@ -96,8 +96,8 @@ pub enum StreamCommand {
 		/// bitrate, no encoder) instead of capturing.
 		#[arg(long, conflicts_with_all = ["source", "synthetic"])]
 		placeholder: bool,
-		/// Video codec: vp8, vp9, h264, av1 [default: the first the encoder
-		/// choice gives: hardware first, else VP8].
+		/// Video codec: vp8, vp9, h264, av1 [default: VP8, which every client
+		/// decodes; with --encoder, that encoder's codec]. One codec is offered.
 		#[arg(long)]
 		codec: Option<String>,
 		/// Encoder: `auto`, `software` or a backend name from `voelinctl
@@ -177,6 +177,9 @@ pub async fn run(con: &mut Connection, args: &StreamArgs) -> Result<()> {
 		} else {
 			let configured = match codec {
 				Some(codec) => Some(codec.parse().map_err(|e| anyhow::anyhow!("{e}"))?),
+				// One codec is offered (below): by default the one every
+				// client decodes. A named encoder brings its own codec.
+				None if encoder == "auto" => Some(Codec::Vp8),
 				None => None,
 			};
 			if let Some(codec) = preferred_codec(&codecs, configured) {

@@ -22,13 +22,14 @@ crates/voelin-ui/
     components/          the design system (catalogue below); index.slint exports all
     shells/              desktop.slint (rail, top bar, Sidebar), mobile.slint (bottom
                          navigation), common.slint (Panel, VoiceCard, UserCard, ...)
-    screens/             channels, chat, streams (panel and viewer), settings, home,
-                         dialogs, mobile (phone-only pages)
+    screens/             channels, chat, members (panel, card), drawers (pins, topics),
+                         voice (the voice channel), streams (viewer; the phone's
+                         panel), settings, home, dialogs, mobile (phone-only pages)
     assets/              fonts/ (Inter, OFL), icons/ (Lucide, ISC), logo.svg
   assets/twemoji.bin     the Twemoji SVGs packed by scripts/pack-twemoji.py
   src/
     app.rs               setup, App state, event dispatch
-    servers.rs chat.rs streams.rs settings_page.rs appearance.rs
+    servers.rs chat.rs members.rs streams.rs settings_page.rs appearance.rs
                          the logic of each area
     vm/                  pure view models (engine state → Slint structs), unit-tested
     bind/                callbacks of each area, wired once
@@ -62,7 +63,7 @@ literal colours.
 | Radii | `radius-xs` 4, `radius-sm` 6, `radius-md` 8, `radius-lg` 12, `radius-xl` 16, `radius-pill` |
 | Spacing | `space-1` 2 … `space-8` 32 (2, 4, 8, 12, 16, 20, 24, 32) |
 | Type (scaled) | `font-xs` 11, `font-sm` 12, `font-body` 14, `font-md` 15, `font-lg` 17, `font-xl` 20, `font-2xl` 24, `font-3xl` 30; `weight-regular` … `weight-bold` |
-| Sizes | `row-height`, `control-height` 36, `control-height-sm` 28, `icon-sm/md/lg` 16/20/24, `rail-width` 72, `sidebar-width` 264 (grows with the font scale), `topbar-height` 56, `right-panel-min/max` |
+| Sizes | `row-height`, `control-height` 36, `control-height-sm` 28, `icon-sm/md/lg` 16/20/24, `rail-width` 72, `sidebar-width` 264 (grows with the font scale), `topbar-height` 56, `right-panel-min` |
 | Motion | `fast` 120 ms, `normal` 200 ms |
 
 A light palette is filled in for every colour; `mode` switches at runtime.
@@ -119,6 +120,26 @@ Shell pieces (ui/shells/): `DesktopShell` (rail + top bar + panels as
 `Panel`, `ServerRail`, `TopBar`, `MobileShell` (top bar, page, bottom
 navigation), `VoiceCard`, `VoiceButtons`, `UserCard`, `HoldToTalk`.
 
+## The server page
+
+The server page follows the design mockups 03 to 08 (desktop). Each part
+comes from the engine's events; what a gateway adds is hidden without it.
+
+| Part | `VOELIN_OPEN` | What it shows | Engine data |
+|---|---|---|---|
+| Chat | `server` | Header with Pinned Messages, Topics, the voice channel and the members button; chat tabs; messages grouped by author ("Today at 10:14"), avatars, emoji, reactions with an add button, pin and topic marks, file cards with download; composer with attach, emoji and send. Opens at the newest message and follows new ones while at the end | `ChatHistory` (and `Chat` for servers without history), `AvatarReady`, `Transfer`, `Gateway` (pins; reactions arrive as stored messages); `Command::LoadOlderHistory`, `DownloadChatFile`, `UploadFile`, `GatewayRequest::React`, `Unreact`, `Pin`, `Unpin` |
+| Members panel | `server` (`panel`, `no-panel`) | "Members — N" and a search; those streaming first (the people in our channel while the voice channel or a stream is shown), then each server group in the server's order with its icon, then those without a group. Rows: avatar with status, name, crown (admin groups), priority speaker, channel commander, recording, moderator role, talk power, what they do or the channel they are in. Resizable: the width is `ui.members_width` | `Presence`, `Groups`, `Talking`, `IconReady` |
+| Member card | `member` | Description, groups, talk power, country; private message, poke, friend, block; volume and mute for us | `ContactsChanged`; `Command::SetContact`, `SetClientVolume`, `SetClientMuted`, `Poke` |
+| Pinned messages | `pins` | In the members panel's place: cards with author, time, text, files and reactions; the pin unpins, a click jumps to the message | `Gateway` `Pins`, `Pinned`, `Unpinned`; `GatewayRequest::Pins`, `Unpin` |
+| Topics | `topics`, `topic:<id>` | In the members panel's place: search, cards with the message count, creator and last activity, Create Topic; an open topic replaces the chat's messages and takes replies | `Gateway` `Topics`, `Topic`, `TopicHistory`; `GatewayRequest::Topics`, `TopicHistory`, `CreateTopic`, `Post` |
+| Voice channel | `voice` | Title, topic, "5 in voice / 50 total", Voice Settings, Leave; the people as large avatars (talking ring and bars, muted, crown, streaming); the streams as cards (LIVE, viewers, kind, bitrate, sound, Watch Stream); the channel's chat | `Presence`, `Talking`, `StreamsChanged`, `Gateway` stream directory (viewer counts) |
+| Watching a stream | `watch`, `popout` | The channel's header with "5 in voice" and Leave; the player with the streamer, title, viewers, LIVE, the picture's height (the simulcast picker when the streamer offers layers), volume, elapsed time, back to the chat, pop out, full screen; a note that the stream belongs to the channel; the channel's chat and a Stream Info tab. Popped out (and in full screen) it fills the window | `WatchState`, decoded frames (`src/video.rs`), `Gateway` stream directory |
+
+The pins and topics share the place of the members panel: opening one
+closes the other, and the members button brings the panel back. On the
+phone the chat is the Chat tab and the members of our channel are on the
+Activity tab.
+
 ## Adding a screen
 
 1. Write the screen in `ui/screens/<name>.slint` from the components
@@ -150,6 +171,7 @@ live when they change (settings page, `--set`, another window):
 | `ui.font_scale` | number above 0 | 1.0 | every type size |
 | `ui.narrow_breakpoint` | pixels | 800 | below this width the phone layout |
 | `ui.image_cache_mb` | megabytes | 64 | decoded images kept in memory (0: none) |
+| `ui.members_width` | pixels | 280 | width of the members panel (dragging its edge sets it) |
 
 In a config file write them as dotted keys at the top level
 (`"ui.theme" = "light"`): a `[ui]` table is read as the `ui` value.
@@ -180,29 +202,48 @@ Environment variables (see `src/dev.rs`):
   a stream, without a server (nothing is stored).
 - `VOELIN_OPEN=<what>[,<what>...]`: `home`, `server`, `settings[:voice|keybinds|streaming|privacy|appearance]`,
   `about`, `share`, `bookmark`, `emoji`, `client`, `panel`, `no-panel`,
-  `tab:<home|servers|chat|activity|you>` (phone layout).
+  `voice`, `pins`, `topics`, `topic:<id>`, `member`, `watch`, `popout`
+  (the server page, above), `tab:<home|servers|chat|activity|you>` (phone
+  layout). With sample data, `watch` plays the local test pattern in the
+  sample stream's place.
 - `VOELIN_WINDOW_SIZE=390x844`: window size (phone layout below the breakpoint).
 - `VOELIN_SCREENSHOT=<png>`, `VOELIN_SCREENSHOT_DELAY=<s>`: save the window and exit.
 - `VOELIN_DEMO_STREAM=1`, `VOELIN_AUTOCONNECT`, `VOELIN_AUTOWATCH`,
   `VOELIN_AUTOSHARE`, `VOELIN_DATA_DIR` as before.
 
 ```sh
-SLINT_BACKEND=winit-software VOELIN_DATA_DIR=$(mktemp -d) VOELIN_DEMO_UI=1 \
-VOELIN_OPEN=settings:appearance VOELIN_WINDOW_SIZE=1440x960 \
+scripts/shots.sh shot.png settings:appearance 1440x960
+# which runs, headless:
+env -u WAYLAND_DISPLAY SLINT_BACKEND=winit-software VOELIN_DATA_DIR=$(mktemp -d) \
+VOELIN_DEMO_UI=1 VOELIN_OPEN=settings:appearance VOELIN_WINDOW_SIZE=1440x960 \
 VOELIN_SCREENSHOT=shot.png VOELIN_SCREENSHOT_DELAY=4 \
-xvfb-run -a -s "-screen 0 1600x1100x24" target/debug/voelin
+xvfb-run -a -s "-screen 0 1440x960x24" target/debug/voelin
 ```
 
-The pictures in `docs/screenshots/` were made this way (reduced to 256
-colours with `convert -colors 256 PNG8:`).
+Remove `WAYLAND_DISPLAY` as above in a Wayland session: winit prefers
+Wayland, so the window would open on the desktop instead of on the Xvfb
+server (and take whatever size the compositor gives it). The script also
+turns FFmpeg off (`VOELIN_FFMPEG=0`: probing hardware encoders is not
+needed for pictures and has crashed in a driver), makes the screen twice
+the window's size so the pointer is not over the window, and passes
+`$ARGS` to the app (`ARGS="--set ui.theme=light"`). The pictures in
+`docs/screenshots/` were made this way (reduced to 256 colours with
+`convert -colors 256 PNG8:`).
+
+| Server page | |
+|---|---|
+| ![chat and members](screenshots/desktop-server.png) | ![voice channel](screenshots/desktop-voice.png) |
+| ![pinned messages](screenshots/desktop-pins.png) | ![topics](screenshots/desktop-topics.png) |
+| ![a topic](screenshots/desktop-topic.png) | ![member card](screenshots/desktop-member-card.png) |
+| ![watching a stream](screenshots/desktop-stream-viewer.png) | ![popped out](screenshots/desktop-popout.png) |
 
 | Desktop | |
 |---|---|
-| ![home](screenshots/desktop-home.png) | ![viewer](screenshots/desktop-stream-viewer.png) |
+| ![home](screenshots/desktop-home.png) | ![light](screenshots/desktop-light.png) |
 | ![settings](screenshots/desktop-settings-voice.png) | ![appearance](screenshots/desktop-settings-appearance.png) |
-| ![emoji](screenshots/desktop-emoji-picker.png) | ![light](screenshots/desktop-light.png) |
+| ![emoji](screenshots/desktop-emoji-picker.png) | ![volume](screenshots/desktop-client-volume.png) |
 | ![share](screenshots/desktop-share-dialog.png) | ![add server](screenshots/desktop-add-server.png) |
-| ![about](screenshots/desktop-about.png) | ![volume](screenshots/desktop-client-volume.png) |
+| ![about](screenshots/desktop-about.png) | |
 
 | Phone layout | | | | |
 |---|---|---|---|---|
@@ -212,6 +253,16 @@ colours with `convert -colors 256 PNG8:`).
 
 - No drop shadows or blur (the software renderer draws none): glows are
   translucent rings, the backdrop is a gradient rectangle.
-- Avatars are initials on a colour from the name; the image cache is ready
-  for pictures (server icons, avatars) once the engine provides them.
+- Avatars are the clients' pictures from the engine's cache
+  (`AvatarReady`), or initials on a colour from the name; group icons come
+  from `IconReady`.
+- The members panel lists the people online: TeamSpeak tells a client
+  nothing about offline members, so the mockup's "Offline" section and a
+  server-wide member count are left out.
+- The quality picker shows only when the streamer's simulcast layers are
+  known; the engine does not yet tell a viewer which layers a stream has,
+  so in practice the player shows the decoded picture's height.
+- Popping the stream out fills the main window (no second window yet).
+- A jump to a pinned message scrolls to where an average row would be
+  (rows differ in height), and only to messages already loaded.
 - The window keeps its native decorations (no custom title bar).

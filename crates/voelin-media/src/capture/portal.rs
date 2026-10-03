@@ -11,9 +11,13 @@
 //! (`BGRx` / `BGRA` / `RGBx` / `RGBA`) second, so compositors without
 //! DMA-BUF support use shared memory. When reading DMA-BUFs turns out slow
 //! (buffers in memory the CPU reads uncached, e.g. a discrete GPU's VRAM),
-//! the stream switches to shared memory. Tiled DMA-BUFs would need a GPU
-//! import and are not offered. Frames go to the [`FrameSink`] while the
-//! buffer is dequeued; nothing is copied before conversion. The frame rate
+//! the stream switches to shared memory. A sink that
+//! [accepts DMA-BUFs](FrameSink::accepts_dmabuf) (a VA-API encoder, which
+//! converts and encodes them on the GPU) gets them before anything is
+//! mapped, and then the CPU never reads them. Tiled DMA-BUFs are not
+//! offered: the modifiers the encoder's driver imports are not known here.
+//! Frames go to the [`FrameSink`] while the buffer is dequeued; nothing is
+//! copied before conversion. The frame rate
 //! follows the sink's cap: the compositor is asked for up to that rate and
 //! sends frames when the screen changes.
 
@@ -31,7 +35,7 @@ use pw::spa::pod::{
 use pw::spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Fraction, Id, Rectangle, SpaTypes};
 use tracing::{debug, warn};
 
-use crate::capture::dmabuf::DmaBufMap;
+use crate::capture::dmabuf::{self, DmaBufMap};
 use crate::capture::pw::{PwThread, pod, serialize};
 use crate::capture::{
 	BoxFuture, CaptureOptions, CaptureSource, DRM_MOD_LINEAR, DmaBufRef, FrameSink, QueueSink,
@@ -248,9 +252,23 @@ const MODIFIER_LINEAR: i64 = 0;
 /// Reading DMA-BUFs slower than this (per pixel, conversion included) means
 /// the buffers live in memory the CPU reads uncached (e.g. a discrete GPU's
 /// VRAM); shared memory is faster then.
-const SLOW_DMABUF_NS_PER_PIXEL: f64 = 6.0;
+///
+/// Measured on a Radeon RX 7900 GRE capturing a 2560x1440 desktop at 60 fps,
+/// the same run through both paths: a LINEAR DMA-BUF took 11.95 ms per frame
+/// (3.24 ns per pixel) and 19.5 CPU cores, shared memory 0.27 ms (0.07 ns
+/// per pixel) and 0.41 cores — 44 times the time and 48 times the CPU. The
+/// threshold was 6.0, which that does not reach, so the switch never
+/// happened and a discrete GPU burned twenty cores on screen sharing. It
+/// sits between the two figures, an order of magnitude above the fast path,
+/// so a GPU whose buffers the CPU can read (anything with unified memory)
+/// keeps them.
+const SLOW_DMABUF_NS_PER_PIXEL: f64 = 1.0;
 /// DMA-BUF frames timed before deciding.
 const DMABUF_PROBE_FRAMES: u32 = 30;
+/// DMA-BUFs that failed to map before shared memory is offered instead. A
+/// few failures can be a buffer being replaced; more means this compositor's
+/// buffers cannot be read this way at all.
+const DMABUF_FAILURES_BEFORE_SHM: u32 = 5;
 
 /// What was negotiated.
 #[derive(Clone, Copy, Debug)]
@@ -275,6 +293,9 @@ struct VideoState {
 	/// Time spent handing DMA-BUF frames to the sink, and how many.
 	dmabuf_time: Duration,
 	dmabuf_frames: u32,
+	/// DMA-BUFs that could not be mapped (see
+	/// [`DMABUF_FAILURES_BEFORE_SHM`]).
+	dmabuf_failures: u32,
 	logged: Option<bool>,
 	mainloop: pw::main_loop::MainLoopWeak,
 }
@@ -303,6 +324,7 @@ fn video_stream(
 		maps: Vec::new(),
 		dmabuf_time: Duration::ZERO,
 		dmabuf_frames: 0,
+		dmabuf_failures: 0,
 		logged: None,
 		mainloop: mainloop.downgrade(),
 	};
@@ -582,7 +604,12 @@ fn process(stream: &pw::stream::Stream, state: &mut VideoState) {
 			fourcc,
 			modifier: format.modifier.map_or(DRM_MOD_LINEAR, |m| m as u64),
 			fd: data.fd(),
-			size: (raw.mapoffset + raw.maxsize) as usize,
+			// As for the mapping below: compositors leave `maxsize` 0 for
+			// a DMA-BUF, whose size is its buffer object's.
+			size: match (raw.mapoffset + raw.maxsize) as usize {
+				0 => dmabuf::size_of(data.fd()).unwrap_or(raw.mapoffset as usize + needed),
+				size => size,
+			},
 			planes: [(raw.mapoffset as usize + offset, stride), (0, 0), (0, 0), (0, 0)],
 			plane_count: 1,
 		};
@@ -600,14 +627,42 @@ fn process(stream: &pw::stream::Stream, state: &mut VideoState) {
 	let started = Instant::now();
 	let more = if is_dmabuf {
 		let raw = data.as_raw();
-		let len = (raw.mapoffset + raw.maxsize) as usize;
+		// A DMA-BUF's size lives in its buffer object, not in `maxsize`:
+		// `maxsize` describes a mapping, which only shared memory has, and
+		// compositors leave it 0 (measured on a 2560x1440 Wayland desktop:
+		// fd valid, stride 10240, `mapoffset` and `maxsize` both 0). Mapping
+		// `mapoffset + maxsize` bytes then asks for a zero-length mapping
+		// and every frame is dropped, so fall back to the rows the
+		// negotiated format describes, which is exactly what is read below.
+		let len = match (raw.mapoffset + raw.maxsize) as usize {
+			0 => raw.mapoffset as usize + needed,
+			size => size,
+		};
 		let fd = data.fd();
 		if !state.maps.iter().any(|m| m.fd() == fd && m.len() >= len) {
 			state.maps.retain(|m| m.fd() != fd);
 			match DmaBufMap::new(fd, len) {
 				Ok(map) => state.maps.push(map),
 				Err(e) => {
-					warn!("cannot map a screen capture DMA-BUF: {e}");
+					warn!(
+						fd,
+						len,
+						mapoffset = raw.mapoffset,
+						maxsize = raw.maxsize,
+						stride,
+						height = format.height,
+						"cannot map a screen capture DMA-BUF: {e}"
+					);
+					// Dropping every frame would leave the viewer a black
+					// screen; shared memory always works.
+					state.dmabuf_failures += 1;
+					if state.dmabuf_failures >= DMABUF_FAILURES_BEFORE_SHM && state.dmabuf {
+						tracing::info!(
+							"screen capture DMA-BUFs cannot be mapped; switching to shared memory"
+						);
+						state.dmabuf = false;
+						renegotiate(stream, state.fps, false);
+					}
 					return;
 				}
 			}

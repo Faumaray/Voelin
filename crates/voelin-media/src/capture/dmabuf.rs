@@ -21,6 +21,18 @@ const DMA_BUF_SYNC_END: u64 = 1 << 2;
 /// `DMA_BUF_IOCTL_SYNC`: `_IOW('b', 0, struct dma_buf_sync)`.
 const SYNC: rustix::ioctl::Opcode = rustix::ioctl::opcode::write::<DmaBufSync>(b'b', 0);
 
+/// The size of DMA-BUF `fd` in bytes (`lseek(fd, 0, SEEK_END)`, which a
+/// DMA-BUF answers with its buffer object's size without moving anything).
+pub(crate) fn size_of(fd: RawFd) -> Option<usize> {
+	if fd < 0 {
+		return None;
+	}
+	// SAFETY: borrowed for the call from a caller that holds it open.
+	let fd = unsafe { BorrowedFd::borrow_raw(fd) };
+	let end = rustix::fs::seek(fd, rustix::fs::SeekFrom::End(0)).ok()?;
+	usize::try_from(end).ok().filter(|&size| size > 0)
+}
+
 /// A read-only mapping of a DMA-BUF.
 pub(crate) struct DmaBufMap {
 	fd: RawFd,
@@ -97,5 +109,7 @@ mod tests {
 		assert_eq!(map.fd(), file.as_raw_fd());
 		assert_eq!(map.read(|b| b.iter().map(|&x| u64::from(x)).sum::<u64>()), 7 * 8192);
 		assert!(DmaBufMap::new(-1, 10).is_err());
+		assert_eq!(size_of(file.as_raw_fd()), Some(8192));
+		assert_eq!(size_of(-1), None);
 	}
 }

@@ -227,12 +227,12 @@ export component TopBar inherits Rectangle {
         }
         IconButton {
             icon: Icons.users;
-            label: @tr("Members and streams");
-            checked: Nav.right-panel-open && Nav.page == Page.server;
+            label: @tr("Members");
+            checked: Nav.right-panel-open && !Nav.pins-open && !Nav.topics-open && Nav.page == Page.server;
             y: (parent.height - self.height) / 2;
             clicked => {
                 Nav.show(Page.server);
-                Nav.right-panel-open = !Nav.right-panel-open;
+                Nav.toggle-members();
             }
         }
         Rectangle {
