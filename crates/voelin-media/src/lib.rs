@@ -79,6 +79,8 @@ pub enum Error {
 	Cancelled,
 	#[error("download failed: {0}")]
 	Download(String),
+	#[error("segmentation: {0}")]
+	Segmentation(String),
 	#[error("I/O: {0}")]
 	Io(#[from] std::io::Error),
 }

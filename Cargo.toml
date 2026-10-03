@@ -107,6 +107,16 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.x11rb-protocol]
 opt-level = 3
+# The studio's person segmentation (tract): unoptimized, one mask takes
+# about half a second.
+[profile.dev.package.tract-core]
+opt-level = 3
+[profile.dev.package.tract-linalg]
+opt-level = 3
+[profile.dev.package.tract-data]
+opt-level = 3
+[profile.dev.package.ndarray]
+opt-level = 3
 [profile.dev.package.wayland-backend]
 opt-level = 3
 [profile.dev.package.wayland-client]

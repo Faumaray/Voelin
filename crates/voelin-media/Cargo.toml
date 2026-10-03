@@ -9,7 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
-default = ["vpx", "openh264", "openh264-download", "ffmpeg", "x11", "pipewire", "wlroots"]
+default = ["vpx", "openh264", "openh264-download", "ffmpeg", "x11", "pipewire", "wlroots", "segment"]
 # VP8 and VP9 through the system libvpx (pkg-config `vpx`).
 vpx = ["dep:libvpx-native-sys"]
 # H.264 through Cisco's prebuilt OpenH264 library, loaded at runtime. The
@@ -33,6 +33,10 @@ pipewire = ["dep:ashpd", "dep:pipewire", "dep:memmap2", "dep:rustix", "dep:zune-
 # Screen capture on wlroots compositors (Sway, Hyprland, river, ...) without
 # the portal: ext-image-copy-capture-v1 or wlr-screencopy-unstable-v1 (Linux).
 wlroots = ["dep:wayland-client", "dep:wayland-protocols", "dep:wayland-protocols-wlr", "dep:memmap2", "dep:rustix"]
+# The studio's background replacement finds the person with a segmentation
+# model (PP-HumanSeg, ONNX, bundled in `models/`) run on the CPU by tract.
+# Without it the background is cut around a centred oval.
+segment = ["dep:tract-onnx"]
 # Conversion between `Codec` and `str0m::format::Codec`.
 str0m = ["dep:str0m"]
 # The studio's WHIP output: a WebRTC session (str0m) set up over HTTP. Needs
@@ -56,6 +60,7 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 sha2 = { version = "0.10.9", optional = true }
 str0m = { version = "0.23.1", default-features = false, optional = true }
 thiserror = "2.0.21"
+tract-onnx = { version = "0.23.8", optional = true }
 tokio = { version = "1", features = ["sync"] }
 tracing = "0.1.44"
 yuv = "0.8.19"

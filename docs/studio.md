@@ -44,7 +44,7 @@ the UI) and a `background` (replacement, below).
 |---|---|---|
 | `screen` | `monitor`, `backend` (`portal`, `wlroots`, `x11`, `windows`; none: this session's), `cursor` | a capture backend, frames borrowed and copied into pooled frames |
 | `window` | `handle` (X11 id, `HWND`), `backend`, `cursor` | the same |
-| `portal` | `restore_token`, `cursor` | the ScreenCast portal's dialog (Wayland); the token is written back so it is asked once |
+| `portal` | `restore_token`, `cursor` | the ScreenCast portal's dialog (Wayland); with a `restore_token` the portal may restore its last choice without asking. The UI adds portal sources without one, so the dialog asks each time the source starts |
 | `camera` | `device` (a `camera::Camera::id`; empty: the first), `size`, `fps`, `mirror` | see [Cameras](#cameras) |
 | `image` | `path` | PNG or JPEG, alpha kept, read once |
 | `text` | `text`, `font` (none: the bundled Inter), `size_px`, `colour`, `backdrop`, `align`, `padding` | rasterised once with `ab_glyph` |
@@ -147,13 +147,19 @@ blur is a three-pass box blur (close to a Gaussian), separable, with a
 running sum so its cost does not grow with the radius, in bands on a worker
 pool over pooled buffers.
 
-**What segments today is not a person.** `segment::Ellipse`, the segmenter
-that is always there, is a centred oval about where a person sits in front
-of a camera. A person segmentation model (MediaPipe selfie segmentation,
-Apache-2.0, through `tract-onnx`) is meant to sit behind the `Segmenter`
-trait; it is not in this build, because the model could not be fetched where
-this was built (see [Status](#status)). Dropping it in changes nothing on the
-frame path.
+The person is found by `segment::HumanSeg` (feature `segment`, on by
+default): PP-HumanSeg, PaddleSeg's portrait segmentation model as OpenCV Zoo
+ships it (`crates/voelin-media/models/`, 6 MB, Apache-2.0, bundled into the
+binary), run on the CPU by `tract-onnx`. The frame is squeezed to 192x192 RGB;
+the mask is the model's probability of a person per pixel, 192x192, which
+the frame path stretches back over the frame (its soft edge is the
+feathering). The model is parsed and optimised once per process, on the
+segmentation thread when the first mask is due; one mask then takes about
+50 ms on one core of a desktop CPU (dev builds optimise tract too), so the
+10 masks a second cost about half a core. If the model does not load,
+`segment::Ellipse`, a centred oval about where a person sits in front of a
+camera, stands in (and builds without `segment` use it). Other models drop
+in behind the `Segmenter` trait without changing the frame path.
 
 ## Outputs (`studio::output`)
 
@@ -347,7 +353,8 @@ two threads) takes about 3 ms at its own rate (15 fps by default).
 | MJPEG from a real camera (Fifine K420) at 2560x1440, 1920x1080 and 1280x720 | `camera::tests::a_real_camera_delivers_its_largest_mjpeg_size` (`--ignored`, `VOELIN_CAMERA_SIZE` picks a size) | tested on one webcam: each size arrived at 10 fps, which is what the camera sent in that light (`v4l2-ctl` measured the same 10 fps) |
 | Camera through the XDG Camera portal (sandboxes) | – | compiles only |
 | Screen, window and portal sources | the existing capture backends ([media.md](media.md#capture)) | as tested there; not run inside the studio here |
-| Background blur, image and colour backdrops on the oval mask | `segment::tests` | tested; **no person segmentation model** (see above) |
+| Background blur, image and colour backdrops on the oval mask | `segment::tests` | tested |
+| Person segmentation (PP-HumanSeg through tract): loads, 192x192 mask, nobody in an empty room, time per mask | `segment::tests::the_model_finds_nobody_in_an_empty_room` | tested (about 50 ms per mask); on a photo of a person the mask follows the silhouette, arms and legs included (checked by eye, the photo is not in the repository); not yet tried with a camera |
 | Windows cameras (Media Foundation: listing, the native format nearest the wanted size, NV12 through the source reader, MJPEG decoded by it) | `cargo clippy --target x86_64-pc-windows-gnu -p voelin-media` | type-checked only, never run |
 | Android cameras | – | not implemented: `camera::list()` has only the test pattern there |
 | RTMP: the FLV tags (sizes, times past 24 bits, AVC from Annex B, `onMetaData` in AMF0), URL and key handling (the name hides the key), dead servers refused | `flv::tests`, `rtmp::tests` | tested |

@@ -149,7 +149,9 @@ Activity tab.
 ![Stream Studio](screenshots/desktop-studio-live.png)
 
 The studio (mockups 09, 10 and the phone's 04) is a page of the main window
-(the radio button in the top bar), a window of its own (the button in its
+(the Share button's menu: "Share screen" for a quick share of a screen or
+window, "Stream Studio" for the studio; while a share runs the button opens
+its dialog), a window of its own (the button in its
 header; closing that window brings it back) and a phone page. Its controller
 is `src/studio.rs` on the engine's studio ([studio.md](studio.md)): the
 studio runs while it is shown, live or recording, and a `Streamer` started
@@ -312,9 +314,10 @@ the window's size so the pointer is not over the window, and passes
 - The members panel lists the people online: TeamSpeak tells a client
   nothing about offline members, so the mockup's "Offline" section and a
   server-wide member count are left out.
-- The quality picker shows only when the streamer's simulcast layers are
-  known; the engine does not yet tell a viewer which layers a stream has,
-  so in practice the player shows the decoded picture's height.
+- The quality picker shows only when the streamer lists its simulcast
+  layers, which only a Voelin streamer does (`a=x-voelin-layers`, see
+  [media.md](media.md)); for the official client's streams the player
+  shows the decoded picture's height.
 - Popping the stream out fills the main window (no second window yet).
 - A jump to a pinned message scrolls to where an average row would be
   (rows differ in height), and only to messages already loaded.
@@ -323,6 +326,7 @@ the window's size so the pointer is not over the window, and passes
   stream belongs to its channel): its destination picks among the servers,
   not among their channels. Image paths (image sources, backgrounds) are
   typed, there is no file chooser. The background effect replaces what is
-  outside an oval (the engine has no person segmentation model yet). The
+  around the person the engine's segmentation model finds (an oval where
+  the model does not load). The
   studio cannot be detached on Android (one window). Its own window shows
   no toasts; status messages go to the main window.

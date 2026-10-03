@@ -1,0 +1,42 @@
+// What a Share button opens: a quick share of a screen or a window (the
+// share dialog) or the Stream Studio. While a share runs it opens the share
+// dialog right away, to manage it.
+
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { PopupMenu } from "components/index.slint";
+import { Bridge } from "bridge.slint";
+import { StudioBridge } from "studio-bridge.slint";
+import { Nav } from "nav.slint";
+
+export component ShareMenu inherits Rectangle {
+    // The menu's height, to open it above a button.
+    out property <length> menu-height: 2 * Theme.control-height + 2 * Theme.space-2 + 2px;
+    width: 0;
+    height: 0;
+
+    // Open at (x, y), relative to this element.
+    public function open(x: length, y: length) {
+        if Bridge.share-state == "live" || Bridge.share-state == "starting" {
+            Nav.open-share();
+        } else {
+            menu.show(x, y);
+        }
+    }
+
+    menu := PopupMenu {
+        menu-width: 220px;
+        entries: [
+            // The studio's stream takes the place of a simple share.
+            { text: @tr("Share screen"), icon: Icons.monitor-up, enabled: !StudioBridge.status.live },
+            { text: @tr("Stream Studio"), icon: Icons.radio, enabled: true },
+        ];
+        activated(i) => {
+            if i == 0 {
+                Nav.open-share();
+            } else {
+                Nav.open-studio();
+            }
+        }
+    }
+}
