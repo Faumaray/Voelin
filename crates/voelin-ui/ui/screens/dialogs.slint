@@ -3,7 +3,7 @@
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, BookmarkForm, ShareForm } from "../bridge.slint";
-import { Nav } from "../nav.slint";
+import { Nav, Page } from "../nav.slint";
 import { Icon, Button, ButtonKind, IconButton, TextField, Field, Select, Toggle, ToggleRow, Slider, Modal, Card, Chip, Banner, Avatar, Status, ListView, ScrollView } from "../components/index.slint";
 import { AboutSlint } from "std-widgets.slint";
 
@@ -15,8 +15,10 @@ component Footer inherits HorizontalLayout {
 
 export component BookmarkDialog inherits Modal {
     in-out property <BookmarkForm> form;
+    // Join by address: connect once saved.
+    in property <bool> join;
     callback done();
-    title: form.id < 0 ? @tr("Add server") : @tr("Edit server");
+    title: join ? @tr("Join a server") : form.id < 0 ? @tr("Add server") : @tr("Edit server");
     subtitle: @tr("TeamSpeak 3 or 6 server address and your nickname there.");
     icon: Icons.server;
     card-width: 560px;
@@ -102,10 +104,15 @@ export component BookmarkDialog inherits Modal {
         }
         Button {
             kind: ButtonKind.primary;
-            text: @tr("Save");
+            icon: root.join ? Icons.log-in : Icons.check;
+            text: root.join ? @tr("Save and connect") : @tr("Save");
             enabled: form.address != "" && form.nickname != "";
             clicked => {
                 Bridge.save-bookmark(form);
+                if root.join {
+                    Bridge.connect-voice();
+                    Nav.show(Page.server);
+                }
                 done();
             }
         }

@@ -50,6 +50,9 @@ fn open_settings(dir: &Path, overrides: &[String]) -> Settings {
 	for key in appearance_keys() {
 		prefs.register(key);
 	}
+	for key in crate::settings::page_keys() {
+		prefs.register(key);
+	}
 	let config = std::env::var_os("VOELIN_CONFIG")
 		.map(PathBuf::from)
 		.or_else(|| Some(dir.join("config.toml")).filter(|p| p.exists()));
@@ -214,6 +217,8 @@ pub(crate) struct SessionView {
 	pub downloads: HashMap<u64, crate::chat::Download>,
 	/// The next transfer id.
 	pub next_transfer: u64,
+	/// What the home, messages and events screens keep of the session.
+	pub extra: crate::social::SessionExtra,
 }
 
 impl Default for SessionView {
@@ -237,6 +242,7 @@ impl Default for SessionView {
 			stream_viewers: HashMap::new(),
 			downloads: HashMap::new(),
 			next_transfer: 1,
+			extra: Default::default(),
 		}
 	}
 }
@@ -296,6 +302,15 @@ pub(crate) struct Models {
 	pub qualities: Rc<VecModel<slint::SharedString>>,
 	/// Shown when there is no chat.
 	pub no_chat: Rc<VecModel<ChatLine>>,
+	/// Home, friends, messages, the bell, the search, events.
+	pub social: crate::social::SocialModels,
+	/// Settings pages.
+	pub layers: Rc<VecModel<LayerItem>>,
+	pub audio_sources: Rc<VecModel<AudioSourceItem>>,
+	pub identities: Rc<VecModel<IdentityItem>>,
+	pub gateway_config: Rc<VecModel<ConfigItem>>,
+	pub gateway_perms: Rc<VecModel<PermItem>>,
+	pub all_settings: Rc<VecModel<SettingItem>>,
 }
 
 impl Models {
@@ -313,6 +328,13 @@ impl Models {
 			topic_messages: Rc::default(),
 			qualities: Rc::default(),
 			no_chat: Rc::default(),
+			social: crate::social::SocialModels::new(bridge),
+			layers: Rc::default(),
+			audio_sources: Rc::default(),
+			identities: Rc::default(),
+			gateway_config: Rc::default(),
+			gateway_perms: Rc::default(),
+			all_settings: Rc::default(),
 		};
 		bridge.set_servers(ModelRc::from(models.servers.clone()));
 		bridge.set_tree(ModelRc::from(models.tree.clone()));
@@ -326,6 +348,12 @@ impl Models {
 		bridge.set_topic_messages(ModelRc::from(models.topic_messages.clone()));
 		bridge.set_viewer_qualities(ModelRc::from(models.qualities.clone()));
 		bridge.set_messages(ModelRc::from(models.no_chat.clone()));
+		bridge.set_layers(ModelRc::from(models.layers.clone()));
+		bridge.set_audio_sources(ModelRc::from(models.audio_sources.clone()));
+		bridge.set_identities(ModelRc::from(models.identities.clone()));
+		bridge.set_gateway_config(ModelRc::from(models.gateway_config.clone()));
+		bridge.set_gateway_perms(ModelRc::from(models.gateway_perms.clone()));
+		bridge.set_all_settings(ModelRc::from(models.all_settings.clone()));
 		models
 	}
 }
@@ -341,8 +369,6 @@ pub(crate) struct App {
 	pub sessions: HashMap<i64, SessionView>,
 	pub models: Models,
 	pub status: String,
-	/// The top bar's search: filters the channel tree.
-	pub tree_filter: String,
 	/// The members panel's search.
 	pub member_filter: String,
 	/// The topics drawer's search.
@@ -389,6 +415,10 @@ pub(crate) struct App {
 	/// Files being uploaded to a channel from the composer: session,
 	/// channel and name, so the link can be posted when they are up.
 	pub uploads: HashMap<u64, (i64, u64, String)>,
+	/// Home, friends, messages, the bell and the search.
+	pub social: crate::social::Social,
+	/// The settings pages of the new design.
+	pub pages: crate::settings_pages::Pages,
 }
 
 thread_local! {
@@ -556,7 +586,6 @@ pub fn run(options: RunOptions) -> Result<()> {
 		sessions: HashMap::new(),
 		models,
 		status: String::new(),
-		tree_filter: String::new(),
 		member_filter: String::new(),
 		topic_filter: String::new(),
 		voice_view: false,
@@ -583,14 +612,23 @@ pub fn run(options: RunOptions) -> Result<()> {
 		open_client_pending: switches.open_client,
 		notices_loaded: false,
 		uploads: HashMap::new(),
+		social: Default::default(),
+		pages: Default::default(),
 	};
 	APP.with(|a| *a.borrow_mut() = Some(app));
 	crate::bind::wire(&ui);
 	with_app(|app| {
 		app.apply_appearance();
+		app.load_default_identity();
+		app.apply_srtp();
 		app.refresh_all();
 		app.refresh_settings_flags();
 		app.refresh_crash_notice();
+		app.load_recent_chats();
+		app.refresh_people();
+		app.refresh_home();
+		app.refresh_notices();
+		app.refresh_pages();
 		if app.demo {
 			app.start_demo();
 		}
@@ -714,9 +752,16 @@ impl App {
 		} else if appearance_keys().iter().any(|k| k.name() == key) {
 			self.apply_appearance();
 		}
+		self.page_setting_changed(key);
 	}
 
 	pub(crate) fn handle_event(&mut self, event: Event) {
+		let touched = self.social_event(&event);
+		self.dispatch(event);
+		self.social_refresh(touched);
+	}
+
+	fn dispatch(&mut self, event: Event) {
 		match event {
 			Event::State { session, state } => {
 				let id = session as i64;
@@ -813,7 +858,10 @@ impl App {
 			Event::ChatHistory { session, target, messages, source, complete } => {
 				self.history_batch(session as i64, &target, messages, source, complete);
 			}
-			Event::Gateway { session, update } => self.gateway_update(session as i64, update),
+			Event::Gateway { session, update } => {
+				self.gateway_extra(session as i64, &update);
+				self.gateway_update(session as i64, update);
+			}
 			Event::Groups { session, server_groups, .. } => {
 				let view = self.sessions.entry(session as i64).or_default();
 				view.server_groups = (*server_groups).clone();
@@ -859,6 +907,7 @@ impl App {
 	/// Once a second.
 	fn tick(&mut self) {
 		self.tick_streams();
+		self.tick_pages();
 		if self.audio_dirty {
 			self.save_audio();
 		}

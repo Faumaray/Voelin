@@ -457,12 +457,15 @@ export component MessageList inherits VerticalLayout {
 export component Composer inherits HorizontalLayout {
     in property <string> placeholder;
     in property <bool> topic;
+    // Files can be attached (channel chats).
+    in property <bool> attach: true;
+    in property <bool> enabled: true;
     padding: Theme.space-4;
     padding-left: Theme.space-5;
     padding-right: Theme.space-5;
     spacing: Theme.space-3;
     // Files go to the channel's file browser and a link into the chat.
-    if !root.topic: IconButton {
+    if !root.topic && root.attach: IconButton {
         icon: Icons.plus;
         label: @tr("Attach a file");
         round: true;
@@ -485,6 +488,7 @@ export component Composer inherits HorizontalLayout {
             input := TextField {
                 text <=> Nav.draft;
                 bare: true;
+                enabled: root.enabled;
                 placeholder: root.placeholder;
                 label: @tr("Message");
                 accepted(text) => {

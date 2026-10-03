@@ -116,6 +116,21 @@ pub fn file(path: &std::path::Path) -> Image {
 		.unwrap_or_default()
 }
 
+/// A picture from encoded bytes (PNG, JPEG, GIF, WebP), decoded once and
+/// kept by `key`; an empty image if it cannot be decoded.
+pub fn picture(key: &str, bytes: &[u8]) -> Image {
+	let cache_key = format!("picture:{key}");
+	CACHE
+		.with(|c| {
+			c.borrow_mut().get_or_load(&cache_key, || {
+				let image = Image::load_from_data(bytes, None).ok()?;
+				let size = image.size();
+				Some((image, size.width as usize * size.height as usize * 4))
+			})
+		})
+		.unwrap_or_default()
+}
+
 /// A Twemoji by key; an empty image if there is none.
 pub fn emoji(key: &str) -> Image {
 	if key.is_empty() {

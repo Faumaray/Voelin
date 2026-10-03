@@ -1,47 +1,21 @@
-// The settings page: navigation (sidebar) and the sections as cards.
+// The settings page: the navigation (sidebar) and the sections as cards.
+// Voice & Video follows design mockup 11; every control reads and writes a
+// setting and applies at once. The account, profiles, streaming,
+// integrations and advanced sections are in settings-pages.slint.
 
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge } from "../bridge.slint";
 import { Nav, SettingsSection } from "../nav.slint";
-import { Icon, Button, ButtonKind, TextField, Field, Select, Toggle, ToggleRow, Slider, SegmentedTabs, Card, Meter, NavItem, Divider, ScrollView } from "../components/index.slint";
-
-// A label, a control (@children) and a value at the right.
-component SliderRow inherits HorizontalLayout {
-    in property <string> label;
-    in property <string> value;
-    spacing: Theme.space-4;
-    min-height: Theme.control-height;
-    Text {
-        text: root.label;
-        color: Theme.text;
-        vertical-alignment: center;
-        min-width: 130px;
-        wrap: word-wrap;
-    }
-    @children
-    Text {
-        text: root.value;
-        color: Theme.text-secondary;
-        width: 64px;
-        vertical-alignment: center;
-        horizontal-alignment: right;
-    }
-}
-
-// Small print under a control.
-component Hint inherits Text {
-    font-size: Theme.font-sm;
-    color: Theme.text-muted;
-    wrap: word-wrap;
-}
+import { Icon, Button, ButtonKind, IconButton, TextField, Field, Select, Toggle, ToggleRow, RadioRow, Slider, SegmentedTabs, Card, Meter, NavItem, Divider, Chip, Avatar, ScrollView } from "../components/index.slint";
+import { SliderRow, Hint, ChoiceRow, AccountSection, ProfilesSection, StreamingSection, IntegrationsSection, AdvancedSection } from "settings-pages.slint";
 
 // The navigation of the settings, for the sidebar.
 export component SettingsNav inherits VerticalLayout {
-    spacing: Theme.space-2;
+    spacing: Theme.space-1;
     VerticalLayout {
         padding-left: Theme.space-3;
-        padding-bottom: Theme.space-4;
+        padding-bottom: Theme.space-3;
         Text {
             text: @tr("Settings");
             font-size: Theme.font-2xl;
@@ -54,58 +28,105 @@ export component SettingsNav inherits VerticalLayout {
             color: Theme.text-muted;
         }
     }
-    NavItem {
-        icon: Icons.mic;
-        text: @tr("Voice & Video");
-        subtitle: @tr("Microphone, speakers, processing");
-        selected: Nav.settings-section == SettingsSection.voice;
-        clicked => { Nav.open-settings(SettingsSection.voice); }
-    }
-    NavItem {
-        icon: Icons.keyboard;
-        text: @tr("Keybinds");
-        subtitle: @tr("Push-to-talk");
-        selected: Nav.settings-section == SettingsSection.keybinds;
-        clicked => { Nav.open-settings(SettingsSection.keybinds); }
-    }
-    NavItem {
-        icon: Icons.radio;
-        text: @tr("Streaming");
-        subtitle: @tr("Codecs for streams");
-        selected: Nav.settings-section == SettingsSection.streaming;
-        clicked => { Nav.open-settings(SettingsSection.streaming); }
-    }
-    NavItem {
-        icon: Icons.shield;
-        text: @tr("Privacy & Safety");
-        subtitle: @tr("Crash reports");
-        selected: Nav.settings-section == SettingsSection.privacy;
-        clicked => { Nav.open-settings(SettingsSection.privacy); }
-    }
-    NavItem {
-        icon: Icons.palette;
-        text: @tr("Appearance");
-        subtitle: @tr("Theme, text size, layout");
-        selected: Nav.settings-section == SettingsSection.appearance;
-        clicked => { Nav.open-settings(SettingsSection.appearance); }
-    }
-    Divider { }
-    NavItem {
-        icon: Icons.info;
-        text: @tr("About");
-        subtitle: @tr("Version and notices");
-        clicked => { Nav.open-about(); }
+    ScrollView {
+        vertical-stretch: 1;
+        VerticalLayout {
+            spacing: Theme.space-1;
+            alignment: start;
+            NavItem {
+                icon: Icons.user-round;
+                text: @tr("My Account");
+                subtitle: @tr("Identity in use, unique ids");
+                selected: Nav.settings-section == SettingsSection.account;
+                clicked => { Nav.open-settings(SettingsSection.account); }
+            }
+            NavItem {
+                icon: Icons.users;
+                text: @tr("Profiles");
+                subtitle: @tr("Identities, import, export");
+                selected: Nav.settings-section == SettingsSection.profiles;
+                clicked => { Nav.open-settings(SettingsSection.profiles); }
+            }
+            NavItem {
+                icon: Icons.palette;
+                text: @tr("Appearance");
+                subtitle: @tr("Themes, layout, text size");
+                selected: Nav.settings-section == SettingsSection.appearance;
+                clicked => { Nav.open-settings(SettingsSection.appearance); }
+            }
+            NavItem {
+                icon: Icons.mic;
+                text: @tr("Voice & Video");
+                subtitle: @tr("Audio, camera, streaming");
+                selected: Nav.settings-section == SettingsSection.voice;
+                clicked => { Nav.open-settings(SettingsSection.voice); }
+            }
+            NavItem {
+                icon: Icons.radio;
+                text: @tr("Streaming");
+                subtitle: @tr("Go live, stream settings");
+                selected: Nav.settings-section == SettingsSection.streaming;
+                clicked => { Nav.open-settings(SettingsSection.streaming); }
+            }
+            NavItem {
+                icon: Icons.smartphone;
+                text: @tr("Devices");
+                subtitle: @tr("Manage your devices");
+                selected: Nav.settings-section == SettingsSection.devices;
+                clicked => { Nav.open-settings(SettingsSection.devices); }
+            }
+            NavItem {
+                icon: Icons.bell;
+                text: @tr("Notifications");
+                subtitle: @tr("Messages, mentions, alerts");
+                selected: Nav.settings-section == SettingsSection.notifications;
+                clicked => { Nav.open-settings(SettingsSection.notifications); }
+            }
+            NavItem {
+                icon: Icons.shield;
+                text: @tr("Privacy & Safety");
+                subtitle: @tr("Blocked people, who can reach you");
+                selected: Nav.settings-section == SettingsSection.privacy;
+                clicked => { Nav.open-settings(SettingsSection.privacy); }
+            }
+            NavItem {
+                icon: Icons.keyboard;
+                text: @tr("Keybinds");
+                subtitle: @tr("Shortcuts, push-to-talk");
+                selected: Nav.settings-section == SettingsSection.keybinds;
+                clicked => { Nav.open-settings(SettingsSection.keybinds); }
+            }
+            NavItem {
+                icon: Icons.puzzle;
+                text: @tr("Integrations");
+                subtitle: @tr("Gateways, encoders");
+                selected: Nav.settings-section == SettingsSection.integrations;
+                clicked => { Nav.open-settings(SettingsSection.integrations); }
+            }
+            Divider { }
+            NavItem {
+                icon: Icons.settings;
+                text: @tr("Advanced");
+                subtitle: @tr("Experimental features");
+                selected: Nav.settings-section == SettingsSection.advanced;
+                clicked => { Nav.open-settings(SettingsSection.advanced); }
+            }
+            NavItem {
+                icon: Icons.info;
+                text: @tr("About");
+                subtitle: @tr("Version and notices");
+                clicked => { Nav.open-about(); }
+            }
+        }
     }
 }
 
-component VoiceSection inherits FlexboxLayout {
-    spacing: Theme.space-5;
-    alignment: stretch;
-    Card {
-        min-width: 340px;
-        horizontal-stretch: 1;
-        title: @tr("Microphone");
-        icon: Icons.mic;
+// The microphone: device, test, input volume and level, processing.
+component MicrophoneCard inherits Card {
+    title: @tr("Microphone");
+    icon: Icons.mic;
+    HorizontalLayout {
+        spacing: Theme.space-3;
         Select {
             model: Bridge.input-devices;
             current-index: Bridge.audio.input-index;
@@ -116,16 +137,523 @@ component VoiceSection inherits FlexboxLayout {
                 Bridge.audio-changed(Bridge.audio);
             }
         }
-        Field {
-            label: @tr("Transmit");
-            SegmentedTabs {
-                model: [@tr("Push-to-talk"), @tr("Voice activation"), @tr("Continuously")];
-                current-index: Bridge.audio.transmit;
-                label: @tr("Transmit");
-                selected(i) => {
-                    Bridge.audio.transmit = i;
-                    Bridge.audio-changed(Bridge.audio);
+        Button {
+            icon: Icons.mic;
+            text: Bridge.mic-test ? @tr("Stop Test") : @tr("Test Mic");
+            checked: Bridge.mic-test;
+            enabled: !Bridge.voice-connected;
+            accessible-label: Bridge.mic-test ? @tr("Stop the microphone test") : @tr("Test the microphone");
+            clicked => { Bridge.toggle-mic-test(); }
+        }
+    }
+    SliderRow {
+        label: @tr("Input Volume");
+        value: @tr("{} dB", round(Bridge.audio.input-gain));
+        Slider {
+            y: (parent.height - self.height) / 2;
+            minimum: -30;
+            maximum: 30;
+            value: Bridge.audio.input-gain;
+            label: @tr("Input volume");
+            changed(v) => {
+                Bridge.audio.input-gain = round(v);
+                Bridge.audio-changed(Bridge.audio);
+            }
+        }
+    }
+    HorizontalLayout {
+        spacing: Theme.space-4;
+        Text {
+            text: @tr("Input Level");
+            color: Theme.text;
+            vertical-alignment: center;
+            min-width: 110px;
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Meter {
+                height: 12px;
+                level: Bridge.input-level;
+                threshold: Bridge.audio.vad-threshold;
+                show-threshold: Bridge.audio.transmit == 1;
+                active: Bridge.input-sending || Bridge.mic-test;
+            }
+        }
+    }
+    Divider { }
+    ToggleRow {
+        icon: Icons.audio-lines;
+        text: @tr("Noise Suppression");
+        description: @tr("Reduces background noise");
+        checked: Bridge.audio.noise-suppression;
+        toggled(on) => {
+            Bridge.audio.noise-suppression = on;
+            Bridge.audio-changed(Bridge.audio);
+        }
+    }
+    if Bridge.audio.noise-suppression: SegmentedTabs {
+        model: [@tr("Low"), @tr("Moderate"), @tr("High"), @tr("Very high")];
+        current-index: Bridge.audio.noise-level;
+        label: @tr("Noise suppression level");
+        selected(i) => {
+            Bridge.audio.noise-level = i;
+            Bridge.audio-changed(Bridge.audio);
+        }
+    }
+    ToggleRow {
+        icon: Icons.volume-x;
+        text: @tr("Echo Cancellation");
+        description: @tr("Prevents audio feedback");
+        checked: Bridge.audio.echo-cancellation;
+        toggled(on) => {
+            Bridge.audio.echo-cancellation = on;
+            Bridge.audio-changed(Bridge.audio);
+        }
+    }
+    ToggleRow {
+        icon: Icons.sliders-horizontal;
+        text: @tr("Automatic Gain Control");
+        description: @tr("Keeps your volume consistent");
+        checked: Bridge.audio.auto-gain;
+        toggled(on) => {
+            Bridge.audio.auto-gain = on;
+            Bridge.audio-changed(Bridge.audio);
+        }
+    }
+}
+
+// Speakers: device, a test sound, volume.
+component OutputCard inherits Card {
+    title: @tr("Output");
+    icon: Icons.volume-2;
+    HorizontalLayout {
+        spacing: Theme.space-3;
+        Select {
+            model: Bridge.output-devices;
+            current-index: Bridge.audio.output-index;
+            icon: Icons.headphones;
+            label: @tr("Speakers");
+            selected => {
+                Bridge.audio.output-index = self.current-index;
+                Bridge.audio-changed(Bridge.audio);
+            }
+        }
+        Button {
+            icon: Icons.play;
+            text: @tr("Test Sound");
+            clicked => { Bridge.test-sound(); }
+        }
+    }
+    SliderRow {
+        label: @tr("Output Volume");
+        value: @tr("{}%", round(Bridge.audio.output-volume));
+        Slider {
+            y: (parent.height - self.height) / 2;
+            minimum: 0;
+            maximum: 400;
+            value: Bridge.audio.output-volume;
+            label: @tr("Output volume");
+            changed(v) => {
+                Bridge.audio.output-volume = round(v);
+                Bridge.audio-changed(Bridge.audio);
+            }
+        }
+    }
+}
+
+// Who may watch our stream without asking (`stream.permissions`).
+export component PermissionsCard inherits Card {
+    title: @tr("Streaming Permissions");
+    icon: Icons.radio;
+    subtitle: @tr("Choose who can watch your streams without asking.");
+    for choice[i] in [
+        { icon: Icons.globe, text: @tr("Everyone"), description: @tr("Anyone who asks can watch your streams") },
+        { icon: Icons.users, text: @tr("Friends Only"), description: @tr("Only your friends can watch; others are asked") },
+        { icon: Icons.volume-2, text: @tr("Voice Channel Only"), description: @tr("Only people in your voice channel can watch") },
+        { icon: Icons.lock, text: @tr("No One"), description: @tr("Nobody can watch your streams") },
+    ]: RadioRow {
+        icon: choice.icon;
+        text: choice.text;
+        description: choice.description;
+        checked: Bridge.video.permissions == i;
+        clicked => {
+            Bridge.video.permissions = i;
+            Bridge.video-changed(Bridge.video);
+        }
+    }
+}
+
+// The camera: device, preview, background effect.
+component CameraCard inherits Card {
+    title: @tr("Camera");
+    icon: Icons.video;
+    HorizontalLayout {
+        spacing: Theme.space-3;
+        Select {
+            model: Bridge.cameras;
+            current-index: Bridge.video.camera;
+            icon: Icons.video;
+            label: @tr("Camera");
+            selected => {
+                Bridge.video.camera = self.current-index;
+                Bridge.video-changed(Bridge.video);
+            }
+        }
+        IconButton {
+            icon: Icons.settings;
+            label: @tr("Camera devices");
+            filled: true;
+            clicked => { Nav.open-settings(SettingsSection.devices); }
+        }
+    }
+    Rectangle {
+        height: 200px;
+        border-radius: Theme.radius-lg;
+        clip: true;
+        background: @linear-gradient(160deg, #1a2550 0%, #0b1330 100%);
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        if Bridge.video.preview && Bridge.camera-frame.width > 0: Image {
+            width: parent.width;
+            height: parent.height;
+            source: Bridge.camera-frame;
+            image-fit: cover;
+        }
+        if !Bridge.video.preview || Bridge.camera-frame.width == 0: VerticalLayout {
+            alignment: center;
+            spacing: Theme.space-2;
+            HorizontalLayout {
+                alignment: center;
+                Icon {
+                    source: Icons.camera;
+                    size: 40px;
+                    tint: Theme.text-muted;
                 }
+            }
+            Text {
+                text: Bridge.camera-status != "" ? Bridge.camera-status : @tr("The preview is off.");
+                color: Theme.text-muted;
+                font-size: Theme.font-sm;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+        }
+        HorizontalLayout {
+            y: parent.height - 34px;
+            height: 26px;
+            padding-left: Theme.space-3;
+            spacing: Theme.space-2;
+            Rectangle {
+                width: 9px;
+                height: 9px;
+                y: (parent.height - self.height) / 2;
+                border-radius: 4.5px;
+                background: Bridge.video.preview ? Theme.success : Theme.offline;
+            }
+            Text {
+                text: @tr("Camera Preview");
+                color: #ffffff;
+                font-size: Theme.font-sm;
+                vertical-alignment: center;
+            }
+        }
+        IconButton {
+            x: parent.width - self.width - Theme.space-3;
+            y: parent.height - self.height - Theme.space-3;
+            icon: Bridge.video.preview ? Icons.video-off : Icons.video;
+            label: Bridge.video.preview ? @tr("Stop the preview") : @tr("Start the preview");
+            round: true;
+            filled: true;
+            size: 34px;
+            icon-size: Theme.icon-sm;
+            clicked => { Bridge.toggle-camera-preview(); }
+        }
+    }
+    HorizontalLayout {
+        spacing: Theme.space-3;
+        Text {
+            text: @tr("Background Effects");
+            color: Theme.text;
+            vertical-alignment: center;
+        }
+        Select {
+            model: [@tr("None"), @tr("Blur")];
+            current-index: Bridge.video.background;
+            icon: Icons.wand-sparkles;
+            label: @tr("Background effect");
+            selected => {
+                Bridge.video.background = self.current-index;
+                Bridge.video-changed(Bridge.video);
+            }
+        }
+        Button {
+            icon: Icons.settings;
+            text: @tr("Camera Settings");
+            clicked => { Nav.open-settings(SettingsSection.devices); }
+        }
+    }
+}
+
+// Resolution, frame rate, codec, hardware acceleration, mirror.
+component VideoCard inherits Card {
+    title: @tr("Video Settings");
+    icon: Icons.monitor;
+    HorizontalLayout {
+        spacing: Theme.space-3;
+        Field {
+            label: @tr("Resolution");
+            Select {
+                model: [@tr("Auto"), "720p (HD)", "1080p (Full HD)", "1440p (QHD)", "2160p (4K)"];
+                current-index: Bridge.video.resolution == "1280x720" ? 1 : Bridge.video.resolution == "1920x1080" ? 2 : Bridge.video.resolution == "2560x1440" ? 3 : Bridge.video.resolution == "3840x2160" ? 4 : 0;
+                label: @tr("Camera resolution");
+                selected => {
+                    Bridge.video.resolution = self.current-index == 1 ? "1280x720" : self.current-index == 2 ? "1920x1080" : self.current-index == 3 ? "2560x1440" : self.current-index == 4 ? "3840x2160" : "auto";
+                    Bridge.video-changed(Bridge.video);
+                }
+            }
+        }
+        Field {
+            label: @tr("Frame Rate");
+            Select {
+                model: ["15 FPS", "24 FPS", "30 FPS", "60 FPS", "120 FPS"];
+                current-index: Bridge.video.fps == "15" ? 0 : Bridge.video.fps == "24" ? 1 : Bridge.video.fps == "30" ? 2 : Bridge.video.fps == "120" ? 4 : 3;
+                label: @tr("Frame rate");
+                selected => {
+                    Bridge.video.fps = self.current-index == 0 ? "15" : self.current-index == 1 ? "24" : self.current-index == 2 ? "30" : self.current-index == 4 ? "120" : "60";
+                    Bridge.video-changed(Bridge.video);
+                }
+            }
+        }
+        Field {
+            label: @tr("Video Codec");
+            Select {
+                model: [@tr("Auto (best)"), "VP8", "VP9", "H.264", "AV1"];
+                current-index: Bridge.video.codec;
+                label: @tr("Video codec");
+                selected => {
+                    Bridge.video.codec = self.current-index;
+                    Bridge.video-changed(Bridge.video);
+                }
+            }
+        }
+    }
+    ToggleRow {
+        text: @tr("Enable Hardware Acceleration");
+        checked: Bridge.video.hardware;
+        toggled(on) => {
+            Bridge.video.hardware = on;
+            Bridge.video-changed(Bridge.video);
+        }
+    }
+    ToggleRow {
+        text: @tr("Mirror My Video");
+        checked: Bridge.video.mirror;
+        toggled(on) => {
+            Bridge.video.mirror = on;
+            Bridge.video-changed(Bridge.video);
+        }
+    }
+}
+
+// A quality preset tile.
+component PresetTile inherits Rectangle {
+    in property <string> text;
+    in property <string> detail;
+    in property <bool> selected;
+    in property <image> icon;
+    callback clicked();
+    height: 62px;
+    horizontal-stretch: 1;
+    border-radius: Theme.radius-md;
+    background: selected ? Theme.accent-soft : touch.has-hover ? Theme.surface-3 : Theme.surface-2;
+    border-width: selected ? 2px : 1px;
+    border-color: selected ? Theme.accent : Theme.border;
+    accessible-role: AccessibleRole.radio-button;
+    accessible-label: text;
+    accessible-checkable: true;
+    accessible-checked: selected;
+    accessible-action-default => { clicked(); }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+    VerticalLayout {
+        alignment: center;
+        spacing: 2px;
+        HorizontalLayout {
+            alignment: center;
+            spacing: Theme.space-2;
+            if root.icon.width > 0: Icon {
+                source: root.icon;
+                size: Theme.icon-sm;
+                tint: Theme.text;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: root.text;
+                color: Theme.text;
+                font-size: Theme.font-md;
+                font-weight: Theme.weight-medium;
+            }
+        }
+        Text {
+            text: root.detail;
+            color: root.selected ? Theme.text-secondary : Theme.text-muted;
+            font-size: Theme.font-xs;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+// Stream quality presets, the bitrate, the upload it costs.
+component QualityCard inherits Card {
+    title: @tr("Stream Quality");
+    icon: Icons.radio;
+    HorizontalLayout {
+        spacing: Theme.space-3;
+        PresetTile {
+            icon: Icons.sparkles;
+            text: @tr("Auto");
+            detail: @tr("The source's size");
+            selected: Bridge.video.quality == 0;
+            clicked => {
+                Bridge.video.quality = 0;
+                Bridge.video-changed(Bridge.video);
+            }
+        }
+        PresetTile {
+            text: "720p";
+            detail: @tr("Lower bandwidth");
+            selected: Bridge.video.quality == 1;
+            clicked => {
+                Bridge.video.quality = 1;
+                Bridge.video-changed(Bridge.video);
+            }
+        }
+        PresetTile {
+            text: "1080p";
+            detail: @tr("Full HD");
+            selected: Bridge.video.quality == 2;
+            clicked => {
+                Bridge.video.quality = 2;
+                Bridge.video-changed(Bridge.video);
+            }
+        }
+        PresetTile {
+            text: "1440p";
+            detail: @tr("Higher quality");
+            selected: Bridge.video.quality == 3;
+            clicked => {
+                Bridge.video.quality = 3;
+                Bridge.video-changed(Bridge.video);
+            }
+        }
+    }
+    if Bridge.video.quality < 0: Text {
+        text: @tr("Your own simulcast layers are set (Streaming page); a preset replaces them.");
+        color: Theme.text-muted;
+        font-size: Theme.font-sm;
+        wrap: word-wrap;
+    }
+    HorizontalLayout {
+        spacing: Theme.space-4;
+        Text {
+            text: @tr("Stream Bitrate");
+            color: Theme.text;
+            vertical-alignment: center;
+        }
+        Slider {
+            y: (parent.height - self.height) / 2;
+            minimum: 500;
+            maximum: 20000;
+            step: 250;
+            value: Bridge.video.bitrate;
+            label: @tr("Stream bitrate");
+            released(v) => {
+                Bridge.video.bitrate = round(v / 250) * 250;
+                Bridge.video-changed(Bridge.video);
+            }
+        }
+        TextField {
+            width: 92px;
+            text: round(Bridge.video.bitrate);
+            input-type: number;
+            label: @tr("Stream bitrate in kbit/s");
+            accepted(t) => {
+                if t.is-float() && t.to-float() >= 1 {
+                    Bridge.video.bitrate = t.to-float();
+                    Bridge.video-changed(Bridge.video);
+                }
+            }
+        }
+        Text {
+            text: "kbps";
+            color: Theme.text-secondary;
+            vertical-alignment: center;
+        }
+    }
+    HorizontalLayout {
+        spacing: Theme.space-2;
+        Icon {
+            source: Icons.upload;
+            size: Theme.icon-sm;
+            tint: Theme.text-muted;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: @tr("Estimated Upload Usage: ~{} GB per hour", round(Bridge.video.bitrate * 3600 / 8 / 100000) / 10);
+            color: Theme.text-muted;
+            font-size: Theme.font-sm;
+        }
+    }
+}
+
+component VoiceSection inherits VerticalLayout {
+    in property <bool> wide;
+    if root.wide: HorizontalLayout {
+        spacing: Theme.space-5;
+        VerticalLayout {
+            spacing: Theme.space-5;
+            horizontal-stretch: 1;
+            alignment: start;
+            MicrophoneCard { }
+            OutputCard { }
+            PermissionsCard { }
+        }
+        VerticalLayout {
+            spacing: Theme.space-5;
+            horizontal-stretch: 1;
+            alignment: start;
+            CameraCard { }
+            VideoCard { }
+            QualityCard { }
+        }
+    }
+    if !root.wide: VerticalLayout {
+        spacing: Theme.space-4;
+        MicrophoneCard { }
+        OutputCard { }
+        CameraCard { }
+        VideoCard { }
+        QualityCard { }
+        PermissionsCard { }
+    }
+}
+
+component KeybindsSection inherits VerticalLayout {
+    alignment: start;
+    spacing: Theme.space-5;
+    Card {
+        title: @tr("Voice transmission");
+        icon: Icons.mic;
+        SegmentedTabs {
+            model: [@tr("Push-to-talk"), @tr("Voice activation"), @tr("Continuously")];
+            current-index: Bridge.audio.transmit;
+            label: @tr("Transmit");
+            selected(i) => {
+                Bridge.audio.transmit = i;
+                Bridge.audio-changed(Bridge.audio);
             }
         }
         SliderRow {
@@ -150,7 +678,7 @@ component VoiceSection inherits FlexboxLayout {
                 text: @tr("Input level");
                 color: Theme.text;
                 vertical-alignment: center;
-                min-width: 130px;
+                min-width: 110px;
             }
             VerticalLayout {
                 alignment: center;
@@ -162,136 +690,8 @@ component VoiceSection inherits FlexboxLayout {
                     active: Bridge.input-sending || Bridge.mic-test;
                 }
             }
-            Button {
-                small: true;
-                icon: Icons.mic;
-                text: Bridge.mic-test ? @tr("Stop test") : @tr("Test mic");
-                checked: Bridge.mic-test;
-                enabled: !Bridge.voice-connected;
-                accessible-label: Bridge.mic-test ? @tr("Stop the microphone test") : @tr("Test the microphone");
-                clicked => { Bridge.toggle-mic-test(); }
-            }
-        }
-        Hint {
-            text: Bridge.voice-connected ? (Bridge.input-sending ? @tr("Sending voice") : @tr("Not sending")) : @tr("The meter shows the microphone while connected or during a test.");
-            color: Bridge.input-sending ? Theme.success : Theme.text-muted;
-        }
-        SliderRow {
-            label: @tr("Microphone gain");
-            value: @tr("{} dB", round(Bridge.audio.input-gain));
-            Slider {
-                y: (parent.height - self.height) / 2;
-                minimum: -30;
-                maximum: 30;
-                value: Bridge.audio.input-gain;
-                label: @tr("Microphone gain");
-                changed(v) => {
-                    Bridge.audio.input-gain = round(v);
-                    Bridge.audio-changed(Bridge.audio);
-                }
-            }
         }
     }
-    Card {
-        min-width: 340px;
-        horizontal-stretch: 1;
-        title: @tr("Processing");
-        icon: Icons.audio-lines;
-        ToggleRow {
-            icon: Icons.volume-x;
-            text: @tr("Echo cancellation");
-            description: @tr("Prevents audio feedback");
-            checked: Bridge.audio.echo-cancellation;
-            toggled(on) => {
-                Bridge.audio.echo-cancellation = on;
-                Bridge.audio-changed(Bridge.audio);
-            }
-        }
-        ToggleRow {
-            icon: Icons.audio-lines;
-            text: @tr("Noise suppression");
-            description: @tr("Reduces background noise");
-            checked: Bridge.audio.noise-suppression;
-            toggled(on) => {
-                Bridge.audio.noise-suppression = on;
-                Bridge.audio-changed(Bridge.audio);
-            }
-        }
-        Field {
-            label: @tr("Noise suppression level");
-            SegmentedTabs {
-                model: [@tr("Low"), @tr("Moderate"), @tr("High"), @tr("Very high")];
-                current-index: Bridge.audio.noise-level;
-                label: @tr("Noise suppression level");
-                opacity: Bridge.audio.noise-suppression ? 1.0 : 0.5;
-                selected(i) => {
-                    Bridge.audio.noise-level = i;
-                    Bridge.audio-changed(Bridge.audio);
-                }
-            }
-        }
-        ToggleRow {
-            icon: Icons.sliders-horizontal;
-            text: @tr("Automatic gain control");
-            description: @tr("Keeps your volume consistent");
-            checked: Bridge.audio.auto-gain;
-            toggled(on) => {
-                Bridge.audio.auto-gain = on;
-                Bridge.audio-changed(Bridge.audio);
-            }
-        }
-    }
-    Card {
-        min-width: 340px;
-        horizontal-stretch: 1;
-        title: @tr("Output");
-        icon: Icons.volume-2;
-        Select {
-            model: Bridge.output-devices;
-            current-index: Bridge.audio.output-index;
-            icon: Icons.headphones;
-            label: @tr("Speakers");
-            selected => {
-                Bridge.audio.output-index = self.current-index;
-                Bridge.audio-changed(Bridge.audio);
-            }
-        }
-        SliderRow {
-            label: @tr("Output volume");
-            value: @tr("{}%", round(Bridge.audio.output-volume));
-            Slider {
-                y: (parent.height - self.height) / 2;
-                minimum: 0;
-                maximum: 200;
-                value: Bridge.audio.output-volume;
-                label: @tr("Playback volume");
-                changed(v) => {
-                    Bridge.audio.output-volume = round(v);
-                    Bridge.audio-changed(Bridge.audio);
-                }
-            }
-        }
-        SliderRow {
-            label: @tr("Playback buffer");
-            value: @tr("{} ms", round(Bridge.audio.playback-buffer));
-            Slider {
-                y: (parent.height - self.height) / 2;
-                minimum: 20;
-                maximum: 180;
-                step: 10;
-                value: Bridge.audio.playback-buffer;
-                label: @tr("Playback buffer");
-                changed(v) => {
-                    Bridge.audio.playback-buffer = round(v / 10) * 10;
-                    Bridge.audio-changed(Bridge.audio);
-                }
-            }
-        }
-    }
-}
-
-component KeybindsSection inherits VerticalLayout {
-    alignment: start;
     Card {
         title: @tr("Push-to-talk");
         icon: Icons.keyboard;
@@ -327,44 +727,108 @@ component KeybindsSection inherits VerticalLayout {
             text: @tr("Keys are written like Ctrl+Shift+T, Alt+F1, CapsLock or MouseBack. On Wayland the desktop asks to confirm the key and may let you pick another one. The \"Hold to talk\" button in the window always works.");
         }
     }
-}
-
-component StreamingSection inherits VerticalLayout {
-    alignment: start;
     Card {
-        title: @tr("H.264");
-        icon: Icons.video;
-        ToggleRow {
-            text: @tr("Enable H.264");
-            description: @tr("Downloads OpenH264 from Cisco");
-            checked <=> Bridge.h264-enabled;
-            toggled => { Bridge.set-h264(Bridge.h264-enabled); }
-        }
-        Hint { text: Bridge.h264-attribution; }
-        if Bridge.h264-enabled: HorizontalLayout {
-            spacing: Theme.space-3;
+        title: @tr("Shortcuts in the window");
+        icon: Icons.layout-grid;
+        for key in [
+            { keys: "Ctrl K", what: @tr("Search servers, channels, people and settings") },
+            { keys: "↑ ↓ Enter", what: @tr("Choose and open a search result") },
+            { keys: "Esc", what: @tr("Close the search, a dialog or a picture") },
+            { keys: "Enter", what: @tr("Send a message") },
+        ]: HorizontalLayout {
+            spacing: Theme.space-4;
             Text {
-                text: Bridge.h264-status;
+                width: 110px;
+                text: key.keys;
+                color: Theme.accent-text;
+                font-weight: Theme.weight-semibold;
+            }
+            Text {
+                text: key.what;
                 color: Theme.text-secondary;
-                vertical-alignment: center;
                 horizontal-stretch: 1;
                 wrap: word-wrap;
             }
-            if !Bridge.h264-loaded: Button {
-                icon: Icons.download;
-                text: Bridge.h264-busy ? @tr("Downloading…") : @tr("Download OpenH264");
-                enabled: !Bridge.h264-busy;
-                clicked => { Bridge.download-h264(); }
-            }
-        }
-        Hint {
-            text: @tr("VP8 and VP9 work without it. H.264 lets you watch streams that other clients send as H.264. The library is downloaded from Cisco only when you click Download, and Cisco's license covers its patent royalties.");
         }
     }
 }
 
 component PrivacySection inherits VerticalLayout {
     alignment: start;
+    spacing: Theme.space-5;
+    Card {
+        title: @tr("Who can reach you");
+        icon: Icons.shield-check;
+        ChoiceRow {
+            text: @tr("Private messages");
+            description: @tr("Messages of everyone else are dropped.");
+            model: [@tr("Everyone"), @tr("Friends"), @tr("Nobody")];
+            current: Bridge.privacy.messages;
+            selected(i) => {
+                Bridge.privacy.messages = i;
+                Bridge.privacy-changed(Bridge.privacy);
+            }
+        }
+        ChoiceRow {
+            text: @tr("Pokes");
+            description: @tr("Pokes of everyone else are dropped.");
+            model: [@tr("Everyone"), @tr("Friends"), @tr("Nobody")];
+            current: Bridge.privacy.pokes;
+            selected(i) => {
+                Bridge.privacy.pokes = i;
+                Bridge.privacy-changed(Bridge.privacy);
+            }
+        }
+    }
+    Card {
+        title: @tr("Blocked people");
+        icon: Icons.ban;
+        subtitle: @tr("Their messages in channels show as \"blocked\"; their voice is muted for you.");
+        ChoiceRow {
+            text: @tr("Their private messages and pokes");
+            model: [@tr("Hide them"), @tr("Show flagged")];
+            current: Bridge.privacy.block-mode;
+            selected(i) => {
+                Bridge.privacy.block-mode = i;
+                Bridge.privacy-changed(Bridge.privacy);
+            }
+        }
+        if Bridge.blocked.length == 0: Hint {
+            text: @tr("You have blocked no one. Block people from their card on a server or on the Friends page.");
+        }
+        for person in Bridge.blocked: HorizontalLayout {
+            spacing: Theme.space-3;
+            Avatar {
+                size: 32px;
+                initials: person.initials;
+                tint: person.tint;
+                image: person.avatar;
+                label: person.name;
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                Text {
+                    text: person.name;
+                    color: Theme.text;
+                    overflow: elide;
+                }
+                Text {
+                    text: person.uid;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    overflow: elide;
+                }
+            }
+            Button {
+                small: true;
+                text: @tr("Unblock");
+                y: (parent.height - self.height) / 2;
+                clicked => { Bridge.contact-action(person.uid, "neutral"); }
+            }
+        }
+    }
+    PermissionsCard { }
     Card {
         title: @tr("Crash reports");
         icon: Icons.shield;
@@ -376,6 +840,178 @@ component PrivacySection inherits VerticalLayout {
         }
         Hint {
             text: @tr("A report is a text file with the error and where it happened. It may contain a server address from the error message. You can attach it to a bug report yourself; the app never sends it anywhere.");
+        }
+    }
+}
+
+component NotificationsSection inherits VerticalLayout {
+    alignment: start;
+    spacing: Theme.space-5;
+    Card {
+        title: @tr("Notify me about");
+        icon: Icons.bell-ring;
+        subtitle: @tr("In the app: the bell. On the desktop: also a system notification.");
+        ChoiceRow {
+            text: @tr("Mentions");
+            description: @tr("Your name in a channel or server chat");
+            model: [@tr("Off"), @tr("In the app"), @tr("Desktop")];
+            current: Bridge.notify.mentions;
+            selected(i) => {
+                Bridge.notify.mentions = i;
+                Bridge.notify-changed(Bridge.notify);
+            }
+        }
+        ChoiceRow {
+            text: @tr("Private messages");
+            model: [@tr("Off"), @tr("In the app"), @tr("Desktop")];
+            current: Bridge.notify.messages;
+            selected(i) => {
+                Bridge.notify.messages = i;
+                Bridge.notify-changed(Bridge.notify);
+            }
+        }
+        ChoiceRow {
+            text: @tr("Pokes");
+            model: [@tr("Off"), @tr("In the app"), @tr("Desktop")];
+            current: Bridge.notify.pokes;
+            selected(i) => {
+                Bridge.notify.pokes = i;
+                Bridge.notify-changed(Bridge.notify);
+            }
+        }
+        ChoiceRow {
+            text: @tr("Event reminders");
+            description: @tr("Before events you can join start");
+            model: [@tr("Off"), @tr("In the app"), @tr("Desktop")];
+            current: Bridge.notify.events;
+            selected(i) => {
+                Bridge.notify.events = i;
+                Bridge.notify-changed(Bridge.notify);
+            }
+        }
+        ChoiceRow {
+            text: @tr("Friends coming online");
+            model: [@tr("Off"), @tr("In the app"), @tr("Desktop")];
+            current: Bridge.notify.friends;
+            selected(i) => {
+                Bridge.notify.friends = i;
+                Bridge.notify-changed(Bridge.notify);
+            }
+        }
+        HorizontalLayout {
+            alignment: start;
+            Button {
+                icon: Icons.bell;
+                text: @tr("Send a test notification");
+                clicked => { Bridge.test-notification(); }
+            }
+        }
+    }
+}
+
+component DevicesSection inherits VerticalLayout {
+    alignment: start;
+    spacing: Theme.space-5;
+    Card {
+        title: @tr("Audio");
+        icon: Icons.headphones;
+        Field {
+            label: @tr("Microphone");
+            Select {
+                model: Bridge.input-devices;
+                current-index: Bridge.audio.input-index;
+                icon: Icons.mic;
+                label: @tr("Microphone");
+                selected => {
+                    Bridge.audio.input-index = self.current-index;
+                    Bridge.audio-changed(Bridge.audio);
+                }
+            }
+        }
+        Field {
+            label: @tr("Speakers");
+            Select {
+                model: Bridge.output-devices;
+                current-index: Bridge.audio.output-index;
+                icon: Icons.headphones;
+                label: @tr("Speakers");
+                selected => {
+                    Bridge.audio.output-index = self.current-index;
+                    Bridge.audio-changed(Bridge.audio);
+                }
+            }
+        }
+        SliderRow {
+            label: @tr("Playback buffer");
+            value: @tr("{} ms", round(Bridge.audio.playback-buffer));
+            Slider {
+                y: (parent.height - self.height) / 2;
+                minimum: 20;
+                maximum: 180;
+                step: 10;
+                value: Bridge.audio.playback-buffer;
+                label: @tr("Playback buffer");
+                changed(v) => {
+                    Bridge.audio.playback-buffer = round(v / 10) * 10;
+                    Bridge.audio-changed(Bridge.audio);
+                }
+            }
+        }
+        Hint {
+            text: @tr("A device that is unplugged stays chosen and is used again when it comes back.");
+        }
+    }
+    Card {
+        title: @tr("Cameras");
+        icon: Icons.camera;
+        for camera in Bridge.cameras: HorizontalLayout {
+            spacing: Theme.space-3;
+            Icon {
+                source: Icons.video;
+                size: Theme.icon-sm;
+                tint: Theme.text-secondary;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: camera;
+                color: Theme.text-secondary;
+                horizontal-stretch: 1;
+                wrap: word-wrap;
+            }
+        }
+        Hint {
+            text: @tr("Cameras are used as sources in the Stream Studio; the camera chosen under Voice & Video is the default.");
+        }
+    }
+    Card {
+        title: @tr("Screen capture");
+        icon: Icons.monitor;
+        Field {
+            label: @tr("Capture with");
+            Select {
+                model: [@tr("Automatic"), @tr("Desktop portal (Wayland)"), @tr("wlroots"), "X11"];
+                current-index: Bridge.streaming.capture;
+                label: @tr("Capture backend");
+                selected => {
+                    Bridge.streaming.capture = self.current-index;
+                    Bridge.streaming-changed(Bridge.streaming);
+                }
+            }
+        }
+        for source in Bridge.capture-sources: HorizontalLayout {
+            spacing: Theme.space-3;
+            Icon {
+                source: Icons.monitor;
+                size: Theme.icon-sm;
+                tint: Theme.text-secondary;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: source;
+                color: Theme.text-secondary;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
         }
     }
 }
@@ -433,7 +1069,7 @@ component AppearanceSection inherits VerticalLayout {
         }
         Field {
             label: @tr("Image cache (MB)");
-            hint: @tr("Decoded avatars, icons and emoji kept in memory. In use: {}", Bridge.image-cache-usage);
+            hint: @tr("Decoded avatars, icons, emoji and pictures kept in memory. In use: {}", Bridge.image-cache-usage);
             TextField {
                 text: round(Bridge.appearance.image-cache-mb);
                 input-type: number;
@@ -454,39 +1090,66 @@ component AppearanceSection inherits VerticalLayout {
 export component SettingsPage inherits Rectangle {
     // Show the section navigation above the content (narrow windows).
     in property <bool> compact;
-    property <image> section-icon: Nav.settings-section == SettingsSection.voice ? Icons.mic
-        : Nav.settings-section == SettingsSection.keybinds ? Icons.keyboard
-        : Nav.settings-section == SettingsSection.streaming ? Icons.radio
-        : Nav.settings-section == SettingsSection.privacy ? Icons.shield : Icons.palette;
-    property <string> section-title: Nav.settings-section == SettingsSection.voice ? @tr("Voice & Video")
-        : Nav.settings-section == SettingsSection.keybinds ? @tr("Keybinds")
-        : Nav.settings-section == SettingsSection.streaming ? @tr("Streaming")
-        : Nav.settings-section == SettingsSection.privacy ? @tr("Privacy & Safety") : @tr("Appearance");
-    property <string> section-subtitle: Nav.settings-section == SettingsSection.voice ? @tr("Set up your microphone, speakers and voice processing.")
-        : Nav.settings-section == SettingsSection.keybinds ? @tr("Talk with a key, even while other windows have focus.")
-        : Nav.settings-section == SettingsSection.streaming ? @tr("Codecs for watching streams.")
-        : Nav.settings-section == SettingsSection.privacy ? @tr("What the app keeps on this device.") : @tr("Theme, text size and layout. Changes apply at once.");
+    property <SettingsSection> s: Nav.settings-section;
+    property <image> section-icon: s == SettingsSection.voice ? Icons.mic
+        : s == SettingsSection.keybinds ? Icons.keyboard
+        : s == SettingsSection.streaming ? Icons.radio
+        : s == SettingsSection.privacy ? Icons.shield
+        : s == SettingsSection.account ? Icons.user-round
+        : s == SettingsSection.profiles ? Icons.users
+        : s == SettingsSection.devices ? Icons.smartphone
+        : s == SettingsSection.notifications ? Icons.bell
+        : s == SettingsSection.integrations ? Icons.puzzle
+        : s == SettingsSection.advanced ? Icons.settings : Icons.palette;
+    property <string> section-title: s == SettingsSection.voice ? @tr("Voice & Video")
+        : s == SettingsSection.keybinds ? @tr("Keybinds")
+        : s == SettingsSection.streaming ? @tr("Streaming")
+        : s == SettingsSection.privacy ? @tr("Privacy & Safety")
+        : s == SettingsSection.account ? @tr("My Account")
+        : s == SettingsSection.profiles ? @tr("Profiles")
+        : s == SettingsSection.devices ? @tr("Devices")
+        : s == SettingsSection.notifications ? @tr("Notifications")
+        : s == SettingsSection.integrations ? @tr("Integrations")
+        : s == SettingsSection.advanced ? @tr("Advanced") : @tr("Appearance");
+    property <string> section-subtitle: s == SettingsSection.voice ? @tr("Set up your audio, video, and streaming preferences for {}.", Bridge.app-name)
+        : s == SettingsSection.keybinds ? @tr("How your voice goes out, and the keys for it.")
+        : s == SettingsSection.streaming ? @tr("Defaults of your streams, their layers and their sound.")
+        : s == SettingsSection.privacy ? @tr("Who can reach you, blocked people, what the app keeps.")
+        : s == SettingsSection.account ? @tr("Who servers see when you connect.")
+        : s == SettingsSection.profiles ? @tr("Your identities: each is a unique id on every server.")
+        : s == SettingsSection.devices ? @tr("Microphones, speakers, cameras and screens.")
+        : s == SettingsSection.notifications ? @tr("What the bell and the desktop tell you.")
+        : s == SettingsSection.integrations ? @tr("Gateways of your servers and the video encoders here.")
+        : s == SettingsSection.advanced ? @tr("Encoding, encryption, history, cache, every setting.")
+        : @tr("Theme, text size and layout. Changes apply at once.");
     accessible-role: AccessibleRole.groupbox;
     accessible-label: section-title;
     sv := ScrollView {
         VerticalLayout {
             width: sv.visible-width;
-            padding: compact ? Theme.space-4 : Theme.space-7;
+            padding: compact ? Theme.space-4 : Theme.space-6;
             spacing: Theme.space-5;
             alignment: start;
-            if root.compact: SegmentedTabs {
-                model: [@tr("Voice"), @tr("Keys"), @tr("Streams"), @tr("Privacy"), @tr("Look")];
-                current-index: Nav.settings-section == SettingsSection.voice ? 0 : Nav.settings-section == SettingsSection.keybinds ? 1 : Nav.settings-section == SettingsSection.streaming ? 2 : Nav.settings-section == SettingsSection.privacy ? 3 : 4;
-                label: @tr("Settings sections");
-                selected(i) => {
-                    Nav.open-settings(i == 0 ? SettingsSection.voice : i == 1 ? SettingsSection.keybinds : i == 2 ? SettingsSection.streaming : i == 3 ? SettingsSection.privacy : SettingsSection.appearance);
+            if root.compact: Select {
+                model: [@tr("Voice & Video"), @tr("Keybinds"), @tr("Streaming"), @tr("Privacy & Safety"), @tr("Appearance"), @tr("My Account"), @tr("Profiles"), @tr("Devices"), @tr("Notifications"), @tr("Integrations"), @tr("Advanced")];
+                current-index: s == SettingsSection.voice ? 0 : s == SettingsSection.keybinds ? 1 : s == SettingsSection.streaming ? 2 : s == SettingsSection.privacy ? 3 : s == SettingsSection.appearance ? 4
+                    : s == SettingsSection.account ? 5 : s == SettingsSection.profiles ? 6 : s == SettingsSection.devices ? 7 : s == SettingsSection.notifications ? 8 : s == SettingsSection.integrations ? 9 : 10;
+                icon: root.section-icon;
+                label: @tr("Settings section");
+                selected => {
+                    Nav.open-settings(self.current-index == 0 ? SettingsSection.voice : self.current-index == 1 ? SettingsSection.keybinds
+                        : self.current-index == 2 ? SettingsSection.streaming : self.current-index == 3 ? SettingsSection.privacy
+                        : self.current-index == 4 ? SettingsSection.appearance : self.current-index == 5 ? SettingsSection.account
+                        : self.current-index == 6 ? SettingsSection.profiles : self.current-index == 7 ? SettingsSection.devices
+                        : self.current-index == 8 ? SettingsSection.notifications : self.current-index == 9 ? SettingsSection.integrations
+                        : SettingsSection.advanced);
                 }
             }
             HorizontalLayout {
                 spacing: Theme.space-4;
                 Icon {
                     source: root.section-icon;
-                    size: 34px;
+                    size: root.compact ? 28px : 40px;
                     tint: Theme.accent-text;
                     y: (parent.height - self.height) / 2;
                 }
@@ -494,7 +1157,7 @@ export component SettingsPage inherits Rectangle {
                     alignment: center;
                     Text {
                         text: root.section-title;
-                        font-size: Theme.font-3xl;
+                        font-size: root.compact ? Theme.font-2xl : Theme.font-3xl;
                         font-weight: Theme.weight-bold;
                         color: Theme.text;
                     }
@@ -505,11 +1168,19 @@ export component SettingsPage inherits Rectangle {
                     }
                 }
             }
-            if Nav.settings-section == SettingsSection.voice: VoiceSection { }
-            if Nav.settings-section == SettingsSection.keybinds: KeybindsSection { }
-            if Nav.settings-section == SettingsSection.streaming: StreamingSection { }
-            if Nav.settings-section == SettingsSection.privacy: PrivacySection { }
-            if Nav.settings-section == SettingsSection.appearance: AppearanceSection { }
+            if s == SettingsSection.voice: VoiceSection {
+                wide: sv.visible-width > 900px;
+            }
+            if s == SettingsSection.keybinds: KeybindsSection { }
+            if s == SettingsSection.streaming: StreamingSection { }
+            if s == SettingsSection.privacy: PrivacySection { }
+            if s == SettingsSection.appearance: AppearanceSection { }
+            if s == SettingsSection.account: AccountSection { }
+            if s == SettingsSection.profiles: ProfilesSection { }
+            if s == SettingsSection.devices: DevicesSection { }
+            if s == SettingsSection.notifications: NotificationsSection { }
+            if s == SettingsSection.integrations: IntegrationsSection { }
+            if s == SettingsSection.advanced: AdvancedSection { }
         }
     }
 }

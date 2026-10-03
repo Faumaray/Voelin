@@ -1,0 +1,482 @@
+// Things over the page: the bell's notifications, the search (Ctrl+K), a
+// picture from the chat opened larger.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Bridge, NoticeItem, SearchItem } from "../bridge.slint";
+import { Nav, Page, SettingsSection } from "../nav.slint";
+import { Icon, Button, ButtonKind, IconButton, Avatar, Status, Chip, CountBadge, TextField, Kbd, Divider, ListView, ScrollView } from "../components/index.slint";
+
+// One notification.
+component NoticeRow inherits Rectangle {
+    in property <NoticeItem> notice;
+    min-height: 64px;
+    border-radius: Theme.radius-md;
+    background: touch.has-hover ? Theme.surface-4 : notice.unread ? Theme.accent-soft.transparentize(0.6) : transparent;
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: notice.title;
+    accessible-description: notice.body;
+    accessible-action-default => { Bridge.open-notice(notice.key); Nav.notifications-open = false; }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            Bridge.open-notice(root.notice.key);
+            Nav.notifications-open = false;
+        }
+    }
+    HorizontalLayout {
+        padding: Theme.space-3;
+        spacing: Theme.space-3;
+        VerticalLayout {
+            alignment: start;
+            Rectangle {
+                width: 40px;
+                height: 40px;
+                Avatar {
+                    size: 40px;
+                    initials: root.notice.initials;
+                    tint: root.notice.tint;
+                    image: root.notice.avatar;
+                    label: root.notice.title;
+                }
+                Rectangle {
+                    x: 24px;
+                    y: 24px;
+                    width: 20px;
+                    height: 20px;
+                    border-radius: 10px;
+                    background: root.notice.kind == "poke" ? Theme.warning
+                        : root.notice.kind == "mention" ? Theme.accent
+                        : root.notice.kind == "event" ? #8b5cf6
+                        : root.notice.kind == "friend" ? Theme.success : Theme.info;
+                    border-width: 2px;
+                    border-color: Theme.surface-3;
+                    Icon {
+                        source: root.notice.kind == "poke" ? Icons.hand
+                            : root.notice.kind == "mention" ? Icons.at-sign
+                            : root.notice.kind == "event" ? Icons.calendar
+                            : root.notice.kind == "friend" ? Icons.user-check : Icons.message-square;
+                        size: 11px;
+                        tint: #ffffff;
+                    }
+                }
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 2px;
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                Text {
+                    text: root.notice.title;
+                    color: Theme.text;
+                    font-weight: root.notice.unread ? Theme.weight-semibold : Theme.weight-medium;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.notice.time;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                }
+            }
+            if root.notice.body != "": Text {
+                text: root.notice.body;
+                color: Theme.text-secondary;
+                font-size: Theme.font-sm;
+                wrap: word-wrap;
+                overflow: elide;
+                max-height: 36px * Theme.font-scale;
+            }
+        }
+        if root.notice.unread: Rectangle {
+            width: 8px;
+            height: 8px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 4px;
+            background: Theme.accent;
+        }
+    }
+}
+
+// The bell's panel: mentions, pokes, messages, event reminders, friends
+// coming online; requests to watch our stream and saved crash reports.
+export component NotificationsPanel inherits Rectangle {
+    width: 400px;
+    background: Theme.surface-3;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.border-strong;
+    clip: true;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: @tr("Notifications");
+    // Clicks inside stay inside.
+    TouchArea { }
+    VerticalLayout {
+        padding: Theme.space-3;
+        spacing: Theme.space-2;
+        HorizontalLayout {
+            padding-left: Theme.space-2;
+            spacing: Theme.space-2;
+            Text {
+                text: @tr("Notifications");
+                color: Theme.text;
+                font-size: Theme.font-lg;
+                font-weight: Theme.weight-semibold;
+                vertical-alignment: center;
+            }
+            if Bridge.notifications-unread > 0: CountBadge {
+                count: Bridge.notifications-unread;
+                y: (parent.height - self.height) / 2;
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+            Button {
+                small: true;
+                kind: ButtonKind.ghost;
+                icon: Icons.check;
+                text: @tr("Mark all read");
+                enabled: Bridge.notifications-unread > 0;
+                y: (parent.height - self.height) / 2;
+                clicked => { Bridge.mark-notices-read(); }
+            }
+            IconButton {
+                icon: Icons.trash-2;
+                label: @tr("Clear all");
+                size: 30px;
+                icon-size: Theme.icon-sm;
+                enabled: Bridge.notifications.length > 0;
+                y: (parent.height - self.height) / 2;
+                clicked => { Bridge.clear-notices(); }
+            }
+            IconButton {
+                icon: Icons.settings;
+                label: @tr("Notification settings");
+                size: 30px;
+                icon-size: Theme.icon-sm;
+                y: (parent.height - self.height) / 2;
+                clicked => {
+                    Nav.notifications-open = false;
+                    Nav.open-settings(SettingsSection.notifications);
+                }
+            }
+        }
+        if Bridge.share-requests > 0: Rectangle {
+            height: 48px;
+            border-radius: Theme.radius-md;
+            background: share-touch.has-hover ? Theme.surface-4 : Theme.live-soft;
+            share-touch := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    Nav.notifications-open = false;
+                    Nav.open-share();
+                }
+            }
+            HorizontalLayout {
+                padding-left: Theme.space-3;
+                spacing: Theme.space-3;
+                Icon {
+                    source: Icons.monitor-up;
+                    tint: Theme.live;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: @tr("{} want to watch your stream", Bridge.share-requests);
+                    color: Theme.text;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+        if Bridge.crash-notice != "": Rectangle {
+            min-height: 48px;
+            border-radius: Theme.radius-md;
+            background: Theme.warning-soft;
+            HorizontalLayout {
+                padding: Theme.space-3;
+                spacing: Theme.space-3;
+                Icon {
+                    source: Icons.triangle-alert;
+                    tint: Theme.warning;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: Bridge.crash-notice;
+                    color: Theme.text;
+                    font-size: Theme.font-sm;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+        if Bridge.notifications.length == 0 && Bridge.share-requests == 0: VerticalLayout {
+            padding: Theme.space-6;
+            spacing: Theme.space-2;
+            HorizontalLayout {
+                alignment: center;
+                Icon {
+                    source: Icons.bell;
+                    size: 36px;
+                    tint: Theme.text-disabled;
+                }
+            }
+            Text {
+                text: @tr("Nothing new. Mentions, pokes, messages, event reminders and friends coming online show up here.");
+                color: Theme.text-muted;
+                font-size: Theme.font-sm;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+        }
+        ListView {
+            vertical-stretch: 1;
+            min-height: Bridge.notifications.length > 0 ? 200px : 0px;
+            for notice in Bridge.notifications: NoticeRow {
+                notice: notice;
+            }
+        }
+    }
+}
+
+// A result of the search.
+component ResultRow inherits VerticalLayout {
+    in property <SearchItem> item;
+    in property <bool> selected;
+    callback clicked();
+    if root.item.header != "": Text {
+        text: root.item.header;
+        color: Theme.text-muted;
+        font-size: Theme.font-xs;
+        font-weight: Theme.weight-semibold;
+        height: 28px;
+        vertical-alignment: bottom;
+    }
+    Rectangle {
+        height: 46px;
+        border-radius: Theme.radius-md;
+        background: root.selected ? Theme.accent-soft : touch.has-hover ? Theme.surface-4 : transparent;
+        border-width: root.selected ? 1px : 0px;
+        border-color: Theme.accent;
+        accessible-role: AccessibleRole.list-item;
+        accessible-label: root.item.title;
+        accessible-description: root.item.subtitle;
+        accessible-item-selectable: true;
+        accessible-item-selected: root.selected;
+        accessible-action-default => { root.clicked(); }
+        touch := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { root.clicked(); }
+        }
+        HorizontalLayout {
+            padding-left: Theme.space-3;
+            padding-right: Theme.space-3;
+            spacing: Theme.space-3;
+            VerticalLayout {
+                alignment: center;
+                if root.item.kind == "person" || root.item.kind == "contact" || root.item.kind == "server": Avatar {
+                    size: 32px;
+                    square: root.item.kind == "server";
+                    initials: root.item.initials;
+                    tint: root.item.tint;
+                    image: root.item.avatar;
+                    label: root.item.title;
+                    status: root.item.kind == "person" ? Status.online : Status.none;
+                }
+                if root.item.kind == "channel" || root.item.kind == "setting": Rectangle {
+                    width: 32px;
+                    height: 32px;
+                    border-radius: Theme.radius-md;
+                    background: Theme.surface-4;
+                    Icon {
+                        source: root.item.kind == "channel" ? Icons.hash : Icons.settings;
+                        size: Theme.icon-sm;
+                        tint: Theme.accent-text;
+                    }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                Text {
+                    text: root.item.title;
+                    color: Theme.text;
+                    font-weight: Theme.weight-medium;
+                    overflow: elide;
+                }
+                if root.item.subtitle != "": Text {
+                    text: root.item.subtitle;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    overflow: elide;
+                }
+            }
+            if root.selected: Icon {
+                source: Icons.arrow-right;
+                size: Theme.icon-sm;
+                tint: Theme.accent-text;
+                y: (parent.height - self.height) / 2;
+            }
+        }
+    }
+}
+
+// The search (Ctrl+K): servers, channels, people and settings pages; the
+// arrow keys pick a result, Enter opens it, Escape closes.
+export component SearchPalette inherits Rectangle {
+    background: Theme.scrim;
+    accessible-role: AccessibleRole.none;
+    TouchArea {
+        clicked => { Nav.close-search(); }
+    }
+    card := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: min(80px, parent.height / 10);
+        width: min(parent.width - 24px, 640px);
+        height: min(parent.height - self.y - 24px, 540px);
+        background: Theme.surface;
+        border-radius: Theme.radius-xl;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        clip: true;
+        accessible-role: AccessibleRole.groupbox;
+        accessible-label: @tr("Search");
+        TouchArea { }
+        VerticalLayout {
+            padding: Theme.space-4;
+            spacing: Theme.space-3;
+            input := TextField {
+                height: 46px;
+                text: Nav.search-text;
+                icon: Icons.search;
+                font-size: Theme.font-md;
+                placeholder: @tr("Search servers, channels, people, settings…");
+                label: @tr("Search");
+                init => { self.focus(); }
+                edited(text) => {
+                    Nav.search-text = text;
+                    Nav.search-index = 0;
+                    results.content-y = 0;
+                    Bridge.search(text);
+                }
+                accepted => {
+                    if Bridge.search-results.length > 0 {
+                        Bridge.search-activate(Nav.search-index);
+                        Nav.close-search();
+                    }
+                }
+                key-pressed(event) => {
+                    if event.text == Key.DownArrow {
+                        Nav.search-index = min(Bridge.search-results.length - 1, Nav.search-index + 1);
+                        if (Nav.search-index + 1) * 52px > results.visible-height - results.content-y {
+                            results.content-y = results.visible-height - (Nav.search-index + 1) * 52px;
+                        }
+                        return accept;
+                    }
+                    if event.text == Key.UpArrow {
+                        Nav.search-index = max(0, Nav.search-index - 1);
+                        if Nav.search-index * 52px < -results.content-y {
+                            results.content-y = -Nav.search-index * 52px;
+                        }
+                        return accept;
+                    }
+                    if event.text == Key.Escape {
+                        Nav.close-search();
+                        return accept;
+                    }
+                    reject
+                }
+            }
+            if Bridge.search-results.length == 0: Text {
+                text: Nav.search-text == "" ? @tr("Type to find a server, a channel, a person or a settings page.") : @tr("Nothing matches “{}”.", Nav.search-text);
+                color: Theme.text-muted;
+                font-size: Theme.font-sm;
+                wrap: word-wrap;
+            }
+            results := ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    alignment: start;
+                    for item[i] in Bridge.search-results: ResultRow {
+                        item: item;
+                        selected: i == Nav.search-index;
+                        clicked => {
+                            Bridge.search-activate(i);
+                            Nav.close-search();
+                        }
+                    }
+                }
+            }
+            Divider { }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                alignment: start;
+                Kbd { text: "↑"; }
+                Kbd { text: "↓"; }
+                Text {
+                    text: @tr("to choose");
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    width: Theme.space-4;
+                }
+                Kbd { text: "Enter"; }
+                Text {
+                    text: @tr("to open");
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    width: Theme.space-4;
+                }
+                Kbd { text: "Esc"; }
+                Text {
+                    text: @tr("to close");
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+// A picture from the chat, as large as the window allows.
+export component Lightbox inherits Rectangle {
+    background: #000000d8;
+    accessible-role: AccessibleRole.image;
+    accessible-label: @tr("Picture");
+    TouchArea {
+        clicked => { Nav.lightbox-open = false; }
+    }
+    FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                Nav.lightbox-open = false;
+                return accept;
+            }
+            reject
+        }
+    }
+    Image {
+        x: 40px;
+        y: 40px;
+        width: parent.width - 80px;
+        height: parent.height - 80px;
+        source: Nav.lightbox;
+        image-fit: contain;
+    }
+    IconButton {
+        x: parent.width - self.width - Theme.space-4;
+        y: Theme.space-4;
+        icon: Icons.x;
+        label: @tr("Close");
+        round: true;
+        filled: true;
+        clicked => { Nav.lightbox-open = false; }
+    }
+}

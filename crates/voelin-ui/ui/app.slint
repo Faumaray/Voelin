@@ -24,7 +24,11 @@ import { MemberCardPopup, MembersPanel } from "screens/members.slint";
 import { VoiceView } from "screens/voice.slint";
 import { StreamViewer } from "screens/streams.slint";
 import { SettingsNav, SettingsPage } from "screens/settings.slint";
-import { HomeNav, HomePage } from "screens/home.slint";
+import { HomeNav, HomePage, HomeAside, LibraryPage } from "screens/home.slint";
+import { FriendsPage, ContactPanel } from "screens/friends.slint";
+import { MessagesPage, ConversationList, Conversation, DmProfile, OfflineDialog } from "screens/messages.slint";
+import { ServerLinks, EventsPage, EventDialog } from "screens/events.slint";
+import { NotificationsPanel, SearchPalette, Lightbox } from "screens/overlays.slint";
 import { MobileServers, ActivityPage, YouPage } from "screens/mobile.slint";
 import { BookmarkDialog, ShareDialog, ClientAudioDialog, AboutDialog } from "screens/dialogs.slint";
 
@@ -46,10 +50,14 @@ export component MainWindow inherits Window {
     // Set from change handlers: a binding on `width` would loop through the
     // layout.
     property <length> breakpoint: Nav.narrow-breakpoint;
-    changed width => { Nav.narrow = self.width < Nav.narrow-breakpoint; }
+    changed width => {
+        Nav.narrow = self.width < Nav.narrow-breakpoint;
+        Nav.wide = self.width > 1180px;
+    }
     changed breakpoint => { Nav.narrow = self.width < Nav.narrow-breakpoint; }
     init => {
         Nav.narrow = self.width < Nav.narrow-breakpoint;
+        Nav.wide = self.width > 1180px;
         Theme.system-dark = Palette.color-scheme != ColorScheme.light;
     }
     // Android: the space under the on-screen keyboard (the window is not
@@ -98,8 +106,8 @@ export component MainWindow inherits Window {
     keys := FocusScope {
         // Ctrl+K: search.
         capture-key-pressed(event) => {
-            if event.modifiers.control && (event.text == "k" || event.text == "K") && !Nav.narrow && root.chrome {
-                Nav.search-requests += 1;
+            if event.modifiers.control && (event.text == "k" || event.text == "K") && root.chrome {
+                Nav.open-search("");
                 return accept;
             }
             reject
@@ -123,8 +131,41 @@ export component MainWindow inherits Window {
                     horizontal-stretch: 1;
                     HomePage { }
                 }
-                if Nav.page == Page.server: Sidebar {
+                if Nav.page == Page.home && Nav.wide: Panel {
+                    width: 300px;
+                    horizontal-stretch: 0;
+                    HomeAside { }
+                }
+                // Friends, direct messages and the Library share the home
+                // sidebar.
+                if Nav.page == Page.friends || Nav.page == Page.messages || Nav.page == Page.library: Sidebar {
+                    HomeNav { }
+                }
+                if Nav.page == Page.friends: Panel {
+                    horizontal-stretch: 1;
+                    FriendsPage { }
+                }
+                if Nav.page == Page.friends && Bridge.contact.uid != "": Panel {
+                    width: 320px;
+                    horizontal-stretch: 0;
+                    ContactPanel { }
+                }
+                if Nav.page == Page.messages: Panel {
+                    horizontal-stretch: 1;
+                    MessagesPage { }
+                }
+                if Nav.page == Page.messages && Bridge.dm.open && !Bridge.dm.mail && Nav.wide: Panel {
+                    width: 300px;
+                    horizontal-stretch: 0;
+                    DmProfile { }
+                }
+                if Nav.page == Page.library: Panel {
+                    horizontal-stretch: 1;
+                    LibraryPage { }
+                }
+                if Nav.page == Page.server || Nav.page == Page.events: Sidebar {
                     ServerHeader { }
+                    ServerLinks { }
                     if !Bridge.voice-connected && !Bridge.voice-connecting: ConnectActions { }
                     ChannelTree {
                         vertical-stretch: 1;
@@ -151,9 +192,12 @@ export component MainWindow inherits Window {
                     if Nav.topics-open && !Nav.pins-open: TopicsDrawer { }
                     if !Nav.pins-open && !Nav.topics-open: MembersPanel { }
                 }
+                if Nav.page == Page.events: Panel {
+                    horizontal-stretch: 1;
+                    EventsPage { }
+                }
                 if Nav.page == Page.settings: Sidebar {
                     SettingsNav { }
-                    Rectangle { vertical-stretch: 1; }
                 }
                 if Nav.page == Page.settings: Panel {
                     horizontal-stretch: 1;
@@ -163,18 +207,44 @@ export component MainWindow inherits Window {
 
             if Nav.narrow && root.chrome: MobileShell {
                 title: Nav.page == Page.settings ? @tr("Settings")
+                    : Nav.page == Page.friends ? @tr("Friends")
+                    : Nav.page == Page.messages ? @tr("Messages")
+                    : Nav.page == Page.library ? @tr("Library")
+                    : Nav.page == Page.events ? @tr("Events")
                     : Nav.mobile-tab == MobileTab.home ? Bridge.app-name
                     : Nav.mobile-tab == MobileTab.you ? @tr("You")
                     : Nav.mobile-tab == MobileTab.activity ? @tr("Activity")
                     : Bridge.server-title;
                 subtitle: Nav.page == Page.settings ? "" : Nav.mobile-tab == MobileTab.chat && Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length ? Bridge.tabs[Bridge.current-tab].title : Nav.mobile-tab == MobileTab.servers ? Bridge.server-stats : "";
-                back: Nav.page == Page.settings;
+                back: Nav.page == Page.settings || Nav.page == Page.friends || Nav.page == Page.messages || Nav.page == Page.library || Nav.page == Page.events;
                 unread: Bridge.unread-total;
-                go-back => { Nav.show(Page.server); }
+                go-back => {
+                    if Nav.page == Page.messages && Bridge.dm.open {
+                        Bridge.open-conversation(-1);
+                    } else if Nav.page == Page.events || Nav.page == Page.settings {
+                        Nav.show(Page.server);
+                    } else {
+                        Nav.show(Page.home);
+                        Nav.mobile-tab = MobileTab.home;
+                    }
+                }
                 if Nav.page == Page.settings: SettingsPage {
                     compact: true;
                 }
-                if Nav.page != Page.settings && (Nav.page == Page.home || Nav.mobile-tab == MobileTab.home): HomePage { }
+                if Nav.page == Page.home || (Nav.page == Page.server && Nav.mobile-tab == MobileTab.home): HomePage {
+                    compact: true;
+                }
+                if Nav.page == Page.friends: FriendsPage {
+                    compact: true;
+                }
+                if Nav.page == Page.messages && !Bridge.dm.open: ConversationList { }
+                if Nav.page == Page.messages && Bridge.dm.open: Conversation {
+                    compact: true;
+                }
+                if Nav.page == Page.library: LibraryPage { }
+                if Nav.page == Page.events: EventsPage {
+                    compact: true;
+                }
                 if Nav.page == Page.server && Nav.mobile-tab == MobileTab.servers: MobileServers { }
                 if Nav.page == Page.server && Nav.mobile-tab == MobileTab.chat && Bridge.viewer-open: StreamViewer { }
                 if Nav.page == Page.server && Nav.mobile-tab == MobileTab.chat && !Bridge.viewer-open: ChatView {
@@ -228,12 +298,39 @@ export component MainWindow inherits Window {
         }
     }
 
+    // The bell's panel, under the bell (the phone: the whole width).
+    if Nav.notifications-open: Rectangle {
+        TouchArea {
+            clicked => { Nav.notifications-open = false; }
+        }
+        NotificationsPanel {
+            x: Nav.narrow ? 8px : parent.width - self.width - 100px;
+            y: Nav.narrow ? 64px : Theme.topbar-height;
+            width: Nav.narrow ? parent.width - 16px : 400px;
+            height: min(parent.height - self.y - 16px, 560px);
+        }
+    }
+
+    if Nav.search-open: SearchPalette { }
+
+    if Nav.lightbox-open: Lightbox { }
+
+    if Nav.event-form-open: EventDialog {
+        form <=> Nav.event-form;
+        done => { Nav.event-form-open = false; }
+    }
+
+    if Nav.offline-form-open: OfflineDialog {
+        done => { Nav.offline-form-open = false; }
+    }
+
     if Nav.topic-form-open: TopicDialog {
         done => { Nav.topic-form-open = false; }
     }
 
     if Nav.bookmark-open: BookmarkDialog {
         form <=> Nav.bookmark-form;
+        join: Nav.join-open;
         done => { Nav.bookmark-open = false; }
     }
 

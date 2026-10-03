@@ -118,13 +118,22 @@ export component MobileShell inherits Rectangle {
                     }
                 }
                 IconButton {
+                    icon: Icons.search;
+                    label: @tr("Search");
+                    round: true;
+                    filled: true;
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Nav.open-search(""); }
+                }
+                IconButton {
                     icon: Icons.bell;
                     label: @tr("Notifications");
                     round: true;
                     filled: true;
-                    dot: Bridge.share-requests > 0 || Bridge.crash-notice != "";
+                    checked: Nav.notifications-open;
+                    dot: Bridge.notifications-unread > 0 || Bridge.share-requests > 0 || Bridge.crash-notice != "";
                     y: (parent.height - self.height) / 2;
-                    clicked => { Nav.mobile-tab = MobileTab.activity; Nav.show(Page.server); }
+                    clicked => { Nav.notifications-open = !Nav.notifications-open; }
                 }
             }
         }

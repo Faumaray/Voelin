@@ -47,6 +47,8 @@ pub struct LineCtx {
 	pub topic: String,
 	/// The state of the downloads started from this message, by link index.
 	pub downloads: Vec<(usize, FileItem)>,
+	/// Pictures of the links shown inline, by link index.
+	pub previews: Vec<(usize, Image)>,
 }
 
 /// When a message was sent, for its header (see [`stamp`]).
@@ -174,6 +176,9 @@ fn line_of(
 				item.state = running.state.clone();
 				item.progress = running.progress;
 			}
+			if let Some((_, picture)) = ctx.previews.iter().find(|(index, _)| *index == i) {
+				item.preview = picture.clone();
+			}
 			item
 		})
 		.collect();
@@ -200,7 +205,7 @@ fn line_of(
 	}
 }
 
-fn is_picture(name: &str) -> bool {
+pub fn is_picture(name: &str) -> bool {
 	let lower = name.to_ascii_lowercase();
 	[".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"].iter().any(|e| lower.ends_with(e))
 }

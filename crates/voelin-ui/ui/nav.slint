@@ -2,7 +2,7 @@
 // navigate through these functions; Rust sets the same properties for the
 // development switch VOELIN_OPEN (src/dev.rs).
 
-import { Bridge, BookmarkForm, ShareForm } from "bridge.slint";
+import { Bridge, BookmarkForm, ShareForm, EventForm, OfflineForm } from "bridge.slint";
 
 export enum Page {
     // Welcome page: servers at a glance.
@@ -10,15 +10,29 @@ export enum Page {
     // A server: channels, chat or the stream viewer, members and streams.
     server,
     settings,
+    // Contacts and where they are.
+    friends,
+    // Direct messages across servers.
+    messages,
+    // Recordings and clips.
+    library,
+    // A server's scheduled events (gateway `events`).
+    events,
 }
 
-// Sections of the settings page, in the order of its navigation.
+// Sections of the settings page (`settings-section` takes these numbers).
 export enum SettingsSection {
     voice,
     keybinds,
     streaming,
     privacy,
     appearance,
+    account,
+    profiles,
+    devices,
+    notifications,
+    integrations,
+    advanced,
 }
 
 // Tabs of the bottom navigation in the narrow (mobile) layout.
@@ -38,10 +52,10 @@ export global Nav {
     // `ui.narrow_breakpoint`.
     in-out property <bool> narrow: false;
     in-out property <length> narrow-breakpoint: 800px;
+    // Wide enough for a third column (home, direct messages).
+    in-out property <bool> wide: true;
     in-out property <bool> right-panel-open: true;
     in-out property <length> right-panel-width: 280px;
-    // Incremented to focus the search field (Ctrl+K).
-    in-out property <int> search-requests;
     // The voice channel we are in (people, streams, its chat) instead of
     // the plain chat.
     in-out property <bool> voice-view: false;
@@ -66,6 +80,25 @@ export global Nav {
     in-out property <BookmarkForm> bookmark-form;
     in-out property <ShareForm> share-form;
 
+    // The bell's panel, the search (Ctrl+K) and its selected result, a
+    // picture opened from the chat, the event and offline message forms,
+    // the friends page's tab, the direct messages' tab, the add-server
+    // dialog in "join" mode (connect once saved).
+    in-out property <bool> notifications-open;
+    in-out property <bool> search-open;
+    in-out property <string> search-text;
+    in-out property <int> search-index;
+    in-out property <bool> lightbox-open;
+    in-out property <image> lightbox;
+    in-out property <bool> event-form-open;
+    in-out property <EventForm> event-form;
+    in-out property <string> event-error;
+    in-out property <bool> offline-form-open;
+    in-out property <OfflineForm> offline-form;
+    in-out property <int> friends-tab;
+    in-out property <int> dm-tab;
+    in-out property <bool> join-open;
+
     // Settings were opened (so leaving them tells Rust).
     property <bool> settings-active;
 
@@ -75,6 +108,16 @@ export global Nav {
             Bridge.close-settings();
         }
         page = p;
+        notifications-open = false;
+        if p == Page.events {
+            Bridge.open-events();
+        }
+        if p == Page.messages {
+            Bridge.open-messages();
+        }
+        if p == Page.library {
+            Bridge.open-library();
+        }
     }
 
     public function open-settings(section: SettingsSection) {
@@ -84,6 +127,66 @@ export global Nav {
         }
         settings-section = section;
         page = Page.settings;
+        notifications-open = false;
+        Bridge.settings-section(section == SettingsSection.voice ? 0
+            : section == SettingsSection.keybinds ? 1
+            : section == SettingsSection.streaming ? 2
+            : section == SettingsSection.privacy ? 3
+            : section == SettingsSection.appearance ? 4
+            : section == SettingsSection.account ? 5
+            : section == SettingsSection.profiles ? 6
+            : section == SettingsSection.devices ? 7
+            : section == SettingsSection.notifications ? 8
+            : section == SettingsSection.integrations ? 9 : 10);
+    }
+
+    public function open-search(text: string) {
+        search-text = text;
+        search-index = 0;
+        search-open = true;
+        notifications-open = false;
+        Bridge.search(text);
+    }
+
+    public function close-search() {
+        search-open = false;
+        search-text = "";
+    }
+
+    public function open-picture(key: int, index: int) {
+        lightbox = Bridge.open-preview(key, index);
+        lightbox-open = true;
+    }
+
+    public function create-event() {
+        event-form = Bridge.edit-event(-1);
+        event-error = "";
+        event-form-open = true;
+    }
+
+    public function edit-event(id: int) {
+        event-form = Bridge.edit-event(id);
+        event-error = "";
+        event-form-open = true;
+    }
+
+    public function write-offline(uid: string, to: string) {
+        offline-form = { uid: uid, to: to, subject: "", text: "" };
+        offline-form-open = true;
+    }
+
+    public function join-server() {
+        bookmark-form = Bridge.edit-bookmark(-1);
+        join-open = true;
+        bookmark-open = true;
+    }
+
+    // The members panel of the current server.
+    public function show-members() {
+        show(Page.server);
+        pins-open = false;
+        topics-open = false;
+        right-panel-open = true;
     }
 
     public function close-settings() {
@@ -102,11 +205,13 @@ export global Nav {
 
     public function add-server() {
         bookmark-form = Bridge.edit-bookmark(-1);
+        join-open = false;
         bookmark-open = true;
     }
 
     public function edit-server(id: int) {
         bookmark-form = Bridge.edit-bookmark(id);
+        join-open = false;
         bookmark-open = true;
     }
 

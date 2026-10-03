@@ -11,9 +11,6 @@ pub(super) fn wire(ui: &MainWindow) {
 	bridge.on_select_server(|id| {
 		with_app(|app| app.select_server(id as i64));
 	});
-	bridge.on_search(|text| {
-		with_app(|app| app.search(text.to_string()));
-	});
 	bridge.on_search_members(|text| {
 		with_app(|app| app.search_members(text.to_string()));
 	});

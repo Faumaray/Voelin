@@ -198,25 +198,29 @@ export component TopBar inherits Rectangle {
         HorizontalLayout {
             horizontal-stretch: 1;
             alignment: center;
-            search := SearchBox {
+            // Opens the search (Ctrl+K does too).
+            Rectangle {
                 max-width: 680px;
                 height: 40px;
                 y: (parent.height - self.height) / 2;
-                placeholder: Bridge.current-server >= 0 ? @tr("Search channels and people in {}…", Bridge.server-title) : @tr("Search channels and people…");
-                label: @tr("Search");
-                edited(text) => { Bridge.search(text); }
+                SearchBox {
+                    read-only: true;
+                    placeholder: @tr("Search servers, channels, people or settings…");
+                    label: @tr("Search");
+                }
+                TouchArea {
+                    mouse-cursor: MouseCursor.text;
+                    clicked => { Nav.open-search(""); }
+                }
             }
         }
         IconButton {
             icon: Icons.bell;
-            label: Bridge.share-requests > 0 ? @tr("{} requests to watch your stream", Bridge.share-requests) : @tr("Notifications");
-            dot: Bridge.share-requests > 0 || Bridge.crash-notice != "";
+            label: Bridge.notifications-unread > 0 ? @tr("{} new notifications", Bridge.notifications-unread) : @tr("Notifications");
+            dot: Bridge.notifications-unread > 0 || Bridge.share-requests > 0 || Bridge.crash-notice != "";
+            checked: Nav.notifications-open;
             y: (parent.height - self.height) / 2;
-            clicked => {
-                if Bridge.share-requests > 0 {
-                    Nav.open-share();
-                }
-            }
+            clicked => { Nav.notifications-open = !Nav.notifications-open; }
         }
         IconButton {
             icon: Icons.users;
@@ -241,9 +245,6 @@ export component TopBar inherits Rectangle {
             clicked => { Nav.open-about(); }
         }
     }
-    // Ctrl+K focuses the search.
-    property <int> requests: Nav.search-requests;
-    changed requests => { search.focus(); }
 }
 
 // A sidebar panel: the page's navigation (@children) above the voice card

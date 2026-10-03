@@ -24,6 +24,8 @@ dirs = "6"
 miniz_oxide = "0.8"
 png = "0.18"
 serde = { version = "1", features = ["derive"] }
+# Settings and gateway values as JSON (the advanced and integrations pages).
+serde_json = "1"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -56,9 +58,6 @@ voelin-store = { path = "../voelin-store", features = ["keyring"] }
 [target.'cfg(target_os = "android")'.dependencies]
 slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "renderer-software", "backend-android-activity-06"] }
 voelin-core = { path = "../voelin-core", default-features = false, features = ["media"] }
-
-[dev-dependencies]
-serde_json = "1"
 
 [build-dependencies]
 slint-build = "1.18"

@@ -11,11 +11,22 @@ use crate::vm;
 
 impl App {
 	pub(crate) fn connect_voice(&mut self) {
+		let channel =
+			self.current.and_then(|id| self.bookmark(id)).and_then(|b| b.default_channel.clone());
+		self.connect_voice_to(channel);
+	}
+
+	/// Connect the current server with voice, into `channel` (a name or
+	/// path) if given.
+	pub(crate) fn connect_voice_to(&mut self, channel: Option<String>) {
 		let Some(b) = self.current.and_then(|id| self.bookmark(id)).cloned() else { return };
+		if self.demo_ui {
+			return;
+		}
 		let mut options = VoiceOptions::new(&b.address, &b.nickname);
-		options.identity = Some(self.identity.clone());
+		options.identity = Some(self.identity_for(Some(b.id)));
 		options.server_password = self.secrets.get(&b.server_password_key()).ok().flatten();
-		options.channel = b.default_channel.clone();
+		options.channel = channel;
 		options.audio = true;
 		options.stream_peer = self.video.peer_config(options.stream_peer);
 		self.engine
@@ -36,7 +47,7 @@ impl App {
 			self.engine.send(Command::ObserveGateway {
 				session,
 				url: url.clone(),
-				identity: Box::new(self.identity.clone()),
+				identity: Box::new(self.identity_for(Some(b.id))),
 			});
 		} else if let Some(q) = &b.query {
 			let secret = self.secrets.get(&b.query_password_key()).ok().flatten();
@@ -141,7 +152,7 @@ impl App {
 			},
 			address: form.address.to_string(),
 			nickname: form.nickname.to_string(),
-			identity: None,
+			identity: self.bookmark(form.id as i64).and_then(|b| b.identity),
 			default_channel: None,
 			gateway_url: Some(form.gateway_url.to_string()).filter(|u| !u.is_empty()),
 			query,
@@ -199,7 +210,12 @@ impl App {
 				let state = view.map(|v| v.state.clone()).unwrap_or_default();
 				let unread = view.map_or(0, |v| v.unread());
 				let live = view.is_some_and(|v| v.streams_available() && !v.streams.is_empty());
-				vm::servers::item(b, &state, unread, live)
+				let detail = view
+					.filter(|v| !v.presence.channels.is_empty())
+					.map(|v| vm::tree::stats(&v.presence))
+					.unwrap_or_default();
+				let flavor = view.map(|v| v.extra.flavor.clone()).unwrap_or_default();
+				vm::servers::item(b, &state, unread, live, detail, flavor)
 			})
 			.collect();
 		vm::list::sync(&self.models.servers, &items);
@@ -275,7 +291,7 @@ impl App {
 			playback: &self.playback,
 			own_channel: view.state.own_channel,
 			own_client: view.state.own_client,
-			filter: &self.tree_filter,
+			filter: "",
 			avatars: &view.avatars,
 			icons: &view.icons,
 			groups: &view.server_groups,
@@ -323,13 +339,5 @@ impl App {
 			view.collapsed.insert(channel);
 		}
 		self.refresh_tree();
-	}
-
-	/// The top bar's search.
-	pub(crate) fn search(&mut self, text: String) {
-		if self.tree_filter != text {
-			self.tree_filter = text;
-			self.refresh_tree();
-		}
 	}
 }
