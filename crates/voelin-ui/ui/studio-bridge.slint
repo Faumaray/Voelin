@@ -112,6 +112,8 @@ export struct StudioStatus {
     output-height: int,
     fps: int,
     detached: bool,
+    // A window of its own is possible (not on Android).
+    can-detach: bool,
     // The live scene shows a screen, a camera, a window (the phone's cards).
     screen-shown: bool,
     camera-shown: bool,

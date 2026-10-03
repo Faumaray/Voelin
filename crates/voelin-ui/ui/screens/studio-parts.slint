@@ -717,7 +717,7 @@ export component StudioHeader inherits HorizontalLayout {
             }
         }
     }
-    IconButton {
+    if StudioBridge.status.can-detach: IconButton {
         icon: StudioBridge.status.detached ? Icons.minimize-2 : Icons.external-link;
         label: StudioBridge.status.detached ? @tr("Back into the main window") : @tr("Open in its own window");
         y: (parent.height - self.height) / 2;
@@ -1697,6 +1697,7 @@ component NumberField inherits VerticalLayout {
     in property <string> label;
     in-out property <string> value <=> field.text;
     in property <string> placeholder;
+    alignment: start;
     spacing: Theme.space-1;
     Text {
         text: root.label;
@@ -1720,11 +1721,12 @@ component SourceDialog inherits Modal {
     subtitle: adding ? @tr("Added to the live scene.") : @tr("Position, size and crop are in output pixels.");
     icon: StudioKinds.icon(form.kind);
     card-width: 560px;
-    card-height: 680px;
+    card-height: form.kind == "camera" ? 760px : form.kind == "text" || form.kind == "colour" || form.kind == "image" ? 640px : 560px;
     dismissed => { done(); }
     ScrollView {
         vertical-stretch: 1;
         VerticalLayout {
+            alignment: start;
             spacing: Theme.space-4;
             padding-right: Theme.space-3;
             Field {
@@ -2042,6 +2044,7 @@ component StudioSettingsDialog inherits Modal {
     ScrollView {
         vertical-stretch: 1;
         VerticalLayout {
+            alignment: start;
             spacing: Theme.space-4;
             padding-right: Theme.space-3;
             Field {

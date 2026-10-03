@@ -3,6 +3,7 @@
 // compact; it has its own globals, which Rust fills from the same models
 // (src/studio.rs). Closing it docks the studio back into the main window.
 
+import { Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { StudioBridge, StudioNav } from "studio-bridge.slint";
@@ -19,6 +20,12 @@ export component StudioWindow inherits Window {
     default-font-family: "Inter";
     default-font-size: Theme.font-body;
     icon: Icons.logo;
+
+    // Scroll bars and menus follow the theme (Rust copies the main
+    // window's Theme here).
+    property <bool> dark: Theme.dark;
+    changed dark => { Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light; }
+    init => { Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light; }
 
     Rectangle {
         background: Theme.backdrop;

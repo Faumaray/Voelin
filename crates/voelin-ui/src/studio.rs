@@ -1007,6 +1007,7 @@ impl App {
 			output_height: h as i32,
 			fps: fps as i32,
 			detached: st.window.is_some(),
+			can_detach: cfg!(not(target_os = "android")),
 			screen_shown: shows(|k| {
 				matches!(
 					k,
@@ -1899,6 +1900,10 @@ impl App {
 	// The window of its own.
 
 	pub(crate) fn studio_detach(&mut self) {
+		// One window on Android.
+		if cfg!(target_os = "android") {
+			return;
+		}
 		if self.studio.window.is_none() {
 			let window = match StudioWindow::new() {
 				Ok(window) => window,
