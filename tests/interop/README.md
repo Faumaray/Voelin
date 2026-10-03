@@ -14,6 +14,7 @@ TeamSpeak server is involved.
 | `browser_streams_to_rust` | Chromium offers a canvas `captureStream` and an oscillator with VP8, VP9, H264 and AV1 preferred in turn (codecs the browser cannot send are skipped); our viewer `Peer::answer` must receive frames of that codec and Opus, over `AES_CM_128_HMAC_SHA1_80`. VP8 also uses trickled browser candidates and checks that a PLI brings a keyframe |
 | `real_encoders_decode_in_browser` (voelin-core) | Every encoder this machine has (`Codecs::encoders()`), as a share uses it: the 1280x720 test pattern through the `Streamer`, VA-API encoders also from DMA-BUFs as the ScreenCast portal hands over the screen; our streamer peer offers that codec alone (H.264 as Constrained Baseline, see below); the browser must decode at least 60 frames at 1280x720 in 3 s. Codecs the browser does not answer (HEVC, H.264 in Playwright's Chromium) are skipped |
 | `share_offer_picks_a_codec_every_client_decodes` (voelin-core) | The offer a share makes on this machine (`preferred_codec`, `peer_config`): the browser, answering with the first codec of the offer it lists as the official client does, must pick one every TeamSpeak client decodes (`decoded_everywhere`), and decode it |
+| `browser_streams_decode_in_the_pipeline` (voelin-core) | The other way: Chromium sends its canvas (320x240) in AV1, VP9 and H.264 in turn (skipping what it cannot send) to our viewer peer, which accepts what this machine decodes (`peer_config`); the engine's `VideoPipeline` must decode 30 pictures at 320x240 with the first decoder of the codec's ladder (`Codecs::decoders_for`), keyframe requests going to the browser as PLIs |
 | `browser_renegotiates_with_rust` | Chromium streams VP8, then sends a new offer on the same connection with VP9 first (as the official client re-offers when it does not encode the codec we chose); `Peer::renegotiate` answers on the same peer, in the new offer's codec order; VP9 frames must arrive |
 | `trickled_candidates_reach_browser` | A server-reflexive candidate (from a fake STUN server) as our sessions trickle it (`iceCandidate` signal with the peer's mid) is accepted by `addIceCandidate` |
 
@@ -72,6 +73,9 @@ may do the same; see `docs/protocol-notes/ts6-streaming.md`.
   0 and 1): it does not answer an offer of Constrained High alone
   (`640c1f`, what our streamers offer), yet decodes High profile streams
   when it negotiated another profile (its decoder is FFmpeg's).
+- Chromium 152 (Arch Linux build, `VOELIN_CHROMIUM=/usr/bin/chromium`) sends
+  AV1, VP9 and H.264; our pipeline decodes all three on the GPU here (AMD,
+  VA-API: `av1_vaapi`, `vp9_vaapi`, `h264_vaapi`), at the canvas's size.
 - With str0m's bandwidth estimation and pacer on our streamer peer, Chromium's
   transport-cc feedback yields estimates within the first second (about
   640 kbit/s rising towards the desired bitrate with the 720 kbit/s synthetic
