@@ -273,3 +273,34 @@ async fn browser_streams_to_rust() {
 	assert!(aes_cm_128_sha1_80(&stats["transport"]["srtpCipher"]), "{stats:#}");
 	browser.quit().await;
 }
+
+/// Chromium streams VP8, then renegotiates to VP9 on the same connection, as
+/// the official client re-offers when it does not encode the codec our
+/// answer chose: our viewer answers on the same peer and keeps receiving,
+/// now VP9.
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_renegotiates_with_rust() {
+	if !enabled() {
+		eprintln!("skipped: set VOELIN_INTEROP=1 (needs node, Playwright and Chromium)");
+		return;
+	}
+	let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
+	let mut browser = Browser::start().await;
+	let offer = browser.call(json!({ "op": "offer", "codec": "VP8", "trickle": false })).await;
+	let (mut peer, answer) =
+		Peer::answer(&PeerConfig::loopback(), offer["sdp"].as_str().unwrap()).await.unwrap();
+	browser.call(json!({ "op": "accept", "sdp": answer })).await;
+	wait_connected(&mut peer).await;
+	let before = receive(&mut peer, Duration::from_secs(5), 30).await;
+	assert!(before.video.get(Codec::Vp8) >= 30, "before: {:?}", before.video);
+
+	let offer = browser.call(json!({ "op": "reoffer", "codec": "VP9" })).await;
+	let again = peer.renegotiate(offer["sdp"].as_str().unwrap()).await.unwrap();
+	browser.call(json!({ "op": "accept", "sdp": again })).await;
+	let after = receive(&mut peer, Duration::from_secs(8), 30).await;
+	eprintln!("after the new offer: video {:?}, audio {:?}", after.video, after.audio);
+	assert!(after.video.get(Codec::Vp9) >= 30, "after: {:?}", after.video);
+	let stats = browser.call(json!({ "op": "stats" })).await;
+	assert_eq!(stats["connectionState"], "connected", "{stats:#}");
+	browser.quit().await;
+}

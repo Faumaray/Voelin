@@ -1307,6 +1307,18 @@ impl ViewerSession {
 				}
 			}
 			StreamNotification::Signaling { json, .. } => match Signal::parse(json) {
+				// A new offer on the running connection (the official client
+				// re-offers when it does not encode the codec we chose) is
+				// answered by the same peer; `reconnectOffer` starts a new one.
+				Ok(Signal::Offer { sdp, reconnect: false }) if self.peer.is_some() => {
+					let peer = self.peer.as_ref().expect("checked above");
+					match peer.renegotiate(&sdp).await {
+						Ok(sdp) => self.signal(Signal::Answer { sdp }, out),
+						Err(e) => {
+							self.fail(format!("cannot answer the streamer's new offer: {e}"), out)
+						}
+					}
+				}
 				Ok(Signal::Offer { sdp, .. }) => self.answer(&sdp, out).await,
 				Ok(Signal::IceCandidate { candidate, .. }) => {
 					if let Some(peer) = &self.peer {
