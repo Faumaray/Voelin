@@ -328,7 +328,8 @@ the software encoders above are used as before.
   and on request (a GOP of 2^30 frames, or what each wrapper takes as
   unlimited: 65535 for Quick Sync, 0 for AMF and VideoToolbox, 2^29 for
   rav1e; `keyframe_interval` if set) with forced IDR (`pict_type` I,
-  `forced-idr`), CBR (`maxrate` = `b`, a one-second buffer; SVT-AV1 `rc=2`),
+  `forced-idr`), CBR (`maxrate` = `b`, a one-second buffer, two seconds for
+  `av1_vaapi`, whose rate control overshoots with one; SVT-AV1 `rc=2`),
   time base 1/fps (hardware rate control budgets per frame from it; pts are
   frame numbers from the capture timestamps), BT.601 limited range. Per
   family: x264 `veryfast` (`EncoderConfig::speed` picks another preset),
@@ -627,7 +628,8 @@ conversion and encode together), "encode" the wall time of one
 |---|---|---|---|---|---|
 | `h264_vaapi` | 60.0 | 5951 | 2.52 | 0.25 | 1.02 |
 | `h264_amf` | 60.0 | 5910 | 2.17 | 0.31 | 1.02 |
-| `av1_vaapi` | 60.0 | 6211 | 2.23 | 0.20 | 1.02 |
+| `av1_vaapi`, as first measured | 60.0 | 6211 | 2.23 | 0.20 | 1.02 |
+| `av1_vaapi`, two-second buffer * | 60.0 | 5982 | 2.24-2.33 | 0.28-0.29 | 1.02 |
 | `av1_amf` | 60.0 | 5962 | 2.75 | 0.29 | 1.02 |
 | `libx264` | 60.0 | 5674 | 2.33 | 1.16 | 1.02 |
 | libvpx VP8 | 60.0 | 6031 | 4.93 | 1.69 | 1.02 |
@@ -638,7 +640,8 @@ conversion and encode together), "encode" the wall time of one
 |---|---|---|---|---|---|
 | `h264_vaapi` | 60.0 | 10112 | 3.96 | 0.33 | 1.02 |
 | `h264_amf` | 60.0 | 10188 | 2.80 | 0.41 | 1.02 |
-| `av1_vaapi` | 60.0 | 10794 | 3.56 | 0.34 | 1.02 |
+| `av1_vaapi`, as first measured | 60.0 | 10794 | 3.56 | 0.34 | 1.02 |
+| `av1_vaapi`, two-second buffer * | 60.0 | 9920 | 3.49-3.50 | 0.38-0.52 | 1.02 |
 | `av1_amf` | 60.0 | 10079 | 2.91 | 0.42 | 1.02 |
 | `libx264` | 59.9 | 9406 | 11.88 | 2.17 | 1.03 |
 | libvpx VP8 | 60.0 | 10038 | 4.32 | 2.55 | 1.02 |
@@ -657,8 +660,19 @@ frame rate at both sizes on this machine, so the difference is CPU, not
 throughput. Hardware costs 0.20-0.42 cores against 1.16-2.55 for software,
 a factor of four to eight, and the gap widens with size — at 1440p60 x264
 needs 2.17 cores and is the only encoder that dropped a frame. Every backend
-honoured the target bitrate within 2 % except `av1_vaapi`, which overshoots
-by 4-8 %. The steady state is 1.02 allocations per encoded frame (the
+honoured the target bitrate within 2 % except `av1_vaapi`, which overshot by
+3.5-8 % with the one-second rate-control buffer every backend gets.
+
+\* Two runs each, later, while the machine was in use (a control run of
+`h264_vaapi` at 1080p60 gave 0.27 cores against the 0.25 above, the same
+5951 kbit/s); the bitrates repeat exactly between runs, the CPU figures do
+not. Measured on the encoder alone, only the buffer moved Mesa's AV1 rate
+control (`maxrate`, `rc_mode`, `blbrc`, the QP bounds did nothing): with
+two seconds it lands within 1.2 % at 1440p60, 1080p60 and 720p30, and is
+no burstier than the other hardware encoders — at 1440p60 its peak over
+100 ms is 13.6 Mbit/s against 14.0-14.4 for `h264_vaapi`, `h264_amf` and
+`av1_amf`, and over 250 ms to 1 s it is lower than with one second. So
+`av1_vaapi` alone gets two. The steady state is 1.02 allocations per encoded frame (the
 `Arc<[u8]>` of `EncodedFrame`) with hardware as with software: no reopen
 storm, no per-frame allocation in the import or upload path. Conversion and
 scaling cost 0.16-0.30 ms per frame at these sizes and are not the
@@ -817,7 +831,7 @@ has not run on Windows yet.
 | An encoder per codec viewers chose (made, dropped, stream codec skipped, preference change) | `voelin-core` `media::tests::an_encoder_per_codec_viewers_chose` | tested |
 | Answer's codec reported to the streamer, H.264 level in the offer, HEVC offered | `voelin-stream` `peer::tests::streamer_learns_the_answered_codec`, `h264::tests` | tested (str0m on loopback) |
 | x264 / SVT-AV1 / libaom in the streamer pipeline | `voelinctl stream bench --encoder ...` | 720p30: x264 8.7 ms per frame, SVT-AV1 1.3 ms, libaom 37 ms; 1.1 allocations per encoded frame |
-| Hardware encoders VA-API and AMF (H.264, HEVC, AV1) in the streamer pipeline | `voelinctl stream bench` on a Radeon RX 7900 GRE, 1080p60 / 1440p60 / simulcast | tested: full frame rate, 0.20-0.42 cores against 1.16-2.55 for software, 1.02 allocations per encoded frame (see the table above) |
+| Hardware encoders VA-API and AMF (H.264, HEVC, AV1) in the streamer pipeline | `voelinctl stream bench` on a Radeon RX 7900 GRE, 1080p60 / 1440p60 / simulcast | tested: full frame rate, 0.20-0.52 cores against 1.16-2.55 for software, 1.02 allocations per encoded frame, every backend within 2 % of the target bitrate once `av1_vaapi` got a two-second buffer (it overshot by 3.5-8 %; see the tables above) |
 | Hardware encoders → our decoders: `h264_vaapi` / `h264_amf` → OpenH264, `av1_vaapi` / `av1_amf` → dav1d (PSNR > 28 dB, decoded size, keyframes at start and on request, timestamps, bitrate change) at 320x240 and 1920x1080 | `tests/ffmpeg.rs` `hardware_encoders_roundtrip` (`VOELIN_OPENH264_LIB`, `--features av1`) | tested on the Radeon RX 7900 GRE: it found the AV1 encoder padding 1080 rows to 1082 (and other sizes to 64x16), now cropped (see above). HEVC is not decoded (no decoder here) |
 | The alignment an AV1 encoder pads to, from the sequence header it writes | `ffmpeg::encoder::tests::av1_declared_size_and_alignment` (every optional header field), the self-test on the GPU | tested: (64, 16) for `av1_vaapi` and `av1_amf`, (2, 2) for SVT-AV1, rav1e and libaom |
 | Hardware encoders NVENC, Quick Sync, Media Foundation, VideoToolbox | – | not tested (no such hardware here); NVENC and Quick Sync are skipped by the vendor check and the Windows code type-checks for `x86_64-pc-windows-gnu` |
