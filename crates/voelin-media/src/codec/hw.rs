@@ -1,13 +1,17 @@
-//! Encoder factories found at runtime.
+//! Encoder and decoder factories found at runtime.
 //!
 //! - FFmpeg (feature `ffmpeg`, desktop): VA-API, NVENC, Quick Sync, AMF,
 //!   Media Foundation and VideoToolbox encoders, plus software ones FFmpeg
 //!   wraps (x264, OpenH264, SVT-AV1, rav1e, libaom); one factory per backend
-//!   that passed its self-test ([`crate::ffmpeg::probe`]).
+//!   that passed its self-test ([`crate::ffmpeg::probe`]). Decoders likewise:
+//!   VA-API, NVDEC, D3D11VA, DXVA2 and VideoToolbox, then dav1d and FFmpeg's
+//!   own ([`crate::ffmpeg::decoder::probe`]).
 //! - Android: MediaCodec ([`super::mediacodec`]).
 
 use crate::Result;
-use crate::codec::{Codec, EncoderBackend, EncoderConfig, VideoEncoder};
+use crate::codec::{
+	Codec, DecoderBackend, EncoderBackend, EncoderConfig, VideoDecoder, VideoEncoder,
+};
 
 /// Creates encoders of one backend.
 pub trait EncoderFactory: Send + Sync {
@@ -49,6 +53,35 @@ pub fn probe() -> Vec<Box<dyn EncoderFactory>> {
 	#[cfg(target_os = "android")]
 	if let Some(f) = super::mediacodec::probe() {
 		found.push(Box::new(f));
+	}
+	found
+}
+
+/// Creates decoders of one backend for one codec: FFmpeg's, or one an
+/// application adds ([`Codecs::with_decoder`](super::Codecs::with_decoder)).
+pub trait DecoderFactory: Send + Sync {
+	/// The backend its decoders are (for the ladder, logs and settings).
+	fn backend(&self) -> DecoderBackend;
+
+	fn codec(&self) -> Codec;
+
+	/// The API or library behind it (`VA-API`, `dav1d`, ...), for the UI.
+	fn api(&self) -> &'static str;
+
+	/// A GPU decoder: left out when hardware decoding is off.
+	fn is_hardware(&self) -> bool;
+
+	fn create(&self) -> Result<Box<dyn VideoDecoder>>;
+}
+
+/// Decoder factories usable on this machine: FFmpeg's decoders that passed
+/// their self-test, hardware first.
+pub fn probe_decoders() -> Vec<Box<dyn DecoderFactory>> {
+	#[allow(unused_mut)]
+	let mut found: Vec<Box<dyn DecoderFactory>> = Vec::new();
+	#[cfg(feature = "ffmpeg")]
+	for factory in crate::ffmpeg::decoder::FfmpegDecoderFactory::available() {
+		found.push(Box::new(factory));
 	}
 	found
 }

@@ -89,11 +89,19 @@ impl<'a> PlaneRef<'a> {
 
 	/// A tightly packed copy of `width` x `rows` bytes.
 	fn to_plane(self, width: usize, rows: usize) -> Plane {
-		let mut data = Vec::with_capacity(width * rows);
+		let mut plane = Plane::new(Vec::with_capacity(width * rows), width);
+		self.copy_into(&mut plane, width, rows);
+		plane
+	}
+
+	/// As [`to_plane`](Self::to_plane), into `dst`'s buffer (which only
+	/// grows).
+	fn copy_into(self, dst: &mut Plane, width: usize, rows: usize) {
+		dst.data.clear();
 		for y in 0..rows {
-			data.extend_from_slice(self.row(y, width));
+			dst.data.extend_from_slice(self.row(y, width));
 		}
-		Plane::new(data, width)
+		dst.stride = width;
 	}
 }
 
@@ -178,6 +186,33 @@ impl FrameRef<'_> {
 			PixelsRef::Rgba(p) => FrameData::Rgba(p.to_plane(w * 4, h)),
 		};
 		VideoFrame { width: self.width, height: self.height, timestamp: self.timestamp, data }
+	}
+
+	/// As [`to_frame`](Self::to_frame), into `out`: its buffers are reused
+	/// when it has this pixel format, so copying frames of one size into the
+	/// same `out` allocates nothing after the first.
+	pub fn copy_to(&self, out: &mut VideoFrame) {
+		let (w, h) = (self.width as usize, self.height as usize);
+		let (cw, ch) = chroma_size(self.width, self.height);
+		match (self.pixels, &mut out.data) {
+			(PixelsRef::I420 { y, u, v }, FrameData::I420 { y: oy, u: ou, v: ov }) => {
+				y.copy_into(oy, w, h);
+				u.copy_into(ou, cw, ch);
+				v.copy_into(ov, cw, ch);
+			}
+			(PixelsRef::Nv12 { y, uv }, FrameData::Nv12 { y: oy, uv: ouv }) => {
+				y.copy_into(oy, w, h);
+				uv.copy_into(ouv, cw * 2, ch);
+			}
+			(PixelsRef::Bgra(p), FrameData::Bgra(o)) | (PixelsRef::Rgba(p), FrameData::Rgba(o)) => {
+				p.copy_into(o, w * 4, h);
+			}
+			_ => {
+				*out = self.to_frame();
+				return;
+			}
+		}
+		(out.width, out.height, out.timestamp) = (self.width, self.height, self.timestamp);
 	}
 }
 
@@ -394,5 +429,26 @@ mod tests {
 		let short = FrameRef { pixels: PixelsRef::Bgra(PlaneRef::new(&data[..27], 16)), ..frame };
 		assert!(short.validate().is_err());
 		assert_eq!(VideoFrame::black_i420(5, 3).view().format(), PixelFormat::I420);
+	}
+
+	#[test]
+	fn copies_reuse_the_destination() {
+		let source = VideoFrame::black_i420(33, 17).with_timestamp(Duration::from_millis(7));
+		let mut out = VideoFrame::from_bgra(1, 1, 4, vec![0; 4]).unwrap();
+		source.view().copy_to(&mut out);
+		assert_eq!(out, source, "another format: replaced");
+		let FrameData::I420 { y, .. } = &out.data else { panic!("not I420") };
+		let buffer = y.data.as_ptr();
+		let smaller = VideoFrame::black_i420(20, 10);
+		smaller.view().copy_to(&mut out);
+		assert_eq!(out, smaller);
+		let FrameData::I420 { y, .. } = &out.data else { panic!("not I420") };
+		assert_eq!(y.data.as_ptr(), buffer, "the same buffer");
+		let nv12 = FrameRef {
+			pixels: PixelsRef::Nv12 { y: PlaneRef::new(&[1; 4], 2), uv: PlaneRef::new(&[2; 2], 2) },
+			..VideoFrame::black_i420(2, 2).view()
+		};
+		nv12.copy_to(&mut out);
+		assert_eq!(out, nv12.to_frame());
 	}
 }

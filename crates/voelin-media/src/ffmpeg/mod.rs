@@ -1,6 +1,8 @@
 //! FFmpeg, loaded at runtime (feature `ffmpeg`): hardware video encoders
 //! (VA-API, NVENC, Quick Sync, AMF, Media Foundation, VideoToolbox) and
-//! more software encoders (x264, OpenH264, SVT-AV1, rav1e, libaom).
+//! more software encoders (x264, OpenH264, SVT-AV1, rav1e, libaom); video
+//! decoders, in hardware (VA-API, NVDEC, D3D11VA, DXVA2, VideoToolbox) and
+//! in software (dav1d, FFmpeg's own), see [`decoder`].
 //!
 //! FFmpeg is never linked or shipped: [`Ffmpeg::get`] finds the system's
 //! (or `VOELIN_FFMPEG_DIR`'s) libavcodec and libavutil, whatever their major
@@ -11,7 +13,8 @@
 //!
 //! [`probe`] lists every encoder backend with the result of a self-test (one
 //! small frame encoded), so a backend whose driver or GPU is missing is
-//! skipped with a reason, without affecting the others.
+//! skipped with a reason, without affecting the others;
+//! [`decoder::probe`] does the same for decoders (a short clip decoded).
 #![allow(unsafe_code)]
 
 use std::ffi::{CStr, c_char, c_int};
@@ -20,6 +23,7 @@ use std::sync::{Mutex, OnceLock};
 
 pub mod audio;
 pub mod avio;
+pub mod decoder;
 pub mod encoder;
 mod gpu;
 mod layout;
@@ -29,6 +33,7 @@ mod vpp;
 pub(crate) use gpu::Surface;
 pub use gpu::{GpuConverter, GpuLayer};
 
+pub use decoder::{DECODERS, DecoderSpec, DecoderStatus, FfmpegDecoder};
 pub use encoder::{
 	BACKENDS, BackendKind, BackendSpec, BackendStatus, FfmpegEncoder, FfmpegFactory, Input, probe,
 };
@@ -82,6 +87,8 @@ pub struct Ffmpeg {
 	pub(crate) frame: FrameFields,
 	/// `AVCodecContext.hw_frames_ctx`.
 	pub(crate) codec_hw_frames: Result<usize, String>,
+	/// `AVCodecContext.hw_device_ctx`, for hardware decoders.
+	pub(crate) codec_hw_device: Result<usize, String>,
 	/// `AVFrame.buf[0]` / `hw_frames_ctx`.
 	pub(crate) frame_refs: Result<FrameRefs, String>,
 	/// `AVCodecContext.sample_fmt`, for the AAC encoder of RTMP output.
@@ -122,7 +129,9 @@ impl Ffmpeg {
 			drm_prime: api.pix_fmt("drm_prime"),
 			bgr0: api.pix_fmt("bgr0"),
 		};
-		let codec_hw_frames = layout::codec_hw_frames(&api);
+		let hw_fields = layout::codec_hw_fields(&api);
+		let codec_hw_frames = hw_fields.clone().map(|(frames, _)| frames);
+		let codec_hw_device = hw_fields.map(|(_, device)| device);
 		let frame_refs = layout::frame_refs(&api, yuv420p);
 		let codec_sample_fmt = layout::codec_sample_fmt(&api);
 		let io = libs.format_api().and_then(|format| {
@@ -159,6 +168,7 @@ impl Ffmpeg {
 			_libs: libs,
 			frame,
 			codec_hw_frames,
+			codec_hw_device,
 			frame_refs,
 			codec_sample_fmt,
 			io,
@@ -291,6 +301,15 @@ mod tests {
 		assert!(info.rtmp.is_ok(), "{info:?}");
 		if cfg!(target_pointer_width = "64") {
 			assert!(ffmpeg.frame_refs.is_ok(), "{:?}", ffmpeg.frame_refs);
+		}
+		// `hw_device_ctx`, where FFmpeg 9's headers put it (libavcodec 63:
+		// `hw_frames_ctx` 552, `hw_device_ctx` 560 on x86-64).
+		let (frames, device) = (ffmpeg.codec_hw_frames.clone(), ffmpeg.codec_hw_device.clone());
+		// SAFETY: no arguments.
+		if cfg!(target_pointer_width = "64")
+			&& unsafe { (ffmpeg.api.avcodec_version)() } >> 16 == 63
+		{
+			assert_eq!((frames, device), (Ok(552), Ok(560)));
 		}
 	}
 
