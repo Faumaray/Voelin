@@ -141,6 +141,17 @@ fn probe_reports_every_backend() {
 		let automatic = status.available.is_ok() && status.spec.is_automatic();
 		assert_eq!(info.rank.is_some(), automatic, "{}", status.spec.name);
 	}
+	// On Linux, AMF's runtime is not even loaded unless asked for: the
+	// probe crashed in it (SIGSEGV in libamfrt64), and VA-API drives the
+	// same encoder there. Nothing in this process may have loaded it.
+	if cfg!(target_os = "linux") && std::env::var_os("VOELIN_FFMPEG_AMF").is_none() {
+		for status in statuses.iter().filter(|s| s.spec.api == "AMF") {
+			let reason = status.available.as_ref().unwrap_err();
+			assert!(reason.contains("VOELIN_FFMPEG_AMF=1"), "{}: {reason}", status.spec.name);
+		}
+		let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+		assert!(!maps.contains("libamfrt"), "AMF's runtime was loaded");
+	}
 }
 
 #[test]
@@ -192,6 +203,40 @@ fn hardware_encoders_roundtrip() {
 		roundtrip(name, 1920, 1080);
 	}
 	eprintln!("tested: {names:?}");
+}
+
+/// AMF's runtime crashed (SIGSEGV in `AMFFactoryHelper::Init` /
+/// `Terminate` in `libamfrt64`) when encoders were opened on several
+/// threads at once, as the probe and simulcast layers do: 10 of 420 probes
+/// with several processes probing together. Opens and closes are
+/// serialised now; this opens every usable AMF encoder on parallel threads
+/// again and again. On Linux it needs `VOELIN_FFMPEG_AMF=1`; ignored by
+/// default because a regression takes the whole test binary down.
+#[test]
+#[ignore = "needs AMF; a regression crashes the process"]
+fn amf_encoders_open_in_parallel() {
+	if ffmpeg().is_none() {
+		return;
+	}
+	let names: Vec<&str> =
+		["h264_amf", "hevc_amf", "av1_amf"].into_iter().filter(|n| available(n)).collect();
+	if names.is_empty() {
+		eprintln!("no usable AMF encoder, skipped");
+		return;
+	}
+	let frame = voelin_media::VideoFrame::black_i420(W, H);
+	for _ in 0..40 {
+		std::thread::scope(|scope| {
+			for &name in &names {
+				let frame = &frame;
+				scope.spawn(move || {
+					let mut encoder = FfmpegEncoder::new(name, EncoderConfig::default()).unwrap();
+					encoder.encode(frame, true).unwrap();
+				});
+			}
+		});
+	}
+	eprintln!("opened {names:?} together 40 times");
 }
 
 #[test]
