@@ -50,6 +50,20 @@ impl Surface {
 		Ok(Self(frame))
 	}
 
+	/// Another frame of the same surface (NULL, which encoders refuse, if
+	/// memory runs out).
+	pub(crate) fn new_ref(&self) -> Self {
+		let api = &Ffmpeg::get().expect("a surface exists only with FFmpeg").api;
+		// SAFETY: a new frame takes a reference to ours; freed on failure.
+		unsafe {
+			let mut frame = (api.av_frame_alloc)();
+			if !frame.is_null() && (api.av_frame_ref)(frame, self.0) < 0 {
+				(api.av_frame_free)(&mut frame);
+			}
+			Self(frame)
+		}
+	}
+
 	/// The VA-API surface id (`data[3]` of an `AV_PIX_FMT_VAAPI` frame,
 	/// `hwcontext_vaapi.h`).
 	pub(crate) fn id(&self) -> c_uint {

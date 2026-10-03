@@ -305,6 +305,18 @@ impl GpuFrame {
 	pub fn pts_90khz(&self) -> u64 {
 		(self.timestamp.as_micros() * u128::from(VIDEO_CLOCK_RATE) / 1_000_000) as u64
 	}
+
+	/// The same picture at another time (another reference to the same
+	/// surface), e.g. to send a still screen again.
+	pub fn at(&self, timestamp: Duration) -> Self {
+		Self {
+			width: self.width,
+			height: self.height,
+			timestamp,
+			#[cfg(feature = "ffmpeg")]
+			surface: self.surface.new_ref(),
+		}
+	}
 }
 
 impl std::fmt::Debug for GpuFrame {

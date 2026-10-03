@@ -45,7 +45,7 @@ pub use voelin_media::capture::playback::{AppMatch, AudioApp, AudioApps};
 pub use voelin_media::capture::synthetic::Pattern;
 use voelin_media::capture::synthetic::{SineSource, SyntheticScreen};
 use voelin_media::capture::{
-	self, CaptureOptions, CaptureSource, FramePacer, FrameSink, ScreenCapture, SourceId,
+	self, CaptureOptions, CaptureSource, DmaBufRef, FramePacer, FrameSink, ScreenCapture, SourceId,
 };
 use voelin_media::handoff::Handoff;
 use voelin_media::mix::{
@@ -55,7 +55,10 @@ pub use voelin_media::mix::{Level, SourceState};
 use voelin_media::scale::Pyramid;
 use voelin_media::studio::Studio;
 use voelin_media::studio::output::{Packet, Track};
-use voelin_media::{Codec, Codecs, ContentHint, EncoderConfig, FrameRef, VideoEncoder, VideoFrame};
+use voelin_media::{
+	Codec, Codecs, ContentHint, EncodedChunk, EncoderConfig, FrameRef, GpuFrame, VideoEncoder,
+	VideoFrame,
+};
 pub use voelin_media::{EncoderBackend, EncoderPreference};
 use voelin_stream::{
 	EncodedFrame, FrameSource, Frequency, LayerId, LayerSet, LayerSpec, MediaFrame, MediaKind,
@@ -502,6 +505,11 @@ pub struct StreamerConfig {
 	pub synthetic_size: (u32, u32),
 	/// What the test pattern shows.
 	pub synthetic_pattern: Pattern,
+	/// Hand the test pattern over as DMA-BUFs of ordinary memory, as the
+	/// ScreenCast portal hands over the screen
+	/// ([`SyntheticScreen::with_dmabuf`]): drives the GPU path without a
+	/// portal (Linux, `/dev/udmabuf`).
+	pub synthetic_dmabuf: bool,
 	/// Portal restore token from an earlier share: the desktop may skip its
 	/// dialog. The new one is [`Streamer::restore_token`].
 	pub restore_token: Option<String>,
@@ -524,6 +532,7 @@ impl Default for StreamerConfig {
 			cursor: true,
 			synthetic_size: (1280, 720),
 			synthetic_pattern: Pattern::Simple,
+			synthetic_dmabuf: false,
 			restore_token: None,
 			layers: Vec::new(),
 		}
@@ -612,8 +621,16 @@ pub struct StreamerStats {
 	pub captured_frames: u64,
 	pub capture_fps: f64,
 	/// Mean time to convert a captured frame to I420 and scale it for every
-	/// layer that is due.
+	/// layer that is due, on the CPU.
 	pub convert_time: Duration,
+	/// Captured frames that never reached the CPU: DMA-BUFs converted to
+	/// NV12 and scaled for every layer on the GPU, for VA-API encoders.
+	pub gpu_frames: u64,
+	/// Mean time the capture thread spends on such a frame (it waits for
+	/// the GPU, so the buffer can go back to the compositor).
+	pub gpu_convert_time: Duration,
+	/// Why the GPU path stopped (it fell back to the CPU), if it did.
+	pub gpu_error: Option<String>,
 	/// Frames dropped between conversion and the encoders, all layers.
 	pub dropped_frames: u64,
 	/// Threads converting and scaling.
@@ -636,6 +653,12 @@ struct Layer {
 	spec: Mutex<LayerSpec>,
 	/// Newest converted frame for the encoder.
 	inbox: Handoff<VideoFrame>,
+	/// Newest frame converted on the GPU, instead.
+	gpu_inbox: Handoff<GpuFrame>,
+	/// What every encoder of the layer takes GPU frames at, written by the
+	/// encoder thread: `width << 32 | height` alignment, 0 if one of them
+	/// needs frames in memory.
+	gpu: AtomicU64,
 	/// A keyframe was asked for.
 	keyframe: AtomicBool,
 	stop: AtomicBool,
@@ -669,6 +692,8 @@ impl Layer {
 			id: spec.id,
 			spec: Mutex::new(spec.clone()),
 			inbox: Handoff::new(),
+			gpu_inbox: Handoff::new(),
+			gpu: AtomicU64::new(0),
 			keyframe: AtomicBool::new(false),
 			stop: AtomicBool::new(false),
 			bitrate: AtomicU64::new(spec.bitrate.max(1)),
@@ -731,6 +756,7 @@ impl Settings {
 struct Rates {
 	capture_fps: f64,
 	convert_time: Duration,
+	gpu_convert_time: Duration,
 	/// Per layer: id, fps, kbit/s, encode time.
 	layers: Vec<(LayerId, f64, f64, Duration)>,
 }
@@ -751,6 +777,10 @@ struct Shared {
 	converted: AtomicU64,
 	convert_ns: AtomicU64,
 	convert_threads: AtomicUsize,
+	/// Frames converted on the GPU instead, and the time it took.
+	gpu_converted: AtomicU64,
+	gpu_convert_ns: AtomicU64,
+	gpu_error: Mutex<Option<String>>,
 	/// The layers being encoded, in configuration order.
 	layers: Mutex<Vec<Arc<Layer>>>,
 	/// Bumped whenever `layers` or a layer's spec changes.
@@ -959,7 +989,8 @@ impl Streamer {
 		let (screen, restore_token): (Box<dyn ScreenCapture>, _) = match &config.source {
 			SourceId::Synthetic => {
 				let (w, h) = config.synthetic_size;
-				let mut screen = SyntheticScreen::with_pattern(w, h, config.synthetic_pattern);
+				let mut screen = SyntheticScreen::with_pattern(w, h, config.synthetic_pattern)
+					.with_dmabuf(config.synthetic_dmabuf);
 				screen.start_sink(&SourceId::Synthetic, &options, ingest).await?;
 				(Box::new(screen), None)
 			}
@@ -1220,6 +1251,9 @@ impl Streamer {
 			captured_frames: shared.captured.load(Ordering::Relaxed),
 			capture_fps: rates.capture_fps,
 			convert_time: rates.convert_time,
+			gpu_frames: shared.gpu_converted.load(Ordering::Relaxed),
+			gpu_convert_time: rates.gpu_convert_time,
+			gpu_error: lock(&shared.gpu_error).clone(),
 			dropped_frames: layers.iter().map(|l| l.dropped).sum(),
 			convert_threads: shared.convert_threads.load(Ordering::Relaxed),
 			codec,
@@ -1487,6 +1521,11 @@ struct IngestLayer {
 /// converts and scales them for every layer that is due, and hands each
 /// layer's frame to its encoder. Allocates nothing per frame once the
 /// frame pools are warm.
+///
+/// Frames still in a DMA-BUF (the portal's) are converted and scaled on
+/// the GPU instead when every encoder of every layer takes GPU frames
+/// (VA-API): the CPU never reads them, and the buffer is free again as
+/// soon as the GPU is done with it.
 struct Ingest {
 	shared: Arc<Shared>,
 	pyramid: Pyramid,
@@ -1497,6 +1536,19 @@ struct Ingest {
 	sizes: Vec<(u32, u32)>,
 	due: Vec<bool>,
 	out: Vec<Option<Arc<VideoFrame>>>,
+	#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+	gpu: GpuStage,
+}
+
+/// The GPU stage of [`Ingest`].
+#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+#[derive(Default)]
+struct GpuStage {
+	/// Made for the first DMA-BUF; `Err` once it failed (the CPU converts
+	/// from then on).
+	converter: Option<Result<voelin_media::ffmpeg::GpuConverter, ()>>,
+	layers: Vec<voelin_media::ffmpeg::GpuLayer>,
+	out: Vec<Option<Arc<GpuFrame>>>,
 }
 
 impl Ingest {
@@ -1514,7 +1566,94 @@ impl Ingest {
 			sizes: Vec::new(),
 			due: Vec::new(),
 			out: Vec::new(),
+			#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+			gpu: GpuStage::default(),
 		}
+	}
+
+	/// Whether frames go to the GPU: every layer's encoders take GPU frames
+	/// and the GPU stage has not failed.
+	fn gpu_path(&self) -> bool {
+		#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+		{
+			!matches!(self.gpu.converter, Some(Err(())))
+				&& !self.layers.is_empty()
+				&& self
+					.layers
+					.iter()
+					.all(|l| l.layer.stopped() || l.layer.gpu.load(Ordering::Relaxed) != 0)
+		}
+		#[cfg(not(all(target_os = "linux", feature = "media-desktop")))]
+		false
+	}
+
+	/// Convert DMA-BUF `frame` on the GPU for every layer that is due; `None`
+	/// if it is not taken (the backend maps it for [`FrameSink::frame`]).
+	#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+	fn gpu_frame(&mut self, frame: &DmaBufRef) -> Option<bool> {
+		use voelin_media::ffmpeg::{GpuConverter, GpuLayer};
+
+		if self.shared.stopped() {
+			return Some(false);
+		}
+		if !self.gpu_path() {
+			return None;
+		}
+		let shared = self.shared.clone();
+		let converter = match &mut self.gpu.converter {
+			Some(Ok(converter)) => converter,
+			Some(Err(())) => return None,
+			None => match GpuConverter::new() {
+				Ok(converter) => self.gpu.converter.insert(Ok(converter)).as_mut().ok()?,
+				Err(e) => {
+					warn!("no GPU conversion of captured frames, the CPU converts them: {e}");
+					*lock(&shared.gpu_error) = Some(e.to_string());
+					self.gpu.converter = Some(Err(()));
+					return None;
+				}
+			},
+		};
+		self.pacer.keep(frame.timestamp);
+		shared.captured.fetch_add(1, Ordering::Relaxed);
+		shared
+			.size
+			.store(u64::from(frame.width) << 32 | u64::from(frame.height), Ordering::Relaxed);
+		if shared.sink().is_none() {
+			return Some(true);
+		}
+		let mut any = false;
+		self.gpu.layers.clear();
+		for l in &mut self.layers {
+			let due = !l.layer.stopped() && l.pacer.take(frame.timestamp);
+			any |= due;
+			let alignment = l.layer.gpu.load(Ordering::Relaxed);
+			self.gpu.layers.push(GpuLayer {
+				size: l.spec.output_size(frame.width, frame.height),
+				alignment: ((alignment >> 32) as u32, alignment as u32),
+				due,
+			});
+		}
+		if !any {
+			return Some(true);
+		}
+		self.gpu.out.clear();
+		self.gpu.out.resize(self.layers.len(), None);
+		let started = Instant::now();
+		if let Err(e) = converter.convert(frame, &self.gpu.layers, &mut self.gpu.out) {
+			warn!("GPU conversion failed, the CPU converts captured frames from now on: {e}");
+			*lock(&shared.gpu_error) = Some(e.to_string());
+			self.gpu.converter = Some(Err(()));
+			self.gpu.out.clear();
+			return None;
+		}
+		shared.gpu_convert_ns.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+		shared.gpu_converted.fetch_add(1, Ordering::Relaxed);
+		for (l, out) in self.layers.iter().zip(&mut self.gpu.out) {
+			if let Some(frame) = out.take() {
+				l.layer.gpu_inbox.put(frame);
+			}
+		}
+		Some(true)
 	}
 
 	/// Pick up layer and frame-rate changes.
@@ -1560,12 +1699,23 @@ impl FrameSink for Ingest {
 		if self.shared.stopped() {
 			return false;
 		}
-		let fps = self.shared.fps.load(Ordering::Relaxed);
-		if fps != self.fps {
-			self.fps = fps;
-			self.pacer.set_fps(Some(fps));
-		}
+		// Also the layers, which `accepts_dmabuf` (asked next) looks at.
+		self.refresh();
 		self.pacer.due(timestamp)
+	}
+
+	fn accepts_dmabuf(&self) -> bool {
+		self.gpu_path()
+	}
+
+	fn dmabuf(&mut self, frame: &DmaBufRef) -> Option<bool> {
+		#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+		return self.gpu_frame(frame);
+		#[cfg(not(all(target_os = "linux", feature = "media-desktop")))]
+		{
+			let _ = frame;
+			None
+		}
 	}
 
 	fn frame(&mut self, frame: FrameRef<'_>) -> bool {
@@ -1617,6 +1767,66 @@ impl Drop for Ingest {
 	}
 }
 
+/// A layer's picture: in memory, or on the GPU (converted from a captured
+/// DMA-BUF there).
+#[derive(Clone)]
+enum Picture {
+	Cpu(Arc<VideoFrame>),
+	Gpu(Arc<GpuFrame>),
+}
+
+impl Picture {
+	fn size(&self) -> (u32, u32) {
+		match self {
+			Self::Cpu(frame) => (frame.width, frame.height),
+			Self::Gpu(frame) => (frame.width, frame.height),
+		}
+	}
+
+	/// The same picture `later` after it was captured (a still screen sent
+	/// again; copies a frame in memory).
+	fn later(&self, later: Duration) -> Self {
+		match self {
+			Self::Cpu(frame) => {
+				let timestamp = frame.timestamp + later;
+				Self::Cpu(Arc::new((**frame).clone().with_timestamp(timestamp)))
+			}
+			Self::Gpu(frame) => Self::Gpu(Arc::new(frame.at(frame.timestamp + later))),
+		}
+	}
+}
+
+/// A layer's next picture, from either inbox, or `None` after [`POLL`] or
+/// once the layer is closed. The encoder thread is registered with both
+/// ([`Handoff::register`]), so a `put` to either wakes it.
+fn next_picture(layer: &Layer) -> Option<Picture> {
+	let deadline = Instant::now() + POLL;
+	loop {
+		if let Some(frame) = layer.gpu_inbox.take() {
+			return Some(Picture::Gpu(frame));
+		}
+		if let Some(frame) = layer.inbox.take() {
+			return Some(Picture::Cpu(frame));
+		}
+		let now = Instant::now();
+		if now >= deadline || layer.inbox.is_closed() {
+			return None;
+		}
+		std::thread::park_timeout(deadline - now);
+	}
+}
+
+/// What every encoder of a layer takes GPU frames at, for [`Layer::gpu`]:
+/// the largest alignment of them all, or 0 if one of them takes none.
+fn gpu_alignment<'a>(encoders: impl IntoIterator<Item = &'a dyn VideoEncoder>) -> u64 {
+	let mut alignment = (2, 2);
+	for encoder in encoders {
+		let Some((w, h)) = encoder.gpu_alignment() else { return 0 };
+		alignment = (alignment.0.max(w), alignment.1.max(h));
+	}
+	u64::from(alignment.0) << 32 | u64::from(alignment.1)
+}
+
 /// One encoder of a layer: its keyframe and bitrate state.
 struct LayerEncoder {
 	codec: Codec,
@@ -1635,7 +1845,7 @@ impl LayerEncoder {
 		Self { codec: encoder.codec(), encoder: Some(encoder), keyframe_due: true, bitrate: 0, fps }
 	}
 
-	/// Encode `frame` and hand the frames to `sink` (and `studio`'s
+	/// Encode `picture` and hand the frames to `sink` (and `studio`'s
 	/// outputs); follows the layer's target bitrate and frame rate first.
 	#[allow(clippy::too_many_arguments)]
 	fn encode(
@@ -1644,12 +1854,20 @@ impl LayerEncoder {
 		layer: &Layer,
 		sink: &dyn MediaSink,
 		studio: Option<&Studio>,
-		frame: &VideoFrame,
+		picture: &Picture,
 		requested: bool,
 		target: u64,
 	) {
 		let codec = self.codec;
 		let Some(encoder) = &mut self.encoder else { return };
+		if matches!(picture, Picture::Gpu(_)) && encoder.gpu_alignment().is_none() {
+			// The capture switches to frames in memory once it sees this
+			// encoder (made for a viewer just now); until then it waits, and
+			// its first frame then is a keyframe.
+			self.keyframe_due = true;
+			return;
+		}
+		let (width, height) = picture.size();
 		if target.abs_diff(self.bitrate) * 100 > self.bitrate {
 			match encoder.set_bitrate(target.min(u64::from(u32::MAX)) as u32) {
 				Ok(()) => self.bitrate = target,
@@ -1662,15 +1880,15 @@ impl LayerEncoder {
 		}
 		let force = requested || self.keyframe_due;
 		let mut produced_keyframe = false;
-		let result = encoder.encode_with(frame, force, &mut |chunk| {
+		let mut out = |chunk: EncodedChunk<'_>| {
 			produced_keyframe |= chunk.keyframe;
 			if let Some(studio) = studio {
 				studio.write_packet(&Packet {
 					track: Track::Video { codec, layer: u32::from(layer.id) },
 					pts_90khz: chunk.pts_90khz,
 					keyframe: chunk.keyframe,
-					width: frame.width,
-					height: frame.height,
+					width,
+					height,
 					data: chunk.data,
 				});
 			}
@@ -1688,7 +1906,11 @@ impl LayerEncoder {
 				layer.bytes.fetch_add(chunk.data.len() as u64, Ordering::Relaxed);
 				shared.video_frames.fetch_add(1, Ordering::Relaxed);
 			}
-		});
+		};
+		let result = match picture {
+			Picture::Cpu(frame) => encoder.encode_with(frame, force, &mut out),
+			Picture::Gpu(frame) => encoder.encode_gpu(frame, force, &mut out),
+		};
 		match result {
 			Ok(()) => self.keyframe_due = force && !produced_keyframe,
 			Err(e) => {
@@ -1736,13 +1958,17 @@ fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 	let mut primary_on = true;
 	// The last picture, and when it came: a static screen sends no frames,
 	// so keyframe requests are answered by encoding it again.
-	let mut last: Option<(Arc<VideoFrame>, Instant)> = None;
+	let mut last: Option<(Picture, Instant)> = None;
 	layer.speed.store(
 		primary.encoder.as_ref().and_then(|e| e.speed()).map_or(i64::MIN, i64::from),
 		Ordering::Relaxed,
 	);
+	// The capture may hand over GPU frames once every encoder takes them.
+	layer.inbox.register();
+	layer.gpu_inbox.register();
+	layer.gpu.store(gpu_alignment(primary.encoder.as_deref()), Ordering::Relaxed);
 	while !shared.stopped() && !layer.stopped() {
-		let frame = layer.inbox.wait_timeout(POLL);
+		let picture = next_picture(layer);
 		if let Some(next) = lock(&layer.next_encoder).take() {
 			// Another codec: its first frame is a keyframe anyway.
 			*lock(&layer.backend) = Some(next.backend());
@@ -1785,21 +2011,26 @@ fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 			codecs.extend(primary_on.then_some(primary.codec));
 			codecs.extend(extra.iter().filter(|e| e.encoder.is_some()).map(|e| e.codec));
 		}
+		// The stream codec's encoder counts even while nobody takes it, so
+		// the capture does not switch paths as viewers come and go.
+		let encoders = primary.encoder.as_deref().into_iter();
+		let gpu = gpu_alignment(encoders.chain(extra.iter().filter_map(|e| e.encoder.as_deref())));
+		layer.gpu.store(gpu, Ordering::Relaxed);
 		let requested = layer.keyframe.swap(false, Ordering::Relaxed);
 		let due = primary_on && primary.keyframe_due
 			|| extra.iter().any(|e| e.keyframe_due && e.encoder.is_some());
-		let frame = match frame {
-			Some(frame) => {
-				last = Some((frame.clone(), Instant::now()));
-				frame
+		let picture = match picture {
+			Some(picture) => {
+				last = Some((picture.clone(), Instant::now()));
+				picture
 			}
 			None if requested || due => {
-				let Some((frame, at)) = &last else {
+				let Some((picture, at)) = &last else {
 					layer.keyframe.store(requested, Ordering::Relaxed);
 					continue;
 				};
-				// Same picture, later timestamp (rare: copies the frame).
-				Arc::new((**frame).clone().with_timestamp(frame.timestamp + at.elapsed()))
+				// Same picture, later timestamp (rare).
+				picture.later(at.elapsed())
 			}
 			None => continue,
 		};
@@ -1813,15 +2044,16 @@ fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 		let started = Instant::now();
 		if primary_on {
 			let studio = shared.studio.as_deref();
-			primary.encode(shared, layer, &*sink, studio, &frame, requested, target);
+			primary.encode(shared, layer, &*sink, studio, &picture, requested, target);
 			layer.target.store(primary.bitrate, Ordering::Relaxed);
 		}
 		for encoder in &mut extra {
-			encoder.encode(shared, layer, &*sink, None, &frame, requested, target);
+			encoder.encode(shared, layer, &*sink, None, &picture, requested, target);
 		}
 		layer.encode_ns.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 		layer.encoded.fetch_add(1, Ordering::Relaxed);
-		layer.size.store(u64::from(frame.width) << 32 | u64::from(frame.height), Ordering::Relaxed);
+		let (width, height) = picture.size();
+		layer.size.store(u64::from(width) << 32 | u64::from(height), Ordering::Relaxed);
 		layer.speed.store(
 			primary.encoder.as_ref().and_then(|e| e.speed()).map_or(i64::MIN, i64::from),
 			Ordering::Relaxed,
@@ -1835,6 +2067,8 @@ struct Sample {
 	captured: u64,
 	converted: u64,
 	convert_ns: u64,
+	gpu_converted: u64,
+	gpu_convert_ns: u64,
 }
 
 /// Once a second: rates for [`Streamer::stats`]; every five seconds a
@@ -1861,11 +2095,15 @@ fn stats_loop(shared: &Shared) {
 			captured: shared.captured.load(Ordering::Relaxed),
 			converted: shared.converted.load(Ordering::Relaxed),
 			convert_ns: shared.convert_ns.load(Ordering::Relaxed),
+			gpu_converted: shared.gpu_converted.load(Ordering::Relaxed),
+			gpu_convert_ns: shared.gpu_convert_ns.load(Ordering::Relaxed),
 		};
 		let mean = |ns: u64, n: u64| Duration::from_nanos(ns.checked_div(n).unwrap_or(0));
 		let mut rates = lock(&shared.rates);
 		rates.capture_fps = (now.captured - last.captured) as f64 / secs;
 		rates.convert_time = mean(now.convert_ns - last.convert_ns, now.converted - last.converted);
+		rates.gpu_convert_time =
+			mean(now.gpu_convert_ns - last.gpu_convert_ns, now.gpu_converted - last.gpu_converted);
 		rates.layers.clear();
 		let layers = lock(&shared.layers);
 		for layer in layers.iter() {
@@ -1912,9 +2150,10 @@ fn stats_loop(shared: &Shared) {
 				})
 				.collect();
 			debug!(
-				"stream: capture {:.1} fps, convert {:.1} ms, {}",
+				"stream: capture {:.1} fps, convert {:.1} ms (GPU {:.1} ms), {}",
 				rates.capture_fps,
 				rates.convert_time.as_secs_f64() * 1e3,
+				rates.gpu_convert_time.as_secs_f64() * 1e3,
 				summary.join(", ")
 			);
 		}
@@ -2740,6 +2979,68 @@ mod tests {
 			}
 		}
 		(size, first_keyframe == Some(true))
+	}
+
+	/// The test pattern as DMA-BUFs, as the portal hands over the screen:
+	/// with VA-API encoders on every layer, each frame is converted and
+	/// scaled on the GPU and none on the CPU; after a switch to libvpx,
+	/// which needs frames in memory, the CPU converts them again and the
+	/// stream goes on. Skipped without `h264_vaapi` or `/dev/udmabuf`.
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn dmabufs_take_the_gpu_path_while_every_encoder_does() {
+		let vaapi = voelin_media::ffmpeg::probe()
+			.iter()
+			.any(|s| s.spec.name == "h264_vaapi" && s.available.is_ok());
+		if !vaapi || !std::path::Path::new("/dev/udmabuf").exists() {
+			eprintln!("no h264_vaapi or /dev/udmabuf, skipped");
+			return;
+		}
+		let codecs = Codecs::new();
+		let vaapi = EncoderPreference { hardware: true, backend: "h264_vaapi".parse().unwrap() };
+		let config = StreamerConfig {
+			source: SourceId::Synthetic,
+			synthetic_size: (640, 360),
+			synthetic_dmabuf: true,
+			fps: 30,
+			audio: false,
+			codec: Codec::H264,
+			encoder: vaapi,
+			layers: vec![layer(0, 1.0, None, 1_000_000), layer(5, 0.5, Some(15), 300_000)],
+			..StreamerConfig::default()
+		};
+		let streamer = Streamer::start(&codecs, config).await.unwrap();
+		let mut source = EncodedSource::new(streamer);
+		let count = |frames: &[EncodedFrame], id| frames.iter().filter(|f| f.layer == id).count();
+		let frames = collect(&mut source, |f| count(f, 0) >= 20 && count(f, 5) >= 5).await;
+		for id in [0, 5] {
+			assert!(frames.iter().find(|f| f.layer == id).unwrap().keyframe, "layer {id}");
+		}
+		let stats = source.streamer().stats();
+		assert_eq!(stats.gpu_error, None);
+		assert!(stats.gpu_frames >= 20, "{} frames on the GPU", stats.gpu_frames);
+		let on_cpu = stats.captured_frames - stats.gpu_frames;
+		assert!(on_cpu <= 1, "{on_cpu} of {} frames on the CPU", stats.captured_frames);
+		let sizes: Vec<_> = stats.layers.iter().map(|l| (l.width, l.height)).collect();
+		assert_eq!(sizes, [(640, 360), (320, 180)]);
+
+		let libvpx = EncoderPreference { hardware: false, backend: "libvpx".parse().unwrap() };
+		let update = StreamerConfigUpdate {
+			codec: Some(Codec::Vp8),
+			encoder: Some(libvpx),
+			..StreamerConfigUpdate::default()
+		};
+		source.streamer().reconfigure(&codecs, update).unwrap();
+		let gpu = source.streamer().stats().gpu_frames;
+		let frames = collect(&mut source, |f| count(f, 0) >= 40).await;
+		assert_eq!(decoded_size(Codec::Vp8, &frames, 0), ((640, 360), true));
+		let stats = source.streamer().stats();
+		assert!(
+			stats.gpu_frames <= gpu + 2,
+			"{} frames on the GPU after the switch",
+			stats.gpu_frames - gpu
+		);
+		assert_eq!(stats.gpu_error, None, "a planned switch, not a failure");
 	}
 
 	/// Two layers at their own sizes and frame rates, keyframes per layer,

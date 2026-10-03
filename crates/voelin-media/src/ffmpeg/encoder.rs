@@ -1426,6 +1426,9 @@ impl VideoEncoder for FfmpegEncoder {
 		if !self.spec.is_vaapi() {
 			return Err(self.unavailable(format!("{} takes no VA-API surfaces", self.spec.name)));
 		}
+		if frame.surface.0.is_null() {
+			return Err(self.unavailable("a GPU frame without a surface (out of memory)".into()));
+		}
 		if self.coded_size(frame.width, frame.height) != (frame.width, frame.height) {
 			return Err(self.unavailable(format!(
 				"{}x{} is not a size {} encodes exactly",
