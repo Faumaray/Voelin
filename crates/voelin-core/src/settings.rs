@@ -1048,7 +1048,8 @@ pub enum StreamPermissions {
 	/// Friends (contacts marked friend) are accepted; others are shown to
 	/// the user ([`crate::Event::StreamViewerRequest`]).
 	Friends,
-	/// Clients in our channel are accepted, others denied.
+	/// Clients in our channel are accepted; others (a stream can be watched
+	/// from any channel) are shown to the user.
 	#[default]
 	Channel,
 	/// Every join request is denied.

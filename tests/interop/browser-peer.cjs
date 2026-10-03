@@ -7,6 +7,8 @@
 //   offer {codec, trickle} send canvas video + oscillator audio; offer with
 //                         `codec` preferred -> {sdp} or {unsupported};
 //                         with `trickle` the SDP has no candidates
+//   reoffer {codec}       a new offer on the running connection with `codec`
+//                         preferred (a renegotiation) -> {sdp} or {unsupported}
 //   candidates            candidates gathered so far -> {candidates: [{candidate, sdpMid, sdpMLineIndex}]}
 //   accept {sdp}          apply the answer to our offer
 //   candidate {candidate, sdpMid, sdpMLineIndex}   add a remote candidate
@@ -121,6 +123,19 @@ window.peer = {
 		if (!trickle) await gathered(pc, 3000);
 		const sdp = trickle ? pc.localDescription.sdp.split('\\r\\n').filter((l) => !l.startsWith('a=candidate')).join('\\r\\n') : pc.localDescription.sdp;
 		return { sdp };
+	},
+
+	// A new offer on the running connection with the codec preferred, as the
+	// official client sends when it re-aligns its codec.
+	async reoffer({ codec }) {
+		const pc = this.pc;
+		const transceiver = pc.getTransceivers().find((t) => t.sender.track && t.sender.track.kind === 'video');
+		const all = RTCRtpSender.getCapabilities('video').codecs;
+		const wanted = all.filter((c) => c.mimeType.toLowerCase() === 'video/' + codec.toLowerCase());
+		if (wanted.length === 0) return { unsupported: codec };
+		transceiver.setCodecPreferences([...wanted, ...all.filter((c) => !wanted.includes(c))]);
+		await pc.setLocalDescription(await pc.createOffer());
+		return { sdp: pc.localDescription.sdp };
 	},
 
 	async candidates() {

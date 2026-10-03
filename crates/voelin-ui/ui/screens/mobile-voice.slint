@@ -289,8 +289,9 @@ component StreamPrompt inherits Rectangle {
                 }
             }
             Text {
-                text: stream.id == "" ? @tr("Looking it up…")
+                text: stream.id == "" ? (stream.channel == "" ? @tr("Looking it up…") : @tr("In {}; looking it up…", stream.channel))
                     : stream.own ? @tr("Your stream")
+                    : stream.channel != "" ? @tr("{} · in {}", stream.streamer, stream.channel)
                     : stream.viewers > 0 ? @tr("{} · {} watching", stream.streamer, stream.viewers)
                     : stream.streamer;
                 color: #ffffffb0;

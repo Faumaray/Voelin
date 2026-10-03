@@ -262,6 +262,22 @@ the official client itself is still to be confirmed: the beta needs a
 myTeamSpeak sign-in on first start, so it cannot run from a throwaway
 profile.
 
+### The official client re-offers (confirmed, client 6.0.0-beta4.1, 2026-10-03)
+
+Streaming from the official client to Voelin, its log shows: our answer
+(H.264, VP9, VP8 — no AV1, which the app did not decode) → "remote peer is
+using unsupported codec, realign" → a new `offer` signal on the same
+connection → our answer → `ENCODER create: H264`. The new offer is a
+renegotiation of the running connection: the answer must come from the same
+peer (same ICE credentials and DTLS fingerprint). Voelin answered every offer
+with a new peer, so the connection broke and nothing was shown. Now
+`Peer::renegotiate` answers an `offer` signal on the running connection (a
+`reconnectOffer` still starts a new one), in the codec order of the new offer
+(str0m keeps the first offer's order; `order_like_offer` fixes the answer's
+`m=` lines), so the streamer switches to the codec it re-offered. Tested
+against Chromium: `browser_renegotiates_with_rust` (VP8, then a re-offer of
+VP9 on the same connection; VP9 frames arrive).
+
 ## Open questions
 
 - [x] Viewer side: `joinstreamrequest id clid msg is_remove` (see above).

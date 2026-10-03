@@ -17,7 +17,7 @@ pub fn status(state: &SessionState) -> &'static str {
 }
 
 /// A server of the rail. `unread`: messages in its chats; `live`:
-/// streams in our channel there.
+/// streams on it.
 pub fn item(bookmark: &Bookmark, state: &SessionState, unread: i32, live: bool) -> ServerItem {
 	ServerItem {
 		id: bookmark.id as i32,

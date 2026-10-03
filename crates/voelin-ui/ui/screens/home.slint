@@ -230,7 +230,8 @@ component LiveCard inherits Rectangle {
             overflow: elide;
         }
         Text {
-            text: stream.kind != "" ? stream.streamer + "  •  " + stream.kind : stream.streamer;
+            text: stream.channel != "" ? stream.streamer + "  •  " + stream.channel
+                : stream.kind != "" ? stream.streamer + "  •  " + stream.kind : stream.streamer;
             color: #ffffffb0;
             font-size: Theme.font-sm;
             overflow: elide;
@@ -488,7 +489,7 @@ export component HomePage inherits Rectangle {
                     server: server;
                 }
             }
-            // The streams of our channel.
+            // The streams on the server, ours first.
             if Bridge.streams.length > 0: SectionHeader {
                 text: @tr("Live now");
                 icon: Icons.radio;

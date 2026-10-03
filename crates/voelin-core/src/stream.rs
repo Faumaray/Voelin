@@ -4,13 +4,16 @@
 //! The voice task forwards stream notifications here and sends the resulting
 //! commands. Only started for TeamSpeak 6 servers.
 //!
-//! Streams that started before we joined are looked up on the server
-//! (`requeststreaminfo`) and in the session's gateway directory: its
-//! registered entries (stream id and streamer) are handed to the stream
-//! sessions ([`voelin_stream::Streams::discovered`]) for streamers in our
-//! channel, and a [`StreamLookup`] answers for the gateway when the server
-//! cannot. Our own stream's life (live, viewers, ended) goes back to the
-//! session ([`OwnStreamEvent`]), which keeps its directory entry.
+//! The streams of the whole server are listed, in every channel: a stream can
+//! be watched from any channel, as with the official client. Streams that
+//! started before we joined, and streams in other channels (the server
+//! announces a stream only in its channel), are looked up on the server
+//! (`requeststreaminfo`), so no gateway is needed. A gateway's directory is a
+//! second source: its registered entries (stream id and streamer) are handed
+//! to the stream sessions ([`voelin_stream::Streams::discovered`]), and a
+//! [`StreamLookup`] answers for the gateway when the server cannot. Our own
+//! stream's life (live, viewers, ended) goes back to the session
+//! ([`OwnStreamEvent`]), which keeps its directory entry.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -554,10 +557,11 @@ impl StreamTask {
 			StreamPermissions::Nobody => Some(false),
 			// Friends are let in; others: ask.
 			StreamPermissions::Friends => self.friends.contains(&viewer.0).then_some(true),
+			// Our channel is let in; viewers from other channels: ask.
 			StreamPermissions::Channel => {
 				let discovery = self.streams.discovery();
 				let own = discovery.own_channel();
-				Some(own.is_some() && discovery.channel_of(viewer) == own)
+				(own.is_some() && discovery.channel_of(viewer) == own).then_some(true)
 			}
 		}
 	}
@@ -1016,7 +1020,8 @@ mod tests {
 		assert_eq!(parse_kind("game"), StreamKind::Screen);
 	}
 
-	/// `stream.permissions` answers join requests (`friends`: friends only, others are asked).
+	/// `stream.permissions` answers join requests (`friends` and `channel`:
+	/// those are let in, others are asked).
 	#[tokio::test(flavor = "multi_thread")]
 	async fn permissions_answer_join_requests() {
 		let in_channels = |streamer: u64, viewer: u64| {
@@ -1028,7 +1033,7 @@ mod tests {
 		for (permissions, viewer_channel, friend, expected) in [
 			(StreamPermissions::Everyone, 2, false, Some(true)),
 			(StreamPermissions::Channel, 1, false, Some(true)),
-			(StreamPermissions::Channel, 2, false, Some(false)),
+			(StreamPermissions::Channel, 2, false, None),
 			(StreamPermissions::Nobody, 1, false, Some(false)),
 			(StreamPermissions::Friends, 1, false, None),
 			(StreamPermissions::Friends, 2, true, Some(true)),

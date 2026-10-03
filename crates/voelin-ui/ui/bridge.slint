@@ -220,12 +220,15 @@ export struct BookmarkForm {
     query-password: string,
 }
 
-// A stream in our channel. An empty id: a client that streams, but whose
-// stream is still being looked up (it started before we joined).
+// A stream on the server, ours first: a stream can be watched from any
+// channel. An empty id: a client that streams, but whose stream is still
+// being looked up (it started before we joined, or in another channel).
 export struct StreamItem {
     id: string,
     name: string,
     streamer: string,
+    // The streamer's channel when it is not ours; empty in ours.
+    channel: string,
     // The streamer's client id (their avatar in the members).
     streamer-id: int,
     // How many watch it (the gateway's directory; 0 unknown).
@@ -387,6 +390,8 @@ export global Bridge {
     in property <string> viewer-title;
     // Who streams it (their client id: -1 unknown).
     in property <string> viewer-streamer;
+    // The voice channel the watched stream is in.
+    in property <string> viewer-channel;
     in property <int> viewer-streamer-id: -1;
     // Shown instead of (or over) the picture: waiting, ended, errors.
     in property <string> viewer-status;
