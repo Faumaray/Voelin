@@ -6,7 +6,7 @@
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { StudioBridge, StudioNav } from "studio-bridge.slint";
-import { IconButton } from "components/index.slint";
+import { IconButton, ScrollView } from "components/index.slint";
 import { ScenesCard, SourcesCard, StudioPanel, PanelTitle, StudioPreview, MixerCard, StreamSettings, StudioActions, ViewerRequests, StudioDialogs } from "screens/studio-parts.slint";
 
 export component StudioWindow inherits Window {
@@ -77,7 +77,8 @@ export component StudioWindow inherits Window {
                     horizontal-stretch: 1;
                     spacing: Theme.space-3;
                     StudioPanel {
-                        vertical-stretch: 1.25;
+                        vertical-stretch: 1.2;
+                        min-height: 200px;
                         VerticalLayout {
                             padding: Theme.space-3;
                             spacing: Theme.space-2;
@@ -96,7 +97,7 @@ export component StudioWindow inherits Window {
                     }
                     HorizontalLayout {
                         vertical-stretch: 1;
-                        min-height: 220px;
+                        min-height: 200px;
                         spacing: Theme.space-3;
                         MixerCard {
                             compact: true;
@@ -104,8 +105,10 @@ export component StudioWindow inherits Window {
                         }
                         StudioPanel {
                             horizontal-stretch: 1;
-                            StreamSettings {
-                                compact: true;
+                            ScrollView {
+                                StreamSettings {
+                                    compact: true;
+                                }
                             }
                         }
                     }

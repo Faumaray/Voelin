@@ -187,8 +187,8 @@ export global StudioBridge {
     in property <[StudioSource]> sources;
     in property <[StudioAudio]> audio;
     in property <[StudioLayer]> layers;
-    // "Chill Zone • Starfall Community", one per server the stream can go to.
-    in property <[string]> destinations;
+    // Where the stream can go: the channel (name) on each server (detail).
+    in property <[StudioPick]> destinations;
     in property <[StudioViewer]> viewers;
     // The chat of the channel the stream goes to, and its name.
     in property <[ChatLine]> chat;

@@ -19,9 +19,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use slint::{
-	ComponentHandle, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel,
-};
+use slint::{ComponentHandle, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc};
 use tracing::warn;
@@ -110,7 +108,7 @@ struct Models {
 	audio: Rc<VecModel<StudioAudio>>,
 	layers: Rc<VecModel<StudioLayer>>,
 	viewers: Rc<VecModel<StudioViewer>>,
-	destinations: Rc<VecModel<SharedString>>,
+	destinations: Rc<VecModel<StudioPick>>,
 	picks: Rc<VecModel<StudioPick>>,
 	/// The chat while there is no destination.
 	no_chat: Rc<VecModel<ChatLine>>,
@@ -796,9 +794,9 @@ impl App {
 		ids.into_iter().map(|id| (id, self.studio_destination_name(id))).collect()
 	}
 
-	/// "Chill Zone • Nightfall Guild".
-	fn studio_destination_name(&self, id: i64) -> String {
-		let Some(view) = self.sessions.get(&id) else { return String::new() };
+	/// The channel and the server of a destination.
+	fn studio_destination_parts(&self, id: i64) -> (String, String) {
+		let Some(view) = self.sessions.get(&id) else { return Default::default() };
 		let channel = view
 			.state
 			.own_channel
@@ -810,6 +808,12 @@ impl App {
 		} else {
 			view.presence.server_name.clone()
 		};
+		(channel, server)
+	}
+
+	/// "Chill Zone • Nightfall Guild".
+	fn studio_destination_name(&self, id: i64) -> String {
+		let (channel, server) = self.studio_destination_parts(id);
 		format!("{channel} • {server}")
 	}
 
@@ -821,8 +825,14 @@ impl App {
 			keep.filter(|id| list.iter().any(|(d, _)| d == id)).or_else(|| {
 				self.studio.stream.as_ref().map(|s| s.session).or(list.first().map(|(id, _)| *id))
 			});
-		let names: Vec<SharedString> = list.iter().map(|(_, n)| n.clone().into()).collect();
-		vm::list::sync(&self.studio.models.destinations, &names);
+		let rows: Vec<StudioPick> = list
+			.iter()
+			.map(|(id, _)| {
+				let (channel, server) = self.studio_destination_parts(*id);
+				StudioPick { name: channel.into(), detail: server.into(), kind: "server".into() }
+			})
+			.collect();
+		vm::list::sync(&self.studio.models.destinations, &rows);
 		self.studio_bind_chat();
 		self.studio_refresh_form();
 	}

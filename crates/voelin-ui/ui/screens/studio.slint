@@ -68,8 +68,12 @@ export component StudioPage inherits Rectangle {
             VerticalLayout {
                 horizontal-stretch: 1;
                 spacing: Theme.space-3;
+                // As tall as a 16:9 picture across the column needs; the
+                // mixer and the chat get the rest.
                 StudioPanel {
-                    vertical-stretch: 1.7;
+                    vertical-stretch: 0;
+                    preferred-height: (self.width - 2 * Theme.space-4) * 9 / 16 + 96px + (StudioBridge.viewers.length > 0 ? 40px : 0px);
+                    min-height: 260px;
                     VerticalLayout {
                         padding: Theme.space-4;
                         padding-top: Theme.space-3;
@@ -84,7 +88,7 @@ export component StudioPage inherits Rectangle {
                 }
                 HorizontalLayout {
                     vertical-stretch: 1;
-                    min-height: 250px;
+                    min-height: 240px;
                     spacing: Theme.space-3;
                     MixerCard {
                         horizontal-stretch: 1.35;
@@ -105,8 +109,8 @@ export component StudioPage inherits Rectangle {
             height: 64px;
             spacing: Theme.space-3;
             StudioUser {
-                width: 250px * max(1.0, Theme.font-scale);
                 padding-left: Theme.space-3;
+                horizontal-stretch: 0;
             }
             StudioActions {
                 horizontal-stretch: 1;
@@ -340,6 +344,7 @@ export component MobileStudio inherits Rectangle {
     sv := ScrollView {
         VerticalLayout {
             width: sv.visible-width;
+            alignment: start;
             padding: Theme.space-4;
             padding-top: Theme.space-2;
             spacing: Theme.space-4;
@@ -399,6 +404,47 @@ export component MobileStudio inherits Rectangle {
                         color: #ffffff;
                         font-size: Theme.font-xs;
                         font-weight: Theme.weight-bold;
+                    }
+                }
+                if StudioBridge.sources.length > 0: Rectangle {
+                    x: Theme.space-3;
+                    y: parent.height - self.height - Theme.space-3;
+                    width: min(parent.width - 2 * Theme.space-3, caption.preferred-width);
+                    height: 46px;
+                    border-radius: Theme.radius-md;
+                    background: #060a18b0;
+                    caption := HorizontalLayout {
+                        padding-left: Theme.space-2;
+                        padding-right: Theme.space-4;
+                        spacing: Theme.space-3;
+                        Rectangle {
+                            width: 34px;
+                            height: 34px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: Theme.radius-sm;
+                            background: #ffffff18;
+                            Icon {
+                                source: StudioKinds.icon(StudioBridge.sources[StudioBridge.sources.length - 1].kind);
+                                size: 20px;
+                                tint: #ffffff;
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: StudioBridge.form.title != "" ? StudioBridge.form.title : StudioBridge.sources[StudioBridge.sources.length - 1].name;
+                                color: #ffffff;
+                                font-size: Theme.font-body;
+                                font-weight: Theme.weight-medium;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: StudioBridge.sources[StudioBridge.sources.length - 1].name + " • " + (StudioBridge.status.output-height * 16 == StudioBridge.status.output-width * 9 ? "16:9" : StudioBridge.status.output-width + "×" + StudioBridge.status.output-height);
+                                color: #ffffffb0;
+                                font-size: Theme.font-xs;
+                                overflow: elide;
+                            }
+                        }
                     }
                 }
                 Rectangle {

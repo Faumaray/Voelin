@@ -29,10 +29,10 @@ pub fn scenes(scenes: &Scenes) -> Vec<StudioScene> {
 		.collect()
 }
 
-/// "Camera + Screen": the names of the visible sources, front first.
+/// "Screen + Camera": the names of the visible sources, back first (the
+/// main picture, then what is over it).
 fn summary(scene: &Scene) -> String {
-	let names: Vec<&str> =
-		scene.sources.iter().rev().filter(|s| s.visible).map(Source::label).collect();
+	let names: Vec<&str> = scene.sources.iter().filter(|s| s.visible).map(Source::label).collect();
 	if names.is_empty() { "Empty".into() } else { names.join(" + ") }
 }
 
@@ -517,15 +517,22 @@ fn overlay_kind(name: &str, text: &str) -> SourceKind {
 	}
 }
 
-fn overlay_place(name: &str, (w, h): (u32, u32)) -> Transform {
+/// Where an overlay starts (people can move it): the viewer count at the
+/// top right (by an estimate of its width), the chat at the left, what is
+/// on above the bottom left. Clear of the corners the studio's own badges
+/// cover in the preview.
+fn overlay_place(name: &str, text: &str, (w, h): (u32, u32)) -> Transform {
 	let (w, h) = (w as f32, h as f32);
-	let x = (w * 0.025).round();
-	let y = match name {
-		OVERLAY_VIEWERS => h * 0.11,
-		OVERLAY_CHAT => h * 0.3,
-		_ => h * 0.84,
+	let margin = (w * 0.025).round();
+	let (x, y) = match name {
+		OVERLAY_VIEWERS => {
+			let wide = text.chars().count() as f32 * 34.0 * 0.58 + 28.0;
+			(w - margin - wide, h * 0.14)
+		}
+		OVERLAY_CHAT => (margin, h * 0.3),
+		_ => (margin, h * 0.7),
 	};
-	Transform { x, y: y.round(), ..Transform::default() }
+	Transform { x: x.max(0.0).round(), y: y.round(), ..Transform::default() }
 }
 
 /// Make the scenes hold `wanted`: an overlay that is on is added to the live
@@ -561,7 +568,7 @@ pub fn apply_overlays(scenes: &mut Scenes, wanted: &[Overlay]) -> bool {
 					let id = scene.next_source_id();
 					scene.sources.push(Source {
 						name: overlay.name.into(),
-						transform: overlay_place(overlay.name, size),
+						transform: overlay_place(overlay.name, text, size),
 						..Source::new(id, overlay_kind(overlay.name, text))
 					});
 					changed = true;
@@ -591,7 +598,7 @@ mod tests {
 		let rows = super::scenes(&scenes);
 		assert_eq!(rows.len(), 2);
 		assert!(rows[0].live && !rows[1].live);
-		assert_eq!(rows[0].detail, "Camera + Screen");
+		assert_eq!(rows[0].detail, "Screen + Camera");
 		assert_eq!(rows[1].detail, "Empty");
 		let sources = super::sources(scenes.active(), &[]);
 		assert_eq!(
