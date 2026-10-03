@@ -216,6 +216,8 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 						eprintln!("screenshot failed: {e}");
 					}
 					let _ = ui.hide();
+					// Also when the studio's own window is open.
+					let _ = slint::quit_event_loop();
 				}
 			},
 		);

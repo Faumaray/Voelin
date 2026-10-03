@@ -979,14 +979,15 @@ export component StudioChat inherits StudioPanel {
     to-end := Timer {
         interval: 50ms;
         running: false;
-        // Twice: the rows at the end are measured after the first scroll.
+        // Again for a moment: rows are measured as they come into view, so
+        // the end moves while it is reached.
         triggered => {
             root.tries += 1;
             if chat-list.content-height > 0 {
                 chat-list.content-y = min(0px, chat-list.visible-height - chat-list.content-height);
                 root.passes += 1;
             }
-            if root.passes >= 2 || root.tries > 20 {
+            if root.passes >= 6 || root.tries > 30 {
                 self.running = false;
             }
         }
