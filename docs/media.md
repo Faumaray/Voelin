@@ -185,7 +185,13 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   longer than 30 frames) or a decoder error it skips to the next keyframe,
   asking for one at most every 500 ms. Keyframes are recognised from the
   bitstream (VP8 frame tag, VP9 header, H.264 IDR/SPS NAL units, AV1
-  sequence header OBU).
+  sequence header OBU). `stats()` (`DecodeStats`) tells the codec, the
+  picture's size, pictures decoded and skipped, the video bytes received,
+  and the decoded frame rate and received bitrate since the previous call
+  (at least half a second); the watch screen shows codec, size, rate and
+  bitrate over the player and in Stream Info, refreshed once a second.
+  These are read from the pipeline, which runs in the app, not sent as
+  engine events: the engine never sees the decoded pictures.
 - `Viewer` feeds a `VideoPipeline` from the engine and sends
   `RequestStreamKeyframe`; `LocalPreview` runs capture → encoder → decoder
   without a server (the desktop app's `VOELIN_DEMO_STREAM`).
@@ -1029,7 +1035,7 @@ has not run on Windows yet.
 | Viewer counts: `viewer` of `notifystreaminfo`, counted up and down from the viewers joining and leaving, refreshed one stream at a time | `voelin-stream` `proto::tests::stream_info_answers`, `session::tests::viewer_counts`; `voelinctl stream list` | tested; against the TeamSpeak 6 dev server `stream list` printed "1 watching" while a viewer watched and "0 watching" after |
 | A viewer picks a layer: the offer's `a=x-voelin-layers`, `Signal::Layer`, the streamer moving it (and back with "Auto"); no request to a streamer whose offer lists no layers | `voelin-stream` `layer::tests::layers_in_the_sdp`, `tests/sessions.rs` `viewer_picks_a_layer` and `no_layer_request_without_the_offer_listing_layers` (two sessions, peers on loopback); `voelinctl stream watch --layer 1` against `stream start --placeholder --layer 1.0:2000k --layer 0.5:500k` | tested, also through the TeamSpeak 6 dev server (the viewer stayed on layer 1 at a 2.5 Mbit/s estimate that fits layer 0) |
 | An offer with `a=x-voelin-layers` against libwebrtc | `tests/browser_interop.rs` `rust_streams_to_browser` (`VOELIN_INTEROP=1`, system Chromium 152 through `playwright-core`) | tested: answered and decoded as before. The official client itself not tried |
-| Test pattern → VP8 → decoder, rectangle position and colour | `voelin-core` `media::tests::local_preview_decodes_the_pattern` | tested |
+| Test pattern → VP8 → decoder, rectangle position and colour; decoded frame rate and received bitrate | `voelin-core` `media::tests::local_preview_decodes_the_pattern`; the watch screen with the sample stream (`scripts/shots.sh ... watch`) | tested: the screenshot showed "VP8 · 1280×720 · 30 fps · 0.4 Mbit/s" over the player |
 | Test pattern → two engine stream tasks → str0m peers on loopback → decoder | `voelin-core` `stream::tests::test_pattern_through_stream_tasks` | tested |
 | Stream audio (RTP time → jitter buffer ids, volume, end) | `voelin-core` `audio::tests::stream_audio_with_volume`, stream task test | tested |
 | Stream mixer (latency, fade on underrun, drift correction, rate conversion, limiter, levels, live source changes), `BlockClock` | `voelin-media` `mix::tests`, `tests/mix_alloc.rs` (no allocation per block) | tested |

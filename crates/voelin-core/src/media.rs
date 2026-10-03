@@ -79,6 +79,8 @@ const OPUS_BITRATE: i32 = 128_000;
 pub const MAX_QUEUED: usize = 30;
 /// Keyframe requests while waiting for one are at least this far apart.
 const KEYFRAME_RETRY: Duration = Duration::from_millis(500);
+/// The decoding rates of [`DecodeStats`] cover at least this long.
+const RATE_WINDOW: Duration = Duration::from_millis(500);
 
 #[derive(Debug, thiserror::Error)]
 pub enum MediaError {
@@ -2401,6 +2403,23 @@ pub struct DecodeStats {
 	pub height: u32,
 	/// The last error (no decoder for the codec, decoding failed).
 	pub error: Option<String>,
+	/// Bytes of video received.
+	pub bytes: u64,
+	/// Pictures decoded per second and video received in bit/s, over the
+	/// time since the previous [`VideoPipeline::stats`] (at least
+	/// [`RATE_WINDOW`]; the watch screen asks once a second).
+	pub fps: u32,
+	pub bitrate: u64,
+}
+
+/// Where the rates of [`DecodeStats`] were last measured from.
+#[derive(Default)]
+struct DecodeRates {
+	since: Option<Instant>,
+	decoded: u64,
+	bytes: u64,
+	fps: u32,
+	bitrate: u64,
 }
 
 #[derive(Default)]
@@ -2416,6 +2435,7 @@ struct DecodeQueue {
 	state: Mutex<QueueState>,
 	cond: Condvar,
 	stats: Mutex<DecodeStats>,
+	rates: Mutex<DecodeRates>,
 }
 
 /// Feeds frames into a [`VideoPipeline`]; cheap to clone.
@@ -2432,6 +2452,7 @@ impl FrameInput {
 		if frame.kind != MediaKind::Video {
 			return;
 		}
+		lock(&self.queue.stats).bytes += frame.data.len() as u64;
 		let mut state = lock(&self.queue.state);
 		if state.frames.len() >= MAX_QUEUED {
 			state.frames.clear();
@@ -2486,7 +2507,19 @@ impl VideoPipeline {
 	}
 
 	pub fn stats(&self) -> DecodeStats {
-		lock(&self.input.queue.stats).clone()
+		let mut stats = lock(&self.input.queue.stats).clone();
+		let mut rates = lock(&self.input.queue.rates);
+		let now = Instant::now();
+		let elapsed = rates.since.map(|since| now.saturating_duration_since(since));
+		if elapsed.is_none_or(|e| e >= RATE_WINDOW) {
+			if let Some(seconds) = elapsed.map(|e| e.as_secs_f64()) {
+				rates.fps = ((stats.decoded - rates.decoded) as f64 / seconds).round() as u32;
+				rates.bitrate = ((stats.bytes - rates.bytes) as f64 * 8.0 / seconds) as u64;
+			}
+			(rates.since, rates.decoded, rates.bytes) = (Some(now), stats.decoded, stats.bytes);
+		}
+		(stats.fps, stats.bitrate) = (rates.fps, rates.bitrate);
+		stats
 	}
 }
 
@@ -2981,6 +3014,11 @@ mod tests {
 		assert!(stats.decoded >= 10 && stats.error.is_none(), "{stats:?}");
 		assert_eq!(stats.codec, Some(Codec::Vp8));
 		assert_eq!(preview.streamer().backend(), "synthetic");
+		// Rates over the second since: the pattern's rate, its bitrate.
+		tokio::time::sleep(Duration::from_secs(1)).await;
+		let stats = preview.stats();
+		assert!((20..=40).contains(&stats.fps), "{stats:?}");
+		assert!((100_000..5_000_000).contains(&stats.bitrate), "{stats:?}");
 	}
 
 	fn layer(id: LayerId, scale: f32, max_fps: Option<u32>, bitrate: u64) -> LayerSpec {

@@ -451,7 +451,8 @@ impl Decoder {
 		}
 	}
 
-	/// One line about the video: codec, size, problems.
+	/// One line about the video: codec, size, decoded frame rate, received
+	/// bitrate, problems.
 	pub fn info(&self) -> String {
 		let stats = self.stats();
 		let mut parts = Vec::new();
@@ -460,6 +461,10 @@ impl Decoder {
 		}
 		if stats.width > 0 {
 			parts.push(size_text(stats.width, stats.height));
+		}
+		if stats.decoded > 0 {
+			parts.push(format!("{} fps", stats.fps));
+			parts.push(format!("{:.1} Mbit/s", stats.bitrate as f64 / 1_000_000.0));
 		}
 		if let Some(e) = stats.error {
 			parts.push(e);
