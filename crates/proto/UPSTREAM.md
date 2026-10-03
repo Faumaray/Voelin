@@ -78,3 +78,7 @@ against or offered back to upstream.
    "Voelin patch"). TeamSpeak 6 sends some times, e.g. `datetime` of `notifyfilelist`,
    in milliseconds, which failed to parse and dropped the whole message (empty file
    lists). Values from 10^11 on (year 5138 in seconds) are taken as milliseconds.
+10. **Test logger** (`tsclientlib/src/tests.rs`, "Voelin patch"). The tests' shared
+   tracing setup used `init`, which panics when quickcheck (`use_logging`) has
+   already installed a `log` logger; the panic poisoned the `Lazy` and failed every
+   later test of the binary, depending on test order. It uses `try_init` now.
