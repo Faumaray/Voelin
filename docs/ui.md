@@ -19,18 +19,22 @@ crates/voelin-ui/
     bridge.slint         structs, the Bridge global (data and callbacks for Rust),
                          Images (decoded images) and Emoji (the picker's data)
     nav.slint            Nav global: page, settings section, phone tab, dialogs, panel size
+    studio-bridge.slint  the Stream Studio's structs and globals (StudioBridge, StudioNav)
+    studio-window.slint  StudioWindow: the studio in a window of its own
     components/          the design system (catalogue below); index.slint exports all
     shells/              desktop.slint (rail, top bar, Sidebar), mobile.slint (bottom
                          navigation), common.slint (Panel, VoiceCard, UserCard, ...)
     screens/             channels, chat, members (panel, card), drawers (pins, topics),
                          voice (the voice channel), streams (viewer; the phone's
-                         panel), settings, home, dialogs, mobile (phone-only pages)
+                         panel), settings, home, dialogs, mobile (phone-only pages),
+                         studio-parts (the studio's pieces), studio (its page, its
+                         phone layout)
     assets/              fonts/ (Inter, OFL), icons/ (Lucide, ISC), logo.svg
   assets/twemoji.bin     the Twemoji SVGs packed by scripts/pack-twemoji.py
   src/
     app.rs               setup, App state, event dispatch
     servers.rs chat.rs members.rs streams.rs settings_page.rs appearance.rs
-                         the logic of each area
+    studio.rs            the logic of each area (studio.rs: the Stream Studio's controller)
     vm/                  pure view models (engine state → Slint structs), unit-tested
     bind/                callbacks of each area, wired once
     images.rs            the image cache (LRU, bounded by `ui.image_cache_mb`)
@@ -140,6 +144,41 @@ closes the other, and the members button brings the panel back. On the
 phone the chat is the Chat tab and the members of our channel are on the
 Activity tab.
 
+## The Stream Studio
+
+![Stream Studio](screenshots/desktop-studio-live.png)
+
+The studio (mockups 09, 10 and the phone's 04) is a page of the main window
+(the radio button in the top bar), a window of its own (the button in its
+header; closing that window brings it back) and a phone page. Its controller
+is `src/studio.rs` on the engine's studio ([studio.md](studio.md)): the
+studio runs while it is shown, live or recording, and a `Streamer` started
+for it encodes the composite from the start, so Record Clip and recordings
+work before going live.
+
+| Part | `VOELIN_OPEN` | What it shows | Engine data |
+|---|---|---|---|
+| Scenes | `studio` | The scenes, the live one highlighted, with what each shows; click to switch live, double-click or the menu to rename, remove; Add Scene | `Event::Scenes`; `AddScene`, `SetActiveScene`, `RenameScene`, `RemoveScene` |
+| Sources | `studio`, `studio:source`, `studio:camera` | The live scene's sources, front first: add a screen, window (on Wayland through the portal, on X11 the monitors and windows), camera, image, text or colour; show or hide; a menu with transform, crop, opacity, lock, background effect (cameras: off, blur, image, colour), forward, backward, rename, remove | `AddSource` (as `SetScenes`, with a placement), `UpdateSource`, `ReorderSource`, `RemoveSource`; per source size, rate and error from `Stats` |
+| Header | `studio`, `studio:live` | "Streaming to channel • server", the connection (the viewers' bandwidth estimates against the bitrate, and the composed frame rate), resolution • fps • kbit/s, details on the info button | `Stats`, `Streamer::stats`, the stream's viewers |
+| Preview | `studio`, `studio:live`, `studio:record` | The composite, LIVE and the time (or PREVIEW, REC), watching and joined viewers, title • destination | `Studio::preview` turned into pictures on a thread of its own, latest wins; `State` |
+| Audio mixer | `studio`, `studio:audio` | One row per `stream.audio_sources` entry: meter, gain (dB), mute, a menu; + adds the microphone, desktop audio without Voelin, the shared window's application or an application that plays | the mixer's meters (lock-free, about 15 times a second); `Streamer::reconfigure` follows the setting |
+| Stream chat | `studio` | The chat of the channel the stream goes to and a composer | the destination tab's stored messages, made into lines as the chat view does |
+| Stream settings | `studio` | Destination (the voice channel of each TeamSpeak 6 server we are in), title, game, go-live message (sent to the channel when the stream is up), Show Viewer Count / Chat Overlay / Now Playing, Enable Stream Audio, Advanced Settings, output size and rate (presets or any numbers), bitrate or simulcast layers | `studio.ui`, `stream.bitrate_kbps`, `stream.layers`, `SetOutput` |
+| Bottom bar | `studio`, `studio:settings` | Share Window, Share Screen, Record Clip (and start or stop a recording, the replay length, the folder), Go Live, End Stream, Studio Settings (replay seconds and memory, folder, preview size) | `SaveClip`, `StartRecording`, `StopRecording`, `studio.*`, `SetPreview`; `Command::StartStream`, `Streamer::attach`, `GoLive`, `EndStream` |
+| Window of its own | `studio:window` | The same pieces, compact | — |
+
+The studio's window has globals of its own: the controller sets the same
+models (shared `VecModel`s) and the same values on both windows' globals
+and wires both to the same callbacks (`bind/studio.rs`). The overlay
+switches keep text sources named "Viewer count", "Chat overlay" and "Now
+playing" in the live scene (they can be moved like any source). A TeamSpeak
+stream has a name only, so the game goes into it after the title ("title —
+game"), which is also what the gateway's directory shows. With sample data
+(`VOELIN_DEMO_UI`) the studio runs from synthetic sources (the test pattern,
+the synthetic camera with background blur, text, colours) and test tones,
+on settings in memory, and recordings go to a temporary folder.
+
 ## Adding a screen
 
 1. Write the screen in `ui/screens/<name>.slint` from the components
@@ -172,6 +211,7 @@ live when they change (settings page, `--set`, another window):
 | `ui.narrow_breakpoint` | pixels | 800 | below this width the phone layout |
 | `ui.image_cache_mb` | megabytes | 64 | decoded images kept in memory (0: none) |
 | `ui.members_width` | pixels | 280 | width of the members panel (dragging its edge sets it) |
+| `studio.ui` | JSON | see below | the Stream Studio's stream settings: `title`, `game`, `message` (go-live), `show_viewers`, `show_chat`, `show_now_playing`, `audio` (stream audio), `preview_width` (960), `preview_fps` (15) |
 
 In a config file write them as dotted keys at the top level
 (`"ui.theme" = "light"`): a `[ui]` table is read as the `ui` value.
@@ -205,7 +245,10 @@ Environment variables (see `src/dev.rs`):
   `voice`, `pins`, `topics`, `topic:<id>`, `member`, `watch`, `popout`
   (the server page, above), `tab:<home|servers|chat|activity|you>` (phone
   layout). With sample data, `watch` plays the local test pattern in the
-  sample stream's place.
+  sample stream's place. `studio[:window|live|record|source|audio|camera|scene|settings]`
+  opens the Stream Studio (above) in that state; with its window open a
+  screenshot also saves the window alone (`<name>-window.png`) and draws it
+  over the main window.
 - `VOELIN_WINDOW_SIZE=390x844`: window size (phone layout below the breakpoint).
 - `VOELIN_SCREENSHOT=<png>`, `VOELIN_SCREENSHOT_DELAY=<s>`: save the window and exit.
 - `VOELIN_DEMO_STREAM=1`, `VOELIN_AUTOCONNECT`, `VOELIN_AUTOWATCH`,
@@ -214,7 +257,7 @@ Environment variables (see `src/dev.rs`):
 ```sh
 scripts/shots.sh shot.png settings:appearance 1440x960
 # which runs, headless:
-env -u WAYLAND_DISPLAY SLINT_BACKEND=winit-software VOELIN_DATA_DIR=$(mktemp -d) \
+env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE SLINT_BACKEND=winit-software VOELIN_DATA_DIR=$(mktemp -d) \
 VOELIN_DEMO_UI=1 VOELIN_OPEN=settings:appearance VOELIN_WINDOW_SIZE=1440x960 \
 VOELIN_SCREENSHOT=shot.png VOELIN_SCREENSHOT_DELAY=4 \
 xvfb-run -a -s "-screen 0 1440x960x24" target/debug/voelin
@@ -222,7 +265,10 @@ xvfb-run -a -s "-screen 0 1440x960x24" target/debug/voelin
 
 Remove `WAYLAND_DISPLAY` as above in a Wayland session: winit prefers
 Wayland, so the window would open on the desktop instead of on the Xvfb
-server (and take whatever size the compositor gives it). The script also
+server (and take whatever size the compositor gives it). Remove
+`XDG_SESSION_TYPE` too: with `wayland` there the push-to-talk hotkey (and
+screen capture) use the desktop portal of the real session even on Xvfb,
+and the desktop may ask to bind the shortcut. The script also
 turns FFmpeg off (`VOELIN_FFMPEG=0`: probing hardware encoders is not
 needed for pictures and has crashed in a driver), makes the screen twice
 the window's size so the pointer is not over the window, and passes
@@ -237,6 +283,12 @@ the window's size so the pointer is not over the window, and passes
 | ![a topic](screenshots/desktop-topic.png) | ![member card](screenshots/desktop-member-card.png) |
 | ![watching a stream](screenshots/desktop-stream-viewer.png) | ![popped out](screenshots/desktop-popout.png) |
 
+| Stream Studio | |
+|---|---|
+| ![studio](screenshots/desktop-studio.png) | ![live](screenshots/desktop-studio-live.png) |
+| ![its own window](screenshots/desktop-studio-window.png) | ![the window alone](screenshots/desktop-studio-detached.png) |
+| ![a source](screenshots/desktop-studio-source.png) | ![phone](screenshots/mobile-studio-details.png) |
+
 | Desktop | |
 |---|---|
 | ![home](screenshots/desktop-home.png) | ![light](screenshots/desktop-light.png) |
@@ -248,6 +300,7 @@ the window's size so the pointer is not over the window, and passes
 | Phone layout | | | | |
 |---|---|---|---|---|
 | ![chat](screenshots/mobile-chat.png) | ![servers](screenshots/mobile-servers.png) | ![home](screenshots/mobile-home.png) | ![you](screenshots/mobile-you.png) | ![settings](screenshots/mobile-settings.png) |
+| ![studio](screenshots/mobile-studio.png) | | | | |
 
 ## Limits
 
@@ -266,3 +319,10 @@ the window's size so the pointer is not over the window, and passes
 - A jump to a pinned message scrolls to where an average row would be
   (rows differ in height), and only to messages already loaded.
 - The window keeps its native decorations (no custom title bar).
+- The Stream Studio streams to the voice channel we are in (a TeamSpeak 6
+  stream belongs to its channel): its destination picks among the servers,
+  not among their channels. Image paths (image sources, backgrounds) are
+  typed, there is no file chooser. The background effect replaces what is
+  outside an oval (the engine has no person segmentation model yet). The
+  studio cannot be detached on Android (one window). Its own window shows
+  no toasts; status messages go to the main window.
