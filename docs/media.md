@@ -323,6 +323,26 @@ the software encoders above are used as before.
   machine below this took `voelinctl stream encoders` from 1.77 s to
   0.93-1.12 s, testing 12 backends instead of 20, and the report says "no
   NVIDIA GPU in this machine" instead of a CUDA error code.
+- AMF on Linux: not used unless `VOELIN_FFMPEG_AMF=1`. No AMF encoder is
+  made (`FfmpegEncoder::new` refuses it with the reason, so the probe, the
+  factories and direct callers alike), and AMD's runtime (`libamfrt64`)
+  is never loaded. VA-API drives the same VCN encoder there, as fast and
+  with less CPU in the measurements below, and only VA-API takes DMA-BUFs
+  without a copy; AMF on Linux is AMD's closed runtime running on Vulkan.
+  It crashed the desktop app during the startup probe: SIGSEGV in
+  `AMFFactoryHelper::Init` / `Terminate` (`libamfrt64`, inside
+  `avcodec_open2` creating AMF's Vulkan device), reproduced in 10 of 420
+  probes with several processes probing at once. The runtime's
+  process-wide factory helper loads and unloads libraries while each new
+  encoder initialises, so encoders opened on parallel threads (the probe's
+  self-tests, simulcast layers) pull libraries from under each other.
+  Wherever AMF is used (Windows, or Linux with the variable), AMF encoders
+  are now opened and closed one at a time in the process: none of 600
+  probes crashed that way, with up to eight processes probing together
+  (`amf_encoders_open_in_parallel`, `--ignored`, stresses it). A crash in
+  a vendor library still takes the process down; running the self-tests in
+  a child process was not done because a clean child does not reproduce
+  the state of the app that uses the encoder afterwards.
 - Third-party output: FFmpeg's own log goes to `tracing`, but the libraries
   behind the encoders write to standard error themselves — SVT-AV1 prints a
   build banner and its allocation totals, AMD's AMF runtime prints
@@ -834,6 +854,7 @@ has not run on Windows yet.
 | FFmpeg loader: sonames, missing FFmpeg, layout checks on a real release | `ffmpeg::sys` / `ffmpeg` unit tests; mirrors compared with offsets compiled from the 4.4-9.0 headers | tested (FFmpeg 6.1.1 on Ubuntu 24.04; FFmpeg 9.0.1 / libavutil 61 / libavcodec 63 on Arch, every offset compared with that release's own headers) |
 | FFmpeg software encoders → our decoders: x264 → OpenH264, SVT-AV1 / rav1e / libaom → dav1d (PSNR > 28 dB, keyframes at start and on request, timestamps, bitrate change, size change, odd sizes, Constrained High / Baseline) | `tests/ffmpeg.rs` (`VOELIN_OPENH264_LIB`, `--features av1`) | tested |
 | Self-test failures (NVENC without CUDA, Quick Sync without a session, VA-API without a render node, encoders not in the build) | `tests/ffmpeg.rs`, `voelinctl stream encoders` | tested: each fails alone with FFmpeg's reason |
+| AMF never loaded on Linux by default; AMF opens serialised | `ffmpeg::encoder::tests::amf_is_opt_in_on_linux`, `tests/ffmpeg.rs` `probe_reports_every_backend` (no `libamfrt` in `/proc/self/maps`), `amf_encoders_open_in_parallel` (`--ignored`, with `VOELIN_FFMPEG_AMF=1`) | tested: the probe crash (SIGSEGV in `libamfrt64`, 10 of 420 concurrent probes under Xvfb) reproduced, then none in 600 with serialised opens |
 | Encoder preference (auto, software, named, hardware off), report ranks | `codec::tests::encoder_preference` | tested |
 | An encoder per codec viewers chose (made, dropped, stream codec skipped, preference change) | `voelin-core` `media::tests::an_encoder_per_codec_viewers_chose` | tested |
 | Answer's codec reported to the streamer, H.264 level in the offer, HEVC offered | `voelin-stream` `peer::tests::streamer_learns_the_answered_codec`, `h264::tests` | tested (str0m on loopback) |

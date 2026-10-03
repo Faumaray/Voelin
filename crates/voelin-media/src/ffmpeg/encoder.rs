@@ -529,11 +529,28 @@ struct Session {
 	nv12: bool,
 	/// RGB DMA-BUFs: made on the first one; why not, if they cannot be.
 	rgb: Option<std::result::Result<RgbImport, String>>,
+	/// An AMF encoder: opened and closed under [`amf_lock`].
+	amf: bool,
 }
 
 // SAFETY: the FFmpeg objects belong to this session alone and are used from
 // one thread at a time (`&mut self`).
 unsafe impl Send for Session {}
+
+/// Held while an AMF encoder is opened or closed.
+///
+/// AMD's AMF runtime keeps process-wide state that is not safe to use from
+/// two threads at once: its factory helper loads and unloads libraries
+/// (`AMFFactoryHelper::Init` / `Terminate`, `dlclose`) while it creates the
+/// Vulkan device of a new encoder. Opened on several threads together, as
+/// the probe and simulcast layers do, one thread's `Terminate` unloads what
+/// another's `Init` uses: SIGSEGV in `libamfrt64` inside `avcodec_open2`.
+/// Measured with probes under Xvfb, several processes at once: 10 crashes
+/// in 420 runs before, none in 360 with opens one at a time.
+fn amf_lock() -> std::sync::MutexGuard<'static, ()> {
+	static AMF: std::sync::Mutex<()> = std::sync::Mutex::new(());
+	AMF.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// What RGB DMA-BUFs need on their way into the session's NV12 surfaces:
 /// a frames context of their own size to be mapped onto (FFmpeg gives an
@@ -584,7 +601,9 @@ impl Drop for Session {
 			(api.av_frame_free)(&mut self.sw);
 			(api.av_frame_free)(&mut self.hw);
 			(api.av_packet_free)(&mut self.packet);
+			let amf = self.amf.then(amf_lock);
 			(api.avcodec_free_context)(&mut self.ctx);
+			drop(amf);
 			if !self.pool.is_null() {
 				(api.av_buffer_unref)(&mut self.pool);
 			}
@@ -631,6 +650,9 @@ impl FfmpegEncoder {
 			codec: Codec::H264,
 			reason: format!("unknown FFmpeg encoder {name}"),
 		})?;
+		if let Some(reason) = amf_refused().filter(|_| spec.family() == "amf") {
+			return Err(Error::CodecUnavailable { codec: spec.codec, reason: reason.into() });
+		}
 		let ffmpeg = Ffmpeg::get()
 			.map_err(|e| Error::CodecUnavailable { codec: spec.codec, reason: e.to_owned() })?;
 		// What the probe measured, once it is done (its own encoders run
@@ -770,6 +792,7 @@ impl FfmpegEncoder {
 			timestamps: Timestamps::new(),
 			nv12: self.spec.input != Input::Yuv420p,
 			rgb: None,
+			amf: false,
 		};
 		// SAFETY: `ctx` is a live codec context; the first child is its
 		// private options object (NULL if the codec has none).
@@ -849,8 +872,12 @@ impl FfmpegEncoder {
 				layout::write::<Ptr>(ctx, offset, reference);
 			}
 		}
-		// SAFETY: a configured context and its codec; no options dictionary.
-		let ret = unsafe { (api.avcodec_open2)(ctx, codec, std::ptr::null_mut()) };
+		session.amf = self.spec.family() == "amf";
+		let ret = {
+			let _amf = session.amf.then(amf_lock);
+			// SAFETY: a configured context and its codec; no options dictionary.
+			unsafe { (api.avcodec_open2)(ctx, codec, std::ptr::null_mut()) }
+		};
 		if ret < 0 {
 			return Err(self.error("open", ret));
 		}
@@ -1772,6 +1799,20 @@ fn vendor_may_be_present(spec: &BackendSpec) -> std::result::Result<(), String> 
 	Ok(())
 }
 
+/// Why AMF is not used here, if it is not.
+///
+/// On Linux it is used only with `VOELIN_FFMPEG_AMF=1`: VA-API drives the
+/// same AMD encoder there, measured as fast with less CPU, and only VA-API
+/// takes DMA-BUFs without a copy. AMF on Linux is AMD's closed runtime on
+/// top of Vulkan, and it has crashed the app inside `avcodec_open2` (see
+/// [`amf_lock`]); a library that is never loaded cannot.
+fn amf_refused() -> Option<&'static str> {
+	let opted_in = std::env::var_os("VOELIN_FFMPEG_AMF").is_some_and(|v| v != "0");
+	(cfg!(target_os = "linux") && !opted_in).then_some(
+		"not used on Linux: VA-API drives the same AMD encoder (VOELIN_FFMPEG_AMF=1 uses it)",
+	)
+}
+
 /// The result of [`probe`], once it ran.
 static PROBE: OnceLock<Vec<BackendStatus>> = OnceLock::new();
 
@@ -2496,6 +2537,29 @@ mod tests {
 			let frame = DmaBufRef { timestamp, ..rgb.frame };
 			encoder.encode_dmabuf(&frame, false, &mut |_| {}).unwrap();
 		});
+	}
+
+	/// On Linux an AMF encoder is not even made unless asked for, so AMF's
+	/// runtime is never loaded by default; other backends are made as
+	/// before.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn amf_is_opt_in_on_linux() {
+		if std::env::var_os("VOELIN_FFMPEG_AMF").is_some() {
+			eprintln!("VOELIN_FFMPEG_AMF is set, skipped");
+			return;
+		}
+		for name in ["h264_amf", "hevc_amf", "av1_amf"] {
+			let Err(Error::CodecUnavailable { reason, .. }) =
+				FfmpegEncoder::new(name, EncoderConfig::default())
+			else {
+				panic!("{name} was made");
+			};
+			assert!(reason.contains("VOELIN_FFMPEG_AMF=1"), "{name}: {reason}");
+		}
+		if Ffmpeg::get().is_ok() {
+			assert!(FfmpegEncoder::new("h264_vaapi", EncoderConfig::default()).is_ok());
+		}
 	}
 
 	#[test]
