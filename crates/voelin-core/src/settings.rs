@@ -1115,6 +1115,15 @@ pub static CACHE_FETCH_IMAGES: Key<bool> = Key::new(
 	|| true,
 );
 
+/// Import identities from the official TeamSpeak clients when the app
+/// starts ([`crate::identity::import_new`]; their files are only read).
+pub static IDENTITY_IMPORT: Key<bool> = Key::new(
+	"identity.import_from_teamspeak",
+	Kind::Bool,
+	"Import new identities from the official TeamSpeak clients on start (read only).",
+	|| true,
+);
+
 /// How often a file transfer reports its progress (ms); 0: after every
 /// piece received or sent.
 pub static FILES_PROGRESS_MS: Key<u32> = Key::new(
@@ -1290,6 +1299,7 @@ pub fn builtin_keys() -> Vec<&'static dyn Setting> {
 		&STREAM_AUDIO_SOURCES,
 		&CACHE_MAX_MB,
 		&CACHE_FETCH_IMAGES,
+		&IDENTITY_IMPORT,
 		&FILES_PROGRESS_MS,
 		&PRIVACY_BLOCK_MODE,
 		#[cfg(feature = "media")]

@@ -3,11 +3,30 @@
 
 use slint::{ComponentHandle, SharedString};
 use tracing::warn;
+use voelin_core::identity::Found;
 use voelin_core::{Command, ObserveState, Source, VoiceOptions, VoiceState};
 use voelin_store::{Bookmark, QueryConfig, QueryTransport};
 
 use crate::app::{App, BookmarkForm, Bridge};
 use crate::vm;
+
+/// What to tell the user about the identities imported from the official
+/// clients at start ([`voelin_core::identity::import_new`]), if any.
+/// `had_identity`: we had one before, so it stays the default.
+pub(crate) fn imported_status(imported: &[Found], had_identity: bool) -> Option<String> {
+	let first = imported.first()?;
+	let n = imported.len();
+	let names = imported.iter().map(|f| f.nickname.as_str()).collect::<Vec<_>>().join(", ");
+	Some(match (had_identity, n) {
+		(true, 1) => format!("Imported the identity \u{201c}{names}\u{201d} from TeamSpeak"),
+		(true, _) => format!("Imported {n} identities from TeamSpeak: {names}"),
+		(false, 1) => format!("Using your TeamSpeak identity \u{201c}{names}\u{201d}"),
+		(false, _) => format!(
+			"Using your TeamSpeak identity \u{201c}{}\u{201d} ({n} imported: {names})",
+			first.nickname
+		),
+	})
+}
 
 impl App {
 	pub(crate) fn connect_voice(&mut self) {

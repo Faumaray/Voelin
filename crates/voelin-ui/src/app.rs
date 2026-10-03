@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use slint::{ComponentHandle, ModelRc, VecModel};
 use tokio::runtime::Runtime;
 use tracing::warn;
-use voelin_core::settings::{AUDIO, CRASH_REPORTS, Settings};
+use voelin_core::settings::{AUDIO, CRASH_REPORTS, IDENTITY_IMPORT, Settings};
 use voelin_core::stream::StreamInfo;
 use voelin_core::{
 	AudioSettings, Command, Engine, Event, History, HistoryMessage, SessionState, VoiceState,
@@ -521,6 +521,21 @@ pub fn run(options: RunOptions) -> Result<()> {
 		Ok(history) => engine.send(Command::AttachHistory(history)),
 		Err(e) => warn!(%e, "chat history is not stored this time"),
 	}
+	let prefs = open_settings(&dir, &options.setting_overrides);
+	let switches = crate::dev::Switches::from_env();
+	// New identities of the official TeamSpeak clients, on every start (not
+	// with the sample data of VOELIN_DEMO_UI); with none of our own yet, the
+	// client's default identity becomes ours.
+	let had_identity = !store.identities()?.is_empty();
+	let imported = if prefs.get(&IDENTITY_IMPORT) && !switches.demo_ui {
+		voelin_core::identity::import_new(&store, &voelin_core::identity::discover())
+			.unwrap_or_else(|e| {
+				warn!(%e, "could not import TeamSpeak identities");
+				Vec::new()
+			})
+	} else {
+		Vec::new()
+	};
 	let identity = match store.identities()?.first() {
 		Some(entry) => store.identity(entry.id)?,
 		None => {
@@ -530,7 +545,6 @@ pub fn run(options: RunOptions) -> Result<()> {
 			identity
 		}
 	};
-	let prefs = open_settings(&dir, &options.setting_overrides);
 	engine.send(Command::AttachSettings(prefs.clone()));
 	let mut settings: UiSettings = (*prefs.get_arc(&UI)).clone();
 	settings.crash_reports = prefs.get(&CRASH_REPORTS);
@@ -560,7 +574,6 @@ pub fn run(options: RunOptions) -> Result<()> {
 		ptt.set(Some(settings.ptt_key.clone()));
 	}
 	let video = Video::new(&dir, settings.openh264);
-	let switches = crate::dev::Switches::from_env();
 	let app = App {
 		ui: ui.as_weak(),
 		store,
@@ -610,6 +623,9 @@ pub fn run(options: RunOptions) -> Result<()> {
 		app.refresh_crash_notice();
 		if app.demo {
 			app.start_demo();
+		}
+		if let Some(text) = crate::servers::imported_status(&imported, had_identity) {
+			app.set_status(text);
 		}
 	});
 
