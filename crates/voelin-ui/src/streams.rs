@@ -414,7 +414,8 @@ impl App {
 		let test_pattern = cfg!(debug_assertions)
 			|| self.demo
 			|| std::env::var("VOELIN_TEST_PATTERN").is_ok_and(|v| v == "1");
-		let sources = match self.video.sources(test_pattern) {
+		let restorable = self.settings.portal_restore_token.is_some();
+		let sources = match self.video.sources(test_pattern, restorable) {
 			Ok(sources) => {
 				if self.share.is_none() {
 					self.share_error.clear();

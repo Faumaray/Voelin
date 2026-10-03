@@ -43,7 +43,7 @@ the UI) and a `background` (replacement, below).
 |---|---|---|
 | `screen` | `monitor`, `backend` (`portal`, `wlroots`, `x11`, `windows`; none: this session's), `cursor` | a capture backend, frames borrowed and copied into pooled frames |
 | `window` | `handle` (X11 id, `HWND`), `backend`, `cursor` | the same |
-| `portal` | `restore_token`, `cursor` | the ScreenCast portal's dialog (Wayland); the token is written back so it is asked once |
+| `portal` | `restore_token`, `cursor` | the ScreenCast portal's dialog (Wayland); with a `restore_token` the portal may restore its last choice without asking. The UI adds portal sources without one, so the dialog asks each time the source starts |
 | `camera` | `device` (a `camera::Camera::id`; empty: the first), `size`, `fps`, `mirror` | see [Cameras](#cameras) |
 | `image` | `path` | PNG or JPEG, alpha kept, read once |
 | `text` | `text`, `font` (none: the bundled Inter), `size_px`, `colour`, `backdrop`, `align`, `padding` | rasterised once with `ab_glyph` |
