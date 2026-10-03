@@ -78,12 +78,17 @@ pub fn host_candidate(sdp: &str) -> Option<SocketAddr> {
 	})
 }
 
-/// `sdp` with the candidate address `from` replaced by `to`.
+/// `sdp` with the candidate address `from` replaced by `to`, and no other
+/// candidates (a browser lists one per network interface).
 fn replace(sdp: &str, from: SocketAddr, to: SocketAddr) -> String {
-	sdp.replace(
-		&format!(" {} {} typ ", from.ip(), from.port()),
-		&format!(" {} {} typ ", to.ip(), to.port()),
-	)
+	let (from, to) = (
+		format!(" {} {} typ ", from.ip(), from.port()),
+		format!(" {} {} typ ", to.ip(), to.port()),
+	);
+	sdp.split_inclusive('\n')
+		.filter(|l| !l.starts_with("a=candidate:") || l.contains(&from))
+		.map(|l| l.replace(&from, &to))
+		.collect()
 }
 
 /// The SRTP profile a DTLS 1.2 ServerHello in `data` selects.

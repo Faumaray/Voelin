@@ -16,6 +16,8 @@ use voelin_stream::{
 #[path = "../../../tests/interop/browser.rs"]
 mod browser;
 use browser::{Browser, enabled};
+mod relay;
+use relay::{Relay, Rule};
 
 /// The `srtpCipher` of `getStats()` for AES_CM_128_HMAC_SHA1_80, as Chromium
 /// 141 and 152 name it.
@@ -310,5 +312,73 @@ async fn browser_renegotiates_with_rust() {
 	assert!(after.video.get(Codec::Vp9) >= 30, "after: {:?}", after.video);
 	let stats = browser.call(json!({ "op": "stats" })).await;
 	assert_eq!(stats["connectionState"], "connected", "{stats:#}");
+	browser.quit().await;
+}
+
+/// Our streamer peer to Chromium through a relay that passes the handshake
+/// and drops SRTP once AES-GCM was selected, as an official viewer whose
+/// SRTP fails after the handshake: synthetic media for `seconds`; whether
+/// the peer reported `NoFeedback`, the profile selected, Chromium's stats.
+async fn stream_through_failing_srtp(
+	browser: &mut Browser,
+	srtp_profiles: Vec<SrtpProfile>,
+	seconds: u64,
+) -> (bool, Option<u16>, serde_json::Value) {
+	let relay = Relay::new(Rule::FailSrtp(&[7, 8])).await;
+	let config = PeerConfig {
+		srtp_profiles,
+		stall_timeout: Duration::from_secs(1),
+		..PeerConfig::loopback()
+	};
+	let (mut peer, offer) = Peer::offer(&config, "interop").await.unwrap();
+	let answer = browser.call(json!({ "op": "answer", "sdp": relay.offer(&offer) })).await;
+	peer.accept_answer(&relay.answer(answer["sdp"].as_str().unwrap())).await.unwrap();
+	wait_connected(&mut peer).await;
+	let mut source = SyntheticSource::new(30, 3000, true);
+	let (mut frames, mut no_feedback) = (Vec::new(), false);
+	let end = Instant::now() + Duration::from_secs(seconds);
+	while Instant::now() < end {
+		source.poll_frames(Instant::now(), &mut frames);
+		for f in frames.drain(..) {
+			peer.write(f.kind, f.time, f.data);
+		}
+		while let Some(event) = peer.try_next_event() {
+			no_feedback |= matches!(event, PeerEvent::NoFeedback);
+		}
+		tokio::time::sleep(Duration::from_millis(10)).await;
+	}
+	(no_feedback, relay.profile(), browser.call(json!({ "op": "stats" })).await)
+}
+
+/// The streamer's fallback against libwebrtc: with AES-GCM first, our peer
+/// (the DTLS server) selects it; the relay lets no SRTP through, Chromium's
+/// receiver reports never mention our video, and the peer reports
+/// `NoFeedback` (the streamer session then offers again without the AEAD
+/// profiles). The next connection, AES_CM_128_HMAC_SHA1_80 only, works:
+/// no `NoFeedback`, Chromium decodes.
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_srtp_failure_is_noticed() {
+	use SrtpProfile::{AeadAes128Gcm, AeadAes256Gcm, Aes128CmSha1_80};
+	if !enabled() {
+		eprintln!("skipped: set VOELIN_INTEROP=1 (needs node, Playwright and Chromium)");
+		return;
+	}
+	let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
+	let mut browser = Browser::start().await;
+	let aead_first = vec![AeadAes128Gcm, AeadAes256Gcm, Aes128CmSha1_80];
+	let (no_feedback, profile, stats) =
+		stream_through_failing_srtp(&mut browser, aead_first, 3).await;
+	eprintln!("AES-GCM failing: NoFeedback {no_feedback}, profile {profile:?}, {stats:#}");
+	assert_eq!(profile, Some(7), "AEAD_AES_128_GCM selected");
+	assert!(no_feedback, "a viewer that gets nothing must be noticed");
+	assert_eq!(stats["inbound"]["video"]["framesDecoded"].as_u64().unwrap_or(0), 0);
+
+	let (no_feedback, profile, stats) =
+		stream_through_failing_srtp(&mut browser, vec![Aes128CmSha1_80], 3).await;
+	eprintln!("AES_CM: NoFeedback {no_feedback}, profile {profile:?}, {stats:#}");
+	assert_eq!(profile, Some(1));
+	assert!(!no_feedback, "a working connection must not be taken for a failing one");
+	assert!(aes_cm_128_sha1_80(&stats["transport"]["srtpCipher"]), "{stats:#}");
+	assert!(stats["inbound"]["video"]["framesDecoded"].as_u64().unwrap() > 30, "{stats:#}");
 	browser.quit().await;
 }
