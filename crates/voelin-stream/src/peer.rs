@@ -40,6 +40,9 @@ use crate::stun;
 /// [`OfferOptions::start_bitrate`].
 pub const DEFAULT_START_BITRATE: u64 = 1_000_000;
 
+/// Socket buffers a peer asks for by default ([`PeerConfig::udp_buffer`]).
+pub const DEFAULT_UDP_BUFFER: usize = 4 << 20;
+
 /// Video codecs a peer can negotiate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VideoCodec {
@@ -197,6 +200,13 @@ pub struct PeerConfig {
 	/// level 3.1 by default. A viewer gets frames of the profile its answer
 	/// chose ([`PeerEvent::VideoCodec`]). At most two are offered.
 	pub h264_profile_level_ids: Vec<u32>,
+	/// Receive and send buffer (bytes) each peer socket asks the system for
+	/// (`SO_RCVBUF`, `SO_SNDBUF`; Linux caps them at `net.core.rmem_max` and
+	/// `wmem_max`); 0 keeps the system's default. Linux's default, 208 KB,
+	/// holds about 90 full-size packets: a 1440p keyframe arriving while
+	/// the peer task is busy overflows it, and every lost packet costs the
+	/// viewer a retransmission or a keyframe.
+	pub udp_buffer: usize,
 }
 
 impl Default for PeerConfig {
@@ -215,6 +225,7 @@ impl Default for PeerConfig {
 				.iter()
 				.map(|p| h264::profile_level_id(*p, h264::MIN_OFFER_LEVEL))
 				.collect(),
+			udp_buffer: DEFAULT_UDP_BUFFER,
 		}
 	}
 }
@@ -676,7 +687,7 @@ impl Net {
 		let (tx, incoming) = mpsc::channel(256);
 		let mut sockets = Vec::new();
 		for ip in hosts {
-			let socket = Arc::new(UdpSocket::bind(SocketAddr::new(ip, 0)).await?);
+			let socket = Arc::new(udp_socket(SocketAddr::new(ip, 0), config.udp_buffer)?);
 			let local = socket.local_addr()?;
 			match Candidate::host(local, "udp") {
 				Ok(c) => {
@@ -718,6 +729,38 @@ impl Net {
 	fn socket_for(&self, local: SocketAddr) -> Option<&Arc<UdpSocket>> {
 		self.sockets.iter().find(|s| s.local_addr().is_ok_and(|a| a == local))
 	}
+}
+
+/// A UDP socket on `addr` asking for `buffer` bytes of receive and send
+/// buffer (0: the system's default), see [`PeerConfig::udp_buffer`]. What
+/// the system granted is logged; once per process with a hint when it is
+/// less than asked.
+fn udp_socket(addr: SocketAddr, buffer: usize) -> std::io::Result<UdpSocket> {
+	use socket2::{Domain, Protocol, Socket, Type};
+	static CAPPED: std::sync::Once = std::sync::Once::new();
+	let socket = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
+	if buffer > 0 {
+		// Best effort: the system caps what it grants, and a smaller
+		// buffer only costs packets under load.
+		let _ = socket.set_recv_buffer_size(buffer);
+		let _ = socket.set_send_buffer_size(buffer);
+	}
+	socket.set_nonblocking(true)?;
+	socket.bind(&addr.into())?;
+	let (receive, send) =
+		(socket.recv_buffer_size().unwrap_or(0), socket.send_buffer_size().unwrap_or(0));
+	debug!(%addr, asked = buffer, receive, send, "UDP socket buffers");
+	if receive < buffer {
+		CAPPED.call_once(|| {
+			warn!(
+				asked = buffer,
+				granted = receive,
+				"the system grants less UDP receive buffer than asked; high-bitrate streams \
+				 may lose packets in bursts (Linux: sysctl net.core.rmem_max)"
+			);
+		});
+	}
+	UdpSocket::from_std(socket.into())
 }
 
 struct PendingStun {
