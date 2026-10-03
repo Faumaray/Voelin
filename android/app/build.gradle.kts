@@ -34,6 +34,9 @@ val releaseStoreFile = signing("voelin.signing.storeFile", "VOELIN_SIGNING_STORE
 android {
     namespace = "io.github.faumaray.voelin"
     compileSdk = 36
+    // What the release workflow and the Docker build install (AGP's
+    // default would be 35.0.0).
+    buildToolsVersion = "36.0.0"
     ndkVersion = "27.3.13750724"
 
     defaultConfig {
