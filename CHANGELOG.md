@@ -25,6 +25,12 @@ The first release is in preparation.
   another offered codec get their own encoder. Settings:
   `stream.hardware_acceleration`, `stream.encoder_backend`, `stream.codec`;
   `voelinctl stream encoders` lists what works.
+- Streams connect and play in more cases: H.264 is offered in Constrained
+  High and Constrained Baseline, each viewer getting the profile it takes;
+  a connection that comes up but carries nothing is replaced by one
+  without the SRTP profile or the codec it used; host addresses hidden
+  behind mDNS names (as browsers send them) are resolved; larger socket
+  buffers keep high-bitrate streams from losing packets in bursts.
 - `tsgw`: companion gateway for server admins (presence, channel chat
   relay, history).
 - Chat history: messages are kept on the device and, with a gateway, what
