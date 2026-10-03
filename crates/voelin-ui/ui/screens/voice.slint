@@ -140,8 +140,8 @@ component StreamCard inherits Rectangle {
             large: true;
             y: (parent.height - self.height) / 2;
         }
-        if stream.watching && Bridge.viewer-count > 0: Chip {
-            text: @tr("{} watching", Bridge.viewer-count);
+        if stream.viewers > 0: Chip {
+            text: @tr("{} watching", stream.viewers);
             icon: Icons.eye;
             tint: #ffffff;
             fill: #060a18a0;

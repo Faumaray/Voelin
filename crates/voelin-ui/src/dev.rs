@@ -35,7 +35,7 @@ use voelin_core::{
 	Event, GatewayUpdate, HistoryMessage, HistorySource, ObserveState, SessionState, Source,
 	VoiceState,
 };
-use voelin_gateway_proto::{ReactionCount, TopicInfo, UserRef, feature};
+use voelin_gateway_proto::{ReactionCount, StreamEntry, StreamSource, TopicInfo, UserRef, feature};
 use voelin_model::{
 	ChannelInfo, ChatMessage, ChatTarget, ClientInfo, GroupInfo, Presence, ServerFlavor,
 };
@@ -608,7 +608,26 @@ fn demo_chat(app: &mut App, session: u64) {
 		source: HistorySource::Gateway,
 		complete: true,
 	});
-	// The gateway's answers for the drawers (no gateway runs in demo mode).
+	// The gateway's answers (no gateway runs in demo mode): the stream
+	// directory, and the pins and topics for the drawers.
+	app.handle_event(Event::Gateway {
+		session,
+		update: GatewayUpdate::Streams {
+			streams: vec![StreamEntry {
+				id: "demo-stream".into(),
+				stream_id: Some("demo-stream".into()),
+				streamer: UserRef { uid: "demo-2".into(), name: "Lumen".into() },
+				client_id: Some(2),
+				channel: Some(2),
+				title: "Exploring the Lands Between".into(),
+				kind: "screen".into(),
+				started_ms: now - 12 * 60_000,
+				viewers: Some(12),
+				source: StreamSource::Registered,
+				event_id: None,
+			}],
+		},
+	});
 	let by = |name: &str| UserRef { uid: format!("demo-{name}"), name: name.into() };
 	app.handle_event(Event::Gateway {
 		session,

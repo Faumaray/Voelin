@@ -225,6 +225,8 @@ export struct StreamItem {
     streamer: string,
     // The streamer's client id (their avatar in the members).
     streamer-id: int,
+    // How many watch it (the gateway's directory; 0 unknown).
+    viewers: int,
     audio: bool,
     // "Screen", "Window", "Camera"; and the announced bitrate ("8 Mbit/s").
     kind: string,

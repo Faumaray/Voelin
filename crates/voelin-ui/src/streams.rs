@@ -50,8 +50,6 @@ pub(crate) struct Watch {
 	layers: Vec<LayerSpec>,
 	/// The layer chosen by hand; `None` follows the bandwidth estimate.
 	layer: Option<LayerId>,
-	/// People watching the same stream, as the directory reports it.
-	viewers: u32,
 }
 
 impl Watch {
@@ -227,6 +225,7 @@ impl App {
 					name: s.name.clone().into(),
 					streamer: view.nickname(s.streamer.0).into(),
 					streamer_id: i32::from(s.streamer.0),
+					viewers: view.stream_viewers.get(&s.id).map_or(0, |v| *v as i32),
 					audio: s.audio,
 					watching,
 					own: view.state.own_client == Some(s.streamer.0),
@@ -317,7 +316,7 @@ impl App {
 		bridge.set_share_status(status.into());
 	}
 
-	fn refresh_viewer(&self) {
+	pub(crate) fn refresh_viewer(&self) {
 		let Some(ui) = self.ui.upgrade() else { return };
 		let bridge = ui.global::<Bridge>();
 		let Some(watch) = &self.watch else {
@@ -348,7 +347,8 @@ impl App {
 			.map_or(-1, |s| i32::from(s.streamer.0));
 		bridge.set_viewer_streamer_id(streamer);
 		bridge.set_viewer_elapsed(watch.elapsed().into());
-		bridge.set_viewer_count(watch.viewers as i32);
+		let viewers = self.view().and_then(|v| v.stream_viewers.get(&watch.stream_id)).copied();
+		bridge.set_viewer_count(viewers.unwrap_or(0) as i32);
 		let qualities = watch.qualities();
 		let chosen = watch
 			.layer
@@ -624,7 +624,6 @@ impl App {
 			since: None,
 			layers: Vec::new(),
 			layer: None,
-			viewers: 0,
 		});
 		self.refresh_viewer();
 		self.refresh_streams();
@@ -662,7 +661,6 @@ impl App {
 			since: None,
 			layers: Vec::new(),
 			layer: None,
-			viewers: 0,
 		});
 		let runtime = self.engine.runtime().clone();
 		let wake = || later(|app| app.show_picture());
@@ -692,8 +690,7 @@ impl App {
 		});
 		self.start_demo();
 		if let (Some(watch), Some((id, title, streamer))) = (&mut self.watch, sample) {
-			(watch.stream_id, watch.title, watch.streamer, watch.viewers) =
-				(id, title, streamer, 12);
+			(watch.stream_id, watch.title, watch.streamer) = (id, title, streamer);
 		}
 		self.refresh_viewer();
 	}

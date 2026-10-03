@@ -208,6 +208,8 @@ pub(crate) struct SessionView {
 	pub gateway_caps: Vec<String>,
 	/// The client whose member card is open.
 	pub member_card: Option<u16>,
+	/// Viewers of the streams in the gateway's directory, by stream id.
+	pub stream_viewers: HashMap<String, u32>,
 	/// Downloads started from chat, by transfer id.
 	pub downloads: HashMap<u64, crate::chat::Download>,
 	/// The next transfer id.
@@ -232,6 +234,7 @@ impl Default for SessionView {
 			server_groups: Vec::new(),
 			gateway_caps: Vec::new(),
 			member_card: None,
+			stream_viewers: HashMap::new(),
 			downloads: HashMap::new(),
 			next_transfer: 1,
 		}

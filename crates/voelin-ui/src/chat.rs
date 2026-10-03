@@ -497,11 +497,35 @@ impl App {
 				self.set_status(format!("{request}: {message}"));
 				return;
 			}
+			// The stream directory: how many watch each stream.
+			GatewayUpdate::Streams { streams } => {
+				view.stream_viewers = streams.iter().filter_map(viewers_of).collect();
+				return self.stream_viewers_changed(current);
+			}
+			GatewayUpdate::StreamStarted { stream }
+			| GatewayUpdate::StreamUpdated { stream }
+			| GatewayUpdate::StreamRegistered { stream } => {
+				if let Some((id, viewers)) = viewers_of(&stream) {
+					view.stream_viewers.insert(id, viewers);
+				}
+				return self.stream_viewers_changed(current);
+			}
+			GatewayUpdate::StreamEnded { id, .. } => {
+				view.stream_viewers.remove(&id);
+				return self.stream_viewers_changed(current);
+			}
 			// Posts, pins and reactions also arrive as stored messages.
 			_ => return,
 		}
 		if current {
 			self.refresh_chat();
+		}
+	}
+
+	fn stream_viewers_changed(&self, current: bool) {
+		if current {
+			self.refresh_streams();
+			self.refresh_viewer();
 		}
 	}
 
@@ -715,6 +739,11 @@ impl App {
 		});
 		self.set_status(format!("Uploading {name}…"));
 	}
+}
+
+/// A directory entry's stream id and viewer count, when it has both.
+fn viewers_of(entry: &voelin_gateway_proto::StreamEntry) -> Option<(String, u32)> {
+	Some((entry.stream_id.clone()?, entry.viewers?))
 }
 
 fn pin_row(key: i32, pin: Pin) -> PinRow {
