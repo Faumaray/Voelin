@@ -1644,7 +1644,9 @@ impl Ingest {
 			*lock(&shared.gpu_error) = Some(e.to_string());
 			self.gpu.converter = Some(Err(()));
 			self.gpu.out.clear();
-			return None;
+			// This frame is counted and its layers' pacing taken: it is
+			// dropped, and the next one takes the CPU path.
+			return Some(true);
 		}
 		shared.gpu_convert_ns.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 		shared.gpu_converted.fetch_add(1, Ordering::Relaxed);
