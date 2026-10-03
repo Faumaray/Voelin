@@ -317,21 +317,25 @@ component SourceRow inherits Rectangle {
             { text: source.locked ? @tr("Unlock") : @tr("Lock"), icon: Icons.lock, enabled: true },
             { text: source.background == "keep" ? @tr("Blur background") : @tr("Background effect off"), icon: Icons.sparkles, enabled: source.kind == "camera", separator: true },
             { text: @tr("Background effect…"), icon: Icons.sliders-horizontal, enabled: source.kind == "camera" },
+            // A phone's front and back camera, or the next webcam.
+            { text: @tr("Switch camera"), icon: Icons.video, enabled: source.kind == "camera" },
             { text: @tr("Bring forward"), icon: Icons.chevron-up, enabled: !source.front, separator: true },
             { text: @tr("Send backward"), icon: Icons.chevron-down, enabled: !source.back },
             { text: @tr("Rename…"), icon: Icons.pencil, enabled: true, separator: true },
             { text: @tr("Remove"), icon: Icons.trash-2, enabled: true, danger: true },
         ];
         activated(i) => {
-            if i == 0 || i == 1 || i == 2 || i == 5 || i == 8 {
+            if i == 0 || i == 1 || i == 2 || i == 5 || i == 9 {
                 StudioNav.edit-source(source.id);
             } else if i == 3 {
                 StudioBridge.source-action(source.id, "lock");
             } else if i == 4 {
                 StudioBridge.source-action(source.id, source.background == "keep" ? "bg-blur" : "bg-keep");
             } else if i == 6 {
-                StudioBridge.source-action(source.id, "up");
+                StudioBridge.source-action(source.id, "next-camera");
             } else if i == 7 {
+                StudioBridge.source-action(source.id, "up");
+            } else if i == 8 {
                 StudioBridge.source-action(source.id, "down");
             } else {
                 StudioBridge.source-action(source.id, "remove");
@@ -731,8 +735,8 @@ export component StudioHeader inherits HorizontalLayout {
     }
 }
 
-// One audio source: meter, gain, mute, a menu.
-component MixerRow inherits Rectangle {
+// One audio source: meter, gain, mute, a menu (also the share dialog's).
+export component MixerRow inherits Rectangle {
     in property <StudioAudio> audio;
     in property <int> index;
     in property <bool> compact;
@@ -1918,12 +1922,13 @@ component SourceDialog inherits Modal {
     }
 }
 
-// Pick a screen, window, camera or audio source.
-component PickDialog inherits Modal {
+// Pick a screen, window, camera or audio source (audio: also over the
+// share dialog).
+export component PickDialog inherits Modal {
     in property <string> kind;
     callback done();
-    title: kind == "screen" ? @tr("Share a screen") : kind == "window" ? @tr("Share a window") : kind == "camera" ? @tr("Add a camera") : @tr("Add an audio source");
-    subtitle: kind == "audio" ? @tr("Mixed into the stream's audio.") : @tr("Added to the live scene.");
+    title: kind == "screen" ? @tr("Share a screen") : kind == "window" ? @tr("Share a window") : kind == "camera" ? @tr("Add a camera") : @tr("Audio sources");
+    subtitle: kind == "audio" ? @tr("Mixed into the stream's audio. Pick as many as you like.") : @tr("Added to the live scene.");
     icon: StudioKinds.icon(kind == "audio" ? "microphone" : kind);
     card-width: 520px;
     card-height: 540px;
@@ -1944,24 +1949,22 @@ component PickDialog inherits Modal {
             accessible-role: AccessibleRole.button;
             accessible-label: pick.name;
             accessible-description: pick.detail;
-            accessible-action-default => {
-                if root.kind == "audio" {
-                    StudioBridge.add-audio(i);
-                } else {
-                    StudioBridge.add-picked(root.kind, i);
-                }
-                root.done();
-            }
+            accessible-checkable: root.kind == "audio";
+            accessible-checked: pick.selected;
+            accessible-action-default => { pick-touch.pick(); }
             pick-touch := TouchArea {
                 mouse-cursor: MouseCursor.pointer;
-                clicked => {
+                // Audio sources are switched on and off (several at once);
+                // the rest is added and the picker closes.
+                function pick() {
                     if root.kind == "audio" {
-                        StudioBridge.add-audio(i);
+                        StudioBridge.toggle-audio(i);
                     } else {
                         StudioBridge.add-picked(root.kind, i);
+                        root.done();
                     }
-                    root.done();
                 }
+                clicked => { self.pick(); }
             }
             HorizontalLayout {
                 padding-left: Theme.space-3;
@@ -1973,9 +1976,14 @@ component PickDialog inherits Modal {
                     y: (parent.height - self.height) / 2;
                     border-radius: Theme.radius-md;
                     background: Theme.surface-3;
-                    Icon {
+                    if pick.icon.width == 0: Icon {
                         source: StudioKinds.icon(pick.kind);
                         size: 18px;
+                    }
+                    if pick.icon.width > 0: Image {
+                        width: 28px;
+                        height: 28px;
+                        source: pick.icon;
                     }
                 }
                 VerticalLayout {
@@ -1993,7 +2001,29 @@ component PickDialog inherits Modal {
                         overflow: elide;
                     }
                 }
+                if root.kind == "audio": Rectangle {
+                    width: 24px;
+                    height: 24px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 12px;
+                    background: pick.selected ? Theme.accent : transparent;
+                    border-width: pick.selected ? 0 : 1.5px;
+                    border-color: Theme.border-strong;
+                    if pick.selected: Icon {
+                        source: Icons.check;
+                        size: 16px;
+                        tint: Theme.on-accent;
+                    }
+                }
             }
+        }
+    }
+    if root.kind == "audio": HorizontalLayout {
+        alignment: end;
+        Button {
+            kind: ButtonKind.primary;
+            text: @tr("Done");
+            clicked => { root.done(); }
         }
     }
 }

@@ -229,7 +229,8 @@ pub fn list() -> Vec<Camera> {
 				debug!(camera = %name, "cannot read the camera's formats: {e}");
 				Vec::new()
 			});
-			cameras.push(Camera { id, name, backend: "mediafoundation", formats });
+			// Webcams face the user.
+			cameras.push(Camera { id, name, backend: "mediafoundation", formats, mirrored: true });
 		}
 		Ok(cameras)
 	})

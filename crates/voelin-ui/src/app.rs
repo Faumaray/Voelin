@@ -411,6 +411,9 @@ pub(crate) struct App {
 }
 
 thread_local! {
+	// It is `const`; clippy for Android targets does not see that through
+	// the macro's expansion there.
+	#[allow(clippy::missing_const_for_thread_local)]
 	static APP: RefCell<Option<App>> = const { RefCell::new(None) };
 }
 
@@ -635,6 +638,8 @@ pub fn run(options: RunOptions) -> Result<()> {
 	});
 
 	let _dev = crate::dev::start(&ui, &switches);
+	// What the platform asked for before the window ran.
+	crate::inbox::take();
 
 	ui.run()?;
 	// With our own engine, leave servers properly, so no ghost client stays
@@ -734,6 +739,9 @@ impl App {
 			self.playback = self.prefs.get(&CLIENT_PLAYBACK);
 		} else if appearance_keys().iter().any(|k| k.name() == key) {
 			self.apply_appearance();
+		} else if key == voelin_core::settings::STREAM_AUDIO_SOURCES.name() {
+			// A running share mixes the new sources (streams.rs).
+			self.share_audio_changed();
 		} else if key == STREAM_HARDWARE_DECODING.name() || key == STREAM_DECODER_BACKEND.name() {
 			self.video.set_decoder_preference(decoder_preference(&self.prefs));
 		}

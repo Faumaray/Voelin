@@ -147,6 +147,9 @@ pub async fn run(con: &mut Connection, args: &StreamArgs) -> Result<()> {
 	if !ServerFlavor::from_version_string(&version).capabilities().streams {
 		bail!("streams need a TeamSpeak 6 server (this one is {version})");
 	}
+	// Every channel, as the app does: a stream can be watched from any
+	// channel, and the server shows a streamer only in subscribed channels.
+	con.get_state()?.server.set_subscribed(true).send(con)?;
 	let mut config = if args.loopback { PeerConfig::loopback() } else { PeerConfig::default() };
 	if !args.stun.is_empty() {
 		config.stun_servers = args.stun.clone();

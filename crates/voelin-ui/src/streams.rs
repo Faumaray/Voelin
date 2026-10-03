@@ -2,16 +2,22 @@
 //! viewer. The engine runs the stream sessions; `video.rs` captures,
 //! encodes and decodes.
 
+use std::time::Duration;
+
 use slint::{ComponentHandle, Model};
 use tracing::warn;
-use voelin_core::media::audio_source_specs;
-use voelin_core::settings::{STREAM_AUDIO_SOURCES, STREAM_BITRATE_KBPS, STREAM_FPS};
+use voelin_core::media::{Streamer, audio_source_specs};
+use voelin_core::settings::{
+	AudioSourceSetting, STREAM_AUDIO_SOURCES, STREAM_BITRATE_KBPS, STREAM_FPS,
+};
 use voelin_core::stream::{
 	EndReason, LayerId, LayerSpec, LeaveReason, StreamKind, StreamSetup, ViewerInfo, ViewerState,
 };
 use voelin_core::{Command, Event, StreamState, WatchState};
 
-use crate::app::{App, Bridge, ShareForm, SourceItem, StreamItem, ViewerItem, later, model};
+use crate::app::{
+	App, Bridge, ShareForm, SourceItem, StreamItem, ViewerItem, later, model, with_app,
+};
 use crate::settings::{
 	BITRATE_CHOICES, FPS_CHOICES, ShareDefaults, nearest_choice, parse_positive,
 };
@@ -27,6 +33,46 @@ pub(crate) struct Share {
 	viewers: Vec<ViewerInfo>,
 	/// The capture ended by itself and the stream is being stopped.
 	stopping: bool,
+	/// The audio mixer's meters (the studio's rows), about 15 times a second.
+	_meters: slint::Timer,
+}
+
+/// What the share dialog asks of the capture: the audio mixer's `sources`
+/// (`stream.audio_sources`) while "Share system audio" is on; off, or with
+/// no sources, no audio at all.
+fn capture_request(
+	fps: u32,
+	bitrate_kbps: u32,
+	audio: bool,
+	sources: &[AudioSourceSetting],
+	restore_token: Option<String>,
+) -> CaptureRequest {
+	let audio_sources = if audio { audio_source_specs(sources) } else { Vec::new() };
+	CaptureRequest {
+		fps,
+		bitrate_kbps,
+		audio: !audio_sources.is_empty(),
+		audio_sources,
+		restore_token,
+	}
+}
+
+/// The viewers of the sample share (VOELIN_DEMO_UI): two watch, one asks.
+fn demo_viewers() -> Vec<ViewerInfo> {
+	let viewer = |id, state, message: &str| ViewerInfo {
+		client: tsclientlib::ClientId(id),
+		state,
+		message: message.into(),
+		layer: None,
+		estimate: None,
+		srtp_profile: None,
+		codec: None,
+	};
+	vec![
+		viewer(3, ViewerState::Connected, ""),
+		viewer(5, ViewerState::Connected, ""),
+		viewer(4, ViewerState::Requested, "Can I watch?"),
+	]
 }
 
 /// The stream in the viewer.
@@ -189,6 +235,7 @@ impl App {
 				} else {
 					share_end_text(&reason)
 				});
+				self.mixer_refresh();
 			}
 		}
 		self.refresh_streams();
@@ -305,6 +352,7 @@ impl App {
 		bridge.set_share_state(state.into());
 		bridge.set_share_busy(self.share_busy);
 		bridge.set_share_error(self.share_error.clone().into());
+		bridge.set_share_audio(share.is_some_and(|s| s.capture.has_audio()));
 		let viewers: Vec<ViewerItem> = share
 			.map(|s| {
 				s.viewers
@@ -367,6 +415,12 @@ impl App {
 			.and_then(|v| v.streams.iter().find(|s| s.id == watch.stream_id))
 			.map_or(-1, |s| i32::from(s.streamer.0));
 		bridge.set_viewer_streamer_id(streamer);
+		let members = &self.models.members;
+		bridge.set_viewer_streamer_admin(
+			(0..members.row_count())
+				.filter_map(|i| members.row_data(i))
+				.any(|m| m.id == streamer && m.admin),
+		);
 		let channel = u16::try_from(streamer).ok().and_then(|id| {
 			let view = self.view()?;
 			view.presence.channels.get(&view.channel_of(id)?).map(|c| c.name.clone())
@@ -428,6 +482,8 @@ impl App {
 		if self.share.is_some() {
 			self.refresh_streams();
 		}
+		// The share dialog's audio mixer (studio.rs).
+		self.mixer_tick();
 		if self.watch.is_some() {
 			self.refresh_viewer();
 		}
@@ -461,6 +517,8 @@ impl App {
 			ui.global::<Bridge>().set_share_sources(model(items));
 		}
 		self.refresh_streams();
+		// Its audio: the Stream Studio's mixer rows and picker.
+		self.mixer_show();
 		let defaults = &self.settings.share;
 		let nickname = self.current.and_then(|id| self.bookmark(id)).map(|b| b.nickname.clone());
 		let (fps, bitrate) = (self.prefs.get(&STREAM_FPS), self.prefs.get(&STREAM_BITRATE_KBPS));
@@ -479,21 +537,34 @@ impl App {
 		}
 	}
 
+	/// The share dialog's form with the test pattern chosen.
+	fn test_pattern_form(&mut self) -> Option<ShareForm> {
+		let mut form = self.open_share();
+		let ui = self.ui.upgrade()?;
+		let sources = ui.global::<Bridge>().get_share_sources();
+		let pattern = (0..sources.row_count())
+			.find(|&i| sources.row_data(i).is_some_and(|s| s.name == "Test pattern"))?;
+		form.source = pattern as i32;
+		Some(form)
+	}
+
 	/// Development switch `VOELIN_AUTOSHARE`: share the test pattern once.
 	pub(crate) fn autoshare(&mut self) {
 		if !self.autoshare || !self.view().is_some_and(|v| v.streams_available()) {
 			return;
 		}
 		self.autoshare = false;
-		let mut form = self.open_share();
-		let Some(ui) = self.ui.upgrade() else { return };
-		let sources = ui.global::<Bridge>().get_share_sources();
-		let pattern = (0..sources.row_count())
-			.find(|&i| sources.row_data(i).is_some_and(|s| s.name == "Test pattern"));
-		let Some(index) = pattern else { return };
-		form.source = index as i32;
-		form.auto_accept = true;
-		self.start_share(form);
+		if let Some(form) = self.test_pattern_form() {
+			self.start_share(ShareForm { auto_accept: true, ..form });
+		}
+	}
+
+	/// `VOELIN_OPEN=share:live` with sample data: the test pattern shared
+	/// with the sample mixer's sources (live at once, `capture_ready`).
+	pub(crate) fn demo_share(&mut self) {
+		if let Some(form) = self.test_pattern_form() {
+			self.start_share(ShareForm { audio: true, ..form });
+		}
 	}
 
 	pub(crate) fn start_share(&mut self, form: ShareForm) {
@@ -527,15 +598,10 @@ impl App {
 			audio: form.audio,
 			auto_accept: form.auto_accept,
 		};
-		// No sources configured: no audio.
-		let audio_sources = audio_source_specs(&self.prefs.get(&STREAM_AUDIO_SOURCES));
-		let request = CaptureRequest {
-			fps,
-			bitrate_kbps: bitrate,
-			audio: form.audio && !audio_sources.is_empty(),
-			audio_sources,
-			restore_token: self.settings.portal_restore_token.clone(),
-		};
+		// The mixer's sources (the sample studio's with VOELIN_DEMO_UI).
+		let sources = self.studio_settings().get(&STREAM_AUDIO_SOURCES);
+		let token = self.settings.portal_restore_token.clone();
+		let request = capture_request(fps, bitrate, form.audio, &sources, token);
 		self.settings.share = defaults;
 		self.store_settings();
 		self.share_busy = true;
@@ -544,7 +610,7 @@ impl App {
 		let setup = StreamSetup {
 			name: form.name.trim().to_owned(),
 			bitrate,
-			audio: form.audio,
+			audio: request.audio,
 			..StreamSetup::default()
 		};
 		let auto_accept = form.auto_accept;
@@ -580,28 +646,62 @@ impl App {
 					let reason = capture.audio_error().unwrap_or_default();
 					self.set_status(format!("Sharing without sound: {reason}"));
 				}
-				self.engine.send(Command::StartStream {
-					session: session as u64,
-					setup,
-					auto_accept,
+				// Sample data has no server: live at once, with viewers.
+				let (live, viewers) = if self.demo_ui {
+					(true, demo_viewers())
+				} else {
+					let session = session as u64;
+					self.engine.send(Command::StartStream { session, setup, auto_accept });
+					(false, Vec::new())
+				};
+				let meters = slint::Timer::default();
+				meters.start(slint::TimerMode::Repeated, Duration::from_millis(66), || {
+					with_app(|app| app.studio_meters());
 				});
 				self.share = Some(Share {
 					session,
 					capture,
-					live: false,
-					viewers: Vec::new(),
+					live,
+					viewers,
 					stopping: false,
+					_meters: meters,
 				});
+				// The mixer's rows follow this capture's sources.
+				self.mixer_refresh();
 			}
 		}
 		self.refresh_streams();
 	}
 
 	pub(crate) fn stop_share(&mut self) {
-		if let Some(share) = &mut self.share {
-			share.stopping = true;
-			self.engine.send(Command::StopStream { session: share.session as u64 });
+		let Some(share) = &mut self.share else { return };
+		share.stopping = true;
+		let session = share.session;
+		if self.demo_ui {
+			self.share_state(session, StreamState::Ended(EndReason::Local));
+		} else {
+			self.engine.send(Command::StopStream { session: session as u64 });
 		}
+	}
+
+	/// The running share's streamer (the mixer's rows, studio.rs).
+	pub(crate) fn share_streamer(&self) -> Option<&Streamer> {
+		self.share.as_ref().map(|s| s.capture.streamer())
+	}
+
+	/// `stream.audio_sources` changed (the mixer, the settings, another
+	/// window): a running share mixes the new sources.
+	pub(crate) fn share_audio_changed(&mut self) {
+		if self.share.is_none() {
+			return;
+		}
+		let sources = audio_source_specs(&self.studio_settings().get(&STREAM_AUDIO_SOURCES));
+		let codecs = self.video.codecs();
+		let Some(share) = &self.share else { return };
+		if let Err(e) = share.capture.follow_audio(&codecs, sources) {
+			self.set_status(format!("Stream audio: {e}"));
+		}
+		self.mixer_refresh();
 	}
 
 	pub(crate) fn respond_viewer(&mut self, viewer: u16, accept: bool) {
@@ -813,5 +913,35 @@ mod tests {
 		assert_eq!(super::bitrate_text(640), "640 kbit/s");
 		assert_eq!(super::bitrate_text(8000), "8 Mbit/s");
 		assert_eq!(super::bitrate_text(4608), "4.6 Mbit/s");
+	}
+
+	/// What the share dialog's mixer holds goes to the capture, with each
+	/// source's gain and mute; "Share system audio" off (or nothing picked)
+	/// shares no audio at all.
+	#[test]
+	fn the_share_carries_the_picked_audio() {
+		use voelin_core::media::{AppMatch, AudioSourceKind};
+		use voelin_core::settings::{AudioSourceKindSetting, AudioSourceSetting};
+		let app = AudioSourceKindSetting::App { name: Some("firefox".into()), pid: None };
+		let picked = [
+			AudioSourceSetting { gain: 0.5, ..AudioSourceSetting::new(app) },
+			AudioSourceSetting {
+				muted: true,
+				..AudioSourceSetting::new(AudioSourceKindSetting::Microphone)
+			},
+		];
+		let request = super::capture_request(30, 4608, true, &picked, None);
+		assert!(request.audio);
+		let kinds: Vec<_> = request.audio_sources.iter().map(|s| s.kind.clone()).collect();
+		let firefox = AudioSourceKind::App(AppMatch::Name("firefox".into()));
+		assert_eq!(kinds, [firefox, AudioSourceKind::Microphone]);
+		let mix: Vec<_> = request.audio_sources.iter().map(|s| (s.gain, s.muted)).collect();
+		assert_eq!(mix, [(0.5, false), (1.0, true)]);
+		assert_eq!((request.fps, request.bitrate_kbps), (30, 4608));
+
+		let off = super::capture_request(30, 4608, false, &picked, None);
+		assert!(!off.audio && off.audio_sources.is_empty());
+		let none = super::capture_request(30, 4608, true, &[], None);
+		assert!(!none.audio && none.audio_sources.is_empty());
 	}
 }

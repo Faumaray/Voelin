@@ -49,4 +49,46 @@ object Native {
     /** "Mute" / "Unmute" in the voice notification. */
     @JvmStatic
     external fun onToggleMute()
+
+    /** "Deafen" / "Undeafen" in the voice notification. */
+    @JvmStatic
+    external fun onToggleDeafen()
+
+    /**
+     * A YUV_420_888 camera frame for feed `id`: the three planes (direct
+     * buffers, valid during the call), the luma and chroma row strides, the
+     * chroma pixel stride (1: planar, 2: interleaved), and the clockwise
+     * rotation that turns it upright. Returns false when it is no longer
+     * wanted.
+     */
+    @JvmStatic
+    external fun onCameraFrame(
+        id: Long,
+        y: ByteBuffer,
+        u: ByteBuffer,
+        v: ByteBuffer,
+        yRowStride: Int,
+        uvRowStride: Int,
+        uvPixelStride: Int,
+        width: Int,
+        height: Int,
+        rotation: Int,
+        timestampNs: Long,
+    ): Boolean
+
+    /** Camera feed `id` failed or could not start (`message`: why). */
+    @JvmStatic
+    external fun onCameraError(id: Long, message: String)
+
+    /** The voice notification was tapped: show the voice channel. */
+    @JvmStatic
+    external fun onOpenVoice()
+
+    /**
+     * Shared to the app ("Share to Voelin"): text for the current chat's
+     * composer, and copies of the shared files (one path per line) for the
+     * current channel.
+     */
+    @JvmStatic
+    external fun onShare(text: String?, paths: String?)
 }
