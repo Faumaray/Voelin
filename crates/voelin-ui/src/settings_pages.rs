@@ -1234,7 +1234,11 @@ impl App {
 	// Camera (Voice & Video, Devices).
 
 	fn load_cameras(&mut self) {
-		let cameras = crate::camera::list();
+		let mut cameras = crate::camera::list();
+		// Sample data never opens a real camera.
+		if self.demo_ui {
+			cameras.retain(|(id, _)| id == "synthetic");
+		}
 		self.pages.cameras = cameras.iter().map(|(id, _)| id.clone()).collect();
 		let names: Vec<SharedString> =
 			cameras.into_iter().map(|(_, n)| SharedString::from(n)).collect();
@@ -1253,7 +1257,8 @@ impl App {
 	}
 
 	pub(crate) fn start_camera(&mut self) {
-		let device = self.prefs.get(&VIDEO_CAMERA);
+		let device =
+			if self.demo_ui { "synthetic".to_owned() } else { self.prefs.get(&VIDEO_CAMERA) };
 		let size = parse_size(&self.prefs.get(&VIDEO_RESOLUTION));
 		let blur = self.prefs.get(&VIDEO_BACKGROUND) == "blur";
 		let mirror = self.prefs.get(&VIDEO_MIRROR);
