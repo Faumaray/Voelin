@@ -2335,9 +2335,9 @@ mod tests {
 
 		// The buffers: the driver's own (tiled), and a LINEAR one with a
 		// padded pitch in system memory, which is what the portal negotiates.
-		#[cfg(target_os = "linux")]
+		#[cfg(all(target_os = "linux", feature = "pipewire"))]
 		let linear = linear_dmabuf(&picture, (SIZE.0 as usize * 4).next_multiple_of(256));
-		#[cfg(not(target_os = "linux"))]
+		#[cfg(not(all(target_os = "linux", feature = "pipewire")))]
 		let linear: Option<((), DmaBufRef)> = None;
 		if linear.is_none() {
 			eprintln!("no /dev/udmabuf: the LINEAR buffer is skipped");
@@ -2402,91 +2402,33 @@ mod tests {
 		}
 	}
 
-	/// `struct udmabuf_create` of `<linux/udmabuf.h>`, and `UDMABUF_CREATE`
-	/// returning the new DMA-BUF.
-	#[cfg(target_os = "linux")]
-	#[repr(C)]
-	struct UdmabufCreate {
-		memfd: u32,
-		flags: u32,
-		offset: u64,
-		size: u64,
-	}
-
-	// SAFETY: `UDMABUF_CREATE` (`_IOW('u', 0x42, struct udmabuf_create)`)
-	// only reads the struct and returns a new descriptor.
-	#[cfg(target_os = "linux")]
-	unsafe impl rustix::ioctl::Ioctl for UdmabufCreate {
-		type Output = std::os::fd::OwnedFd;
-		const IS_MUTATING: bool = false;
-
-		fn opcode(&self) -> rustix::ioctl::Opcode {
-			rustix::ioctl::opcode::write::<UdmabufCreate>(b'u', 0x42)
-		}
-
-		fn as_ptr(&mut self) -> *mut std::ffi::c_void {
-			(&raw mut *self).cast()
-		}
-
-		unsafe fn output_from_ptr(
-			out: rustix::ioctl::IoctlOutput,
-			_: *mut std::ffi::c_void,
-		) -> rustix::io::Result<Self::Output> {
-			// SAFETY: the descriptor the kernel just made, ours to own.
-			Ok(unsafe { std::os::fd::FromRawFd::from_raw_fd(out) })
-		}
-	}
-
-	/// `picture` (BGRA) in a LINEAR DMA-BUF of system memory, rows `stride`
-	/// bytes apart: `/dev/udmabuf` over a sealed memfd. The descriptor has
-	/// to outlive the returned buffer. `None` without access to
+	/// `picture` (BGRA) in a LINEAR DMA-BUF of ordinary memory, rows
+	/// `stride` bytes apart ([`Udmabuf`](crate::capture::dmabuf::Udmabuf));
+	/// the buffer has to outlive the reference. `None` without access to
 	/// `/dev/udmabuf`.
-	#[cfg(target_os = "linux")]
+	#[cfg(all(target_os = "linux", feature = "pipewire"))]
 	fn linear_dmabuf(
 		picture: &VideoFrame,
 		stride: usize,
-	) -> Option<(std::os::fd::OwnedFd, DmaBufRef)> {
-		use rustix::fs::{MemfdFlags, SealFlags};
-		use std::io::Write;
-		use std::os::fd::AsRawFd;
-
+	) -> Option<(crate::capture::dmabuf::Udmabuf, DmaBufRef)> {
 		let FrameData::Bgra(pixels) = &picture.data else { return None };
 		let (w, h) = (picture.width as usize, picture.height as usize);
-		let size = (stride * h).next_multiple_of(4096);
-		let memfd = rustix::fs::memfd_create(
-			"voelin-linear-dmabuf",
-			MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
-		)
-		.ok()?;
-		let mut bytes = vec![0; size];
-		for (y, row) in bytes.chunks_exact_mut(stride).take(h).enumerate() {
+		let mut buffer = crate::capture::dmabuf::Udmabuf::new(stride * h).ok()?;
+		for (y, row) in buffer.bytes_mut().chunks_exact_mut(stride).take(h).enumerate() {
 			row[..w * 4].copy_from_slice(pixels.row(y, w * 4));
 		}
-		let mut file = std::fs::File::from(memfd);
-		file.write_all(&bytes).ok()?;
-		rustix::fs::fcntl_add_seals(&file, SealFlags::SHRINK).ok()?;
-		let device =
-			std::fs::OpenOptions::new().read(true).write(true).open("/dev/udmabuf").ok()?;
-		let create = UdmabufCreate {
-			memfd: file.as_raw_fd() as u32,
-			flags: 1,
-			offset: 0,
-			size: size as u64,
-		};
-		// SAFETY: see the `Ioctl` impl; `device` is /dev/udmabuf.
-		let fd = unsafe { rustix::ioctl::ioctl(&device, create) }.ok()?;
 		let frame = DmaBufRef {
 			width: picture.width,
 			height: picture.height,
 			timestamp: Duration::ZERO,
 			fourcc: drm_fourcc(b"XR24"),
 			modifier: crate::capture::DRM_MOD_LINEAR,
-			fd: fd.as_raw_fd(),
-			size,
+			fd: buffer.fd(),
+			size: buffer.len(),
 			planes: [(0, stride), (0, 0), (0, 0), (0, 0)],
 			plane_count: 1,
 		};
-		Some((fd, frame))
+		Some((buffer, frame))
 	}
 
 	/// What the CPU spends per frame on its way into a VA-API encoder at

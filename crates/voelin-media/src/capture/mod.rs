@@ -28,7 +28,7 @@ use crate::queue::{FrameReceiver, FrameSender, frame_channel};
 use crate::{Error, Result};
 
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
-mod dmabuf;
+pub(crate) mod dmabuf;
 pub mod external;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod pipewire_audio;
