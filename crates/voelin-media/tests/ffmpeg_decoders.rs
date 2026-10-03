@@ -239,3 +239,162 @@ fn decoders_with_and_without_ffmpeg() {
 		.unwrap();
 	assert!(child.success(), "without FFmpeg: {child}");
 }
+
+/// The access units of an Annex B H.264 stream that has access unit
+/// delimiters (`aud=1` in x264, `-aud 1` in VA-API), as a stream's frames.
+fn access_units(stream: &[u8]) -> Vec<&[u8]> {
+	let mut starts = Vec::new();
+	let mut i = 0;
+	while i + 3 < stream.len() {
+		if stream[i..i + 3] == [0, 0, 1] {
+			if stream[i + 3] & 0x1f == 9 {
+				starts.push(if i > 0 && stream[i - 1] == 0 { i - 1 } else { i });
+			}
+			i += 3;
+		} else {
+			i += 1;
+		}
+	}
+	starts.push(stream.len());
+	starts.windows(2).map(|w| &stream[w[0]..w[1]]).collect()
+}
+
+/// A 32x18 luma thumbnail (block averages), to compare pictures cheaply.
+fn thumbnail(picture: &VideoFrame) -> Vec<u8> {
+	let y = match &picture.data {
+		voelin_media::FrameData::I420 { y, .. } | voelin_media::FrameData::Nv12 { y, .. } => y,
+		_ => panic!("not YUV"),
+	};
+	let (w, bw, bh) =
+		(picture.width as usize, picture.width as usize / 32, picture.height as usize / 18);
+	let mut out = Vec::with_capacity(32 * 18);
+	for by in 0..18 {
+		for bx in 0..32 {
+			let sum: u64 = (by * bh..(by + 1) * bh)
+				.map(|row| {
+					y.row(row, w)[bx * bw..(bx + 1) * bw].iter().map(|&p| u64::from(p)).sum::<u64>()
+				})
+				.sum();
+			out.push((sum / (bw * bh) as u64) as u8);
+		}
+	}
+	out
+}
+
+/// Make `path` with the `ffmpeg` command from `args` (output options
+/// last), unless it is there; whether it is.
+fn ffmpeg_command(path: &std::path::Path, args: &[&str]) -> bool {
+	if path.exists() {
+		return true;
+	}
+	let made = std::process::Command::new("ffmpeg")
+		.args(["-hide_banner", "-loglevel", "error", "-y"])
+		.args(args)
+		.arg(path)
+		.status();
+	if !made.is_ok_and(|s| s.success()) {
+		let _ = std::fs::remove_file(path);
+		return false;
+	}
+	true
+}
+
+/// H.264 with B-frames at 2560x1440 and 60 fps, like the official client's
+/// stream (AMF with B-frames and rare keyframes): every H.264 decoder of
+/// the ladder, and Cisco's OpenH264 with `VOELIN_OPENH264_LIB`, decodes it;
+/// how fast, the slowest frame, and whether every picture comes out, in
+/// order (against FFmpeg's software decoder). The streams come from the
+/// `ffmpeg` command: x264 with 3 B-frames, `h264_vaapi` with 2, ten
+/// seconds of `testsrc2` at 8 Mbit/s, keyframes every ten seconds. Run with
+/// `--release`.
+#[test]
+#[ignore = "a measurement: needs the ffmpeg command; run with --release"]
+fn h264_with_b_frames_at_1440p60() {
+	if ffmpeg().is_none() {
+		return;
+	}
+	let dir = std::env::temp_dir().join("voelin-h264-bframes");
+	std::fs::create_dir_all(&dir).unwrap();
+	let source = "-f lavfi -i testsrc2=size=2560x1440:rate=60 -t 10";
+	let rate = "-g 600 -b:v 8M -maxrate 9M -bufsize 9M -f h264";
+	let x264 = "-c:v libx264 -preset veryfast -profile:v high -bf 3 -x264-params aud=1";
+	let vaapi = "-vf format=nv12,hwupload -c:v h264_vaapi -profile:v high -bf 2 -aud 1";
+	let mut streams = Vec::new();
+	for (name, args) in [
+		("x264", format!("{source} {x264} -pix_fmt yuv420p {rate}")),
+		("h264_vaapi", format!("-vaapi_device /dev/dri/renderD128 {source} {vaapi} {rate}")),
+	] {
+		let path = dir.join(format!("{name}-bframes-1440p60.h264"));
+		let args: Vec<&str> = args.split(' ').collect();
+		if ffmpeg_command(&path, &args) {
+			streams.push((name, std::fs::read(&path).unwrap()));
+		} else {
+			eprintln!("{name}: the ffmpeg command did not make the stream, skipped");
+		}
+	}
+	let codecs = Codecs::new();
+	let openh264 = std::env::var_os("VOELIN_OPENH264_LIB")
+		.map(|path| voelin_media::codec::h264::OpenH264::load(path).unwrap());
+	let mut names: Vec<String> =
+		codecs.decoders_for(Codec::H264).iter().map(|b| b.to_string()).collect();
+	names.extend(openh264.as_ref().map(|_| "openh264".to_owned()));
+	for (stream, data) in &streams {
+		let units = access_units(data);
+		let mut reference: Option<Vec<Vec<u8>>> = None;
+		for name in &names {
+			let mut decoder: Box<dyn VideoDecoder> = match (name.as_str(), &openh264) {
+				("openh264", Some(library)) => Box::new(library.decoder().unwrap()),
+				_ => {
+					let backend =
+						codecs.decoders_for(Codec::H264).into_iter().find(|b| b.name() == name);
+					codecs.new_decoder_with(Codec::H264, backend.unwrap()).unwrap()
+				}
+			};
+			let mut picture = VideoFrame::black_i420(0, 0);
+			let mut thumbnails = Vec::with_capacity(units.len());
+			let (mut errors, mut slowest, mut busy) = (0, Duration::ZERO, Duration::ZERO);
+			for unit in &units {
+				let started = Instant::now();
+				let result = decoder.decode_into(unit, &mut picture);
+				let took = started.elapsed();
+				(slowest, busy) = (slowest.max(took), busy + took);
+				match result {
+					Ok(true) => {
+						assert_eq!((picture.width, picture.height), (2560, 1440), "{name}");
+						thumbnails.push(thumbnail(&picture));
+					}
+					Ok(false) => {}
+					Err(_) => errors += 1,
+				}
+			}
+			let fps = thumbnails.len() as f64 / busy.as_secs_f64();
+			let differing = reference.as_ref().map_or(0, |reference| {
+				let differs = |(a, b): &(&Vec<u8>, &Vec<u8>)| {
+					a.iter().zip(*b).any(|(x, y)| x.abs_diff(*y) > 3)
+				};
+				thumbnails.iter().zip(reference).filter(differs).count()
+			});
+			eprintln!(
+				"{stream} 2560x1440@60 with B-frames, {name}: {} of {} pictures, {errors} errors, \
+				 {fps:.0} fps, slowest frame {:.1} ms, {differing} differ from FFmpeg's software decoder",
+				thumbnails.len(),
+				units.len(),
+				slowest.as_secs_f64() * 1000.0,
+			);
+			if name == "h264" {
+				reference = Some(thumbnails);
+			} else if name.ends_with("_vaapi") {
+				assert_eq!(errors, 0, "{name}");
+				assert!(thumbnails.len() + 3 >= units.len(), "{name}: pictures missing");
+			}
+		}
+	}
+	// What a viewer adds per picture: the NV12 or I420 picture to RGBA.
+	let mut rgba = vec![0; 2560 * 1440 * 4];
+	let i420 = VideoFrame::black_i420(2560, 1440);
+	let started = Instant::now();
+	for _ in 0..30 {
+		convert::to_rgba(&i420, &mut rgba, 2560 * 4).unwrap();
+	}
+	eprintln!("to RGBA at 2560x1440: {:.1} ms", started.elapsed().as_secs_f64() * 1000.0 / 30.0);
+}
