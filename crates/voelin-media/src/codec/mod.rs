@@ -257,6 +257,32 @@ pub trait VideoEncoder: Send {
 	fn speed(&self) -> Option<i32> {
 		None
 	}
+
+	/// Whether this encoder takes [`GpuFrame`](crate::GpuFrame)s
+	/// ([`encode_gpu`](Self::encode_gpu)), and then the multiple their
+	/// width and height must be of (a size it encodes exactly; GPU frames
+	/// are made at that size instead of being cropped here). `None` for
+	/// encoders that need the pixels in memory: all but VA-API.
+	fn gpu_alignment(&self) -> Option<(u32, u32)> {
+		None
+	}
+
+	/// Encode a frame that is in GPU memory, like
+	/// [`encode_with`](Self::encode_with). Only for encoders with a
+	/// [`gpu_alignment`](Self::gpu_alignment), and frames of a size that is a
+	/// multiple of it; the rest fail with `Error::CodecUnavailable`.
+	fn encode_gpu(
+		&mut self,
+		frame: &crate::GpuFrame,
+		force_keyframe: bool,
+		out: &mut dyn FnMut(EncodedChunk<'_>),
+	) -> Result<()> {
+		let _ = (frame, force_keyframe, out);
+		Err(Error::CodecUnavailable {
+			codec: self.codec(),
+			reason: format!("{} takes no frames in GPU memory", self.backend()),
+		})
+	}
 }
 
 /// A video decoder.
