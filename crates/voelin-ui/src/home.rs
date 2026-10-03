@@ -253,6 +253,13 @@ impl App {
 
 	/// List the recordings and clips (when the Library opens).
 	pub(crate) fn load_library(&mut self) {
+		// Sample data shows sample recordings, not the user's.
+		if self.demo_ui {
+			if let Some(ui) = self.ui.upgrade() {
+				ui.global::<Bridge>().set_recordings_dir("~/Videos/Voelin".into());
+			}
+			return;
+		}
 		let dir = self.recordings_dir();
 		let items = recordings_in(&dir);
 		vm::list::sync(&self.models.social.recordings, &items);

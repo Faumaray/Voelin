@@ -359,6 +359,7 @@ export component EventDialog inherits Modal {
         VerticalLayout {
             spacing: Theme.space-4;
             padding-right: Theme.space-3;
+            alignment: start;
             Field {
                 label: @tr("Title");
                 TextField { text <=> form.title; placeholder: @tr("Raid night"); label: @tr("Title"); }
@@ -376,6 +377,7 @@ export component EventDialog inherits Modal {
                 }
                 Field {
                     label: @tr("Ends (optional)");
+                    hint: @tr("Empty: no end");
                     TextField { text <=> form.end; placeholder: "2026-10-04 21:00"; icon: Icons.clock; label: @tr("Ends"); }
                 }
             }

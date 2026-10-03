@@ -67,7 +67,7 @@ impl App {
 				format!("#{}", name.unwrap_or_else(|| cid.to_string()))
 			}
 			ChatTarget::Server => "Server".into(),
-			ChatTarget::Private(uid) => format!("@{uid}"),
+			ChatTarget::Private(uid) => format!("@{}", self.peer_name(uid, None)),
 		};
 		let view = self.sessions.entry(id).or_default();
 		let index = match view.tabs.iter().position(|t| t.target == target) {
@@ -186,9 +186,20 @@ impl App {
 		complete: bool,
 	) {
 		let current = self.current == Some(id);
+		// A private chat is named after the peer, whoever wrote first.
+		let peer = match target {
+			ChatTarget::Private(uid) => Some(format!(
+				"@{}",
+				self.peer_name(
+					uid,
+					messages.iter().find(|m| m.message.author_uid.as_deref() == Some(uid.as_str()))
+				)
+			)),
+			_ => None,
+		};
 		let view = self.sessions.entry(id).or_default();
 		let author = messages.first().map_or("", |m| m.message.author_name.as_str());
-		let title = Self::tab_title(view, target, author);
+		let title = peer.unwrap_or_else(|| Self::tab_title(view, target, author));
 		let index = Self::tab_for(view, target, || title);
 		let shown = current && view.current_tab == index;
 		let tab = &mut view.tabs[index];

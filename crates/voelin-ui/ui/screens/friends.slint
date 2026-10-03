@@ -133,7 +133,8 @@ export component FriendsPage inherits VerticalLayout {
     in property <bool> compact;
     padding: compact ? Theme.space-4 : Theme.space-6;
     spacing: Theme.space-4;
-    HorizontalLayout {
+    // The phone's top bar names the page.
+    if !root.compact: HorizontalLayout {
         spacing: Theme.space-4;
         if !root.compact: Icon {
             source: Icons.users;
