@@ -8,8 +8,9 @@ MediaTime::new(frame.pts_90khz, Frequency::NINETY_KHZ), data)`), and received
 `MediaFrame`s go to `VideoDecoder::decode`.
 
 The Stream Studio (`studio`: scenes of sources composited into the stream's
-video, recording, a replay buffer, WHIP) is described in
-[studio.md](studio.md).
+video, cameras among them (MJPEG ones decoded on a thread of their own,
+Media Foundation on Windows); recording, a replay buffer, WHIP and RTMP) is
+described in [studio.md](studio.md).
 
 ## API overview
 
@@ -988,6 +989,8 @@ has not run on Windows yet.
 | `wayland-client`, `wayland-protocols`, `wayland-protocols-wlr` | MIT | wlroots capture |
 | `criterion` | Apache-2.0 OR MIT | benchmarks only (dev-dependency) |
 | `ashpd`, `pipewire`, `libspa` / libpipewire | MIT | libpipewire is dynamic |
+| `zune-jpeg`, `zune-core` | MIT OR Apache-2.0 OR Zlib | the studio's MJPEG cameras (`pipewire`) |
+| `tract-onnx`; PP-HumanSeg (ONNX model) | MIT OR Apache-2.0; Apache-2.0 | the studio's person segmentation (`segment`); the model is bundled |
 | `windows-capture`, `wasapi`, `windows` | MIT (`windows`: MIT OR Apache-2.0) | Windows only |
 | FFmpeg (libavcodec, libavutil, libavformat) | LGPL-2.1+ (GPL-2+ in builds with x264 and other GPL parts) | the user's installed libraries, loaded at runtime; never linked or shipped |
 | libva | MIT | the user's `libva.so.2` (the one FFmpeg's VA-API support uses), loaded at runtime for the GPU colour conversion; never linked or shipped |
