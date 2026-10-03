@@ -14,6 +14,7 @@ pub mod dtls;
 pub mod feedback;
 pub mod h264;
 pub mod layer;
+pub mod mdns;
 pub mod peer;
 pub mod proto;
 pub mod session;

@@ -34,7 +34,7 @@ use tracing::{debug, trace, warn};
 use crate::dtls::{self, NegotiatedProfile, SrtpProfile};
 use crate::h264::{self, H264Profile};
 use crate::layer::LayerSpec;
-use crate::stun;
+use crate::{mdns, stun};
 
 /// Initial bandwidth estimate of a streamer's peer without
 /// [`OfferOptions::start_bitrate`].
@@ -42,6 +42,9 @@ pub const DEFAULT_START_BITRATE: u64 = 1_000_000;
 
 /// Socket buffers a peer asks for by default ([`PeerConfig::udp_buffer`]).
 pub const DEFAULT_UDP_BUFFER: usize = 4 << 20;
+
+/// How long an mDNS candidate's name is asked for.
+const MDNS_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// How long a connected viewer waits for video by default
 /// ([`PeerConfig::stall_timeout`]): a streamer sends a keyframe as soon as
@@ -444,12 +447,35 @@ impl Peer {
 				codecs.push(*c);
 			}
 		}
-		let offer = SdpOffer::from_sdp_string(offer).map_err(|e| PeerError::Sdp(e.to_string()))?;
+		let parsed = SdpOffer::from_sdp_string(offer).map_err(|e| PeerError::Sdp(e.to_string()))?;
 		let (mut rtc, srtp_profile) = build_rtc(config, &codecs, false, None);
 		let net = Net::bind(config, &mut rtc)?;
-		let answer = rtc.sdp_api().accept_offer(offer)?;
+		let answer = rtc.sdp_api().accept_offer(parsed)?;
 		let peer = Self::spawn(rtc, net, config, None, Vec::new(), srtp_profile);
+		peer.resolve_mdns(offer);
 		Ok((peer, answer.to_sdp_string()))
+	}
+
+	/// Resolve the mDNS names of the candidates in `sdp` (a whole SDP or one
+	/// candidate line) in the background and add them as plain candidates:
+	/// peers that hide their host addresses (browsers, other libwebrtc
+	/// builds) can then still connect on a LAN. ICE takes whichever pair
+	/// works, these or the others.
+	fn resolve_mdns(&self, sdp: &str) {
+		for line in sdp.lines() {
+			let Some(name) = mdns::candidate_name(line) else { continue };
+			let (name, line, cmd) = (name.to_owned(), line.to_owned(), self.cmd.clone());
+			tokio::spawn(async move {
+				match mdns::resolve(&name, MDNS_TIMEOUT).await {
+					Some(ip) => {
+						debug!(name, %ip, "mDNS candidate resolved");
+						let _ =
+							cmd.send(Cmd::RemoteCandidate(line.replace(&name, &ip.to_string())));
+					}
+					None => debug!(name, "mDNS candidate not resolved"),
+				}
+			});
+		}
 	}
 
 	fn spawn(
@@ -483,7 +509,9 @@ impl Peer {
 	pub async fn accept_answer(&self, sdp: &str) -> Result<(), PeerError> {
 		let (tx, rx) = oneshot::channel();
 		self.cmd.send(Cmd::Answer(sdp.to_owned(), tx)).map_err(|_| PeerError::Closed)?;
-		rx.await.map_err(|_| PeerError::Closed)?
+		rx.await.map_err(|_| PeerError::Closed)??;
+		self.resolve_mdns(sdp);
+		Ok(())
 	}
 
 	/// Viewer side: answer a new offer of the streamer on this connection
@@ -493,12 +521,19 @@ impl Peer {
 	pub async fn renegotiate(&self, offer: &str) -> Result<String, PeerError> {
 		let (tx, rx) = oneshot::channel();
 		self.cmd.send(Cmd::Offer(offer.to_owned(), tx)).map_err(|_| PeerError::Closed)?;
-		rx.await.map_err(|_| PeerError::Closed)?
+		let answer = rx.await.map_err(|_| PeerError::Closed)??;
+		self.resolve_mdns(offer);
+		Ok(answer)
 	}
 
-	/// Add a trickled remote candidate (`candidate:...`, `a=` prefix optional).
+	/// Add a trickled remote candidate (`candidate:...`, `a=` prefix
+	/// optional); one with an mDNS name once it is resolved.
 	pub fn add_remote_candidate(&self, candidate: &str) {
-		let _ = self.cmd.send(Cmd::RemoteCandidate(candidate.to_owned()));
+		if mdns::candidate_name(candidate).is_some() {
+			self.resolve_mdns(candidate);
+		} else {
+			let _ = self.cmd.send(Cmd::RemoteCandidate(candidate.to_owned()));
+		}
 	}
 
 	/// Send one encoded frame (streamer). Dropped until connected.

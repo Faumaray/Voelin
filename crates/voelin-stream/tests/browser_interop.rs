@@ -315,6 +315,63 @@ async fn browser_renegotiates_with_rust() {
 	browser.quit().await;
 }
 
+/// Chromium with its host addresses behind mDNS names (`<uuid>.local`, as
+/// without camera or microphone permission) and no STUN: the names are
+/// its only candidates. Our candidates are kept from it, so it cannot
+/// start the checks itself (and learn our address from them): the
+/// connection comes up only if our peers resolve its names by a multicast
+/// DNS query and reach it, as streamer (the names in the browser's answer)
+/// and as viewer (in its offer). Then the media flows.
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_mdns_candidates_connect() {
+	if !enabled() {
+		eprintln!("skipped: set VOELIN_INTEROP=1 (needs node, Playwright and Chromium)");
+		return;
+	}
+	let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
+	let mut browser = Browser::start_with_mdns().await;
+	let only_mdns = |sdp: &str| {
+		let candidates: Vec<&str> = sdp.lines().filter(|l| l.starts_with("a=candidate:")).collect();
+		!candidates.is_empty() && candidates.iter().all(|l| l.contains(".local "))
+	};
+	let without_candidates = |sdp: &str| -> String {
+		sdp.split_inclusive('\n').filter(|l| !l.starts_with("a=candidate:")).collect()
+	};
+	let config = PeerConfig::loopback();
+
+	// Our streamer, the browser's answer with mDNS names.
+	let (mut peer, offer) = Peer::offer(&config, "mdns").await.unwrap();
+	let offer = without_candidates(&offer);
+	let answer = browser.call(json!({ "op": "answer", "sdp": offer })).await;
+	let answer = answer["sdp"].as_str().unwrap();
+	assert!(only_mdns(answer), "the browser's answer:\n{answer}");
+	peer.accept_answer(answer).await.unwrap();
+	wait_connected(&mut peer).await;
+	let mut source = SyntheticSource::new(30, 3000, false);
+	let mut frames = Vec::new();
+	let end = Instant::now() + Duration::from_secs(2);
+	while Instant::now() < end {
+		source.poll_frames(Instant::now(), &mut frames);
+		for f in frames.drain(..) {
+			peer.write(f.kind, f.time, f.data);
+		}
+		tokio::time::sleep(Duration::from_millis(10)).await;
+	}
+	let stats = browser.call(json!({ "op": "stats" })).await;
+	assert!(stats["inbound"]["video"]["framesDecoded"].as_u64().unwrap() > 20, "{stats:#}");
+
+	// The browser streams, its offer with mDNS names; our viewer answers.
+	let offer = browser.call(json!({ "op": "offer", "codec": "VP8", "trickle": false })).await;
+	let offer = offer["sdp"].as_str().unwrap();
+	assert!(only_mdns(offer), "the browser's offer:\n{offer}");
+	let (mut peer, answer) = Peer::answer(&config, offer).await.unwrap();
+	browser.call(json!({ "op": "accept", "sdp": without_candidates(&answer) })).await;
+	wait_connected(&mut peer).await;
+	let received = receive(&mut peer, Duration::from_secs(5), 20).await;
+	assert!(received.video.get(Codec::Vp8) >= 20, "{:?}", received.video);
+	browser.quit().await;
+}
+
 /// Our streamer peer to Chromium through a relay that passes the handshake
 /// and drops SRTP once AES-GCM was selected, as an official viewer whose
 /// SRTP fails after the handshake: synthetic media for `seconds`; whether

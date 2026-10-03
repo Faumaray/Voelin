@@ -190,14 +190,16 @@ window.peer = {
 `;
 
 async function main() {
+	const args = ['--autoplay-policy=no-user-gesture-required'];
+	// Real host candidates instead of mDNS names (no getUserMedia permission
+	// here), unless the test is about mDNS names (VOELIN_BROWSER_MDNS=1).
+	if (process.env.VOELIN_BROWSER_MDNS !== '1') {
+		args.push('--disable-features=WebRtcHideLocalIpsWithMdns');
+	}
 	const browser = await chromium.launch({
 		headless: true,
 		executablePath: process.env.VOELIN_CHROMIUM || undefined,
-		args: [
-			// Real host candidates instead of mDNS names (no getUserMedia permission here).
-			'--disable-features=WebRtcHideLocalIpsWithMdns',
-			'--autoplay-policy=no-user-gesture-required',
-		],
+		args,
 	});
 	const page = await browser.newPage();
 	page.on('console', (m) => process.stderr.write('[page] ' + m.text() + '\n'));
