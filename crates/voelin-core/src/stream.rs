@@ -30,7 +30,7 @@ use voelin_stream::{
 pub use voelin_stream::{
 	Codec, EncodedFrame, EndReason, FrameSource, Frequency, LayerId, LayerSet, LayerSpec,
 	LeaveReason, MediaFrame, MediaKind, MediaTime, PeerConfig, SrtpProfile, StreamInfo, StreamKind,
-	StreamSetup, SyntheticSource, VideoCodec, ViewerInfo, ViewerState,
+	StreamSetup, SyntheticSource, VideoCodec, VideoFormat, ViewerInfo, ViewerState,
 };
 
 use crate::audio::{AudioHandle, AudioIn};
@@ -92,16 +92,16 @@ impl StreamSink {
 		self.live.load(Ordering::Relaxed) && self.tx.send(StreamInput::Frame(frame)).is_ok()
 	}
 
-	/// Send one video frame encoded in `codec`: only viewers whose answer
-	/// chose `codec` get it.
-	pub fn send_video(&self, frame: EncodedFrame, codec: VideoCodec) -> bool {
+	/// Send one video frame encoded in `format`: only viewers whose answer
+	/// chose that codec (and H.264 profile) get it.
+	pub fn send_video(&self, frame: EncodedFrame, format: VideoFormat) -> bool {
 		self.live.load(Ordering::Relaxed)
-			&& self.tx.send(StreamInput::VideoFrame(frame, codec)).is_ok()
+			&& self.tx.send(StreamInput::VideoFrame(frame, format)).is_ok()
 	}
 
-	/// Whether a viewer's answer chose `codec`.
-	pub fn has_video_codec(&self, codec: VideoCodec) -> bool {
-		self.feedback.has_codec(codec)
+	/// Whether a viewer's answer chose `format`.
+	pub fn has_video_codec(&self, format: VideoFormat) -> bool {
+		self.feedback.has_codec(format)
 	}
 
 	/// Whether a viewer asked for a keyframe of any layer since the last
@@ -172,8 +172,8 @@ pub(crate) enum StreamInput {
 	/// SRTP profile order of new connections.
 	SrtpProfiles(Vec<SrtpProfile>),
 	Frame(EncodedFrame),
-	/// A video frame for the viewers that chose its codec.
-	VideoFrame(EncodedFrame, VideoCodec),
+	/// A video frame for the viewers that chose its codec and H.264 profile.
+	VideoFrame(EncodedFrame, VideoFormat),
 	Notification(StreamNotification),
 	RequestFailed(Request, String),
 	/// Clients on the server: channel and `client_is_streaming`.
@@ -397,8 +397,8 @@ impl StreamTask {
 				self.streams.write_frame(&frame);
 				Ok(())
 			}
-			StreamInput::VideoFrame(frame, codec) => {
-				self.streams.write_frame_in(&frame, Some(codec));
+			StreamInput::VideoFrame(frame, format) => {
+				self.streams.write_frame_in(&frame, Some(format));
 				Ok(())
 			}
 			StreamInput::Notification(n) => {

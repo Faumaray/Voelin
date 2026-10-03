@@ -92,6 +92,73 @@ impl std::fmt::Display for VideoCodec {
 	}
 }
 
+/// A video codec as an answer chose it, with the H.264 profile: the
+/// streamer encodes each format with an encoder of its own and sends a
+/// viewer only frames of its format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum VideoFormat {
+	Vp8,
+	Vp9,
+	H264(H264Profile),
+	Av1,
+	H265,
+}
+
+impl VideoFormat {
+	pub const ALL: [Self; 6] = [
+		Self::Vp8,
+		Self::Vp9,
+		Self::H264(H264Profile::ConstrainedHigh),
+		Self::H264(H264Profile::ConstrainedBaseline),
+		Self::Av1,
+		Self::H265,
+	];
+
+	pub fn codec(self) -> VideoCodec {
+		match self {
+			Self::Vp8 => VideoCodec::Vp8,
+			Self::Vp9 => VideoCodec::Vp9,
+			Self::H264(_) => VideoCodec::H264,
+			Self::Av1 => VideoCodec::Av1,
+			Self::H265 => VideoCodec::H265,
+		}
+	}
+
+	/// Bit of this format in a set of formats ([`crate::LayerFeedback`]):
+	/// the codec's, and one more for H.264 Constrained Baseline.
+	pub fn bit(self) -> u8 {
+		match self {
+			Self::H264(H264Profile::ConstrainedBaseline) => 1 << VideoCodec::ALL.len(),
+			other => other.codec().bit(),
+		}
+	}
+}
+
+/// H.264 in Constrained High, what our encoders make unless told otherwise.
+impl From<VideoCodec> for VideoFormat {
+	fn from(codec: VideoCodec) -> Self {
+		match codec {
+			VideoCodec::Vp8 => Self::Vp8,
+			VideoCodec::Vp9 => Self::Vp9,
+			VideoCodec::H264 => Self::H264(H264Profile::ConstrainedHigh),
+			VideoCodec::Av1 => Self::Av1,
+			VideoCodec::H265 => Self::H265,
+		}
+	}
+}
+
+impl std::fmt::Display for VideoFormat {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::H264(H264Profile::ConstrainedHigh) => f.write_str("H264 Constrained High"),
+			Self::H264(H264Profile::ConstrainedBaseline) => {
+				f.write_str("H264 Constrained Baseline")
+			}
+			other => other.codec().fmt(f),
+		}
+	}
+}
+
 #[derive(Clone, Debug)]
 pub struct PeerConfig {
 	/// Local addresses for host candidates. Empty: the primary IPv4 address.
@@ -123,10 +190,13 @@ pub struct PeerConfig {
 	/// simulcast leaves the peer unable to send video. Official TeamSpeak
 	/// viewers get a plain offer and one layer at a time.
 	pub simulcast: bool,
-	/// H.264 `profile-level-id` of the offer: Constrained High at the level
-	/// the stream needs ([`set_h264_format`](Self::set_h264_format)); level
-	/// 3.1 by default.
-	pub h264_profile_level_id: u32,
+	/// H.264 `profile-level-id`s of the offer, best first: Constrained High,
+	/// then Constrained Baseline for peers that take only that (headless
+	/// Chromium and other libwebrtc builds without a High decoder), each at
+	/// the level the stream needs ([`set_h264_format`](Self::set_h264_format));
+	/// level 3.1 by default. A viewer gets frames of the profile its answer
+	/// chose ([`PeerEvent::VideoCodec`]). At most two are offered.
+	pub h264_profile_level_ids: Vec<u32>,
 }
 
 impl Default for PeerConfig {
@@ -141,7 +211,10 @@ impl Default for PeerConfig {
 			srtp_profiles: SrtpProfile::DEFAULT_ORDER.to_vec(),
 			bandwidth_estimation: true,
 			simulcast: false,
-			h264_profile_level_id: H264_CONSTRAINED_HIGH,
+			h264_profile_level_ids: H264Profile::LADDER
+				.iter()
+				.map(|p| h264::profile_level_id(*p, h264::MIN_OFFER_LEVEL))
+				.collect(),
 		}
 	}
 }
@@ -156,19 +229,14 @@ impl PeerConfig {
 		}
 	}
 
-	/// Offer H.264 in `profile` at the level a `width` x `height` stream at
-	/// `fps` and `bitrate` bit/s needs (at least 3.1, see
-	/// [`crate::h264::offer_profile_level_id`]).
-	pub fn set_h264_format(
-		&mut self,
-		profile: H264Profile,
-		width: u32,
-		height: u32,
-		fps: u32,
-		bitrate: u64,
-	) {
-		self.h264_profile_level_id =
-			h264::offer_profile_level_id(profile, width, height, fps, bitrate);
+	/// Offer H.264 in both profiles ([`H264Profile::LADDER`]) at the levels
+	/// a `width` x `height` stream at `fps` and `bitrate` bit/s needs (at
+	/// least 3.1, see [`crate::h264::offer_profile_level_id`]).
+	pub fn set_h264_format(&mut self, width: u32, height: u32, fps: u32, bitrate: u64) {
+		self.h264_profile_level_ids = H264Profile::LADDER
+			.iter()
+			.map(|p| h264::offer_profile_level_id(*p, width, height, fps, bitrate))
+			.collect();
 	}
 }
 
@@ -231,9 +299,10 @@ pub enum PeerEvent {
 	/// The answer accepted RID simulcast: video goes out per layer with
 	/// these RIDs ([`Peer::write_rid`]).
 	Simulcast(Vec<Rid>),
-	/// The video codec the answer chose (streamer side): the viewer's first
-	/// one. Video written to this peer must be in it.
-	VideoCodec(VideoCodec),
+	/// The video codec the answer chose (streamer side), with the H.264
+	/// profile: the first of our offer the viewer took. Video written to
+	/// this peer must be in it.
+	VideoCodec(VideoFormat),
 	/// The connection is gone.
 	Closed,
 }
@@ -440,9 +509,11 @@ impl Drop for Peer {
 	}
 }
 
-/// H.264 Constrained High, level 3.1: reportedly the only H.264 profile the
-/// TeamSpeak client decodes; str0m's defaults lack it.
-const H264_CONSTRAINED_HIGH: u32 = 0x640c1f;
+/// Payload types (and their RTX) of the H.264 profiles an offer lists, in
+/// the order of [`PeerConfig::h264_profile_level_ids`]: 112 as before for
+/// Constrained High, which str0m's defaults lack, and 108, str0m's own for
+/// Constrained Baseline.
+const H264_PTS: [(u8, u8); 2] = [(112, 113), (108, 109)];
 
 /// The send simulcast of an offer: the layers with a RID, if at least two.
 fn simulcast_offer(layers: &[LayerSpec]) -> Option<Simulcast> {
@@ -474,10 +545,11 @@ fn simulcast_offer(layers: &[LayerSpec]) -> Option<Simulcast> {
 
 /// An RTC with Opus and `video` codecs, in this order of preference, our
 /// DTLS, and bandwidth estimation starting at `bwe` bit/s if given. An
-/// offer lists H.264 only as our encoders produce it (`profile-level-id`
-/// [`PeerConfig::h264_profile_level_id`], packetization mode 1): with
-/// str0m's other variants offered too, a viewer may answer a profile we
-/// never send. An answer takes every variant the offer has.
+/// offer lists H.264 only as our encoders produce it (the
+/// [`PeerConfig::h264_profile_level_ids`], packetization mode 1, best
+/// first): with str0m's other variants offered too, a viewer may answer a
+/// profile we never send. An answer takes str0m's variants and Constrained
+/// High, which they lack.
 fn build_rtc(
 	config: &PeerConfig,
 	video: &[VideoCodec],
@@ -492,12 +564,14 @@ fn build_rtc(
 			VideoCodec::Vp9 => rtc_config.enable_vp9(true),
 			VideoCodec::H264 => {
 				let mut c = if offer { rtc_config } else { rtc_config.enable_h264(true) };
-				c.codec_config().add_h264(
-					112.into(),
-					Some(113.into()),
-					true,
-					config.h264_profile_level_id,
-				);
+				let ids = config.h264_profile_level_ids.iter().copied().filter(|id| {
+					offer
+						|| H264Profile::from_profile_level_id(*id)
+							== Some(H264Profile::ConstrainedHigh)
+				});
+				for (id, (pt, rtx)) in ids.zip(H264_PTS) {
+					c.codec_config().add_h264(pt.into(), Some(rtx.into()), true, id);
+				}
 				c
 			}
 			VideoCodec::Av1 => rtc_config.enable_av1(true),
@@ -917,13 +991,21 @@ impl Task {
 		// The codec video is written in (see `find_writer`).
 		if let Some((mid, pt)) = self.find_writer(MediaKind::Video) {
 			self.writers.insert(MediaKind::Video, (mid, pt));
-			let codec = self.rtc.writer(mid).and_then(|w| {
-				let params = w.payload_params().find(|p| p.pt() == pt)?;
-				VideoCodec::from_codec(params.spec().codec)
+			let format = self.rtc.writer(mid).and_then(|w| {
+				let spec = w.payload_params().find(|p| p.pt() == pt)?.spec();
+				Some(match VideoCodec::from_codec(spec.codec)? {
+					VideoCodec::H264 => VideoFormat::H264(
+						spec.format
+							.profile_level_id
+							.and_then(H264Profile::from_profile_level_id)
+							.unwrap_or_default(),
+					),
+					codec => codec.into(),
+				})
 			});
-			if let Some(codec) = codec {
-				debug!(%codec, "the answer chose");
-				let _ = self.events.send(PeerEvent::VideoCodec(codec));
+			if let Some(format) = format {
+				debug!(%format, "the answer chose");
+				let _ = self.events.send(PeerEvent::VideoCodec(format));
 			}
 		}
 		Ok(())
@@ -991,10 +1073,24 @@ mod tests {
 			..PeerConfig::loopback()
 		};
 		let (_peer, offer) = Peer::offer(&streamer, "s").await.unwrap();
-		assert!(offer.contains("profile-level-id=640c1f"), "{offer}");
-		// Only the profile we encode: a viewer must not answer another.
-		let h264 = offer.lines().filter(|l| l.contains(" H264/90000")).count();
-		assert_eq!(h264, 1, "{offer}");
+		// Only the profiles we encode, best first: a viewer must not answer
+		// another.
+		let h264: Vec<&str> = offer
+			.lines()
+			.filter(|l| l.starts_with("a=fmtp:") && l.contains("profile-level-id"))
+			.collect();
+		assert_eq!(h264.len(), 2, "{offer}");
+		assert!(h264[0].contains("profile-level-id=640c1f"), "{offer}");
+		assert!(h264[1].contains("profile-level-id=42e01f"), "{offer}");
+		let pts: Vec<&str> = offer
+			.lines()
+			.find_map(|l| l.strip_prefix("m=video "))
+			.unwrap()
+			.split(' ')
+			.skip(2)
+			.collect();
+		let at = |pt: &str| pts.iter().position(|p| *p == pt).unwrap();
+		assert!(at("112") < at("108") && at("108") < at("96"), "{pts:?}");
 		let (_peer, answer) = Peer::answer(&PeerConfig::loopback(), &offer).await.unwrap();
 		assert_eq!(offered_video_codecs(&answer)[0], VideoCodec::H264, "{answer}");
 		let vp8_only =
@@ -1067,39 +1163,79 @@ mod tests {
 		);
 	}
 
+	/// The format the answer chose, as the streamer's peer reports it.
+	async fn answered_format(peer: &mut Peer) -> VideoFormat {
+		loop {
+			match peer.next_event().await.unwrap() {
+				PeerEvent::VideoCodec(format) => return format,
+				PeerEvent::Closed => panic!("closed"),
+				_ => {}
+			}
+		}
+	}
+
 	/// Several codecs offered: the streamer learns which one each viewer's
-	/// answer chose; H.264 carries the level the stream needs.
+	/// answer chose; H.264 carries the level the stream needs, in both
+	/// profiles.
 	#[tokio::test]
 	async fn streamer_learns_the_answered_codec() {
 		let mut streamer = PeerConfig {
 			video_codecs: vec![VideoCodec::Vp8, VideoCodec::H264, VideoCodec::H265],
 			..PeerConfig::loopback()
 		};
-		streamer.set_h264_format(H264Profile::ConstrainedHigh, 1920, 1080, 60, 8_000_000);
+		streamer.set_h264_format(1920, 1080, 60, 8_000_000);
 		let (mut peer, offer) = Peer::offer(&streamer, "s").await.unwrap();
 		assert!(offer.contains("profile-level-id=640c2a"), "{offer}");
+		assert!(offer.contains("profile-level-id=42e02a"), "{offer}");
 		assert!(offer.contains("H265/90000"), "{offer}");
+		let high = VideoFormat::H264(H264Profile::ConstrainedHigh);
 		let viewers = [
-			(vec![VideoCodec::Vp8, VideoCodec::H264], VideoCodec::Vp8),
-			(vec![VideoCodec::H264], VideoCodec::H264),
-			(vec![VideoCodec::H265], VideoCodec::H265),
+			(vec![VideoCodec::Vp8, VideoCodec::H264], VideoFormat::Vp8),
+			// Our viewers take both H.264 profiles: the better one.
+			(vec![VideoCodec::H264], high),
+			(vec![VideoCodec::H265], VideoFormat::H265),
 		];
 		for (accept, expected) in viewers {
 			let (mut streamer_peer, offer) = Peer::offer(&streamer, "s").await.unwrap();
 			let config = PeerConfig { accept_video_codecs: accept, ..PeerConfig::loopback() };
 			let (_viewer, answer) = Peer::answer(&config, &offer).await.unwrap();
 			streamer_peer.accept_answer(&answer).await.unwrap();
-			let codec = loop {
-				match streamer_peer.next_event().await.unwrap() {
-					PeerEvent::VideoCodec(codec) => break codec,
-					PeerEvent::Closed => panic!("closed"),
-					_ => {}
-				}
-			};
-			assert_eq!(codec, expected);
+			assert_eq!(answered_format(&mut streamer_peer).await, expected);
 		}
 		peer.close();
 		while peer.next_event().await.is_some() {}
+	}
+
+	/// A viewer whose H.264 is Constrained Baseline only (headless
+	/// Chromium's libwebrtc lists no High profile) answers the fallback
+	/// payload type of our H.264 ladder, and the streamer learns the profile.
+	#[tokio::test]
+	async fn a_baseline_only_viewer_gets_the_fallback_profile() {
+		let streamer =
+			PeerConfig { video_codecs: vec![VideoCodec::H264], ..PeerConfig::loopback() };
+		let (mut streamer_peer, offer) = Peer::offer(&streamer, "s").await.unwrap();
+		let mut viewer = RtcConfig::new().clear_codecs().enable_opus(true);
+		viewer.codec_config().add_h264(102.into(), Some(103.into()), true, 0x42e01f);
+		let mut viewer = viewer.build(Instant::now());
+		let offer = SdpOffer::from_sdp_string(&offer).unwrap();
+		let answer = viewer.sdp_api().accept_offer(offer).unwrap().to_sdp_string();
+		assert!(answer.contains("profile-level-id=42e01f"), "{answer}");
+		assert!(!answer.contains("profile-level-id=640c"), "{answer}");
+		streamer_peer.accept_answer(&answer).await.unwrap();
+		assert_eq!(
+			answered_format(&mut streamer_peer).await,
+			VideoFormat::H264(H264Profile::ConstrainedBaseline)
+		);
+	}
+
+	#[test]
+	fn format_bits_are_distinct() {
+		let bits = VideoFormat::ALL.iter().fold(0u8, |bits, f| {
+			assert_eq!(bits & f.bit(), 0, "{f}");
+			bits | f.bit()
+		});
+		assert_eq!(bits.count_ones(), 6);
+		assert_eq!(VideoFormat::from(VideoCodec::H264).bit(), VideoCodec::H264.bit());
 	}
 
 	/// The SDP lines that make up the media description (not the random ids,

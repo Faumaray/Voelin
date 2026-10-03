@@ -56,13 +56,13 @@ use voelin_media::scale::Pyramid;
 use voelin_media::studio::Studio;
 use voelin_media::studio::output::{Packet, Track};
 use voelin_media::{
-	Codec, Codecs, ContentHint, EncodedChunk, EncoderConfig, FrameRef, GpuFrame, VideoEncoder,
-	VideoFrame,
+	Codec, Codecs, ContentHint, EncodedChunk, EncoderConfig, FrameRef, GpuFrame, H264Profile,
+	VideoEncoder, VideoFrame,
 };
 pub use voelin_media::{EncoderBackend, EncoderPreference};
 use voelin_stream::{
 	EncodedFrame, FrameSource, Frequency, LayerId, LayerSet, LayerSpec, MediaFrame, MediaKind,
-	MediaTime, PeerConfig, VideoCodec,
+	MediaTime, PeerConfig, VideoCodec, VideoFormat,
 };
 
 use crate::settings::{AudioSourceKindSetting, AudioSourceSetting};
@@ -111,6 +111,17 @@ pub fn media_codec(codec: VideoCodec) -> Codec {
 		VideoCodec::H264 => Codec::H264,
 		VideoCodec::Av1 => Codec::Av1,
 		VideoCodec::H265 => Codec::H265,
+	}
+}
+
+/// The H.264 profile an encoder of `format` makes (Constrained High for
+/// every other codec, where it means nothing).
+fn h264_profile(format: VideoFormat) -> H264Profile {
+	match format {
+		VideoFormat::H264(voelin_stream::H264Profile::ConstrainedBaseline) => {
+			H264Profile::ConstrainedBaseline
+		}
+		_ => H264Profile::ConstrainedHigh,
 	}
 }
 
@@ -255,16 +266,16 @@ pub trait MediaSink: Send + Sync {
 		None
 	}
 
-	/// Send one video frame encoded in `codec`: it goes to the viewers whose
-	/// answer chose `codec`.
-	fn send_video(&self, frame: EncodedFrame, codec: Codec) -> bool {
-		let _ = codec;
+	/// Send one video frame encoded in `format`: it goes to the viewers
+	/// whose answer chose that codec (and H.264 profile).
+	fn send_video(&self, frame: EncodedFrame, format: VideoFormat) -> bool {
+		let _ = format;
 		self.send(frame)
 	}
 
-	/// Adds to `out` the video codecs the viewers chose; none (the default)
-	/// means only the stream codec is sent.
-	fn video_codecs(&self, out: &mut Vec<Codec>) {
+	/// Adds to `out` the video codecs (with the H.264 profile) the viewers
+	/// chose; none (the default) means only the stream codec is sent.
+	fn video_codecs(&self, out: &mut Vec<VideoFormat>) {
 		let _ = out;
 	}
 }
@@ -274,16 +285,12 @@ impl MediaSink for StreamSink {
 		StreamSink::send(self, frame)
 	}
 
-	fn send_video(&self, frame: EncodedFrame, codec: Codec) -> bool {
-		StreamSink::send_video(self, frame, video_codec(codec))
+	fn send_video(&self, frame: EncodedFrame, format: VideoFormat) -> bool {
+		StreamSink::send_video(self, frame, format)
 	}
 
-	fn video_codecs(&self, out: &mut Vec<Codec>) {
-		for codec in VideoCodec::ALL {
-			if self.has_video_codec(codec) {
-				out.push(media_codec(codec));
-			}
-		}
+	fn video_codecs(&self, out: &mut Vec<VideoFormat>) {
+		out.extend(VideoFormat::ALL.into_iter().filter(|f| self.has_video_codec(*f)));
 	}
 
 	fn take_keyframe_request(&self) -> bool {
@@ -1867,6 +1874,8 @@ enum ToStudio<'a> {
 
 /// One encoder of a layer: its keyframe and bitrate state.
 struct LayerEncoder {
+	/// What viewers get from it: the codec, and H.264 in one profile.
+	format: VideoFormat,
 	codec: Codec,
 	/// `None`: creating it failed (not retried until it is needed anew).
 	encoder: Option<Box<dyn VideoEncoder>>,
@@ -1879,8 +1888,16 @@ struct LayerEncoder {
 }
 
 impl LayerEncoder {
-	fn new(encoder: Box<dyn VideoEncoder>, fps: u32) -> Self {
-		Self { codec: encoder.codec(), encoder: Some(encoder), keyframe_due: true, bitrate: 0, fps }
+	fn new(encoder: Box<dyn VideoEncoder>, format: VideoFormat, fps: u32) -> Self {
+		let codec = encoder.codec();
+		Self { format, codec, encoder: Some(encoder), keyframe_due: true, bitrate: 0, fps }
+	}
+
+	/// The stream codec's encoder: H.264 in Constrained High, as
+	/// [`new_encoder`] makes it.
+	fn primary(encoder: Box<dyn VideoEncoder>, fps: u32) -> Self {
+		let format = video_codec(encoder.codec()).into();
+		Self::new(encoder, format, fps)
 	}
 
 	/// Encode `picture` and hand the frames to `sink` (and `studio`'s
@@ -1941,7 +1958,7 @@ impl LayerEncoder {
 				layer: layer.id,
 				keyframe: chunk.keyframe,
 			};
-			if sink.send_video(encoded, codec) {
+			if sink.send_video(encoded, self.format) {
 				layer.frames.fetch_add(1, Ordering::Relaxed);
 				layer.keyframes.fetch_add(u64::from(chunk.keyframe), Ordering::Relaxed);
 				layer.bytes.fetch_add(chunk.data.len() as u64, Ordering::Relaxed);
@@ -1963,20 +1980,27 @@ impl LayerEncoder {
 	}
 }
 
-/// An encoder of `codec` for `layer` (a codec a viewer chose), with the
-/// streamer's current codecs and preference.
-fn extra_encoder(shared: &Shared, layer: &Layer, codec: Codec) -> Option<Box<dyn VideoEncoder>> {
+/// An encoder of `format` for `layer` (a codec and H.264 profile a viewer
+/// chose), with the streamer's current codecs and preference.
+fn extra_encoder(
+	shared: &Shared,
+	layer: &Layer,
+	format: VideoFormat,
+) -> Option<Box<dyn VideoEncoder>> {
 	let guard = lock(&shared.encoders);
 	let (codecs, preference) = guard.as_ref()?;
 	let spec = lock(&layer.spec).clone();
-	let config = encoder_config(&spec, layer.fps.load(Ordering::Relaxed), layer.threads);
-	match codecs.new_encoder_preferring(codec, config, preference) {
+	let config = EncoderConfig {
+		h264_profile: h264_profile(format),
+		..encoder_config(&spec, layer.fps.load(Ordering::Relaxed), layer.threads)
+	};
+	match codecs.new_encoder_preferring(media_codec(format.codec()), config, preference) {
 		Ok(encoder) => {
-			debug!(layer = layer.id, %codec, backend = %encoder.backend(), "encoder for viewers");
+			debug!(layer = layer.id, %format, backend = %encoder.backend(), "encoder for viewers");
 			Some(encoder)
 		}
 		Err(e) => {
-			warn!(layer = layer.id, %codec, "no encoder for viewers of this codec: {e}");
+			warn!(layer = layer.id, %format, "no encoder for viewers of this codec: {e}");
 			None
 		}
 	}
@@ -1987,13 +2011,14 @@ fn extra_encoder(shared: &Shared, layer: &Layer, codec: Codec) -> Option<Box<dyn
 /// dropped when none does).
 fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 	let fps = layer.fps.load(Ordering::Relaxed);
-	let mut primary = LayerEncoder::new(encoder, fps);
+	let mut primary = LayerEncoder::primary(encoder, fps);
 	// The first frame is a keyframe anyway; no need to insist.
 	primary.keyframe_due = false;
 	primary.bitrate = layer.bitrate.load(Ordering::Relaxed);
 	*lock(&layer.backend) = primary.encoder.as_ref().map(|e| e.backend());
 	let mut extra: Vec<LayerEncoder> = Vec::new();
-	let mut wanted: Vec<Codec> = Vec::new();
+	let mut wanted: Vec<VideoFormat> = Vec::new();
+	let mut studio_codecs: Vec<Codec> = Vec::new();
 	let mut generation = shared.encoders_generation.load(Ordering::Relaxed);
 	// Whether the stream codec was encoded for the last frame.
 	let mut primary_on = true;
@@ -2013,7 +2038,7 @@ fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 		if let Some(next) = lock(&layer.next_encoder).take() {
 			// Another codec: its first frame is a keyframe anyway.
 			*lock(&layer.backend) = Some(next.backend());
-			primary = LayerEncoder::new(next, primary.fps);
+			primary = LayerEncoder::primary(next, primary.fps);
 		}
 		let Some(sink) = shared.sink() else { continue };
 		shared.poll_keyframes(&*sink);
@@ -2026,29 +2051,41 @@ fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 		// With a studio, the stream codec for its recordings and replay
 		// buffer, and the codecs its outputs of this layer need (RTMP: H.264).
 		if let Some(studio) = &shared.studio {
-			if !wanted.contains(&primary.codec) {
-				wanted.insert(0, primary.codec);
+			if !wanted.contains(&primary.format) {
+				wanted.insert(0, primary.format);
 			}
-			studio.output_codecs(u32::from(layer.id), &mut wanted);
+			studio_codecs.clear();
+			studio.output_codecs(u32::from(layer.id), &mut studio_codecs);
+			for &codec in &studio_codecs {
+				let format = video_codec(codec).into();
+				if !wanted.contains(&format) {
+					wanted.push(format);
+				}
+			}
 		}
 		let now = shared.encoders_generation.load(Ordering::Relaxed);
 		if now != generation {
 			generation = now;
 			extra.clear();
 		}
-		extra.retain(|e| wanted.contains(&e.codec));
-		for &codec in &wanted {
-			if codec != primary.codec && !extra.iter().any(|e| e.codec == codec) {
+		extra.retain(|e| wanted.contains(&e.format));
+		for &format in &wanted {
+			if format != primary.format && !extra.iter().any(|e| e.format == format) {
 				let fps = layer.fps.load(Ordering::Relaxed);
-				extra.push(match extra_encoder(shared, layer, codec) {
-					Some(encoder) => LayerEncoder::new(encoder, fps),
-					None => {
-						LayerEncoder { codec, encoder: None, keyframe_due: false, bitrate: 0, fps }
-					}
+				extra.push(match extra_encoder(shared, layer, format) {
+					Some(encoder) => LayerEncoder::new(encoder, format, fps),
+					None => LayerEncoder {
+						format,
+						codec: media_codec(format.codec()),
+						encoder: None,
+						keyframe_due: false,
+						bitrate: 0,
+						fps,
+					},
 				});
 			}
 		}
-		let primary_wanted = wanted.is_empty() || wanted.contains(&primary.codec);
+		let primary_wanted = wanted.is_empty() || wanted.contains(&primary.format);
 		if primary_wanted && !primary_on {
 			// Frames were skipped: the next one must stand alone.
 			primary.keyframe_due = true;
@@ -2058,7 +2095,11 @@ fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 			let mut codecs = lock(&layer.codecs);
 			codecs.clear();
 			codecs.extend(primary_on.then_some(primary.codec));
-			codecs.extend(extra.iter().filter(|e| e.encoder.is_some()).map(|e| e.codec));
+			for e in extra.iter().filter(|e| e.encoder.is_some()) {
+				if !codecs.contains(&e.codec) {
+					codecs.push(e.codec);
+				}
+			}
 		}
 		// The stream codec's encoder counts even while nobody takes it, so
 		// the capture does not switch paths as viewers come and go.
@@ -2911,11 +2952,11 @@ mod tests {
 	}
 
 	/// A sink whose viewers chose `codecs`; keeps every video frame with its
-	/// codec.
+	/// format.
 	#[derive(Default)]
 	struct CodecSink {
-		codecs: Mutex<Vec<Codec>>,
-		frames: Mutex<Vec<(Codec, EncodedFrame)>>,
+		codecs: Mutex<Vec<VideoFormat>>,
+		frames: Mutex<Vec<(VideoFormat, EncodedFrame)>>,
 		keyframe: AtomicBool,
 	}
 
@@ -2924,8 +2965,8 @@ mod tests {
 			true
 		}
 
-		fn send_video(&self, frame: EncodedFrame, codec: Codec) -> bool {
-			lock(&self.frames).push((codec, frame));
+		fn send_video(&self, frame: EncodedFrame, format: VideoFormat) -> bool {
+			lock(&self.frames).push((format, frame));
 			true
 		}
 
@@ -2933,8 +2974,27 @@ mod tests {
 			self.keyframe.swap(false, Ordering::Relaxed)
 		}
 
-		fn video_codecs(&self, out: &mut Vec<Codec>) {
+		fn video_codecs(&self, out: &mut Vec<VideoFormat>) {
 			out.extend(lock(&self.codecs).iter());
+		}
+	}
+
+	impl CodecSink {
+		/// Wait until `count` frames of `format` arrived.
+		async fn wait_for(&self, format: VideoFormat, count: usize) {
+			let deadline = Instant::now() + Duration::from_secs(10);
+			loop {
+				let n = lock(&self.frames).iter().filter(|(f, _)| *f == format).count();
+				if n >= count {
+					return;
+				}
+				assert!(Instant::now() < deadline, "no {format} frames");
+				tokio::time::sleep(Duration::from_millis(20)).await;
+			}
+		}
+
+		fn count(&self, format: VideoFormat) -> usize {
+			lock(&self.frames).iter().filter(|(f, _)| *f == format).count()
 		}
 	}
 
@@ -2954,29 +3014,15 @@ mod tests {
 		let streamer = Streamer::start(&codecs, config).await.unwrap();
 		let sink = Arc::new(CodecSink::default());
 		streamer.attach(sink.clone());
-		let wait_for = |codec: Codec, count: usize| {
-			let sink = sink.clone();
-			async move {
-				let deadline = Instant::now() + Duration::from_secs(10);
-				loop {
-					let n = lock(&sink.frames).iter().filter(|(c, _)| *c == codec).count();
-					if n >= count {
-						return;
-					}
-					assert!(Instant::now() < deadline, "no {codec} frames");
-					tokio::time::sleep(Duration::from_millis(20)).await;
-				}
-			}
-		};
 		// Nobody chose yet: the stream codec.
-		wait_for(Codec::Vp8, 3).await;
+		sink.wait_for(VideoFormat::Vp8, 3).await;
 		// A VP9 viewer as well.
-		*lock(&sink.codecs) = vec![Codec::Vp8, Codec::Vp9];
-		wait_for(Codec::Vp9, 5).await;
+		*lock(&sink.codecs) = vec![VideoFormat::Vp8, VideoFormat::Vp9];
+		sink.wait_for(VideoFormat::Vp9, 5).await;
 		assert_eq!(streamer.stats().layers[0].codecs, [Codec::Vp8, Codec::Vp9]);
 		let vp9: Vec<EncodedFrame> = lock(&sink.frames)
 			.iter()
-			.filter(|(c, _)| *c == Codec::Vp9)
+			.filter(|(f, _)| *f == VideoFormat::Vp9)
 			.map(|(_, f)| f.clone())
 			.collect();
 		assert!(is_keyframe(Codec::Vp9, &vp9[0].data), "the first VP9 frame is a keyframe");
@@ -2986,12 +3032,11 @@ mod tests {
 			assert_eq!((picture.width, picture.height), (160, 120));
 		}
 		// Only VP9 viewers left: VP8 stops.
-		*lock(&sink.codecs) = vec![Codec::Vp9];
+		*lock(&sink.codecs) = vec![VideoFormat::Vp9];
 		tokio::time::sleep(Duration::from_millis(300)).await;
-		let before = lock(&sink.frames).iter().filter(|(c, _)| *c == Codec::Vp8).count();
-		wait_for(Codec::Vp9, vp9.len() + 10).await;
-		let after = lock(&sink.frames).iter().filter(|(c, _)| *c == Codec::Vp8).count();
-		assert_eq!(before, after, "VP8 is not encoded for nobody");
+		let before = sink.count(VideoFormat::Vp8);
+		sink.wait_for(VideoFormat::Vp9, vp9.len() + 10).await;
+		assert_eq!(before, sink.count(VideoFormat::Vp8), "VP8 is not encoded for nobody");
 		assert_eq!(streamer.stats().layers[0].codecs, [Codec::Vp9]);
 		assert_eq!(streamer.stats().layers[0].backend, Some(EncoderBackend::Libvpx));
 		// Another encoder preference: new encoders, the stream goes on.
@@ -3000,8 +3045,54 @@ mod tests {
 			..StreamerConfigUpdate::default()
 		};
 		streamer.reconfigure(&codecs, update).unwrap();
-		let count = lock(&sink.frames).iter().filter(|(c, _)| *c == Codec::Vp9).count();
-		wait_for(Codec::Vp9, count + 5).await;
+		sink.wait_for(VideoFormat::Vp9, sink.count(VideoFormat::Vp9) + 5).await;
+	}
+
+	/// `profile_idc` of the first SPS in an H.264 access unit (Annex B).
+	fn sps_profile(data: &[u8]) -> Option<u8> {
+		let at = data.windows(4).position(|w| w[..3] == [0, 0, 1] && w[3] & 0x1f == 7)?;
+		data.get(at + 4).copied()
+	}
+
+	/// H.264 viewers of both profiles of our offer's ladder: each gets an
+	/// encoder of its own, in its profile (High 100, Baseline 66 in the SPS).
+	#[cfg(feature = "media-desktop")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn an_encoder_per_h264_profile_viewers_chose() {
+		use voelin_stream::H264Profile::{ConstrainedBaseline, ConstrainedHigh};
+		let codecs = Codecs::new();
+		if !codecs.encoder_codecs().contains(&Codec::H264) {
+			eprintln!("skipped: no H.264 encoder on this machine");
+			return;
+		}
+		let config = StreamerConfig {
+			source: SourceId::Synthetic,
+			synthetic_size: (320, 240),
+			codec: Codec::H264,
+			audio: false,
+			..StreamerConfig::default()
+		};
+		let streamer = Streamer::start(&codecs, config).await.unwrap();
+		let sink = Arc::new(CodecSink::default());
+		let (high, baseline) =
+			(VideoFormat::H264(ConstrainedHigh), VideoFormat::H264(ConstrainedBaseline));
+		*lock(&sink.codecs) = vec![high, baseline];
+		streamer.attach(sink.clone());
+		sink.wait_for(high, 3).await;
+		sink.wait_for(baseline, 3).await;
+		let first = |format| {
+			let frames = lock(&sink.frames);
+			frames.iter().find(|(f, _)| *f == format).map(|(_, frame)| frame.data.clone()).unwrap()
+		};
+		assert_eq!(sps_profile(&first(high)), Some(100));
+		assert_eq!(sps_profile(&first(baseline)), Some(66));
+		assert_eq!(streamer.stats().layers[0].codecs, [Codec::H264], "one codec, two profiles");
+		// The Baseline viewers alone: High is no longer encoded.
+		*lock(&sink.codecs) = vec![baseline];
+		tokio::time::sleep(Duration::from_millis(300)).await;
+		let before = sink.count(high);
+		sink.wait_for(baseline, sink.count(baseline) + 10).await;
+		assert_eq!(before, sink.count(high), "High is not encoded for nobody");
 	}
 
 	/// The test pattern through VP8 and back, without a network: pictures
