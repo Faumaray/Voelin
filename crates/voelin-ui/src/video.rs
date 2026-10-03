@@ -16,7 +16,8 @@ use voelin_core::media::{
 	self, AudioSourceSpec, EncoderPreference, Latest, LocalPreview, Streamer, StreamerConfig,
 	Viewer, peer_config, preferred_codec, stream_codec,
 };
-use voelin_core::stream::PeerConfig;
+use voelin_core::stream::{LayerSpec, PeerConfig};
+use voelin_core::studio::Studio;
 use voelin_core::{Engine, StreamSink};
 
 /// Whether this build can share and decode video.
@@ -104,12 +105,6 @@ impl Video {
 		self.codecs = Arc::new(codecs);
 		self.encoder = encoder;
 		self.codec = codec;
-	}
-
-	/// The codecs in use, e.g. for `Codecs::report` (every encoder backend,
-	/// what works and why the rest does not) off the UI thread.
-	pub fn codecs(&self) -> Arc<Codecs> {
-		self.codecs.clone()
 	}
 
 	/// Whether H.264 works, and a line for the settings page.
@@ -268,6 +263,45 @@ impl Video {
 		runtime.spawn(async move {
 			let result = Streamer::start(&codecs, config).await;
 			done(result.map(|streamer| Capture { streamer, name }).map_err(|e| e.to_string()));
+		});
+	}
+
+	/// The codecs, for reconfiguring a running streamer.
+	pub fn codecs(&self) -> Arc<Codecs> {
+		self.codecs.clone()
+	}
+
+	/// Encode the Stream Studio's composite ([`Streamer::start_studio`]):
+	/// from the start, so its recording and replay buffer work before it
+	/// goes live, and a stream attaches to it like to a capture. `done` runs
+	/// on the runtime.
+	pub fn start_studio(
+		&self,
+		runtime: &Handle,
+		studio: Arc<Studio>,
+		options: CaptureRequest,
+		layers: Vec<LayerSpec>,
+		done: impl FnOnce(Result<Streamer, String>) + Send + 'static,
+	) {
+		let peer = self.peer_config(PeerConfig::default());
+		let Some(codec) = stream_codec(&self.codecs, &peer) else {
+			done(Err("No video encoder is available.".into()));
+			return;
+		};
+		let codecs = self.codecs.clone();
+		let config = StreamerConfig {
+			fps: options.fps,
+			bitrate_kbps: options.bitrate_kbps,
+			codec,
+			encoder: self.encoder.clone(),
+			audio: options.audio,
+			audio_sources: options.audio_sources,
+			layers,
+			..StreamerConfig::default()
+		};
+		runtime.spawn(async move {
+			let result = Streamer::start_studio(&codecs, config, studio).await;
+			done(result.map_err(|e| e.to_string()));
 		});
 	}
 

@@ -31,11 +31,16 @@ import { ServerLinks, EventsPage, EventDialog } from "screens/events.slint";
 import { NotificationsPanel, SearchPalette, Lightbox } from "screens/overlays.slint";
 import { MobileServers, ActivityPage, YouPage } from "screens/mobile.slint";
 import { BookmarkDialog, ShareDialog, ClientAudioDialog, AboutDialog } from "screens/dialogs.slint";
+import { StudioBridge } from "studio-bridge.slint";
+import { StudioPage, MobileStudio } from "screens/studio.slint";
 
 // Rust reaches the globals and structs through this file.
 export * from "bridge.slint";
 export { Theme } from "theme.slint";
 export { Nav, Page, MobileTab, SettingsSection } from "nav.slint";
+// The Stream Studio: its data, and its own window (src/studio.rs).
+export { StudioBridge, StudioNav, StudioScene, StudioSource, StudioAudio, StudioLayer, StudioViewer, StudioPick, StudioStatus, StudioForm, StudioSourceForm, StudioSettingsForm } from "studio-bridge.slint";
+export { StudioWindow } from "studio-window.slint";
 
 export component MainWindow inherits Window {
     title: Bridge.app-name;
@@ -122,7 +127,7 @@ export component MainWindow inherits Window {
             if !root.chrome: StreamViewer { }
 
             if !Nav.narrow && root.chrome: DesktopShell {
-                context: Nav.page == Page.settings ? @tr("Settings") : "";
+                context: Nav.page == Page.settings ? @tr("Settings") : Nav.page == Page.studio ? @tr("Stream Studio") : "";
                 if Nav.page == Page.home: Sidebar {
                     HomeNav { }
                     Rectangle { vertical-stretch: 1; }
@@ -203,6 +208,9 @@ export component MainWindow inherits Window {
                     horizontal-stretch: 1;
                     SettingsPage { }
                 }
+                if Nav.page == Page.studio && !StudioBridge.status.detached: StudioPage {
+                    horizontal-stretch: 1;
+                }
             }
 
             if Nav.narrow && root.chrome: MobileShell {
@@ -252,6 +260,7 @@ export component MainWindow inherits Window {
                 }
                 if Nav.page == Page.server && Nav.mobile-tab == MobileTab.activity: ActivityPage { }
                 if Nav.page == Page.server && Nav.mobile-tab == MobileTab.you: YouPage { }
+                if Nav.page == Page.studio && !StudioBridge.status.detached: MobileStudio { }
             }
         }
     }

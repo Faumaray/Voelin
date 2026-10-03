@@ -95,6 +95,14 @@ impl<T> Handoff<T> {
 		}
 	}
 
+	/// Make the calling thread the consumer that [`put`](Self::put) wakes
+	/// (what the first [`wait_timeout`](Self::wait_timeout) does), for a
+	/// thread that waits on several handoffs itself
+	/// (`std::thread::park_timeout`, then [`take`](Self::take) from each).
+	pub fn register(&self) {
+		self.consumer.get_or_init(std::thread::current);
+	}
+
 	/// Wake the consumer and make waits return at once (items can still be
 	/// taken).
 	pub fn close(&self) {

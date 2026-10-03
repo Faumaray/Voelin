@@ -25,7 +25,13 @@
 //!   `notifications` (the bell), `join` (join by address), `offline` (an
 //!   offline message), `picture` (a chat picture opened large), `camera`
 //!   (the settings' camera preview); settings sections also `account`,
-//!   `profiles`, `devices`, `notifications`, `integrations`, `advanced`.
+//!   `profiles`, `devices`, `notifications`, `integrations`, `advanced`;
+//!   `studio[:<what>]`: the Stream Studio (with `VOELIN_DEMO_UI` a demo
+//!   studio from synthetic sources), `studio:window` in a window of its own,
+//!   `studio:live` going live, `studio:record`, or a dialog: `studio:source`,
+//!   `studio:audio`, `studio:camera`, `studio:scene`, `studio:settings`.
+//!   A screenshot also saves the studio's window (`<name>-window.png`) and
+//!   draws it over the main window.
 //! - `VOELIN_AUTOWATCH=1`: watch the first stream that shows up.
 //! - `VOELIN_AUTOSHARE=test-pattern`: share the test pattern (accepting
 //!   everyone) once connected to a TeamSpeak 6 server.
@@ -34,7 +40,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use slint::ComponentHandle;
+use slint::{ComponentHandle, Rgba8Pixel, SharedPixelBuffer};
 use voelin_core::gateway::Pin;
 use voelin_core::stream::{StreamInfo, StreamKind};
 use voelin_core::{
@@ -223,6 +229,12 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 					app.refresh_pages();
 				});
 			}
+			"studio" => {
+				if arg != "window" {
+					nav.invoke_open_studio();
+				}
+				with_app(|app| app.studio_dev(arg));
+			}
 			// Opened once connected (settings_page.rs).
 			"client" => {}
 			other => eprintln!("VOELIN_OPEN: unknown screen {other:?}"),
@@ -257,6 +269,8 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 						eprintln!("screenshot failed: {e}");
 					}
 					let _ = ui.hide();
+					// Also when the studio's own window is open.
+					let _ = slint::quit_event_loop();
 				}
 			},
 		);
@@ -266,7 +280,33 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 }
 
 fn save_screenshot(ui: &MainWindow, path: &std::path::Path) -> Result<()> {
-	let image = ui.window().take_snapshot()?;
+	let mut image = ui.window().take_snapshot()?;
+	if let Some(studio) = with_app(|app| app.studio_snapshot()).flatten() {
+		let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+		save_png(&studio, &path.with_file_name(format!("{stem}-window.png")))?;
+		paste(&mut image, &studio);
+	}
+	save_png(&image, path)
+}
+
+/// Draw `top` over the bottom right of `image` with a border, as a second
+/// window sits on a desktop.
+fn paste(image: &mut SharedPixelBuffer<Rgba8Pixel>, top: &SharedPixelBuffer<Rgba8Pixel>) {
+	let (w, h) = (image.width() as usize, image.height() as usize);
+	let (tw, th) = (top.width() as usize, top.height() as usize);
+	let (x0, y0) = (w.saturating_sub(tw + 24), h.saturating_sub(th + 24));
+	let border = Rgba8Pixel { r: 0x3f, g: 0x7b, b: 0xff, a: 0xff };
+	let pixels = image.make_mut_slice();
+	for y in y0.saturating_sub(1)..(y0 + th + 1).min(h) {
+		for x in x0.saturating_sub(1)..(x0 + tw + 1).min(w) {
+			let (ty, tx) = (y.wrapping_sub(y0), x.wrapping_sub(x0));
+			pixels[y * w + x] =
+				if ty < th && tx < tw { top.as_slice()[ty * tw + tx] } else { border };
+		}
+	}
+}
+
+fn save_png(image: &SharedPixelBuffer<Rgba8Pixel>, path: &std::path::Path) -> Result<()> {
 	let file = std::io::BufWriter::new(std::fs::File::create(path)?);
 	let mut encoder = png::Encoder::new(file, image.width(), image.height());
 	encoder.set_color(png::ColorType::Rgba);
@@ -611,14 +651,7 @@ fn demo_social(app: &mut App) {
 			70,
 		),
 		private(311, "demo-2", false, ("Lumen", 2), "Let's run it tonight!".into(), 120),
-		private(
-			312,
-			"demo-5",
-			false,
-			("dex", 5),
-			format!("{}", file_link(2, "map-notes.png", 96_120)),
-			26 * 60,
-		),
+		private(312, "demo-5", false, ("dex", 5), file_link(2, "map-notes.png", 96_120), 26 * 60),
 	];
 	for m in lines {
 		let target = m.message.target.clone();
@@ -937,7 +970,7 @@ fn demo_picture(width: u32, height: u32, seed: u32) -> Vec<u8> {
 			let castle = (fx > w * 0.36
 				&& fx < w * 0.52
 				&& fy > h * 0.38
-				&& (((fx - w * 0.36) / (w * 0.02)) as u32 % 2 == 0 || fy > h * 0.45))
+				&& ((((fx - w * 0.36) / (w * 0.02)) as u32).is_multiple_of(2) || fy > h * 0.45))
 				|| (fx > w * 0.42 && fx < w * 0.46 && fy > h * 0.24);
 			if fy > near {
 				c = [6.0, 10.0, 26.0];

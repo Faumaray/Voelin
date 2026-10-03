@@ -20,6 +20,7 @@ mod settings_page;
 mod settings_pages;
 mod social;
 mod streams;
+mod studio;
 mod video;
 mod vm;
 

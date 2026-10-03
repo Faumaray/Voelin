@@ -284,6 +284,47 @@ impl VideoFrame {
 	}
 }
 
+/// A picture in GPU memory: an NV12 VA-API surface, converted and scaled
+/// from a captured DMA-BUF on the GPU (`ffmpeg::GpuConverter`, Linux) so
+/// that no CPU reads its pixels, for the encoders that take one
+/// ([`VideoEncoder::gpu_alignment`](crate::VideoEncoder::gpu_alignment)).
+/// Dropping it gives the surface back to its pool. Only this crate makes
+/// them.
+#[non_exhaustive]
+pub struct GpuFrame {
+	pub width: u32,
+	pub height: u32,
+	/// As [`VideoFrame::timestamp`].
+	pub timestamp: Duration,
+	#[cfg(feature = "ffmpeg")]
+	pub(crate) surface: crate::ffmpeg::Surface,
+}
+
+impl GpuFrame {
+	/// The timestamp on the 90 kHz RTP video clock.
+	pub fn pts_90khz(&self) -> u64 {
+		(self.timestamp.as_micros() * u128::from(VIDEO_CLOCK_RATE) / 1_000_000) as u64
+	}
+
+	/// The same picture at another time (another reference to the same
+	/// surface), e.g. to send a still screen again.
+	pub fn at(&self, timestamp: Duration) -> Self {
+		Self {
+			width: self.width,
+			height: self.height,
+			timestamp,
+			#[cfg(feature = "ffmpeg")]
+			surface: self.surface.new_ref(),
+		}
+	}
+}
+
+impl std::fmt::Debug for GpuFrame {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "GpuFrame({}x{} at {:?})", self.width, self.height, self.timestamp)
+	}
+}
+
 /// Interleaved 32-bit float audio at [`AUDIO_SAMPLE_RATE`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct AudioBuffer {

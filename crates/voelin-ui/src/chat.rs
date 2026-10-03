@@ -173,6 +173,7 @@ impl App {
 		if !shown {
 			self.refresh_servers();
 		}
+		self.studio_chat_changed(id, &message.target);
 	}
 
 	/// Messages the engine stored: added or updated by their local id.
@@ -222,6 +223,7 @@ impl App {
 		if fresh > 0 && !shown {
 			self.refresh_servers();
 		}
+		self.studio_chat_changed(id, target);
 	}
 
 	/// The page of messages before the oldest one shown.
@@ -239,8 +241,14 @@ impl App {
 		self.refresh_chat();
 	}
 
-	/// The lines of a tab, grouped and with everything the row shows.
-	fn lines_of(&self, view: &SessionView, tab: &Tab, messages: &[Msg]) -> Vec<ChatLine> {
+	/// The lines of a tab, grouped and with everything the row shows (also
+	/// the stream chat of the Stream Studio, studio.rs).
+	pub(crate) fn lines_of(
+		&self,
+		view: &SessionView,
+		tab: &Tab,
+		messages: &[Msg],
+	) -> Vec<ChatLine> {
 		let gateway = view.gateway_has(feature::PINS)
 			|| view.gateway_has(feature::REACTIONS)
 			|| view.gateway_has(feature::TOPICS);

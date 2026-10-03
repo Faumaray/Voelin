@@ -49,7 +49,7 @@ pub use codec::{
 	VideoEncoder,
 };
 pub use frame::{
-	AudioBuffer, FrameData, FrameRef, PixelFormat, PixelsRef, Plane, PlaneRef, VideoFrame,
+	AudioBuffer, FrameData, FrameRef, GpuFrame, PixelFormat, PixelsRef, Plane, PlaneRef, VideoFrame,
 };
 pub use queue::{FrameReceiver, FrameSender, frame_channel};
 

@@ -474,6 +474,11 @@ impl App {
 		if self.share_busy || self.share.is_some() {
 			return;
 		}
+		if self.studio_streams_to(session) {
+			self.share_error = "The Stream Studio is live here: end that stream first.".into();
+			self.refresh_streams();
+			return;
+		}
 		// Typed values (no maximum), else the chosen presets.
 		let choice = |i: i32, choices: &[u32]| {
 			choices[usize::try_from(i).unwrap_or(0).min(choices.len() - 1)]

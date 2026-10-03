@@ -15,6 +15,7 @@ use std::ffi::c_int;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use super::gpu::{self, GpuConverter, GpuLayer, RGB_FOURCCS};
 use super::layout::{self, HwFramesFields};
 use super::sys::{self, FrameHead, PacketHead, Ptr, Rational, cstr};
 use super::{Ffmpeg, take_log, vpp};
@@ -25,7 +26,7 @@ use crate::codec::{
 	VideoEncoder,
 };
 use crate::convert;
-use crate::frame::{FrameData, VideoFrame};
+use crate::frame::{FrameData, GpuFrame, VideoFrame};
 use crate::{Error, Result};
 
 /// How a backend takes frames.
@@ -454,7 +455,7 @@ fn vaapi_device(ffmpeg: &Ffmpeg) -> std::result::Result<Ptr, String> {
 
 /// The `VADisplay` of the process's VA-API device (the first field of its
 /// `AVVAAPIDeviceContext`).
-fn vaapi_display(ffmpeg: &Ffmpeg) -> std::result::Result<vpp::Display, String> {
+pub(crate) fn vaapi_display(ffmpeg: &Ffmpeg) -> std::result::Result<vpp::Display, String> {
 	let device = vaapi_device(ffmpeg)?;
 	let name = cstr("vaapi");
 	// SAFETY: a C string; `device` is a live VA-API device reference, whose
@@ -464,6 +465,56 @@ fn vaapi_display(ffmpeg: &Ffmpeg) -> std::result::Result<vpp::Display, String> {
 		let hwctx = layout::device_hwctx(device, kind)?;
 		Ok(layout::read::<Ptr>(hwctx, 0))
 	}
+}
+
+/// A pool of VA-API surfaces of `sw_format` (an `AVPixelFormat`) and
+/// `width` x `height` on the process's device (an `AVHWFramesContext`
+/// reference); surfaces are made on demand and recycled.
+pub(crate) fn vaapi_pool(
+	ffmpeg: &Ffmpeg,
+	width: u32,
+	height: u32,
+	sw_format: c_int,
+) -> std::result::Result<Ptr, String> {
+	let api = &ffmpeg.api;
+	let device = vaapi_device(ffmpeg)?;
+	let vaapi = ffmpeg.pix.vaapi.ok_or("no VA-API pixel format")?;
+	// SAFETY: `device` is a live device reference.
+	let mut pool = unsafe { (api.av_hwframe_ctx_alloc)(device) };
+	if pool.is_null() {
+		return Err("av_hwframe_ctx_alloc failed".into());
+	}
+	// SAFETY: `pool` was just allocated on `device`.
+	let fields: HwFramesFields = match unsafe { layout::hw_frames_fields(pool, device) } {
+		Ok(f) => f,
+		Err(e) => {
+			// SAFETY: allocated above.
+			unsafe { (api.av_buffer_unref)(&mut pool) };
+			return Err(e);
+		}
+	};
+	// SAFETY: the fields were located and checked on this very context;
+	// setting them before av_hwframe_ctx_init is what FFmpeg expects.
+	let ret = unsafe {
+		let ctx = (*pool.cast::<sys::BufferRefHead>()).data.cast::<std::ffi::c_void>();
+		layout::write::<c_int>(ctx, fields.format, vaapi);
+		layout::write::<c_int>(ctx, fields.sw_format, sw_format);
+		layout::write::<c_int>(ctx, fields.width, width as c_int);
+		layout::write::<c_int>(ctx, fields.height, height as c_int);
+		// Surfaces are allocated on demand and recycled by the pool.
+		layout::write::<c_int>(ctx, fields.initial_pool_size, 0);
+		(api.av_hwframe_ctx_init)(pool)
+	};
+	if ret < 0 {
+		// SAFETY: allocated above.
+		unsafe { (api.av_buffer_unref)(&mut pool) };
+		return Err(format!(
+			"VA-API surface pool: {}{}",
+			api.error_text(ret),
+			log_suffix("AVHWFramesContext")
+		));
+	}
+	Ok(pool)
 }
 
 /// FFmpeg's recent messages, appended to an error.
@@ -527,8 +578,6 @@ struct Session {
 	opened: Instant,
 	timestamps: Timestamps,
 	nv12: bool,
-	/// RGB DMA-BUFs: made on the first one; why not, if they cannot be.
-	rgb: Option<std::result::Result<RgbImport, String>>,
 	/// An AMF encoder: opened and closed under [`amf_lock`].
 	amf: bool,
 }
@@ -551,47 +600,6 @@ fn amf_lock() -> std::sync::MutexGuard<'static, ()> {
 	static AMF: std::sync::Mutex<()> = std::sync::Mutex::new(());
 	AMF.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
-
-/// What RGB DMA-BUFs need on their way into the session's NV12 surfaces:
-/// a frames context of their own size to be mapped onto (FFmpeg gives an
-/// imported surface the size of the destination's frames context, and the
-/// session's has the coded size), the frame that holds the mapping, and
-/// the GPU colour conversion.
-struct RgbImport {
-	pool: Ptr,
-	mapped: Ptr,
-	size: (u32, u32),
-	converter: vpp::Converter,
-}
-
-// SAFETY: as `Session`, which owns it.
-unsafe impl Send for RgbImport {}
-
-impl Drop for RgbImport {
-	fn drop(&mut self) {
-		let api = &Ffmpeg::get().expect("an import exists only with FFmpeg").api;
-		// SAFETY: both are NULL or ours.
-		unsafe {
-			(api.av_frame_free)(&mut self.mapped);
-			(api.av_buffer_unref)(&mut self.pool);
-		}
-	}
-}
-
-/// The VA-API surface of a VA-API frame (`data[3]`, `hwcontext_vaapi.h`).
-///
-/// # Safety
-/// `frame` must be a live frame of format `AV_PIX_FMT_VAAPI` holding a
-/// surface.
-unsafe fn surface_id(frame: Ptr) -> std::ffi::c_uint {
-	// SAFETY: guaranteed by the caller.
-	unsafe { (*frame.cast::<FrameHead>()).data[3] as usize as std::ffi::c_uint }
-}
-
-/// The DRM formats of RGB buffers the conversion takes (8 bits per
-/// channel, 4 bytes per pixel; what screen capture offers).
-const RGB_FOURCCS: [u32; 4] =
-	[drm_fourcc(b"XR24"), drm_fourcc(b"AR24"), drm_fourcc(b"XB24"), drm_fourcc(b"AB24")];
 
 impl Drop for Session {
 	fn drop(&mut self) {
@@ -640,6 +648,19 @@ pub struct FfmpegEncoder {
 	/// Sizes it encodes exactly are multiples of these
 	/// ([`BackendStatus::alignment`]).
 	alignment: (u32, u32),
+	/// For RGB DMA-BUFs ([`encode_dmabuf`](Self::encode_dmabuf)): made on
+	/// the first one; why not, if it cannot be.
+	gpu: Option<std::result::Result<GpuConverter, String>>,
+}
+
+/// `size` cropped to a multiple of `alignment` (even at least, for 4:2:0
+/// chroma; at least 2x2): what an encoder of that alignment encodes exactly.
+pub(crate) fn exact_size(size: (u32, u32), alignment: (u32, u32)) -> (u32, u32) {
+	let crop = |v: u32, a: u32| {
+		let a = a.max(2);
+		if v >= a { v / a * a } else { (v & !1).max(2) }
+	};
+	(crop(size.0, alignment.0), crop(size.1, alignment.1))
 }
 
 impl FfmpegEncoder {
@@ -670,6 +691,7 @@ impl FfmpegEncoder {
 			low_power: false,
 			dmabuf_checked: false,
 			alignment,
+			gpu: None,
 		})
 	}
 
@@ -735,11 +757,10 @@ impl FfmpegEncoder {
 	}
 
 	/// The encoder size: the frame cropped to a multiple of the backend's
-	/// alignment (even at least, for 4:2:0 chroma), so that the stream
-	/// declares exactly the picture it carries; at least 2x2.
+	/// alignment, so that the stream declares exactly the picture it
+	/// carries ([`exact_size`]).
 	fn coded_size(&self, width: u32, height: u32) -> (u32, u32) {
-		let crop = |v: u32, a: u32| if v >= a { v / a * a } else { (v & !1).max(2) };
-		(crop(width, self.alignment.0), crop(height, self.alignment.1))
+		exact_size((width, height), self.alignment)
 	}
 
 	/// Open a session for `width` x `height`.
@@ -791,7 +812,7 @@ impl FfmpegEncoder {
 			opened: Instant::now(),
 			timestamps: Timestamps::new(),
 			nv12: self.spec.input != Input::Yuv420p,
-			rgb: None,
+
 			amf: false,
 		};
 		// SAFETY: `ctx` is a live codec context; the first child is its
@@ -863,7 +884,8 @@ impl FfmpegEncoder {
 			self.apply(ctx, private, setting)?;
 		}
 		if self.spec.is_vaapi() {
-			session.pool = self.vaapi_pool(width, height, self.ffmpeg.pix.nv12)?;
+			session.pool = vaapi_pool(self.ffmpeg, width, height, self.ffmpeg.pix.nv12)
+				.map_err(|e| self.unavailable(e))?;
 			let offset = self.ffmpeg.codec_hw_frames.clone().map_err(|e| self.unavailable(e))?;
 			// SAFETY: `offset` is AVCodecContext.hw_frames_ctx (checked at
 			// load); the context takes the new reference and frees it.
@@ -919,45 +941,6 @@ impl FfmpegEncoder {
 
 	/// A VA-API surface pool of `sw_format` (an `AVPixelFormat`) for `width`
 	/// x `height`.
-	fn vaapi_pool(&self, width: u32, height: u32, sw_format: c_int) -> Result<Ptr> {
-		let api = &self.ffmpeg.api;
-		let device = vaapi_device(self.ffmpeg).map_err(|e| self.unavailable(e))?;
-		let vaapi =
-			self.ffmpeg.pix.vaapi.ok_or_else(|| self.unavailable("no VA-API format".into()))?;
-		// SAFETY: `device` is a live device reference.
-		let mut pool = unsafe { (api.av_hwframe_ctx_alloc)(device) };
-		if pool.is_null() {
-			return Err(self.unavailable("av_hwframe_ctx_alloc failed".into()));
-		}
-		// SAFETY: `pool` was just allocated on `device`.
-		let fields: HwFramesFields = match unsafe { layout::hw_frames_fields(pool, device) } {
-			Ok(f) => f,
-			Err(e) => {
-				// SAFETY: allocated above.
-				unsafe { (api.av_buffer_unref)(&mut pool) };
-				return Err(self.unavailable(e));
-			}
-		};
-		// SAFETY: the fields were located and checked on this very context;
-		// setting them before av_hwframe_ctx_init is what FFmpeg expects.
-		let ret = unsafe {
-			let ctx = (*pool.cast::<sys::BufferRefHead>()).data.cast::<std::ffi::c_void>();
-			layout::write::<c_int>(ctx, fields.format, vaapi);
-			layout::write::<c_int>(ctx, fields.sw_format, sw_format);
-			layout::write::<c_int>(ctx, fields.width, width as c_int);
-			layout::write::<c_int>(ctx, fields.height, height as c_int);
-			// Surfaces are allocated on demand and recycled by the pool.
-			layout::write::<c_int>(ctx, fields.initial_pool_size, 0);
-			(api.av_hwframe_ctx_init)(pool)
-		};
-		if ret < 0 {
-			// SAFETY: allocated above.
-			unsafe { (api.av_buffer_unref)(&mut pool) };
-			return Err(self.error("VA-API surface pool", ret));
-		}
-		Ok(pool)
-	}
-
 	/// Copy the I420 picture into the session's frame (cropped to the coded
 	/// size; NV12 interleaved where the backend wants it).
 	fn fill(&self, session: &Session, frame: &VideoFrame) -> Result<()> {
@@ -1132,9 +1115,8 @@ impl FfmpegEncoder {
 	/// (their size must be one it encodes exactly), and stay in use until
 	/// this frame's packet came out (the encoder reads them one frame deep).
 	/// RGB buffers (`XR24`, `AR24`, `XB24`, `AB24`: what screen capture
-	/// delivers) are converted into the session's NV12 surfaces on the GPU
-	/// (VA-API video processing), cropped to the coded size, and
-	/// are no longer read when this returns.
+	/// delivers) are converted to NV12 on the GPU ([`GpuConverter`]), cropped
+	/// to the coded size, and are no longer read when this returns.
 	///
 	/// Anything else fails with `Error::CodecUnavailable`; callers then map
 	/// the buffer and use [`encode_with`](VideoEncoder::encode_with).
@@ -1147,11 +1129,35 @@ impl FfmpegEncoder {
 		if !self.spec.is_vaapi() {
 			return Err(self.unavailable(format!("{} does not import DMA-BUFs", self.spec.name)));
 		}
-		let rgb = RGB_FOURCCS.contains(&frame.fourcc) && frame.plane_count == 1;
-		if !rgb && (frame.fourcc != drm_fourcc(b"NV12") || frame.plane_count != 2) {
+		if RGB_FOURCCS.contains(&frame.fourcc) && frame.plane_count == 1 {
+			let converter = match self
+				.gpu
+				.get_or_insert_with(|| GpuConverter::new().map_err(|e| e.to_string()))
+			{
+				Ok(converter) => converter,
+				Err(e) => {
+					return Err(Error::CodecUnavailable {
+						codec: self.spec.codec,
+						reason: e.clone(),
+					});
+				}
+			};
+			let layer = GpuLayer {
+				size: (frame.width, frame.height),
+				alignment: self.alignment,
+				due: true,
+			};
+			let mut converted = [None];
+			if let Err(e) = converter.convert(frame, &[layer], &mut converted) {
+				return Err(self.unavailable(e.to_string()));
+			}
+			let gpu = converted[0].take().expect("a due layer gets a frame");
+			return self.encode_gpu(&gpu, force_keyframe, out);
+		}
+		if frame.fourcc != drm_fourcc(b"NV12") || frame.plane_count != 2 {
 			return Err(self.unavailable("only NV12 and RGB DMA-BUFs are imported".into()));
 		}
-		if !rgb && self.coded_size(frame.width, frame.height) != (frame.width, frame.height) {
+		if self.coded_size(frame.width, frame.height) != (frame.width, frame.height) {
 			return Err(self.unavailable(format!(
 				"{}x{} is not a size {} encodes exactly",
 				frame.width, frame.height, self.spec.name
@@ -1159,16 +1165,16 @@ impl FfmpegEncoder {
 		}
 		let refs = self.ffmpeg.frame_refs.clone().map_err(|e| self.unavailable(e))?;
 		let (mut session, force) = self.prepare(frame.width, frame.height, force_keyframe, out)?;
-		let result = self.import_and_send(&mut session, frame, rgb, force, refs, out);
+		let result = self.import_and_send(&mut session, frame, force, refs, out);
 		self.session = Some(session);
 		result
 	}
 
+	/// Map an NV12 DMA-BUF onto a surface of the session and encode it.
 	fn import_and_send(
 		&mut self,
 		session: &mut Session,
 		frame: &DmaBufRef,
-		rgb: bool,
 		force: bool,
 		refs: layout::FrameRefs,
 		out: &mut dyn FnMut(EncodedChunk<'_>),
@@ -1189,35 +1195,25 @@ impl FfmpegEncoder {
 			}
 			self.dmabuf_checked = true;
 		}
-		let (pool, hw) = (session.pool, session.hw);
-		if rgb {
-			let import = self.rgb_import(session, frame)?;
-			self.map_dmabuf(frame, import.pool, import.mapped, refs)?;
-			// SAFETY: `hw` is our frame (unreferenced after each frame), the
-			// pool the session's; both surfaces belong to the process's
-			// device, the converter's display.
-			let converted = unsafe {
-				let ret = (api.av_hwframe_get_buffer)(pool, hw, 0);
-				let converted = if ret < 0 {
-					Err(self.error("VA-API surface", ret))
-				} else {
-					let done = import.converter.convert(surface_id(import.mapped), surface_id(hw));
-					done.map_err(|e| self.unavailable(e))
-				};
-				// The buffer has been read: the mapping can go.
-				(api.av_frame_unref)(import.mapped);
-				converted
-			};
-			if let Err(e) = converted {
-				// SAFETY: our frame.
-				unsafe { (api.av_frame_unref)(hw) };
-				return Err(e);
-			}
-		} else {
-			self.map_dmabuf(frame, pool, hw, refs)?;
-		}
+		let hw = session.hw;
+		gpu::map_dmabuf(self.ffmpeg, frame, session.pool, hw, refs).map_err(|e| {
+			Error::Encoder { codec: self.spec.codec, message: format!("{}: {e}", self.spec.name) }
+		})?;
 		let pts =
 			self.stamp(session, frame.timestamp, (frame.timestamp.as_micros() * 9 / 100) as u64);
+		self.send_surface(session, pts, force, out)
+	}
+
+	/// Encode the surface in `session.hw` (taken from the session's frame
+	/// afterwards; the encoder keeps its own reference while it needs it).
+	fn send_surface(
+		&self,
+		session: &mut Session,
+		pts: i64,
+		force: bool,
+		out: &mut dyn FnMut(EncodedChunk<'_>),
+	) -> Result<()> {
+		let hw = session.hw;
 		let pict_type = if force { sys::PICTURE_TYPE_I } else { sys::PICTURE_TYPE_NONE };
 		// SAFETY: offsets checked at load for this release's AVFrame; `hw`
 		// holds a surface until the unref.
@@ -1226,101 +1222,9 @@ impl FfmpegEncoder {
 			layout::write::<c_int>(hw, self.ffmpeg.frame.pict_type, pict_type);
 		}
 		let result = self.send(session, hw, out);
-		// SAFETY: our frame; the encoder holds its own reference.
-		unsafe { (api.av_frame_unref)(hw) };
+		// SAFETY: our frame.
+		unsafe { (self.ffmpeg.api.av_frame_unref)(hw) };
 		result.map(|_| ())
-	}
-
-	/// The session's [`RgbImport`] for `frame`, made on first use (again
-	/// when the buffers change size within the session's coded size).
-	fn rgb_import<'s>(&self, session: &'s mut Session, frame: &DmaBufRef) -> Result<&'s RgbImport> {
-		let size = (frame.width, frame.height);
-		let stale = match &session.rgb {
-			None => true,
-			Some(Ok(import)) => import.size != size,
-			Some(Err(_)) => false,
-		};
-		if stale {
-			session.rgb = None;
-			session.rgb = Some(self.new_rgb_import(size, (session.width, session.height)));
-		}
-		match session.rgb.as_ref().expect("made above") {
-			Ok(import) => Ok(import),
-			Err(e) => Err(self.unavailable(e.clone())),
-		}
-	}
-
-	fn new_rgb_import(
-		&self,
-		size: (u32, u32),
-		coded: (u32, u32),
-	) -> std::result::Result<RgbImport, String> {
-		let bgr0 = self.ffmpeg.pix.bgr0.ok_or("no bgr0 pixel format")?;
-		let display = vaapi_display(self.ffmpeg)?;
-		let converter = vpp::Converter::new(display, coded.0, coded.1)?;
-		let pool = self.vaapi_pool(size.0, size.1, bgr0).map_err(|e| e.to_string())?;
-		// SAFETY: an allocation (NULL is freed as nothing by the drop).
-		let mapped = unsafe { (self.ffmpeg.api.av_frame_alloc)() };
-		let import = RgbImport { pool, mapped, size, converter };
-		if import.mapped.is_null() { Err("out of memory".into()) } else { Ok(import) }
-	}
-
-	/// Map DMA-BUF `frame` onto a VA-API surface in `dst` (one of our
-	/// frames), which gets a reference to `pool`: the import takes that
-	/// frames context's size and device.
-	fn map_dmabuf(
-		&self,
-		frame: &DmaBufRef,
-		pool: Ptr,
-		dst: Ptr,
-		refs: layout::FrameRefs,
-	) -> Result<()> {
-		let api = &self.ffmpeg.api;
-		let drm_prime =
-			self.ffmpeg.pix.drm_prime.ok_or_else(|| self.unavailable("no DRM PRIME".into()))?;
-		let vaapi = self.ffmpeg.pix.vaapi.ok_or_else(|| self.unavailable("no VA-API".into()))?;
-		let mut descriptor =
-			sys::DrmFrameDescriptor { nb_objects: 1, nb_layers: 1, ..Default::default() };
-		descriptor.objects[0] =
-			sys::DrmObject { fd: frame.fd, size: frame.size, format_modifier: frame.modifier };
-		descriptor.layers[0].format = frame.fourcc;
-		descriptor.layers[0].nb_planes = frame.plane_count as c_int;
-		for (plane, &(offset, pitch)) in
-			descriptor.layers[0].planes.iter_mut().zip(&frame.planes[..frame.plane_count])
-		{
-			*plane =
-				sys::DrmPlane { object_index: 0, offset: offset as isize, pitch: pitch as isize };
-		}
-		// SAFETY: the descriptor lives in a buffer the source frame owns
-		// (buf[0], checked offset), so FFmpeg can keep it while mapped; the
-		// destination frame gets a reference to the pool at the checked
-		// hw_frames_ctx offset; av_frame_free / av_frame_unref release both.
-		unsafe {
-			let mut buffer = (api.av_buffer_allocz)(std::mem::size_of::<sys::DrmFrameDescriptor>());
-			let mut src = (api.av_frame_alloc)();
-			if buffer.is_null() || src.is_null() {
-				(api.av_buffer_unref)(&mut buffer);
-				(api.av_frame_free)(&mut src);
-				return Err(self.unavailable("out of memory".into()));
-			}
-			let data = (*buffer.cast::<sys::BufferRefHead>()).data;
-			data.cast::<sys::DrmFrameDescriptor>().write(descriptor);
-			let head = src.cast::<FrameHead>();
-			(*head).format = drm_prime;
-			(*head).width = frame.width as c_int;
-			(*head).height = frame.height as c_int;
-			(*head).data[0] = data;
-			layout::write::<Ptr>(src, refs.buf, buffer);
-			(*dst.cast::<FrameHead>()).format = vaapi;
-			layout::write::<Ptr>(dst, refs.hw_frames_ctx, (api.av_buffer_ref)(pool));
-			let ret = (api.av_hwframe_map)(dst, src, sys::HWFRAME_MAP_READ);
-			(api.av_frame_free)(&mut src);
-			if ret < 0 {
-				(api.av_frame_unref)(dst);
-				return Err(self.error("DMA-BUF import", ret));
-			}
-		}
-		Ok(())
 	}
 
 	/// The pts of a frame taken at `timestamp`: frame numbers at the
@@ -1507,6 +1411,45 @@ impl VideoEncoder for FfmpegEncoder {
 			self.reinit = Reinit::Now;
 		}
 		Ok(())
+	}
+
+	/// VA-API encoders take NV12 surfaces of the sizes they encode exactly.
+	fn gpu_alignment(&self) -> Option<(u32, u32)> {
+		self.spec.is_vaapi().then_some(self.alignment)
+	}
+
+	/// The surface goes to the encoder as it is: the encoder takes a
+	/// reference, so it stays out of its pool until the encoder is done.
+	fn encode_gpu(
+		&mut self,
+		frame: &GpuFrame,
+		force_keyframe: bool,
+		out: &mut dyn FnMut(EncodedChunk<'_>),
+	) -> Result<()> {
+		if !self.spec.is_vaapi() {
+			return Err(self.unavailable(format!("{} takes no VA-API surfaces", self.spec.name)));
+		}
+		if frame.surface.0.is_null() {
+			return Err(self.unavailable("a GPU frame without a surface (out of memory)".into()));
+		}
+		if self.coded_size(frame.width, frame.height) != (frame.width, frame.height) {
+			return Err(self.unavailable(format!(
+				"{}x{} is not a size {} encodes exactly",
+				frame.width, frame.height, self.spec.name
+			)));
+		}
+		let (mut session, force) = self.prepare(frame.width, frame.height, force_keyframe, out)?;
+		let pts = self.stamp(&mut session, frame.timestamp, frame.pts_90khz());
+		// SAFETY: `hw` is our frame, unreferenced after each frame;
+		// `surface` is a live VA-API frame of the same device.
+		let ret = unsafe { (self.ffmpeg.api.av_frame_ref)(session.hw, frame.surface.0) };
+		let result = if ret < 0 {
+			Err(self.error("GPU frame", ret))
+		} else {
+			self.send_surface(&mut session, pts, force, out)
+		};
+		self.session = Some(session);
+		result
 	}
 }
 
@@ -2102,8 +2045,7 @@ mod tests {
 		) -> Self {
 			let ffmpeg = Ffmpeg::get().unwrap();
 			let api = &ffmpeg.api;
-			let encoder = FfmpegEncoder::new("h264_vaapi", EncoderConfig::default()).unwrap();
-			let pool = encoder.vaapi_pool(width, height, sw_format).expect("a VA-API surface pool");
+			let pool = vaapi_pool(ffmpeg, width, height, sw_format).expect("a VA-API surface pool");
 			// SAFETY: `pool` is a live frames context of this process's
 			// VA-API device; the frames are ours and freed by the drop. The
 			// exported frame's `data[0]` is the AVDRMFrameDescriptor FFmpeg
@@ -2190,6 +2132,113 @@ mod tests {
 		}
 	}
 
+	/// The picture of a GPU frame, read back into memory as I420.
+	fn download(frame: &GpuFrame) -> VideoFrame {
+		let ffmpeg = Ffmpeg::get().unwrap();
+		let api = &ffmpeg.api;
+		let (w, h) = (frame.width as usize, frame.height as usize);
+		let mut out = VideoFrame::black_i420(frame.width, frame.height);
+		let FrameData::I420 { y, u, v } = &mut out.data else { unreachable!() };
+		// SAFETY: `sw` is ours and freed below; a downloaded plane holds
+		// `linesize * rows` bytes.
+		unsafe {
+			let mut sw = (api.av_frame_alloc)();
+			(*sw.cast::<FrameHead>()).format = ffmpeg.pix.nv12;
+			assert!((api.av_hwframe_transfer_data)(sw, frame.surface.0, 0) >= 0, "download");
+			let head = &*sw.cast::<FrameHead>();
+			let rows = |i: usize, rows: usize| {
+				let stride = head.linesize[i] as usize;
+				std::slice::from_raw_parts(head.data[i], stride * rows).chunks_exact(stride)
+			};
+			for (row, src) in rows(0, h).enumerate() {
+				y.data[row * w..][..w].copy_from_slice(&src[..w]);
+			}
+			let cw = w / 2;
+			for (row, src) in rows(1, h / 2).enumerate() {
+				for (i, pair) in src[..cw * 2].chunks_exact(2).enumerate() {
+					u.data[row * u.stride + i] = pair[0];
+					v.data[row * v.stride + i] = pair[1];
+				}
+			}
+			(api.av_frame_free)(&mut sw);
+		}
+		out
+	}
+
+	/// One captured RGB DMA-BUF made into a GPU frame per simulcast layer:
+	/// full size, half and a fixed 640x360 at AV1's alignment, each the
+	/// whole picture scaled (cropped to the alignment) as the CPU pyramid
+	/// does it, and each encoded by `h264_vaapi` straight from its surface
+	/// and decoded. The frames are recycled once nothing holds them.
+	#[test]
+	fn gpu_frames_for_every_layer() {
+		const SIZE: (u32, u32) = (1280, 720);
+		if !usable("h264_vaapi") {
+			eprintln!("no usable h264_vaapi, skipped");
+			return;
+		}
+		let ffmpeg = Ffmpeg::get().unwrap();
+		let screen = crate::capture::synthetic::SyntheticScreen::with_pattern(
+			SIZE.0,
+			SIZE.1,
+			crate::capture::synthetic::Pattern::Desktop,
+		);
+		let picture = screen.frame(5, 30);
+		let rgb =
+			Exported::new(SIZE, ffmpeg.pix.bgr0.unwrap(), drm_fourcc(b"XR24"), Some(&picture));
+		let mut converter = GpuConverter::new().expect("VA-API video processing");
+		eprintln!("tiled RGB modifiers the import takes: {:x?}", converter.modifiers());
+		let layers = [
+			GpuLayer { size: SIZE, alignment: (2, 2), due: true },
+			GpuLayer { size: (640, 360), alignment: (64, 16), due: true },
+			GpuLayer { size: (320, 180), alignment: (2, 2), due: false },
+		];
+		let mut out = [None, None, None];
+		converter.convert(&rgb.frame, &layers, &mut out).expect("converted");
+		assert!(out[2].is_none(), "a layer that is not due gets nothing");
+		let sizes: Vec<_> = out.iter().flatten().map(|f| (f.width, f.height)).collect();
+		assert_eq!(sizes, [SIZE, (640, 352)], "cropped to the alignment");
+
+		let cpu = convert::to_i420(&picture).unwrap().into_owned();
+		let mut half = VideoFrame::black_i420(640, 360);
+		let mut workers = crate::workers::Workers::new("voelin-test-scale", 1);
+		crate::scale::scale_i420(&mut workers, &cpu, &mut half).unwrap();
+		for frame in out.iter().flatten() {
+			// The CPU's picture at the layer's size, cropped the same way.
+			let reference = if (frame.width, frame.height) == SIZE { &cpu } else { &half };
+			let mut cropped = reference.view();
+			(cropped.width, cropped.height) = (frame.width, frame.height);
+			let gpu = download(frame);
+			let psnr = convert::psnr(&cropped.to_frame(), &gpu).unwrap();
+			eprintln!("{}x{}: PSNR {psnr:.1} dB against the CPU's", frame.width, frame.height);
+			assert!(psnr > 30.0, "{}x{}: {psnr:.1} dB", frame.width, frame.height);
+
+			let mut encoder = FfmpegEncoder::new("h264_vaapi", EncoderConfig::default()).unwrap();
+			let mut decoder = decoder(Codec::H264);
+			let mut packets = 0;
+			encoder
+				.encode_gpu(frame, true, &mut |chunk| {
+					packets += 1;
+					if let Some(decoder) = &mut decoder {
+						let decoded = decoder.decode(chunk.data).unwrap().expect("a picture");
+						assert_eq!((decoded.width, decoded.height), (frame.width, frame.height));
+						let psnr = convert::psnr(&gpu, &decoded).unwrap();
+						assert!(psnr > 30.0, "decoded at {psnr:.1} dB");
+					}
+				})
+				.expect("encoded from the surface");
+			assert!(packets > 0);
+		}
+		// Once nothing holds them, the same frames come back.
+		let first: Vec<*const GpuFrame> =
+			out.iter().flatten().map(std::sync::Arc::as_ptr).collect();
+		out = [None, None, None];
+		converter.convert(&rgb.frame, &layers, &mut out).expect("converted again");
+		let again: Vec<*const GpuFrame> =
+			out.iter().flatten().map(std::sync::Arc::as_ptr).collect();
+		assert_eq!(first, again, "recycled");
+	}
+
 	/// Our decoder for `codec`, if this build and machine have one: OpenH264
 	/// with `VOELIN_OPENH264_LIB`, dav1d with `--features av1`.
 	fn decoder(codec: Codec) -> Option<Box<dyn crate::codec::VideoDecoder>> {
@@ -2255,7 +2304,6 @@ mod tests {
 			return;
 		}
 		let ffmpeg = Ffmpeg::get().unwrap();
-		let api = &ffmpeg.api;
 		let screen = crate::capture::synthetic::SyntheticScreen::with_pattern(
 			SIZE.0,
 			SIZE.1,
@@ -2267,45 +2315,21 @@ mod tests {
 		assert_eq!(rgb.frame.plane_count, 1);
 
 		// The conversion alone: the GPU's NV12 against the CPU's I420.
-		let converter =
-			vpp::Converter::new(vaapi_display(ffmpeg).unwrap(), SIZE.0, SIZE.1).unwrap();
-		let encoder = FfmpegEncoder::new("h264_vaapi", EncoderConfig::default()).unwrap();
-		let mut pool = encoder.vaapi_pool(SIZE.0, SIZE.1, ffmpeg.pix.nv12).unwrap();
+		let mut converter = GpuConverter::new().expect("VA-API video processing");
+		let layer = GpuLayer { size: SIZE, alignment: (2, 2), due: true };
+		let mut converted = [None];
+		converter.convert(&rgb.frame, &[layer], &mut converted).expect("converted");
+		let downloaded = download(converted[0].as_ref().unwrap());
+		drop((converted, converter));
 		let cpu = convert::to_i420(&picture).unwrap();
 		let FrameData::I420 { y, u, v } = &cpu.data else { unreachable!() };
+		let FrameData::I420 { y: gy, u: gu, v: gv } = &downloaded.data else { unreachable!() };
 		let (w, h, cw, ch) =
 			(SIZE.0 as usize, SIZE.1 as usize, SIZE.0 as usize / 2, SIZE.1 as usize / 2);
-		let mut gpu = [Vec::new(), Vec::new(), Vec::new()];
-		// SAFETY: frames and pool are ours and freed below; the downloaded
-		// planes hold `linesize * rows` bytes.
-		unsafe {
-			let (mut out, mut sw) = ((api.av_frame_alloc)(), (api.av_frame_alloc)());
-			assert!((api.av_hwframe_get_buffer)(pool, out, 0) >= 0);
-			converter.convert(surface_id(rgb.surface), surface_id(out)).expect("converted");
-			(*sw.cast::<FrameHead>()).format = ffmpeg.pix.nv12;
-			assert!((api.av_hwframe_transfer_data)(sw, out, 0) >= 0, "download");
-			let head = &*sw.cast::<FrameHead>();
-			let plane = |i: usize, rows: usize| {
-				let stride = head.linesize[i] as usize;
-				std::slice::from_raw_parts(head.data[i], stride * rows).chunks_exact(stride)
-			};
-			for row in plane(0, h) {
-				gpu[0].extend_from_slice(&row[..w]);
-			}
-			for row in plane(1, ch) {
-				for pair in row[..cw * 2].chunks_exact(2) {
-					gpu[1].push(pair[0]);
-					gpu[2].push(pair[1]);
-				}
-			}
-			(api.av_frame_free)(&mut sw);
-			(api.av_frame_free)(&mut out);
-			(api.av_buffer_unref)(&mut pool);
-		}
-		drop(converter);
 		for (name, gpu, cpu, width, rows) in
-			[("Y", &gpu[0], y, w, h), ("U", &gpu[1], u, cw, ch), ("V", &gpu[2], v, cw, ch)]
+			[("Y", gy, y, w, h), ("U", gu, u, cw, ch), ("V", gv, v, cw, ch)]
 		{
+			let gpu: Vec<u8> = (0..rows).flat_map(|r| gpu.row(r, width).to_vec()).collect();
 			let cpu: Vec<u8> = (0..rows).flat_map(|r| cpu.row(r, width).to_vec()).collect();
 			let mean = gpu.iter().zip(&cpu).map(|(a, b)| u64::from(a.abs_diff(*b))).sum::<u64>()
 				as f64 / cpu.len() as f64;
@@ -2317,9 +2341,9 @@ mod tests {
 
 		// The buffers: the driver's own (tiled), and a LINEAR one with a
 		// padded pitch in system memory, which is what the portal negotiates.
-		#[cfg(target_os = "linux")]
+		#[cfg(all(target_os = "linux", feature = "pipewire"))]
 		let linear = linear_dmabuf(&picture, (SIZE.0 as usize * 4).next_multiple_of(256));
-		#[cfg(not(target_os = "linux"))]
+		#[cfg(not(all(target_os = "linux", feature = "pipewire")))]
 		let linear: Option<((), DmaBufRef)> = None;
 		if linear.is_none() {
 			eprintln!("no /dev/udmabuf: the LINEAR buffer is skipped");
@@ -2384,91 +2408,33 @@ mod tests {
 		}
 	}
 
-	/// `struct udmabuf_create` of `<linux/udmabuf.h>`, and `UDMABUF_CREATE`
-	/// returning the new DMA-BUF.
-	#[cfg(target_os = "linux")]
-	#[repr(C)]
-	struct UdmabufCreate {
-		memfd: u32,
-		flags: u32,
-		offset: u64,
-		size: u64,
-	}
-
-	// SAFETY: `UDMABUF_CREATE` (`_IOW('u', 0x42, struct udmabuf_create)`)
-	// only reads the struct and returns a new descriptor.
-	#[cfg(target_os = "linux")]
-	unsafe impl rustix::ioctl::Ioctl for UdmabufCreate {
-		type Output = std::os::fd::OwnedFd;
-		const IS_MUTATING: bool = false;
-
-		fn opcode(&self) -> rustix::ioctl::Opcode {
-			rustix::ioctl::opcode::write::<UdmabufCreate>(b'u', 0x42)
-		}
-
-		fn as_ptr(&mut self) -> *mut std::ffi::c_void {
-			(&raw mut *self).cast()
-		}
-
-		unsafe fn output_from_ptr(
-			out: rustix::ioctl::IoctlOutput,
-			_: *mut std::ffi::c_void,
-		) -> rustix::io::Result<Self::Output> {
-			// SAFETY: the descriptor the kernel just made, ours to own.
-			Ok(unsafe { std::os::fd::FromRawFd::from_raw_fd(out) })
-		}
-	}
-
-	/// `picture` (BGRA) in a LINEAR DMA-BUF of system memory, rows `stride`
-	/// bytes apart: `/dev/udmabuf` over a sealed memfd. The descriptor has
-	/// to outlive the returned buffer. `None` without access to
+	/// `picture` (BGRA) in a LINEAR DMA-BUF of ordinary memory, rows
+	/// `stride` bytes apart ([`Udmabuf`](crate::capture::dmabuf::Udmabuf));
+	/// the buffer has to outlive the reference. `None` without access to
 	/// `/dev/udmabuf`.
-	#[cfg(target_os = "linux")]
+	#[cfg(all(target_os = "linux", feature = "pipewire"))]
 	fn linear_dmabuf(
 		picture: &VideoFrame,
 		stride: usize,
-	) -> Option<(std::os::fd::OwnedFd, DmaBufRef)> {
-		use rustix::fs::{MemfdFlags, SealFlags};
-		use std::io::Write;
-		use std::os::fd::AsRawFd;
-
+	) -> Option<(crate::capture::dmabuf::Udmabuf, DmaBufRef)> {
 		let FrameData::Bgra(pixels) = &picture.data else { return None };
 		let (w, h) = (picture.width as usize, picture.height as usize);
-		let size = (stride * h).next_multiple_of(4096);
-		let memfd = rustix::fs::memfd_create(
-			"voelin-linear-dmabuf",
-			MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
-		)
-		.ok()?;
-		let mut bytes = vec![0; size];
-		for (y, row) in bytes.chunks_exact_mut(stride).take(h).enumerate() {
+		let mut buffer = crate::capture::dmabuf::Udmabuf::new(stride * h).ok()?;
+		for (y, row) in buffer.bytes_mut().chunks_exact_mut(stride).take(h).enumerate() {
 			row[..w * 4].copy_from_slice(pixels.row(y, w * 4));
 		}
-		let mut file = std::fs::File::from(memfd);
-		file.write_all(&bytes).ok()?;
-		rustix::fs::fcntl_add_seals(&file, SealFlags::SHRINK).ok()?;
-		let device =
-			std::fs::OpenOptions::new().read(true).write(true).open("/dev/udmabuf").ok()?;
-		let create = UdmabufCreate {
-			memfd: file.as_raw_fd() as u32,
-			flags: 1,
-			offset: 0,
-			size: size as u64,
-		};
-		// SAFETY: see the `Ioctl` impl; `device` is /dev/udmabuf.
-		let fd = unsafe { rustix::ioctl::ioctl(&device, create) }.ok()?;
 		let frame = DmaBufRef {
 			width: picture.width,
 			height: picture.height,
 			timestamp: Duration::ZERO,
 			fourcc: drm_fourcc(b"XR24"),
 			modifier: crate::capture::DRM_MOD_LINEAR,
-			fd: fd.as_raw_fd(),
-			size,
+			fd: buffer.fd(),
+			size: buffer.len(),
 			planes: [(0, stride), (0, 0), (0, 0), (0, 0)],
 			plane_count: 1,
 		};
-		Some((fd, frame))
+		Some((buffer, frame))
 	}
 
 	/// What the CPU spends per frame on its way into a VA-API encoder at

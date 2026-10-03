@@ -7,7 +7,9 @@
 # colours with `convert -colors 256 PNG8:`).
 #
 # WAYLAND_DISPLAY is removed so the window opens on the Xvfb server and not
-# on the desktop of a Wayland session (winit prefers Wayland when it can).
+# on the desktop of a Wayland session (winit prefers Wayland when it can),
+# and XDG_SESSION_TYPE so nothing picks the desktop portal for a Wayland
+# session (the push-to-talk hotkey would ask the desktop to bind it).
 # The screen is twice the window's size, so the pointer (in its middle) is
 # not over the window and nothing shows as hovered. FFmpeg stays off: the
 # pictures need no hardware encoders, and probing them can crash in some
@@ -19,7 +21,7 @@ size=${3:-1440x960}
 w=${size%x*}
 h=${size#*x}
 bin=${VOELIN_BIN:-$CARGO_TARGET_DIR/debug/voelin}
-env -u WAYLAND_DISPLAY \
+env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE \
 	SLINT_BACKEND=winit-software \
 	VOELIN_FFMPEG=0 \
 	VOELIN_DATA_DIR="$(mktemp -d)" \

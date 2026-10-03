@@ -8,8 +8,11 @@ mod servers;
 mod settings;
 mod social;
 mod streams;
+pub(crate) mod studio;
 
-use crate::app::MainWindow;
+use slint::ComponentHandle;
+
+use crate::app::{MainWindow, StudioBridge};
 
 /// Connect every callback of the window.
 pub(crate) fn wire(ui: &MainWindow) {
@@ -20,4 +23,5 @@ pub(crate) fn wire(ui: &MainWindow) {
 	emoji::wire(ui);
 	social::wire(ui);
 	pages::wire(ui);
+	studio::wire(&ui.global::<StudioBridge>());
 }

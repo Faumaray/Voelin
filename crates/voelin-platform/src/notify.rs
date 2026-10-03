@@ -66,8 +66,16 @@ mod tests {
 	use super::*;
 
 	/// Without a notification service this must fail, not hang or panic.
+	/// Skipped where a session bus exists: on a desktop the notification
+	/// would really show.
 	#[tokio::test]
 	async fn notify_returns() {
+		let runtime_bus = std::env::var_os("XDG_RUNTIME_DIR")
+			.is_some_and(|d| std::path::Path::new(&d).join("bus").exists());
+		if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some() || runtime_bus {
+			eprintln!("skipped: a D-Bus session bus is configured");
+			return;
+		}
 		let n = Notification { urgent: true, ..Notification::new("Poke", "from a test") };
 		let result = tokio::time::timeout(Duration::from_secs(10), notify(&n)).await;
 		assert!(result.is_ok(), "notify hung");

@@ -8,4 +8,5 @@ pub mod chat;
 pub mod list;
 pub mod servers;
 pub mod social;
+pub mod studio;
 pub mod tree;

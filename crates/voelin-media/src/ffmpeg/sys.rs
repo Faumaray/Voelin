@@ -199,6 +199,7 @@ api! {
 	fn av_frame_get_buffer(frame: Ptr, align: c_int) -> c_int;
 	fn av_frame_make_writable(frame: Ptr) -> c_int;
 	fn av_frame_unref(frame: Ptr);
+	fn av_frame_ref(dst: Ptr, src: Ptr) -> c_int;
 	fn av_opt_set(obj: Ptr, name: *const c_char, val: *const c_char, flags: c_int) -> c_int;
 	fn av_opt_set_int(obj: Ptr, name: *const c_char, val: i64, flags: c_int) -> c_int;
 	fn av_opt_set_q(obj: Ptr, name: *const c_char, val: Rational, flags: c_int) -> c_int;

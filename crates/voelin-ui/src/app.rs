@@ -53,6 +53,7 @@ fn open_settings(dir: &Path, overrides: &[String]) -> Settings {
 	for key in crate::settings::page_keys() {
 		prefs.register(key);
 	}
+	prefs.register(&crate::studio::STUDIO_UI);
 	let config = std::env::var_os("VOELIN_CONFIG")
 		.map(PathBuf::from)
 		.or_else(|| Some(dir.join("config.toml")).filter(|p| p.exists()));
@@ -419,6 +420,8 @@ pub(crate) struct App {
 	pub social: crate::social::Social,
 	/// The settings pages of the new design.
 	pub pages: crate::settings_pages::Pages,
+	/// The Stream Studio (studio.rs).
+	pub studio: crate::studio::StudioState,
 }
 
 thread_local! {
@@ -614,6 +617,7 @@ pub fn run(options: RunOptions) -> Result<()> {
 		uploads: HashMap::new(),
 		social: Default::default(),
 		pages: Default::default(),
+		studio: Default::default(),
 	};
 	APP.with(|a| *a.borrow_mut() = Some(app));
 	crate::bind::wire(&ui);
@@ -899,6 +903,13 @@ impl App {
 			Event::SettingChanged { key } => self.setting_changed(&key),
 			Event::SettingRejected { key, message } => {
 				self.set_status(format!("Setting {key}: {message}"));
+			}
+			// The Stream Studio's stream (studio.rs).
+			Event::StreamState { session, state } if self.studio_streams_to(session as i64) => {
+				self.studio_stream_state(state);
+			}
+			Event::StreamViewers { session, viewers } if self.studio_streams_to(session as i64) => {
+				self.studio_viewers(viewers);
 			}
 			event => self.stream_event(event),
 		}

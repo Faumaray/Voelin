@@ -288,6 +288,8 @@ struct VideoState {
 	fps: u32,
 	/// Offer DMA-BUFs.
 	dmabuf: bool,
+	/// The sink's tiled modifiers the offer was made with (ahead of LINEAR).
+	modifiers: Vec<u64>,
 	/// Mappings of the DMA-BUFs PipeWire cycles through.
 	maps: Vec<DmaBufMap>,
 	/// Time spent handing DMA-BUF frames to the sink, and how many.
@@ -315,12 +317,15 @@ fn video_stream(
 	let stream = pw::stream::StreamRc::new(core.clone(), "voelin-screen-capture", props)
 		.map_err(|e| format!("PipeWire stream: {e}"))?;
 	let fps = sink.max_fps().max(1);
+	let modifiers = sink.dmabuf_modifiers().to_vec();
+	let formats = enum_formats(fps, dmabuf, &modifiers)?;
 	let state = VideoState {
 		sink,
 		format: None,
 		started: Instant::now(),
 		fps,
 		dmabuf,
+		modifiers,
 		maps: Vec::new(),
 		dmabuf_time: Duration::ZERO,
 		dmabuf_frames: 0,
@@ -359,7 +364,6 @@ fn video_stream(
 		.register()
 		.map_err(|e| format!("PipeWire listener: {e}"))?;
 
-	let formats = enum_formats(fps, dmabuf)?;
 	let mut pods = formats.iter().map(|f| pod(f)).collect::<std::result::Result<Vec<_>, _>>()?;
 	stream
 		.connect(
@@ -397,21 +401,43 @@ fn framerate_range(fps: u32) -> Property {
 	)
 }
 
-fn modifier_property(fixed: bool) -> Property {
+/// The modifiers we take, best first: the sink's tiled ones, then LINEAR,
+/// which the CPU can always read.
+fn our_modifiers(tiled: &[u64]) -> Vec<i64> {
+	tiled.iter().map(|&m| m as i64).chain([MODIFIER_LINEAR]).collect()
+}
+
+/// The modifier property of a DMA-BUF format: a choice of `modifiers` the
+/// producer must not fixate (we pick, see [`format_changed`]), or one fixed
+/// modifier.
+fn modifier_property(modifiers: &[i64], fixed: bool) -> Property {
 	let flags = pw::spa::sys::SPA_POD_PROP_FLAG_MANDATORY
 		| if fixed { 0 } else { pw::spa::sys::SPA_POD_PROP_FLAG_DONT_FIXATE };
 	let value = if fixed {
-		Value::Long(MODIFIER_LINEAR)
+		Value::Long(modifiers[0])
 	} else {
 		Value::Choice(ChoiceValue::Long(Choice(
 			ChoiceFlags::empty(),
-			ChoiceEnum::Enum { default: MODIFIER_LINEAR, alternatives: vec![MODIFIER_LINEAR] },
+			ChoiceEnum::Enum { default: modifiers[0], alternatives: modifiers.to_vec() },
 		)))
 	};
 	Property {
 		key: FormatProperties::VideoModifier.as_raw(),
 		flags: PropertyFlags::from_bits_retain(flags),
 		value,
+	}
+}
+
+/// The modifiers a producer's modifier property leaves to choose from.
+fn offered_modifiers(prop: &pw::spa::pod::PodProp) -> Vec<i64> {
+	use pw::spa::pod::deserialize::PodDeserializer;
+	match PodDeserializer::deserialize_any_from(prop.value().as_bytes()).map(|(_, v)| v) {
+		Ok(Value::Long(m)) => vec![m],
+		Ok(Value::Choice(ChoiceValue::Long(Choice(
+			_,
+			ChoiceEnum::Enum { default, alternatives },
+		)))) => std::iter::once(default).chain(alternatives).collect(),
+		_ => Vec::new(),
 	}
 }
 
@@ -423,9 +449,15 @@ fn format_object(properties: Vec<Property>) -> Value {
 	})
 }
 
-/// The formats we offer: each pixel format as a LINEAR DMA-BUF (if
-/// `dmabuf`), then all of them in shared memory.
-fn enum_formats(fps: u32, dmabuf: bool) -> std::result::Result<Vec<Vec<u8>>, String> {
+/// The formats we offer: each pixel format as a DMA-BUF (if `dmabuf`) with
+/// the sink's tiled modifiers ahead of LINEAR, then all of them in shared
+/// memory.
+fn enum_formats(
+	fps: u32,
+	dmabuf: bool,
+	tiled: &[u64],
+) -> std::result::Result<Vec<Vec<u8>>, String> {
+	let modifiers = our_modifiers(tiled);
 	let mut formats = Vec::new();
 	let base = || {
 		vec![
@@ -437,7 +469,7 @@ fn enum_formats(fps: u32, dmabuf: bool) -> std::result::Result<Vec<Vec<u8>>, Str
 		for format in FORMATS {
 			let mut properties = base();
 			properties.push(property!(FormatProperties::VideoFormat, Id, format));
-			properties.push(modifier_property(false));
+			properties.push(modifier_property(&modifiers, false));
 			properties.push(size_range());
 			properties.push(framerate_range(fps));
 			formats.push(serialize(format_object(properties))?);
@@ -461,10 +493,10 @@ fn enum_formats(fps: u32, dmabuf: bool) -> std::result::Result<Vec<Vec<u8>>, Str
 	Ok(formats)
 }
 
-/// Offer formats again (another frame rate, or no DMA-BUFs); PipeWire
-/// renegotiates.
-fn renegotiate(stream: &pw::stream::Stream, fps: u32, dmabuf: bool) {
-	let result = enum_formats(fps, dmabuf).and_then(|formats| {
+/// Offer formats again (another frame rate, other modifiers, or no
+/// DMA-BUFs); PipeWire renegotiates.
+fn renegotiate(stream: &pw::stream::Stream, state: &VideoState) {
+	let result = enum_formats(state.fps, state.dmabuf, &state.modifiers).and_then(|formats| {
 		let mut pods =
 			formats.iter().map(|f| pod(f)).collect::<std::result::Result<Vec<_>, _>>()?;
 		stream.update_params(&mut pods).map_err(|e| e.to_string())
@@ -494,12 +526,17 @@ fn format_changed(
 		.and_then(|o| o.find_prop(Id(FormatProperties::VideoModifier.as_raw())));
 	let modifier = match modifier {
 		Some(prop) if prop.flags().contains(PodPropFlags::DONT_FIXATE) => {
-			// The producer left the choice to us; we only take LINEAR.
+			// The producer left the choice to us: the best of ours that it
+			// can make, else LINEAR.
+			let theirs = offered_modifiers(prop);
+			let ours = our_modifiers(&state.modifiers);
+			let chosen = ours.into_iter().find(|m| theirs.contains(m)).unwrap_or(MODIFIER_LINEAR);
+			debug!(offered = ?theirs, chosen, "screen capture modifier");
 			let mut properties = vec![
 				property!(FormatProperties::MediaType, Id, MediaType::Video),
 				property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
 				property!(FormatProperties::VideoFormat, Id, info.format()),
-				modifier_property(true),
+				modifier_property(&[chosen], true),
 				property!(
 					FormatProperties::VideoSize,
 					Rectangle,
@@ -539,16 +576,20 @@ fn format_changed(
 }
 
 fn process(stream: &pw::stream::Stream, state: &mut VideoState) {
-	// Follow the sink's frame rate: ask the compositor for another rate.
+	// Follow the sink: ask the compositor for another rate, or buffers with
+	// the modifiers the sink takes now.
 	let fps = state.sink.max_fps().max(1);
-	if fps != state.fps {
+	let modifiers = state.sink.dmabuf_modifiers();
+	if fps != state.fps || (state.dmabuf && modifiers != state.modifiers.as_slice()) {
 		state.fps = fps;
-		renegotiate(stream, fps, state.dmabuf);
+		state.modifiers = modifiers.to_vec();
+		renegotiate(stream, state);
 	}
 	let Some(mut buffer) = stream.dequeue_buffer() else { return };
 	let Some(format) = state.format else { return };
 	if format.modifier.is_some_and(|m| m != MODIFIER_LINEAR) && !state.sink.accepts_dmabuf() {
-		// Tiled: the CPU cannot read it (we only offer LINEAR).
+		// Tiled, and the sink no longer imports it: the CPU cannot read it.
+		// The new offer (above) brings LINEAR buffers.
 		return;
 	}
 	let timestamp = state.started.elapsed();
@@ -661,7 +702,7 @@ fn process(stream: &pw::stream::Stream, state: &mut VideoState) {
 							"screen capture DMA-BUFs cannot be mapped; switching to shared memory"
 						);
 						state.dmabuf = false;
-						renegotiate(stream, state.fps, false);
+						renegotiate(stream, state);
 					}
 					return;
 				}
@@ -718,7 +759,7 @@ fn probe_dmabuf(
 			"reading DMA-BUFs takes {per_pixel:.1} ns per pixel; switching screen capture to shared memory"
 		);
 		state.dmabuf = false;
-		renegotiate(stream, state.fps, false);
+		renegotiate(stream, state);
 	}
 }
 
@@ -748,20 +789,32 @@ mod tests {
 	/// left to us to fixate) per pixel format, then shared memory.
 	#[test]
 	fn offered_formats() {
-		let formats = enum_formats(60, true).unwrap();
+		// A sink that imports one tiled modifier (an AMD one here).
+		const TILED: u64 = 0x0200_0000_28a0_1f04;
+		let formats = enum_formats(60, true, &[TILED]).unwrap();
 		assert_eq!(formats.len(), FORMATS.len() + 1);
 		for (i, bytes) in formats.iter().enumerate() {
 			let object = pod(bytes).unwrap().as_object().unwrap();
 			let modifier = object.find_prop(Id(FormatProperties::VideoModifier.as_raw()));
 			if i < FORMATS.len() {
-				let flags = modifier.expect("a modifier").flags();
+				let modifier = modifier.expect("a modifier");
+				let flags = modifier.flags();
 				assert!(flags.contains(PodPropFlags::MANDATORY | PodPropFlags::DONT_FIXATE));
+				// Read back as a producer's choice is: ours first, LINEAR last.
+				let offered = offered_modifiers(modifier);
+				assert_eq!(offered.first(), Some(&(TILED as i64)));
+				assert_eq!(offered.last(), Some(&MODIFIER_LINEAR));
 			} else {
 				assert!(modifier.is_none(), "shared memory has no modifier");
 			}
 		}
-		assert_eq!(enum_formats(30, false).unwrap().len(), 1);
-		let fixed = serialize(format_object(vec![modifier_property(true)])).unwrap();
+		let linear_only = enum_formats(60, true, &[]).unwrap();
+		let object = pod(&linear_only[0]).unwrap().as_object().unwrap();
+		let prop = object.find_prop(Id(FormatProperties::VideoModifier.as_raw())).unwrap();
+		assert_eq!(offered_modifiers(prop), [MODIFIER_LINEAR, MODIFIER_LINEAR]);
+		assert_eq!(enum_formats(30, false, &[TILED]).unwrap().len(), 1);
+		let fixed =
+			serialize(format_object(vec![modifier_property(&[MODIFIER_LINEAR], true)])).unwrap();
 		let object = pod(&fixed).unwrap().as_object().unwrap();
 		let prop = object.find_prop(Id(FormatProperties::VideoModifier.as_raw())).unwrap();
 		assert_eq!(prop.value().get_long().unwrap(), MODIFIER_LINEAR);
