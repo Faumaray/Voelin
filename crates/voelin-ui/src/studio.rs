@@ -38,7 +38,7 @@ use voelin_core::settings::{
 };
 use voelin_core::stream::{EndReason, StreamSetup, ViewerInfo, ViewerState};
 use voelin_core::studio::scene::{
-	Align, Background, Colour, Fit, Scene, Scenes, Source, SourceKind, Transform,
+	Align, Background, Colour, Crop, Fit, Scene, Scenes, Source, SourceKind, Transform,
 };
 use voelin_core::studio::{self, SourceChange, Stats, Status, Studio, camera};
 use voelin_core::{Command, HistoryMessage, HistorySource, StreamState};
@@ -329,15 +329,16 @@ fn demo_settings() -> Settings {
 	let mut cam = source(2, "Camera", camera.clone(), Transform::default());
 	cam.transform = vm::studio::placement(&camera, (1920, 1080));
 	cam.background = Background::Blur { strength: 0.04 };
-	main.sources = vec![
-		source(
-			1,
-			"Game Capture",
-			SourceKind::Pattern { size: (1280, 720) },
-			Transform { fit: Fit::Cover, ..Transform::full(1920, 1080) },
-		),
-		cam,
-	];
+	let mut game = source(
+		1,
+		"Game Capture",
+		SourceKind::Pattern { size: (1280, 720) },
+		Transform { fit: Fit::Cover, ..Transform::full(1920, 1080) },
+	);
+	// The pattern's frame counter sits in its top-left corner, under the
+	// preview's LIVE badge and timer: cropped away.
+	game.crop = Crop { top: 120, ..Crop::default() };
+	main.sources = vec![game, cam];
 	let mut chatting = Scene::new(2, "Just Chatting");
 	chatting.sources = vec![source(
 		1,
