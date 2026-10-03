@@ -50,6 +50,13 @@ noted.
 - **ST5** H.264: enable OpenH264 (download on first use, attribution text
   shown next to the switch), stream to the official client and watch its
   H.264 stream. Disable it again: H.264 is no longer offered.
+- **ST6** Our stream with two simulcast layers (Settings → Streaming, or
+  `voelinctl stream start --synthetic --layer 1.0:3000k --layer 0.5:800k
+  --auto-accept`): its offer then carries Voelin's `a=x-voelin-layers` line.
+  Pass: the official client watches as in ST1. While it watches the
+  official client's stream (ST2), our viewer shows no quality picker and
+  sends no `x-voelin-layer` signal (`RUST_LOG=voelin_stream=debug`, or
+  `--log-commands`: no `streamsignaling` with `x-voelin-layer`).
 
 | ID | Platform | Result | Date | Version | Notes |
 |---|---|---|---|---|---|
@@ -72,6 +79,7 @@ noted.
 | ST4 | KDE | | | | |
 | ST5 | GNOME or KDE | | | | |
 | ST5 | Win11 | | | | |
+| ST6 | any | | | | |
 
 ## Global push-to-talk
 
