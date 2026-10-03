@@ -265,34 +265,34 @@ export component MobileShell inherits Rectangle {
                     icon: Icons.home;
                     text: @tr("Home");
                     selected: Nav.mobile-tab == MobileTab.home && Nav.page != Page.settings;
-                    clicked => { Nav.show(Page.home); Nav.mobile-tab = MobileTab.home; }
+                    clicked => { Nav.show-tab(MobileTab.home); }
                 }
                 NavTab {
                     icon: Icons.server;
                     text: @tr("Servers");
                     selected: Nav.mobile-tab == MobileTab.servers && Nav.page != Page.settings;
                     dot: Bridge.voice-connected;
-                    clicked => { Nav.show(Page.server); Nav.mobile-tab = MobileTab.servers; }
+                    clicked => { Nav.show-tab(MobileTab.servers); }
                 }
                 NavTab {
                     icon: Icons.message-circle;
                     text: @tr("Chats");
                     selected: Nav.mobile-tab == MobileTab.chat && Nav.page != Page.settings;
                     badge: root.unread;
-                    clicked => { Nav.show(Page.server); Nav.mobile-tab = MobileTab.chat; }
+                    clicked => { Nav.show-tab(MobileTab.chat); }
                 }
                 NavTab {
                     icon: Icons.activity;
                     text: @tr("Activity");
                     selected: Nav.mobile-tab == MobileTab.activity && Nav.page != Page.settings;
                     badge: Bridge.share-requests;
-                    clicked => { Nav.show(Page.server); Nav.mobile-tab = MobileTab.activity; }
+                    clicked => { Nav.show-tab(MobileTab.activity); }
                 }
                 NavTab {
                     icon: Icons.user;
                     text: @tr("You");
                     selected: Nav.mobile-tab == MobileTab.you || Nav.page == Page.settings;
-                    clicked => { Nav.show(Page.server); Nav.mobile-tab = MobileTab.you; }
+                    clicked => { Nav.show-tab(MobileTab.you); }
                 }
             }
         }
