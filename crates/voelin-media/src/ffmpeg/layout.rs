@@ -15,20 +15,24 @@
 //! | `AVHWFramesContext` `initial_pool_size`, `format`, `sw_format`, `width`, `height` | creating a frame pool | after seven pointers (eight up to libavutil 58: `internal`) | `device_ctx` must equal the device and both formats must be `AV_PIX_FMT_NONE` in a new context |
 //! | `AVFrame.buf[0]`, `AVFrame.hw_frames_ctx` | importing DMA-BUFs (zero-copy) | a table per libavutil major (56-61, 64-bit only; an unlisted major disables the import) | `buf[0]` of a frame from `av_frame_get_buffer` must hold that frame's `data[0]`; `hw_frames_ctx` of a frame from `av_hwframe_get_buffer` must reference the pool |
 //! | `AVHWDeviceContext.hwctx` | the `VADisplay`, for the GPU colour conversion of RGB DMA-BUFs | right after `type`, after one pointer (two up to libavutil 58: `internal`) | `type` must be the device's type in exactly that layout |
+//! | `AVCodecContext.sample_fmt` | the AAC encoder of RTMP output (an audio encoder needs its sample format before it opens) | after `sample_rate` (option `ar`): directly from libavcodec 61 (then `ch_layout`), after `channels` (option `ac`) up to 60 | the neighbours' option offsets must match exactly one layout, and the field must be `AV_SAMPLE_FMT_NONE` in a new context |
+//! | `AVIOContext.error` | RTMP output: a write that failed (`avio_write` and `avio_flush` return nothing) | searched: the `int` where a write callback's failure lands ([`avio_error`]) | exactly one `int` of the first 200 bytes changes to the callback's sentinel value |
 //!
-//! A check that fails disables only what needs the field (VA-API, or the
-//! DMA-BUF import), with the reason in the probe results. The first three
-//! rows are found by searching, so a new major whose layout matches keeps
-//! working without a change here; the last one is a table, because there is
-//! nothing to anchor those offsets to, and an unlisted major turns the
-//! DMA-BUF import off rather than guess (see [`frame_refs_table`]).
+//! A check that fails disables only what needs the field (VA-API, the
+//! DMA-BUF import, or RTMP output), with the reason in the probe results.
+//! Most rows are found by searching, so a new major whose layout matches
+//! keeps working without a change here; `buf[0]` / `hw_frames_ctx` is a
+//! table, because there is nothing to anchor those offsets to, and an
+//! unlisted major turns the DMA-BUF import off rather than guess (see
+//! [`frame_refs_table`]).
 #![allow(unsafe_code)]
 
 use std::ffi::c_int;
 use std::mem::{offset_of, size_of};
 
 use super::sys::{
-	Api, BufferRefHead, FrameHead, NOPTS_VALUE, PICTURE_TYPE_NONE, Ptr, Rational, cstr,
+	Api, AvioHead, BufferRefHead, FormatApi, FrameHead, NOPTS_VALUE, PICTURE_TYPE_NONE, Ptr,
+	Rational, cstr,
 };
 
 /// Offsets of `pict_type` and `pts` in `AVFrame`.
@@ -228,6 +232,43 @@ fn locate_hw_frames(api: &Api, ctx: Ptr) -> Result<usize, String> {
 	Ok(found)
 }
 
+/// Where `sample_fmt` is in `AVCodecContext`, from the offsets of the
+/// AVOptions of its neighbours, checked in a new context.
+///
+/// An audio encoder must be told its sample format before it opens, and
+/// that field has no AVOption. It follows `sample_rate` (option `ar`):
+/// directly from libavcodec 61, with `ch_layout` (option `ch_layout`) after
+/// it; after `channels` (option `ac`) up to 60, where `ch_layout` sits at
+/// the end of the struct.
+pub fn codec_sample_fmt(api: &Api) -> Result<usize, String> {
+	// SAFETY: a generic context (no codec); freed below.
+	let mut ctx = unsafe { (api.avcodec_alloc_context3)(std::ptr::null_mut()) };
+	if ctx.is_null() {
+		return Err("avcodec_alloc_context3 failed".into());
+	}
+	let offset = |name| option_offset(api, ctx, name);
+	let rate = offset("ar");
+	let found = rate.and_then(|rate| {
+		let new = offset("ch_layout") == Some(rate + 8);
+		let old = offset("ac") == Some(rate + 4);
+		match (new, old) {
+			(true, false) => Some(rate + 4),
+			(false, true) => Some(rate + 8),
+			_ => None,
+		}
+	});
+	// SAFETY: the offset lies before an option of this context, so inside
+	// it, and is int-aligned (a neighbour of int fields).
+	let result = match found {
+		Some(at) if unsafe { read::<c_int>(ctx, at) } == -1 => Ok(at),
+		Some(_) => Err("AVCodecContext.sample_fmt check failed (not NONE in a new context)".into()),
+		None => Err("unknown AVCodecContext layout (sample_fmt not next to sample_rate)".into()),
+	};
+	// SAFETY: allocated above.
+	unsafe { (api.avcodec_free_context)(&mut ctx) };
+	result
+}
+
 /// Offsets in `AVHWFramesContext`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HwFramesFields {
@@ -398,6 +439,77 @@ fn frame_refs_table(avutil_major: u32) -> Option<FrameRefs> {
 		_ => return None,
 	};
 	Some(FrameRefs { buf, hw_frames_ctx })
+}
+
+/// The bytes of an `AVIOContext` searched for `error`: inside the struct of
+/// every release (208 bytes in libavformat 63, the smallest so far; 264 in
+/// 58), and since libavformat 60 it lives inside the larger `FFIOContext`.
+const AVIO_SPAN: usize = 200;
+
+/// The value [`avio_error`]'s write callback fails with: a negative number
+/// no FFmpeg error code uses.
+const AVIO_SENTINEL: c_int = -0x4E5F_0321;
+
+unsafe extern "C" fn refuse_write(_opaque: Ptr, _data: *mut u8, _size: c_int) -> c_int {
+	AVIO_SENTINEL
+}
+
+/// Where `AVIOContext.error` is, found by search.
+///
+/// `avio_write` and `avio_flush` return nothing; a failed write is only
+/// stored in `error`, which moved between releases (120 bytes in
+/// libavformat 58, after the checksum fields; 84 in 63, right after
+/// `eof_reached`). A context whose write callback fails with a sentinel
+/// value is written to and flushed, and the one `int` of its first
+/// [`AVIO_SPAN`] bytes that changed to the sentinel is `error`.
+pub fn avio_error(format: &FormatApi, api: &Api) -> Result<usize, String> {
+	const SIZE: usize = 4096;
+	type Snapshot = [c_int; AVIO_SPAN / 4];
+	// SAFETY: a context of our own over a buffer from av_malloc, as
+	// avio_alloc_context documents; it is only written to through FFmpeg,
+	// and the snapshots read within its first AVIO_SPAN bytes (see there),
+	// at int-aligned offsets of an allocation FFmpeg aligns. The buffer
+	// (which FFmpeg may have replaced) and the context are freed as the
+	// documentation says: `av_freep(&ctx->buffer)`, then
+	// `avio_context_free`.
+	unsafe {
+		let buffer = (api.av_malloc)(SIZE).cast::<u8>();
+		if buffer.is_null() {
+			return Err("av_malloc failed".into());
+		}
+		let mut ctx = (format.avio_alloc_context)(
+			buffer,
+			SIZE as c_int,
+			1,
+			std::ptr::null_mut(),
+			None,
+			Some(refuse_write),
+			None,
+		);
+		if ctx.is_null() {
+			let mut buffer = buffer;
+			(api.av_freep)((&raw mut buffer).cast());
+			return Err("avio_alloc_context failed".into());
+		}
+		let snapshot = |ctx: Ptr| -> Snapshot { std::array::from_fn(|i| read(ctx, i * 4)) };
+		let before = snapshot(ctx);
+		(format.avio_write)(ctx, b"voelin".as_ptr(), 6);
+		(format.avio_flush)(ctx);
+		let after = snapshot(ctx);
+		let head = ctx.cast::<AvioHead>();
+		(api.av_freep)((&raw mut (*head).buffer).cast());
+		(format.avio_context_free)(&mut ctx);
+		let found: Vec<usize> = (0..before.len())
+			.filter(|&i| before[i] != AVIO_SENTINEL && after[i] == AVIO_SENTINEL)
+			.map(|i| i * 4)
+			.collect();
+		match found[..] {
+			[offset] => Ok(offset),
+			_ => Err(format!(
+				"unknown AVIOContext layout (write errors at {found:?}, not in exactly one place)"
+			)),
+		}
+	}
 }
 
 /// [`FrameRefs`] of this release, with `buf[0]` checked on a real frame

@@ -103,6 +103,13 @@ fn share_end_text(reason: &EndReason) -> String {
 	}
 }
 
+/// How many watch stream `id`: the server's count (TeamSpeak 6 tells it),
+/// else the gateway directory's.
+fn viewer_count(view: &crate::app::SessionView, id: &str) -> Option<u32> {
+	let native = view.streams.iter().find(|s| s.id == id).and_then(|s| s.viewers);
+	native.or_else(|| view.stream_viewers.get(id).copied())
+}
+
 /// "8 Mbit/s", "640 kbit/s" (the stream's announced bitrate, kbit/s); "" for 0.
 fn bitrate_text(kbps: u32) -> String {
 	match kbps {
@@ -146,6 +153,17 @@ impl App {
 			}
 			Event::WatchState { session, stream_id, state } => {
 				self.watch_state(session as i64, &stream_id, state);
+			}
+			Event::WatchLayers { session, stream_id, layers, layer } => {
+				if let Some(watch) = self
+					.watch
+					.as_mut()
+					.filter(|w| w.session == Some(session as i64) && w.stream_id == stream_id)
+				{
+					watch.layers = layers;
+					watch.layer = layer;
+					self.refresh_viewer();
+				}
 			}
 			// Also flagged on the sink, which the encoder reads.
 			Event::StreamKeyframeRequest { .. } => {}
@@ -231,7 +249,7 @@ impl App {
 					streamer: view.nickname(s.streamer.0).into(),
 					channel: view.other_channel_name(s.streamer.0).into(),
 					streamer_id: i32::from(s.streamer.0),
-					viewers: view.stream_viewers.get(&s.id).map_or(0, |v| *v as i32),
+					viewers: viewer_count(view, &s.id).unwrap_or(0) as i32,
 					audio: s.audio,
 					watching,
 					own: view.state.own_client == Some(s.streamer.0),
@@ -355,7 +373,7 @@ impl App {
 		});
 		bridge.set_viewer_channel(channel.unwrap_or_default().into());
 		bridge.set_viewer_elapsed(watch.elapsed().into());
-		let viewers = self.view().and_then(|v| v.stream_viewers.get(&watch.stream_id)).copied();
+		let viewers = self.view().and_then(|v| viewer_count(v, &watch.stream_id));
 		bridge.set_viewer_count(viewers.unwrap_or(0) as i32);
 		let qualities = watch.qualities();
 		let chosen = watch
@@ -370,17 +388,17 @@ impl App {
 	}
 
 	/// A simulcast layer of the watched stream (0: follow the bandwidth
-	/// estimate). The streamer picks the layer from each viewer's estimate,
-	/// so this asks for the picture again; a viewer-side choice needs an
-	/// engine API that does not exist yet.
+	/// estimate), asked of the streamer; the engine confirms with
+	/// `WatchLayers`.
 	pub(crate) fn set_stream_quality(&mut self, index: i32) {
 		let Some(watch) = &mut self.watch else { return };
 		watch.layer =
 			usize::try_from(index - 1).ok().and_then(|i| watch.layers.get(i)).map(|l| l.id);
 		if let Some(session) = watch.session {
-			self.engine.send(Command::RequestStreamKeyframe {
+			self.engine.send(Command::SetWatchLayer {
 				session: session as u64,
 				stream_id: watch.stream_id.clone(),
+				layer: watch.layer,
 			});
 		}
 		self.refresh_viewer();

@@ -414,6 +414,7 @@ fn demo_ui(app: &mut App) {
 				bitrate: 8000,
 				viewer_limit: 0,
 				audio: true,
+				viewers: Some(12),
 			}],
 		},
 		Event::State {

@@ -47,6 +47,7 @@ async fn rid_simulcast_over_loopback() {
 		bitrate: 1900,
 		viewer_limit: 0,
 		audio: true,
+		viewers: Some(0),
 	};
 	s.handle_notification(StreamNotification::Started { info, return_code: Some("1".into()) })
 		.await;

@@ -136,8 +136,8 @@ comes from the engine's events; what a gateway adds is hidden without it.
 | Member card | `member` | Description, groups, talk power, country; private message, poke, friend, block; volume and mute for us | `ContactsChanged`; `Command::SetContact`, `SetClientVolume`, `SetClientMuted`, `Poke` |
 | Pinned messages | `pins` | In the members panel's place: cards with author, time, text, files and reactions; the pin unpins, a click jumps to the message | `Gateway` `Pins`, `Pinned`, `Unpinned`; `GatewayRequest::Pins`, `Unpin` |
 | Topics | `topics`, `topic:<id>` | In the members panel's place: search, cards with the message count, creator and last activity, Create Topic; an open topic replaces the chat's messages and takes replies | `Gateway` `Topics`, `Topic`, `TopicHistory`; `GatewayRequest::Topics`, `TopicHistory`, `CreateTopic`, `Post` |
-| Voice channel | `voice` | Title, topic, "5 in voice / 50 total", Voice Settings, Leave; the people as large avatars (talking ring and bars, muted, crown, streaming); the streams as cards (LIVE, viewers, kind, bitrate, sound, Watch Stream); the channel's chat | `Presence`, `Talking`, `StreamsChanged`, `Gateway` stream directory (viewer counts) |
-| Watching a stream | `watch`, `popout` | The channel's header with "5 in voice" and Leave; the player with the streamer, title, viewers, LIVE, the picture's height (the simulcast picker when the streamer offers layers), volume, elapsed time, back to the chat, pop out, full screen; a note that the stream belongs to the channel; the channel's chat and a Stream Info tab. Popped out (and in full screen) it fills the window | `WatchState`, decoded frames (`src/video.rs`), `Gateway` stream directory |
+| Voice channel | `voice` | Title, topic, "5 in voice / 50 total", Voice Settings, Leave; the people as large avatars (talking ring and bars, muted, crown, streaming); the streams as cards (LIVE, viewers, kind, bitrate, sound, Watch Stream); the channel's chat | `Presence`, `Talking`, `StreamsChanged`, viewer counts from `StreamsChanged`, else the `Gateway` stream directory |
+| Watching a stream | `watch`, `popout` | The channel's header with "5 in voice" and Leave; the player with the streamer, title, viewers, LIVE, the picture's height (the simulcast picker when a Voelin streamer offers layers), volume, elapsed time, what arrives (codec, size, frame rate, bitrate), back to the chat, pop out, full screen; a note that the stream belongs to the channel; the channel's chat and a Stream Info tab. Popped out (and in full screen) it fills the window | `WatchState`, `WatchLayers`, decoded frames and their stats (`src/video.rs`), `StreamsChanged` (viewer counts; the `Gateway` stream directory where the server gives none) |
 
 The pins and topics share the place of the members panel: opening one
 closes the other, and the members button brings the panel back. On the
@@ -314,9 +314,10 @@ the window's size so the pointer is not over the window, and passes
 - The members panel lists the people online: TeamSpeak tells a client
   nothing about offline members, so the mockup's "Offline" section and a
   server-wide member count are left out.
-- The quality picker shows only when the streamer's simulcast layers are
-  known; the engine does not yet tell a viewer which layers a stream has,
-  so in practice the player shows the decoded picture's height.
+- The quality picker shows only when the streamer lists its simulcast
+  layers, which only a Voelin streamer does (`a=x-voelin-layers`, see
+  [media.md](media.md)); for the official client's streams the player
+  shows the decoded picture's height.
 - Popping the stream out fills the main window (no second window yet).
 - A jump to a pinned message scrolls to where an average row would be
   (rows differ in height), and only to messages already loaded.
@@ -325,6 +326,7 @@ the window's size so the pointer is not over the window, and passes
   stream belongs to its channel): its destination picks among the servers,
   not among their channels. Image paths (image sources, backgrounds) are
   typed, there is no file chooser. The background effect replaces what is
-  outside an oval (the engine has no person segmentation model yet). The
+  around the person the engine's segmentation model finds (an oval where
+  the model does not load). The
   studio cannot be detached on Android (one window). Its own window shows
   no toasts; status messages go to the main window.

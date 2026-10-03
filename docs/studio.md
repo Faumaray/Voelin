@@ -3,7 +3,8 @@
 The Stream Studio composites scenes of sources (screens, windows, cameras,
 images, text, colours) into one picture that becomes the video of our stream,
 and keeps or forwards what the stream's encoders make: a recording, a replay
-buffer to save clips from after the fact, and WHIP to a broadcast service. It
+buffer to save clips from after the fact, and WHIP or RTMP to a broadcast
+service. It
 is the engine behind the Studio screen of the UI (scenes and sources, a live
 preview, LIVE / timer, the audio mixer, Record Clip, Go Live / End Stream,
 Share Window / Share Screen, a camera with background blur); this page is
@@ -21,7 +22,7 @@ sources (a thread each) ─ Feed (latest wins) ┐
 Streamer::start_studio: convert → layers → encoders ─────┼─ MediaSink (the live stream, when attached)
                         audio sources → mixer → Opus ────┘
                              │ every packet of the stream codec, attached or not
-                             └─ Studio::write_packet ─ replay buffer, recording, WHIP outputs
+                             └─ Studio::write_packet ─ replay buffer, recording, WHIP and RTMP outputs
 ```
 
 Everything is changeable while it runs, and nothing is capped: any number of
@@ -103,11 +104,34 @@ only three read-only enumeration ioctls are written by hand. Capture goes
 through PipeWire, which owns the devices on a current desktop: from the
 user's daemon, or in a sandbox from the XDG Camera portal (`ashpd`), both on
 the same PipeWire thread as screen capture. Raw formats (YUYV, UYVY, NV12,
-I420, packed RGB) are converted into pooled frames; MJPEG is not offered, so
-a camera that has both gives its raw format (often at a lower size at the
-highest rates). `camera::SYNTHETIC` is always listed: the test pattern, for
+I420, packed RGB) are converted into pooled frames. MJPEG, which many USB
+cameras offer for their large sizes only (the Fifine K420: 2560x1440 and
+1920x1080 only as MJPEG, raw up to 1280x720), is decoded by `zune-jpeg`
+straight into pooled RGBA frames on a thread of its own, latest-wins, so a
+decode that falls behind drops pictures rather than holding up the camera;
+the background filter then runs on that thread. A camera-like 1440p
+picture takes about 30 ms to decode (one core), so 1440p at 30 fps is about
+what that thread does.
+
+What PipeWire is offered comes from the V4L2 list, best first: the wanted
+size at the wanted rate in a raw format (nothing to decode), then the
+wanted size at any rate with MJPEG first, then every format at the sizes it
+lists, nearest the wanted size first. Every offer names sizes the driver
+lists for that format: PipeWire's V4L2 source takes a size on trust and
+then fails to set it (NV12 at 2560x1440 on a camera that has that size only
+as MJPEG). `camera::SYNTHETIC` is always listed: the test pattern, for
 tests and machines without a camera. `voelinctl studio cameras` prints the
 list.
+
+On Windows, Media Foundation (`camera::mf`): `MFEnumDeviceSources` lists the
+cameras (the symbolic link is the id, then the friendly name, and every
+native format with its sizes and rates), and an `IMFSourceReader` on a
+thread of its own opens one at the native format nearest the wanted size,
+the fastest up to the wanted rate, and hands out NV12 at that size: with
+advanced video processing on, the reader decodes MJPEG and converts the
+other formats itself. Frames go through the same pacer, pool and
+background filter as on Linux. **Never run**: it is type-checked for
+`x86_64-pc-windows-gnu` only, as nothing here runs Windows.
 
 ## Background replacement (`studio::segment`)
 
@@ -171,9 +195,36 @@ fails is removed and reported, and the rest go on.
   that reaches the service: no STUN or TURN yet. It asks for a keyframe when
   it starts, when ICE comes up, when the service sends a PLI and after its
   queue overflowed.
-- **RTMP** (`rtmp::Rtmp`): the seam only. It is meant to go through the
-  FFmpeg libraries loaded at runtime (libavformat's muxer side is not in the
-  loader yet); until then adding an `rtmp://` output fails with that reason.
+- **RTMP and RTMPS** (`rtmp::Rtmp`, feature `ffmpeg`): through libavformat
+  loaded at runtime, never linked ([media.md](media.md#rtmp-output)). Its
+  `rtmp://` and `rtmps://` protocols do the handshake, `connect`, `publish`
+  and TLS and take an FLV byte stream; the FLV is ours (`flv`: `onMetaData`,
+  AVC and AAC sequence headers, then one tag per frame), as the recordings'
+  Matroska is, so no libavformat struct is touched. Video is H.264 of the
+  output's layer (classic RTMP carries nothing else; Enhanced RTMP's HEVC,
+  AV1, VP9 and Opus are not written): the stream's packets as they are
+  when it encodes H.264; with another stream codec the streamer runs an
+  H.264 encoder for that layer beside it, as for a viewer that chose
+  another codec (`OutputSink::video_codec`, `Studio::output_codecs`), and
+  its packets go to the outputs that asked for H.264 only, while the
+  recordings and the replay buffer keep the stream's codec. Audio is the
+  studio's Opus decoded and encoded as AAC-LC (160 kbit/s, 48 kHz stereo)
+  by FFmpeg's own `opus` decoder and `aac` encoder, on the output's
+  thread. The stream key is the
+  last part of the URL's path (`rtmp://host/app/key`) or the output's token
+  (sent as the play path, the URL's path as the application); the output's
+  name never shows it. The first connection is made when the output is
+  added, so a wrong address or key fails there; a connection that fails
+  later (the service restarting, the network) is made again after 1, 2, 4,
+  ... up to 30 seconds for as long as the output exists, each new one
+  starting at a keyframe it asks for, while the stats show why it is down.
+  A thread of its own runs the connection behind a bounded queue (about two
+  seconds): a slow upload drops packets rather than holding up an encoder,
+  and video resumes at the next keyframe. Audio goes out in time order with
+  the video (it waits for the video of its time, at most a second), and the
+  audio of the first keyframe's moment, which comes before the keyframe,
+  is kept as a recording keeps it. `EndStream` unpublishes and closes; a
+  network that does not answer is cut off after three seconds.
 
 Recording and the replay buffer need no live stream: a studio's streamer
 encodes from the start (see below).
@@ -197,8 +248,8 @@ channel; late subscribers miss what came before).
 | `SetPreview { width, height, fps }` | the preview tap's size and rate (default 480x270 at 15 fps) |
 | `StartRecording { path }` / `StopRecording` | `.webm` or `.mkv` |
 | `SetReplay { seconds, memory_mb }` / `SaveClip { path }` | the replay buffer (0 seconds: off) |
-| `AddOutput(OutputSpec::Record { path } \| Url { url, token })` / `RemoveOutput { id }` | more recordings, WHIP (`http(s)://`), RTMP (refused for now) |
-| `GoLive` / `EndStream` | the studio's state for the header (LIVE, timer); `EndStream` also closes the outputs that push (WHIP push from when they are added). The TeamSpeak stream itself is started and attached as usual |
+| `AddOutput(OutputSpec::Record { path } \| Url { url, token })` / `RemoveOutput { id }` | more recordings, WHIP (`http(s)://`, `token`: the bearer token), RTMP (`rtmp(s)://`, `token`: the stream key unless the URL ends with it) |
+| `GoLive` / `EndStream` | the studio's state for the header (LIVE, timer); `EndStream` also closes the outputs that push (WHIP and RTMP push from when they are added). The TeamSpeak stream itself is started and attached as usual |
 
 | Event | |
 |---|---|
@@ -257,6 +308,10 @@ voelinctl studio run scenes.json --seconds 10 --switch-to 2 \
   --preview preview.png --record rec.webm --clip clip.mkv --replay 30 --tone 440 --codec vp8
 # Push to a WHIP endpoint (token also from VOELIN_WHIP_TOKEN).
 voelinctl studio run scenes.json --seconds 60 --whip https://ingest.example/whip --token ...
+# Push over RTMP(S) (H.264, encoded besides the stream's unless --codec h264;
+# the key in the URL or in --token).
+voelinctl studio run scenes.json --seconds 60 --tone 440 \
+  --rtmp rtmps://live.example/app --token <stream key>
 # The compositor alone: compose time and heap allocations per frame.
 voelinctl studio bench --sources 4 --res 1920x1080 --fps 60
 voelinctl studio cameras
@@ -294,9 +349,16 @@ two threads) takes about 3 ms at its own rate (15 fps by default).
 | Settings ⇄ studio in both directions | `voelin-core` `studio::tests` | tested |
 | WHIP: offer, answer, ICE, DTLS, VP8 and Opus arriving, refusal with the service's reason, `DELETE` on stop | `tests/studio_whip.rs` against a WHIP server built on str0m in the test (`--features whip`) | tested; no public WHIP service tried |
 | Real camera through the user's PipeWire (Fifine K420, 1280x720) | `camera::tests::a_real_camera_delivers` (`--ignored`) | tested on one webcam |
+| MJPEG: decoded into pooled frames (one frame reused), broken pictures refused, the decoder thread takes the newest | `camera::mjpeg::tests` | tested |
+| MJPEG from a real camera (Fifine K420) at 2560x1440, 1920x1080 and 1280x720 | `camera::tests::a_real_camera_delivers_its_largest_mjpeg_size` (`--ignored`, `VOELIN_CAMERA_SIZE` picks a size) | tested on one webcam: each size arrived at 10 fps, which is what the camera sent in that light (`v4l2-ctl` measured the same 10 fps) |
 | Camera through the XDG Camera portal (sandboxes) | – | compiles only |
 | Screen, window and portal sources | the existing capture backends ([media.md](media.md#capture)) | as tested there; not run inside the studio here |
 | Background blur, image and colour backdrops on the oval mask | `segment::tests` | tested |
 | Person segmentation (PP-HumanSeg through tract): loads, 192x192 mask, nobody in an empty room, time per mask | `segment::tests::the_model_finds_nobody_in_an_empty_room` | tested (about 50 ms per mask); on a photo of a person the mask follows the silhouette, arms and legs included (checked by eye, the photo is not in the repository); not yet tried with a camera |
-| Windows and Android cameras | – | not implemented: `camera::list()` has only the test pattern there |
-| RTMP | – | the seam only (refuses with its reason) |
+| Windows cameras (Media Foundation: listing, the native format nearest the wanted size, NV12 through the source reader, MJPEG decoded by it) | `cargo clippy --target x86_64-pc-windows-gnu -p voelin-media` | type-checked only, never run |
+| Android cameras | – | not implemented: `camera::list()` has only the test pattern there |
+| RTMP: the FLV tags (sizes, times past 24 bits, AVC from Annex B, `onMetaData` in AMF0), URL and key handling (the name hides the key), dead servers refused | `flv::tests`, `rtmp::tests` | tested |
+| RTMP beside another stream codec: an output asks for H.264 of its layer only, its packets reach it alone, the recording and the replay buffer keep the stream's | `studio::tests::packets_reach_the_outputs_and_the_studio_is_a_capture_backend` | tested |
+| RTMP: write errors seen (`AVIOContext.error`, found at load), an abort ends a stuck connect, the sample format field of the AAC encoder, Opus → AAC (frames back to back from the packets' clock, priming, a gap restarts the clock) | `ffmpeg::avio::tests`, `ffmpeg::audio::tests`, `ffmpeg::tests` | tested with FFmpeg 9.0.1 (libavformat 63: `error` at 84, `sample_fmt` at 348) and FFmpeg 4.4.8 (58: 120 and 408) |
+| RTMP end to end: a studio stream (H.264 through the hardware encoder, a 440 Hz tone) pushed to FFmpeg's own RTMP server (`ffmpeg -listen 1`) with the key apart from the URL; the server killed and another started on its port; `EndStream` | `voelin-core/tests/studio.rs` `a_studio_stream_goes_out_over_rtmp_and_comes_back_after_the_server_did` | tested: ffprobe reads `h264` 320x180 and `aac` 48000 Hz stereo in both servers' files, each starting at a keyframe, every picture decodes (red), the audio decodes to 440 Hz; the key arrived as the stream name; the second server finished its file and exited by itself. No public service (Twitch, YouTube) tried; RTMPS only through FFmpeg's TLS, untried here |
+| RTMP from a VP8 stream: the same server, the key in the URL, a recording at the same time | `voelin-core/tests/studio.rs` `a_vp8_stream_goes_out_over_rtmp_as_h264` | tested: the streamer's layer encodes VP8 and H.264; ffprobe reads `h264` 320x180 and `aac` 48000 Hz stereo, starting at a keyframe, every picture decodes (red), 440 Hz; the recording is VP8 and Opus |

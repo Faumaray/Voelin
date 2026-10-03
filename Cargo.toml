@@ -121,6 +121,9 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.wayland-client]
 opt-level = 3
+# MJPEG cameras: unoptimized, a 1440p picture takes most of a second.
+[profile.dev.package.zune-jpeg]
+opt-level = 3
 
 [profile.dev]
 # Line tables (for backtraces) for workspace crates, no debug info for

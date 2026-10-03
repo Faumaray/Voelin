@@ -116,6 +116,11 @@ pub struct StreamInfo {
 	pub bitrate: u32,
 	pub viewer_limit: u32,
 	pub audio: bool,
+	/// How many watch it: `viewer` of `notifystreaminfo`, 0 for a stream
+	/// that just started, then kept current from the viewers joining and
+	/// leaving (see [`StreamDirectory`](crate::session::StreamDirectory)).
+	/// `None` where nothing told (e.g. a gateway's directory entry).
+	pub viewers: Option<u32>,
 }
 
 /// Stream notifications, decoded from [`InMessage`].
@@ -190,6 +195,7 @@ impl StreamNotification {
 						bitrate: p.bitrate.unwrap_or(0),
 						viewer_limit: p.viewer_limit.unwrap_or(0),
 						audio: p.audio.unwrap_or(false),
+						viewers: Some(0),
 					},
 					return_code: p.return_code.clone(),
 				})
@@ -207,6 +213,7 @@ impl StreamNotification {
 						bitrate: p.bitrate.unwrap_or(0),
 						viewer_limit: p.viewer_limit.unwrap_or(0),
 						audio: p.audio.unwrap_or(false),
+						viewers: p.viewers,
 					}))
 				})
 				.collect(),
@@ -399,7 +406,7 @@ mod tests {
 			.iter()
 			.map(|n| match n {
 				StreamNotification::Info(i) => {
-					(i.id.as_str(), i.streamer, i.name.as_str(), i.audio)
+					(i.id.as_str(), i.streamer, i.name.as_str(), i.audio, i.viewers)
 				}
 				other => panic!("{other:?}"),
 			})
@@ -407,8 +414,8 @@ mod tests {
 		assert_eq!(
 			infos,
 			[
-				("6b5158dd", ClientId(6), "renamed again", true),
-				("069ba23c", ClientId(6), "second", false)
+				("6b5158dd", ClientId(6), "renamed again", true, Some(0)),
+				("069ba23c", ClientId(6), "second", false, Some(2))
 			]
 		);
 		// A client without streams.

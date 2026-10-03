@@ -367,7 +367,16 @@ component StreamPlayer inherits Rectangle {
                 vertical-alignment: center;
             }
         }
-        Rectangle { horizontal-stretch: 1; }
+        // What arrives: codec, size, frame rate, bitrate.
+        Text {
+            horizontal-stretch: 1;
+            text: Bridge.viewer-quality-detail;
+            color: #ffffff80;
+            font-size: Theme.font-xs;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            overflow: elide;
+        }
         if !Bridge.viewer-fullscreen && !Nav.narrow: IconButton {
             icon: Icons.minimize-2;
             label: @tr("Back to the chat (keeps watching)");

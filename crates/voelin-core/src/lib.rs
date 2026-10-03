@@ -243,6 +243,14 @@ pub enum Command {
 		session: SessionId,
 		stream_id: String,
 	},
+	/// Watch simulcast layer `layer` of a stream (`None`: as the bandwidth
+	/// allows). Only for a stream whose [`Event::WatchLayers`] listed
+	/// layers; otherwise an [`Event::Error`].
+	SetWatchLayer {
+		session: SessionId,
+		stream_id: String,
+		layer: Option<LayerId>,
+	},
 	/// Playback volume of a watched stream's audio, linear (1 = unchanged,
 	/// up to 4).
 	SetStreamVolume {
@@ -551,6 +559,15 @@ pub enum Event {
 		session: SessionId,
 		stream_id: String,
 		state: WatchState,
+	},
+	/// The simulcast layers a watched stream offers (a Voelin streamer with
+	/// several lists them; empty: none to choose from), and the one we asked
+	/// for with [`Command::SetWatchLayer`] (`None`: as the bandwidth allows).
+	WatchLayers {
+		session: SessionId,
+		stream_id: String,
+		layers: Vec<LayerSpec>,
+		layer: Option<LayerId>,
 	},
 	/// A setting was set or reset (by anyone: a command, the UI through
 	/// [`Engine::settings`], …). Read the new value from the settings.
@@ -944,6 +961,7 @@ fn command_session(command: &Command) -> SessionId {
 		| Command::WatchStream { session, .. }
 		| Command::LeaveStream { session, .. }
 		| Command::RequestStreamKeyframe { session, .. }
+		| Command::SetWatchLayer { session, .. }
 		| Command::SetStreamVolume { session, .. }
 		| Command::SetClientVolume { session, .. }
 		| Command::SetClientMuted { session, .. }

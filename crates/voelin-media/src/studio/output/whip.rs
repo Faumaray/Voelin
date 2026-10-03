@@ -40,7 +40,7 @@ use crate::{Error, Result};
 const QUEUE: usize = 256;
 
 fn error(message: impl Into<String>) -> Error {
-	Error::Capture { backend: "whip", message: message.into() }
+	Error::Output { output: "WHIP", message: message.into() }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -291,6 +291,10 @@ impl OutputSink for Whip {
 
 	fn bytes(&self) -> u64 {
 		self.shared.bytes.load(Ordering::Relaxed)
+	}
+
+	fn error(&self) -> Option<String> {
+		lock(&self.shared.error).clone()
 	}
 }
 
