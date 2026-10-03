@@ -39,34 +39,45 @@ export component Hint inherits Text {
     wrap: word-wrap;
 }
 
-// A label and a choice among a few (SegmentedTabs) on one row.
-export component ChoiceRow inherits HorizontalLayout {
+// A label and a choice among a few (SegmentedTabs) on one row; on the
+// phone the choice goes under the label, across the card.
+export component ChoiceRow inherits VerticalLayout {
     in property <string> text;
     in property <string> description;
     in property <[string]> model;
     in-out property <int> current;
     in property <length> choice-width: 280px;
     callback selected(int);
-    spacing: Theme.space-4;
-    min-height: Theme.control-height + 8px;
-    VerticalLayout {
-        alignment: center;
-        horizontal-stretch: 1;
-        Text {
-            text: root.text;
-            color: Theme.text;
-            wrap: word-wrap;
+    spacing: Theme.space-2;
+    HorizontalLayout {
+        spacing: Theme.space-4;
+        padding-top: Nav.narrow ? 0px : 4px;
+        padding-bottom: self.padding-top;
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.text;
+                color: Theme.text;
+                wrap: word-wrap;
+            }
+            if root.description != "": Text {
+                text: root.description;
+                color: Theme.text-muted;
+                font-size: Theme.font-sm;
+                wrap: word-wrap;
+            }
         }
-        if root.description != "": Text {
-            text: root.description;
-            color: Theme.text-muted;
-            font-size: Theme.font-sm;
-            wrap: word-wrap;
+        if !Nav.narrow: SegmentedTabs {
+            width: root.choice-width;
+            y: (parent.height - self.height) / 2;
+            model: root.model;
+            current-index <=> root.current;
+            label: root.text;
+            selected(i) => { root.selected(i); }
         }
     }
-    SegmentedTabs {
-        width: root.choice-width;
-        y: (parent.height - self.height) / 2;
+    if Nav.narrow: SegmentedTabs {
         model: root.model;
         current-index <=> root.current;
         label: root.text;
@@ -74,36 +85,21 @@ export component ChoiceRow inherits HorizontalLayout {
     }
 }
 
-// A label and a number typed in (no built-in limits); Enter applies.
-export component NumberRow inherits HorizontalLayout {
-    in property <string> text;
-    in property <string> description;
+// The number field of a NumberRow and its unit.
+component NumberField inherits HorizontalLayout {
     in property <string> value;
     in property <string> unit;
+    in property <string> label;
     callback accepted(string);
     spacing: Theme.space-4;
-    min-height: Theme.control-height + 8px;
-    VerticalLayout {
-        alignment: center;
-        horizontal-stretch: 1;
-        Text {
-            text: root.text;
-            color: Theme.text;
-            wrap: word-wrap;
-        }
-        if root.description != "": Text {
-            text: root.description;
-            color: Theme.text-muted;
-            font-size: Theme.font-sm;
-            wrap: word-wrap;
-        }
-    }
+    alignment: start;
+    horizontal-stretch: 0;
     TextField {
         width: 120px;
         y: (parent.height - self.height) / 2;
         text: root.value;
         input-type: number;
-        label: root.text;
+        label: root.label;
         accepted(t) => { root.accepted(t); }
     }
     Text {
@@ -112,6 +108,49 @@ export component NumberRow inherits HorizontalLayout {
         color: Theme.text-muted;
         font-size: Theme.font-sm;
         vertical-alignment: center;
+    }
+}
+
+// A label and a number typed in (no built-in limits); Enter applies. On
+// the phone the field goes under the label.
+export component NumberRow inherits VerticalLayout {
+    in property <string> text;
+    in property <string> description;
+    in property <string> value;
+    in property <string> unit;
+    callback accepted(string);
+    spacing: Theme.space-2;
+    HorizontalLayout {
+        spacing: Theme.space-4;
+        padding-top: Nav.narrow ? 0px : 4px;
+        padding-bottom: self.padding-top;
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.text;
+                color: Theme.text;
+                wrap: word-wrap;
+            }
+            if root.description != "": Text {
+                text: root.description;
+                color: Theme.text-muted;
+                font-size: Theme.font-sm;
+                wrap: word-wrap;
+            }
+        }
+        if !Nav.narrow: NumberField {
+            value: root.value;
+            unit: root.unit;
+            label: root.text;
+            accepted(t) => { root.accepted(t); }
+        }
+    }
+    if Nav.narrow: NumberField {
+        value: root.value;
+        unit: root.unit;
+        label: root.text;
+        accepted(t) => { root.accepted(t); }
     }
 }
 
@@ -197,6 +236,35 @@ export component AccountSection inherits VerticalLayout {
     }
 }
 
+// Make default, export, delete.
+component IdentityActions inherits HorizontalLayout {
+    in property <IdentityItem> item;
+    spacing: Theme.space-3;
+    if !root.item.default: Button {
+        small: true;
+        text: @tr("Make default");
+        y: (parent.height - self.height) / 2;
+        clicked => { Bridge.identity-action(root.item.id, "default"); }
+    }
+    Button {
+        small: true;
+        icon: Icons.upload;
+        text: @tr("Export");
+        y: (parent.height - self.height) / 2;
+        clicked => { Bridge.identity-action(root.item.id, "export"); }
+    }
+    IconButton {
+        icon: Icons.trash-2;
+        label: @tr("Delete {}", root.item.name);
+        size: 30px;
+        icon-size: Theme.icon-sm;
+        tint: Theme.danger;
+        enabled: !root.item.default;
+        y: (parent.height - self.height) / 2;
+        clicked => { Bridge.identity-action(root.item.id, "delete"); }
+    }
+}
+
 // One identity: name, ids, level, what can be done with it.
 component IdentityRow inherits Rectangle {
     in property <IdentityItem> item;
@@ -230,29 +298,14 @@ component IdentityRow inherits Rectangle {
             Rectangle {
                 horizontal-stretch: 1;
             }
-            if !root.item.default: Button {
-                small: true;
-                text: @tr("Make default");
-                y: (parent.height - self.height) / 2;
-                clicked => { Bridge.identity-action(root.item.id, "default"); }
+            if !Nav.narrow: IdentityActions {
+                item: root.item;
             }
-            Button {
-                small: true;
-                icon: Icons.upload;
-                text: @tr("Export");
-                y: (parent.height - self.height) / 2;
-                clicked => { Bridge.identity-action(root.item.id, "export"); }
-            }
-            IconButton {
-                icon: Icons.trash-2;
-                label: @tr("Delete {}", root.item.name);
-                size: 30px;
-                icon-size: Theme.icon-sm;
-                tint: Theme.danger;
-                enabled: !root.item.default;
-                y: (parent.height - self.height) / 2;
-                clicked => { Bridge.identity-action(root.item.id, "delete"); }
-            }
+        }
+        // The phone: the buttons under the name.
+        if Nav.narrow: IdentityActions {
+            item: root.item;
+            alignment: start;
         }
         Text {
             text: @tr("TeamSpeak 3: {}", root.item.uid);
@@ -404,7 +457,8 @@ export component ProfilesSection inherits VerticalLayout {
 }
 
 // One simulcast layer, numbers as typed.
-component LayerRow inherits HorizontalLayout {
+// The fields wrap onto more lines on narrow cards.
+component LayerRow inherits FlexboxLayout {
     in property <LayerItem> layer;
     in property <int> index;
     spacing: Theme.space-2;
@@ -444,38 +498,11 @@ component LayerRow inherits HorizontalLayout {
     }
 }
 
-// One audio source of our stream.
-component SourceRow inherits HorizontalLayout {
+// The gain of an audio source and its value.
+component GainSlider inherits HorizontalLayout {
     in property <AudioSourceItem> source;
     in property <int> index;
     spacing: Theme.space-3;
-    Rectangle {
-        width: 34px;
-        height: 34px;
-        y: (parent.height - self.height) / 2;
-        border-radius: Theme.radius-md;
-        background: Theme.surface-4;
-        Icon {
-            source: root.source.kind == "microphone" ? Icons.mic : root.source.kind == "desktop" ? Icons.monitor : root.source.kind == "window" ? Icons.layout-grid : root.source.kind == "synthetic" ? Icons.audio-lines : Icons.music;
-            size: Theme.icon-sm;
-            tint: Theme.accent-text;
-        }
-    }
-    VerticalLayout {
-        alignment: center;
-        width: 180px;
-        Text {
-            text: root.source.name;
-            color: Theme.text;
-            overflow: elide;
-        }
-        Text {
-            text: root.source.detail;
-            color: Theme.text-muted;
-            font-size: Theme.font-xs;
-            overflow: elide;
-        }
-    }
     Slider {
         y: (parent.height - self.height) / 2;
         minimum: 0;
@@ -496,26 +523,75 @@ component SourceRow inherits HorizontalLayout {
         vertical-alignment: center;
         horizontal-alignment: right;
     }
-    IconButton {
-        icon: root.source.muted ? Icons.volume-x : Icons.volume-2;
-        label: root.source.muted ? @tr("Unmute") : @tr("Mute");
-        checked: root.source.muted;
-        danger: true;
-        size: 32px;
-        icon-size: Theme.icon-sm;
-        y: (parent.height - self.height) / 2;
-        clicked => {
-            Bridge.audio-source-changed(root.index, { kind: root.source.kind, name: root.source.name, detail: root.source.detail, gain: root.source.gain, muted: !root.source.muted });
+}
+
+// One audio source of our stream; on the phone its gain goes on a second
+// line.
+component SourceRow inherits VerticalLayout {
+    in property <AudioSourceItem> source;
+    in property <int> index;
+    spacing: Theme.space-2;
+    HorizontalLayout {
+        spacing: Theme.space-3;
+        Rectangle {
+            width: 34px;
+            height: 34px;
+            y: (parent.height - self.height) / 2;
+            border-radius: Theme.radius-md;
+            background: Theme.surface-4;
+            Icon {
+                source: root.source.kind == "microphone" ? Icons.mic : root.source.kind == "desktop" ? Icons.monitor : root.source.kind == "window" ? Icons.layout-grid : root.source.kind == "synthetic" ? Icons.audio-lines : Icons.music;
+                size: Theme.icon-sm;
+                tint: Theme.accent-text;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            // 180px beside the gain; on the phone what the buttons leave.
+            preferred-width: 180px;
+            min-width: Nav.narrow ? 40px : 180px;
+            horizontal-stretch: Nav.narrow ? 1 : 0;
+            Text {
+                text: root.source.name;
+                color: Theme.text;
+                overflow: elide;
+            }
+            Text {
+                text: root.source.detail;
+                color: Theme.text-muted;
+                font-size: Theme.font-xs;
+                overflow: elide;
+            }
+        }
+        if !Nav.narrow: GainSlider {
+            source: root.source;
+            index: root.index;
+        }
+        IconButton {
+            icon: root.source.muted ? Icons.volume-x : Icons.volume-2;
+            label: root.source.muted ? @tr("Unmute") : @tr("Mute");
+            checked: root.source.muted;
+            danger: true;
+            size: 32px;
+            icon-size: Theme.icon-sm;
+            y: (parent.height - self.height) / 2;
+            clicked => {
+                Bridge.audio-source-changed(root.index, { kind: root.source.kind, name: root.source.name, detail: root.source.detail, gain: root.source.gain, muted: !root.source.muted });
+            }
+        }
+        IconButton {
+            icon: Icons.trash-2;
+            label: @tr("Remove {}", root.source.name);
+            size: 32px;
+            icon-size: Theme.icon-sm;
+            tint: Theme.danger;
+            y: (parent.height - self.height) / 2;
+            clicked => { Bridge.remove-audio-source(root.index); }
         }
     }
-    IconButton {
-        icon: Icons.trash-2;
-        label: @tr("Remove {}", root.source.name);
-        size: 32px;
-        icon-size: Theme.icon-sm;
-        tint: Theme.danger;
-        y: (parent.height - self.height) / 2;
-        clicked => { Bridge.remove-audio-source(root.index); }
+    if Nav.narrow: GainSlider {
+        source: root.source;
+        index: root.index;
     }
 }
 
@@ -595,9 +671,8 @@ export component StreamingSection inherits VerticalLayout {
             source: source;
             index: i;
         }
-        HorizontalLayout {
+        FlexboxLayout {
             spacing: Theme.space-2;
-            alignment: start;
             Button {
                 small: true;
                 icon: Icons.monitor;
@@ -929,9 +1004,16 @@ component SettingRow inherits VerticalLayout {
     in property <SettingItem> item;
     spacing: Theme.space-1;
     padding-bottom: Theme.space-2;
+    // The phone: the key above its value.
+    if Nav.narrow: Text {
+        text: root.item.key;
+        color: Theme.text;
+        font-weight: Theme.weight-medium;
+        overflow: elide;
+    }
     HorizontalLayout {
         spacing: Theme.space-3;
-        Text {
+        if !Nav.narrow: Text {
             text: root.item.key;
             color: Theme.text;
             font-weight: Theme.weight-medium;
