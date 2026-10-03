@@ -909,7 +909,7 @@ has not run on Windows yet.
 | OpenH264 download, SHA-256 check, reuse | `tests/openh264.rs -- --ignored` | tested locally (network) |
 | H.264 library missing / unknown file | unit + integration tests | tested |
 | AV1 decoder construction, garbage input | unit test (`--features av1`) | tested; streams of SVT-AV1, rav1e, libaom, `av1_vaapi` and `av1_amf` decoded (rows below) |
-| X11 capture (MIT-SHM and GetImage), sources, window capture → VP8 → decode, cursor | `tests/x11_capture.rs` under Xvfb | tested |
+| X11 capture (MIT-SHM and GetImage), sources, window capture → VP8 → decode, cursor | `tests/x11_capture.rs` under Xvfb (`VOELIN_X11_TEST_DISPLAY`) | tested |
 | wlroots capture (wlr-screencopy v3): outputs, pixels, a change arriving as a new frame, queue API | `tests/wlroots_capture.rs` against headless sway 1.9 (`VOELIN_WLROOTS_TEST_DISPLAY`) | tested; the ext-image-copy-capture path is untested (sway 1.9 predates it) |
 | Converter (strides, unpadded last row, odd sizes, RGBA/I420/NV12), scaler (flat, area average, half), pyramid (sharing, recycling, steady-state pools) | unit tests | tested |
 | Simulcast layers (sizes, fps caps, per-layer keyframes), reconfigure (codec, layers, fps) | `voelin-core` `media::tests::simulcast_layers_and_reconfigure` | tested |
@@ -947,7 +947,7 @@ has not run on Windows yet.
 | Stream mixer (latency, fade on underrun, drift correction, rate conversion, limiter, levels, live source changes), `BlockClock` | `voelin-media` `mix::tests`, `tests/mix_alloc.rs` (no allocation per block) | tested |
 | Application audio on PipeWire: desktop without our own stream, by name, by pid, a new player linked live, a quit one dropped, a restarted one matched again, the app list | `voelin-media/tests/pipewire_apps.rs` (private PipeWire, WirePlumber and D-Bus; tones told apart by frequency) | tested with PipeWire 1.0 and WirePlumber 0.4; skipped without them |
 | Streamer audio sources (mix levels, gain, mute, live change, microphone tap, window source error, silence) | `voelin-core` `media::tests::audio_sources_change_live`, `audio_sources_from_settings`, `settings::tests::audio_sources` | tested |
-| X11 `_NET_WM_PID` of the shared window | `tests/x11_capture.rs` under Xvfb | tested |
+| X11 `_NET_WM_PID` of the shared window | `tests/x11_capture.rs` under Xvfb (`VOELIN_X11_TEST_DISPLAY`) | tested |
 | WASAPI per-process loopback, audio sessions, `HWND` owner | – | type-checked for `x86_64-pc-windows-gnu` only |
 | Android per-app and all-but-ours playback capture | `cargo ndk -t arm64-v8a clippy`, `gradlew compileDebugKotlin` | compiles only (no device or emulator here) |
 | The same through the TeamSpeak 6 server | `voelin-core/tests/media_live.rs` (`VOELIN_LIVE=1`), `voelinctl stream start --synthetic` / `watch --expect-frames` | tested against 6.0.0-beta13.1 |
