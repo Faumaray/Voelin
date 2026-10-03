@@ -194,12 +194,17 @@ fails is removed and reported, and the rest go on.
   `rtmp://` and `rtmps://` protocols do the handshake, `connect`, `publish`
   and TLS and take an FLV byte stream; the FLV is ours (`flv`: `onMetaData`,
   AVC and AAC sequence headers, then one tag per frame), as the recordings'
-  Matroska is, so no libavformat struct is touched. Video is the studio's
-  H.264 of the output's layer as encoded; another stream codec is refused
-  with the reason (classic RTMP carries H.264; Enhanced RTMP's HEVC, AV1,
-  VP9 and Opus are not written). Audio is the studio's Opus decoded and
-  encoded as AAC-LC (160 kbit/s, 48 kHz stereo) by FFmpeg's own `opus`
-  decoder and `aac` encoder, on the output's thread. The stream key is the
+  Matroska is, so no libavformat struct is touched. Video is H.264 of the
+  output's layer (classic RTMP carries nothing else; Enhanced RTMP's HEVC,
+  AV1, VP9 and Opus are not written): the stream's packets as they are
+  when it encodes H.264; with another stream codec the streamer runs an
+  H.264 encoder for that layer beside it, as for a viewer that chose
+  another codec (`OutputSink::video_codec`, `Studio::output_codecs`), and
+  its packets go to the outputs that asked for H.264 only, while the
+  recordings and the replay buffer keep the stream's codec. Audio is the
+  studio's Opus decoded and encoded as AAC-LC (160 kbit/s, 48 kHz stereo)
+  by FFmpeg's own `opus` decoder and `aac` encoder, on the output's
+  thread. The stream key is the
   last part of the URL's path (`rtmp://host/app/key`) or the output's token
   (sent as the play path, the URL's path as the application); the output's
   name never shows it. The first connection is made when the output is
@@ -297,8 +302,9 @@ voelinctl studio run scenes.json --seconds 10 --switch-to 2 \
   --preview preview.png --record rec.webm --clip clip.mkv --replay 30 --tone 440 --codec vp8
 # Push to a WHIP endpoint (token also from VOELIN_WHIP_TOKEN).
 voelinctl studio run scenes.json --seconds 60 --whip https://ingest.example/whip --token ...
-# Push over RTMP(S) (H.264; the key in the URL or in --token).
-voelinctl studio run scenes.json --seconds 60 --codec h264 --tone 440 \
+# Push over RTMP(S) (H.264, encoded besides the stream's unless --codec h264;
+# the key in the URL or in --token).
+voelinctl studio run scenes.json --seconds 60 --tone 440 \
   --rtmp rtmps://live.example/app --token <stream key>
 # The compositor alone: compose time and heap allocations per frame.
 voelinctl studio bench --sources 4 --res 1920x1080 --fps 60
@@ -344,6 +350,8 @@ two threads) takes about 3 ms at its own rate (15 fps by default).
 | Background blur, image and colour backdrops on the oval mask | `segment::tests` | tested; **no person segmentation model** (see above) |
 | Windows cameras (Media Foundation: listing, the native format nearest the wanted size, NV12 through the source reader, MJPEG decoded by it) | `cargo clippy --target x86_64-pc-windows-gnu -p voelin-media` | type-checked only, never run |
 | Android cameras | – | not implemented: `camera::list()` has only the test pattern there |
-| RTMP: the FLV tags (sizes, times past 24 bits, AVC from Annex B, `onMetaData` in AMF0), URL and key handling (the name hides the key), codecs other than H.264 and dead servers refused | `flv::tests`, `rtmp::tests` | tested |
+| RTMP: the FLV tags (sizes, times past 24 bits, AVC from Annex B, `onMetaData` in AMF0), URL and key handling (the name hides the key), dead servers refused | `flv::tests`, `rtmp::tests` | tested |
+| RTMP beside another stream codec: an output asks for H.264 of its layer only, its packets reach it alone, the recording and the replay buffer keep the stream's | `studio::tests::packets_reach_the_outputs_and_the_studio_is_a_capture_backend` | tested |
 | RTMP: write errors seen (`AVIOContext.error`, found at load), an abort ends a stuck connect, the sample format field of the AAC encoder, Opus → AAC (frames back to back from the packets' clock, priming, a gap restarts the clock) | `ffmpeg::avio::tests`, `ffmpeg::audio::tests`, `ffmpeg::tests` | tested with FFmpeg 9.0.1 (libavformat 63: `error` at 84, `sample_fmt` at 348) and FFmpeg 4.4.8 (58: 120 and 408) |
 | RTMP end to end: a studio stream (H.264 through the hardware encoder, a 440 Hz tone) pushed to FFmpeg's own RTMP server (`ffmpeg -listen 1`) with the key apart from the URL; the server killed and another started on its port; `EndStream` | `voelin-core/tests/studio.rs` `a_studio_stream_goes_out_over_rtmp_and_comes_back_after_the_server_did` | tested: ffprobe reads `h264` 320x180 and `aac` 48000 Hz stereo in both servers' files, each starting at a keyframe, every picture decodes (red), the audio decodes to 440 Hz; the key arrived as the stream name; the second server finished its file and exited by itself. No public service (Twitch, YouTube) tried; RTMPS only through FFmpeg's TLS, untried here |
+| RTMP from a VP8 stream: the same server, the key in the URL, a recording at the same time | `voelin-core/tests/studio.rs` `a_vp8_stream_goes_out_over_rtmp_as_h264` | tested: the streamer's layer encodes VP8 and H.264; ffprobe reads `h264` 320x180 and `aac` 48000 Hz stereo, starting at a keyframe, every picture decodes (red), 440 Hz; the recording is VP8 and Opus |

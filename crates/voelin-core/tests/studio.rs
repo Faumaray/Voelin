@@ -194,6 +194,21 @@ fn rtmp_server(port: u16, out: &Path) -> std::process::Child {
 		.unwrap()
 }
 
+/// Add the RTMP output `spec`, trying again while the server starts.
+async fn add_rtmp(studio: &studio::Studio, spec: &voelin_core::studio::OutputSpec) {
+	let deadline = Instant::now() + Duration::from_secs(10);
+	loop {
+		match studio.apply(Command::AddOutput(spec.clone())).await {
+			Ok(()) => return,
+			Err(e) if Instant::now() < deadline => {
+				eprintln!("not yet: {e}");
+				tokio::time::sleep(Duration::from_millis(200)).await;
+			}
+			Err(e) => panic!("the RTMP output did not connect: {e}"),
+		}
+	}
+}
+
 /// Wait up to `limit` for `child` to exit by itself.
 fn wait_exit(child: &mut std::process::Child, limit: Duration) -> Option<std::process::ExitStatus> {
 	let deadline = Instant::now() + limit;
@@ -248,7 +263,9 @@ fn starts_with_keyframe(path: &Path) -> bool {
 		.arg(path)
 		.output()
 		.unwrap();
-	String::from_utf8_lossy(&out.stdout).lines().next() == Some("1")
+	// Side data (an encoder's SEI) adds fields after the flag.
+	String::from_utf8_lossy(&out.stdout).lines().next().and_then(|l| l.split(',').next())
+		== Some("1")
 }
 
 /// The studio pushed over RTMP to FFmpeg's own RTMP server: H.264 as
@@ -299,18 +316,7 @@ async fn a_studio_stream_goes_out_over_rtmp_and_comes_back_after_the_server_did(
 		url: format!("rtmp://127.0.0.1:{port}/live"),
 		token: Some("test-key".into()),
 	};
-	let deadline = Instant::now() + Duration::from_secs(10);
-	loop {
-		match studio.apply(Command::AddOutput(spec.clone())).await {
-			Ok(()) => break,
-			// The server is still starting.
-			Err(e) if Instant::now() < deadline => {
-				eprintln!("not yet: {e}");
-				tokio::time::sleep(Duration::from_millis(200)).await;
-			}
-			Err(e) => panic!("the RTMP output did not connect: {e}"),
-		}
-	}
+	add_rtmp(&studio, &spec).await;
 	studio.apply(Command::GoLive).await.unwrap();
 	tokio::time::sleep(Duration::from_secs(3)).await;
 
@@ -347,6 +353,74 @@ async fn a_studio_stream_goes_out_over_rtmp_and_comes_back_after_the_server_did(
 		assert!(length >= seconds, "{length} s of audio in {}", file.display());
 		assert!((430.0..450.0).contains(&hz), "{hz} Hz in {}", file.display());
 	}
+	std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A VP8 stream goes out over RTMP all the same: the streamer encodes H.264
+/// of the output's layer beside the VP8 (the key in the URL this time),
+/// while the recording keeps the stream's VP8.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_vp8_stream_goes_out_over_rtmp_as_h264() {
+	use voelin_core::media::voelin_media::ffmpeg::avio::Connection;
+	use voelin_core::studio::OutputSpec;
+
+	if !has("ffmpeg") || !has("ffprobe") || Connection::available().is_err() {
+		eprintln!("skipped: needs ffmpeg, ffprobe and the FFmpeg libraries with RTMP");
+		return;
+	}
+	let codecs = Codecs::new();
+	if ![Codec::Vp8, Codec::H264].iter().all(|c| codecs.encoder_codecs().contains(c)) {
+		eprintln!("skipped: needs VP8 and H.264 encoders");
+		return;
+	}
+	let settings = Settings::in_memory();
+	let mut scenes =
+		Scenes { width: WIDTH, height: HEIGHT, fps: 30, active: 1, ..Scenes::default() };
+	scenes.scenes.push(colour_scene(1, "Red", RED));
+	settings.set(&STUDIO_SCENES, scenes).unwrap();
+	let studio = studio::start(&settings).await.unwrap();
+	let config = StreamerConfig {
+		fps: 30,
+		bitrate_kbps: 800,
+		codec: Codec::Vp8,
+		audio_sources: vec![AudioSourceSpec::new(AudioSourceKind::Synthetic { hz: 440 })],
+		..StreamerConfig::default()
+	};
+	let mut streamer = Streamer::start_studio(&codecs, config, studio.clone()).await.unwrap();
+
+	let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+	let dir = std::env::temp_dir().join(format!("voelin-studio-rtmp-vp8-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let (pushed, recording) = (dir.join("pushed.flv"), dir.join("recording.webm"));
+	let mut server = rtmp_server(port, &pushed);
+	let spec =
+		OutputSpec::Url { url: format!("rtmp://127.0.0.1:{port}/live/test-key"), token: None };
+	add_rtmp(&studio, &spec).await;
+	studio.apply(Command::StartRecording { path: recording.clone() }).await.unwrap();
+	tokio::time::sleep(Duration::from_secs(3)).await;
+	let encoded = streamer.stats().layers[0].codecs.clone();
+	studio.apply(Command::StopRecording).await.unwrap();
+	studio.apply(Command::EndStream).await.unwrap();
+	let status = wait_exit(&mut server, Duration::from_secs(10));
+	if status.is_none() {
+		let _ = server.kill();
+	}
+	streamer.stop();
+	assert!(status.is_some_and(|s| s.success()), "the server did not finish: {status:?}");
+	assert_eq!(encoded, [Codec::Vp8, Codec::H264]);
+
+	let log = std::fs::read_to_string(pushed.with_extension("log")).unwrap_or_default();
+	assert!(!log.contains("Unexpected stream"), "{log}");
+	let streams = probe_streams(&pushed);
+	assert_eq!(streams, [format!("h264,{WIDTH},{HEIGHT}"), "aac,48000,2".to_owned()], "{log}");
+	assert!(starts_with_keyframe(&pushed));
+	let pictures = decode(&pushed);
+	assert!(pictures.len() >= 60, "{} pictures", pictures.len());
+	assert!(near(centre(&pictures[0]), RED), "{:?}", centre(&pictures[0]));
+	let (length, hz) = tone(&pushed);
+	assert!(length >= 2.0 && (430.0..450.0).contains(&hz), "{length} s at {hz} Hz");
+	let (streams, _) = probe(&recording);
+	check_streams(&streams);
 	std::fs::remove_dir_all(&dir).ok();
 }
 

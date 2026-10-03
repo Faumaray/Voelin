@@ -91,6 +91,14 @@ pub trait OutputSink: Send {
 		false
 	}
 
+	/// The video codec this sink needs whatever the stream encodes (RTMP:
+	/// H.264). The streamer then encodes it too, as for a viewer that chose
+	/// it ([`Studio::output_codecs`](crate::studio::Studio::output_codecs)).
+	/// `None`: the stream's own codec.
+	fn video_codec(&self) -> Option<Codec> {
+		None
+	}
+
 	/// Take one packet.
 	fn write(&mut self, packet: &Packet<'_>) -> Result<()>;
 

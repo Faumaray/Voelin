@@ -145,6 +145,11 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   go out through `MediaSink::send_video(frame, codec)`. Sinks that do not
   tell codecs apart (`EncodedSource`, a `FrameSource`) get the stream codec
   only, so their offers must list it alone (`voelinctl stream start` does).
+  A studio's outputs count as viewers too: the stream codec always runs
+  for its recordings and replay buffer, and an output that needs a codec of
+  its own (RTMP: H.264) gets an encoder of the layer it takes
+  (`Studio::output_codecs`), whose packets reach only such outputs
+  (`Studio::write_output_packet`).
 - `stats()`: `StreamerStats` with capture fps, convert time and threads,
   the GPU path (`gpu_frames`, `gpu_convert_time`, `gpu_error`),
   dropped frames, codec, and per layer (`LayerStats`) size, frames,

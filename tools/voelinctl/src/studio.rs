@@ -74,7 +74,7 @@ struct RunArgs {
 	#[arg(long)]
 	whip: Option<String>,
 	/// Push to this RTMP(S) server (`rtmp://host/app/key`, or the key in
-	/// --token). Needs --codec h264 unless H.264 is the first codec.
+	/// --token), in H.264: encoded besides the stream's unless --codec h264.
 	#[arg(long)]
 	rtmp: Option<String>,
 	/// Bearer token for --whip, stream key for --rtmp.

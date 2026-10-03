@@ -8,9 +8,11 @@
 //! libavformat struct is touched; the one field read is where a failed
 //! write lands, found at load.
 //!
-//! - Video: the studio's H.264 packets of one layer, as they are (no second
-//!   encode). Another stream codec is refused with the reason: classic RTMP
-//!   carries H.264 only.
+//! - Video: H.264 of one layer (classic RTMP carries nothing else): the
+//!   stream's packets as they are when it encodes H.264, else those of an
+//!   H.264 encoder the streamer runs for this output beside the stream's
+//!   ([`OutputSink::video_codec`]), as it does for a viewer of another
+//!   codec.
 //! - Audio: the studio's Opus, decoded and encoded as AAC-LC by FFmpeg's own
 //!   codecs ([`crate::ffmpeg::audio`]) on the output's thread.
 //! - The stream key: in the URL (`rtmp://host/app/key`) or given apart (the
@@ -59,14 +61,6 @@ fn error(message: impl Into<String>) -> Error {
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 	m.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Why `codec` cannot go out over RTMP.
-fn unsupported(codec: Codec) -> Error {
-	error(format!(
-		"RTMP carries H.264 video; the stream encodes {codec}. Choose H.264 as the stream codec \
-		 for this output"
-	))
 }
 
 /// Where to connect: the URL libavformat opens, its protocol options and a
@@ -176,22 +170,13 @@ impl Rtmp {
 		url.starts_with("rtmp://") || url.starts_with("rtmps://")
 	}
 
-	/// Connect to `url` and push `layer` of the studio and its audio. The
-	/// stream key is the last part of the URL's path, or `key` if given.
-	/// `codec` is what the studio encodes, if known: anything but H.264 is
-	/// refused (also later, when its first packet comes).
+	/// Connect to `url` and push `layer` of the studio (in H.264) and its
+	/// audio. The stream key is the last part of the URL's path, or `key` if
+	/// given.
 	///
 	/// Fails when there is no FFmpeg with libavformat, or the first
 	/// connection does (a wrong address, a refused key).
-	pub async fn start(
-		url: &str,
-		key: Option<&str>,
-		layer: u32,
-		codec: Option<Codec>,
-	) -> Result<Self> {
-		if let Some(codec) = codec.filter(|c| *c != Codec::H264) {
-			return Err(unsupported(codec));
-		}
+	pub async fn start(url: &str, key: Option<&str>, layer: u32) -> Result<Self> {
 		let target = Target::new(url, key)?;
 		#[cfg(not(feature = "ffmpeg"))]
 		{
@@ -245,7 +230,7 @@ impl OutputSink for Rtmp {
 
 	fn wants(&self, track: Track) -> bool {
 		match track {
-			Track::Video { layer, .. } => layer == self.layer,
+			Track::Video { codec, layer } => codec == Codec::H264 && layer == self.layer,
 			Track::Audio { .. } => true,
 		}
 	}
@@ -254,14 +239,15 @@ impl OutputSink for Rtmp {
 		self.shared.keyframe.swap(false, Ordering::Relaxed)
 	}
 
+	fn video_codec(&self) -> Option<Codec> {
+		Some(Codec::H264)
+	}
+
 	fn write(&mut self, packet: &Packet<'_>) -> Result<()> {
 		let Some(queue) = &self.queue else { return Ok(()) };
-		if let Track::Video { codec, layer } = packet.track {
-			if layer != self.layer {
+		if packet.track.is_video() {
+			if !self.wants(packet.track) {
 				return Ok(());
-			}
-			if codec != Codec::H264 {
-				return Err(unsupported(codec));
 			}
 			if self.skip_video {
 				if !packet.keyframe {
@@ -630,16 +616,10 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn other_codecs_and_dead_servers_are_refused() {
-		let e = Rtmp::start("rtmp://127.0.0.1:1/app", Some("k"), 0, Some(Codec::Vp8))
-			.await
-			.err()
-			.expect("VP8 refused")
-			.to_string();
-		assert!(e.contains("H.264"), "{e}");
+	async fn dead_servers_are_refused() {
 		// Port 1 on loopback: nothing listens.
 		if crate::ffmpeg::avio::Connection::available().is_ok() {
-			let e = Rtmp::start("rtmp://127.0.0.1:1/app", Some("k"), 0, Some(Codec::H264))
+			let e = Rtmp::start("rtmp://127.0.0.1:1/app", Some("k"), 0)
 				.await
 				.err()
 				.expect("nothing listens")

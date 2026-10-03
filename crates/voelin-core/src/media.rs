@@ -1854,6 +1854,17 @@ fn gpu_alignment<'a>(encoders: impl IntoIterator<Item = &'a dyn VideoEncoder>) -
 	u64::from(alignment.0) << 32 | u64::from(alignment.1)
 }
 
+/// Which of a studio's outputs get an encoder's packets.
+#[derive(Clone, Copy)]
+enum ToStudio<'a> {
+	None,
+	/// The stream codec's: all of them, recordings and replay buffer too.
+	All(&'a Studio),
+	/// Another codec's: the outputs that asked for it
+	/// ([`Studio::output_codecs`]).
+	Asked(&'a Studio),
+}
+
 /// One encoder of a layer: its keyframe and bitrate state.
 struct LayerEncoder {
 	codec: Codec,
@@ -1880,7 +1891,7 @@ impl LayerEncoder {
 		shared: &Shared,
 		layer: &Layer,
 		sink: &dyn MediaSink,
-		studio: Option<&Studio>,
+		studio: ToStudio<'_>,
 		picture: &Picture,
 		requested: bool,
 		target: u64,
@@ -1909,15 +1920,18 @@ impl LayerEncoder {
 		let mut produced_keyframe = false;
 		let mut out = |chunk: EncodedChunk<'_>| {
 			produced_keyframe |= chunk.keyframe;
-			if let Some(studio) = studio {
-				studio.write_packet(&Packet {
-					track: Track::Video { codec, layer: u32::from(layer.id) },
-					pts_90khz: chunk.pts_90khz,
-					keyframe: chunk.keyframe,
-					width,
-					height,
-					data: chunk.data,
-				});
+			let packet = Packet {
+				track: Track::Video { codec, layer: u32::from(layer.id) },
+				pts_90khz: chunk.pts_90khz,
+				keyframe: chunk.keyframe,
+				width,
+				height,
+				data: chunk.data,
+			};
+			match studio {
+				ToStudio::All(studio) => studio.write_packet(&packet),
+				ToStudio::Asked(studio) => studio.write_output_packet(&packet),
+				ToStudio::None => {}
 			}
 			let encoded = EncodedFrame {
 				kind: MediaKind::Video,
@@ -2009,6 +2023,14 @@ fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 		// The codecs viewers chose; none known: the stream codec.
 		wanted.clear();
 		sink.video_codecs(&mut wanted);
+		// With a studio, the stream codec for its recordings and replay
+		// buffer, and the codecs its outputs of this layer need (RTMP: H.264).
+		if let Some(studio) = &shared.studio {
+			if !wanted.contains(&primary.codec) {
+				wanted.insert(0, primary.codec);
+			}
+			studio.output_codecs(u32::from(layer.id), &mut wanted);
+		}
 		let now = shared.encoders_generation.load(Ordering::Relaxed);
 		if now != generation {
 			generation = now;
@@ -2070,12 +2092,13 @@ fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 		let target = sink.layer_bitrate(layer.id).unwrap_or(configured).clamp(1, cap);
 		let started = Instant::now();
 		if primary_on {
-			let studio = shared.studio.as_deref();
+			let studio = shared.studio.as_deref().map_or(ToStudio::None, ToStudio::All);
 			primary.encode(shared, layer, &*sink, studio, &picture, requested, target);
 			layer.target.store(primary.bitrate, Ordering::Relaxed);
 		}
 		for encoder in &mut extra {
-			encoder.encode(shared, layer, &*sink, None, &picture, requested, target);
+			let studio = shared.studio.as_deref().map_or(ToStudio::None, ToStudio::Asked);
+			encoder.encode(shared, layer, &*sink, studio, &picture, requested, target);
 		}
 		layer.encode_ns.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 		layer.encoded.fetch_add(1, Ordering::Relaxed);
