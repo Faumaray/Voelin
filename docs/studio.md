@@ -123,6 +123,16 @@ as MJPEG). `camera::SYNTHETIC` is always listed: the test pattern, for
 tests and machines without a camera. `voelinctl studio cameras` prints the
 list.
 
+On Windows, Media Foundation (`camera::mf`): `MFEnumDeviceSources` lists the
+cameras (the symbolic link is the id, then the friendly name, and every
+native format with its sizes and rates), and an `IMFSourceReader` on a
+thread of its own opens one at the native format nearest the wanted size,
+the fastest up to the wanted rate, and hands out NV12 at that size: with
+advanced video processing on, the reader decodes MJPEG and converts the
+other formats itself. Frames go through the same pacer, pool and
+background filter as on Linux. **Never run**: it is type-checked for
+`x86_64-pc-windows-gnu` only, as nothing here runs Windows.
+
 ## Background replacement (`studio::segment`)
 
 A source's `background` is `keep`, `blur` (`strength`: radius as a fraction
@@ -332,7 +342,8 @@ two threads) takes about 3 ms at its own rate (15 fps by default).
 | Camera through the XDG Camera portal (sandboxes) | – | compiles only |
 | Screen, window and portal sources | the existing capture backends ([media.md](media.md#capture)) | as tested there; not run inside the studio here |
 | Background blur, image and colour backdrops on the oval mask | `segment::tests` | tested; **no person segmentation model** (see above) |
-| Windows and Android cameras | – | not implemented: `camera::list()` has only the test pattern there |
+| Windows cameras (Media Foundation: listing, the native format nearest the wanted size, NV12 through the source reader, MJPEG decoded by it) | `cargo clippy --target x86_64-pc-windows-gnu -p voelin-media` | type-checked only, never run |
+| Android cameras | – | not implemented: `camera::list()` has only the test pattern there |
 | RTMP: the FLV tags (sizes, times past 24 bits, AVC from Annex B, `onMetaData` in AMF0), URL and key handling (the name hides the key), codecs other than H.264 and dead servers refused | `flv::tests`, `rtmp::tests` | tested |
 | RTMP: write errors seen (`AVIOContext.error`, found at load), an abort ends a stuck connect, the sample format field of the AAC encoder, Opus → AAC (frames back to back from the packets' clock, priming, a gap restarts the clock) | `ffmpeg::avio::tests`, `ffmpeg::audio::tests`, `ffmpeg::tests` | tested with FFmpeg 9.0.1 (libavformat 63: `error` at 84, `sample_fmt` at 348) and FFmpeg 4.4.8 (58: 120 and 408) |
 | RTMP end to end: a studio stream (H.264 through the hardware encoder, a 440 Hz tone) pushed to FFmpeg's own RTMP server (`ffmpeg -listen 1`) with the key apart from the URL; the server killed and another started on its port; `EndStream` | `voelin-core/tests/studio.rs` `a_studio_stream_goes_out_over_rtmp_and_comes_back_after_the_server_did` | tested: ffprobe reads `h264` 320x180 and `aac` 48000 Hz stereo in both servers' files, each starting at a keyframe, every picture decodes (red), the audio decodes to 440 Hz; the key arrived as the stream name; the second server finished its file and exited by itself. No public service (Twitch, YouTube) tried; RTMPS only through FFmpeg's TLS, untried here |

@@ -22,8 +22,10 @@
 //! [`SYNTHETIC`] is a camera that is always there: the test pattern. Tests
 //! and machines without a camera use it.
 //!
-//! Windows and Android have no camera backend yet ([`list`] returns only the
-//! synthetic one).
+//! Windows: Media Foundation (`mf`): `MFEnumDeviceSources` lists the
+//! cameras, an `IMFSourceReader` captures as NV12, decoding MJPEG on the way.
+//! Only type-checked, never run. Android has no camera backend yet ([`list`]
+//! returns only the synthetic one).
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
@@ -40,6 +42,9 @@ use crate::studio::source::FeedSink;
 pub const SYNTHETIC: &str = "synthetic";
 
 const BACKEND: &str = "camera";
+
+#[cfg(windows)]
+mod mf;
 
 /// A pixel format a camera delivers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -124,7 +129,9 @@ pub fn list() -> Vec<Camera> {
 	// Devices are listed where they can be captured: through PipeWire.
 	#[cfg(all(target_os = "linux", feature = "pipewire"))]
 	let devices = v4l2::list();
-	#[cfg(not(all(target_os = "linux", feature = "pipewire")))]
+	#[cfg(windows)]
+	let devices = mf::list();
+	#[cfg(not(any(all(target_os = "linux", feature = "pipewire"), windows)))]
 	let devices = Vec::new();
 	let synthetic = Camera {
 		id: SYNTHETIC.to_owned(),
@@ -142,6 +149,9 @@ pub struct Capture {
 	screen: Option<Box<dyn ScreenCapture>>,
 	#[cfg(all(target_os = "linux", feature = "pipewire"))]
 	stream: Option<pipewire_camera::Stream>,
+	/// Stops its thread when dropped.
+	#[cfg(windows)]
+	_mf: Option<mf::Stream>,
 }
 
 impl Capture {
@@ -181,6 +191,8 @@ impl Capture {
 				screen: Some(Box::new(screen)),
 				#[cfg(all(target_os = "linux", feature = "pipewire"))]
 				stream: None,
+				#[cfg(windows)]
+				_mf: None,
 			});
 		}
 		#[cfg(all(target_os = "linux", feature = "pipewire"))]
@@ -196,7 +208,12 @@ impl Capture {
 			tracing::debug!(device = %wanted, "camera through PipeWire");
 			Ok(Self { backend: "pipewire", device: wanted, screen: None, stream: Some(stream) })
 		}
-		#[cfg(not(all(target_os = "linux", feature = "pipewire")))]
+		#[cfg(windows)]
+		{
+			let stream = mf::Stream::start(&wanted, size, fps, feed, background)?;
+			Ok(Self { backend: "mediafoundation", device: wanted, screen: None, _mf: Some(stream) })
+		}
+		#[cfg(not(any(all(target_os = "linux", feature = "pipewire"), windows)))]
 		{
 			let _ = (size, feed, background);
 			Err(crate::Error::CaptureUnavailable {

@@ -77,8 +77,9 @@ ndk = { version = "0.9.0", default-features = false, features = ["media", "api-l
 
 [target.'cfg(windows)'.dependencies]
 wasapi = "0.24.0"
-# Process names for the list of applications with audio sessions.
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Threading"] }
+# Process names for the list of applications with audio sessions,
+# and studio cameras (Media Foundation).
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Threading"] }
 windows-capture = "2.0.1"
 
 [dev-dependencies]
