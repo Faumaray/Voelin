@@ -338,6 +338,10 @@ export global Bridge {
     in property <[ChatLine]> topic-messages;
     // The member card over the members panel.
     in-out property <MemberCard> member-card;
+    // Jumping to a pinned message: its row in `messages`, and a counter
+    // that changes with every jump.
+    in property <int> jump-index: -1;
+    in property <int> jump-requests;
     in property <string> status-text;
     // Unread messages in all chats of the current server.
     in property <int> unread-total;

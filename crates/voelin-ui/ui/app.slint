@@ -140,7 +140,8 @@ export component MainWindow inherits Window {
                 if Nav.page == Page.server && root.side-panel: ResizeHandle {
                     size <=> Nav.right-panel-width;
                     minimum: Theme.right-panel-min;
-                    maximum: Theme.right-panel-max;
+                    // As wide as the window allows, leaving the chat 400 px.
+                    maximum: max(Theme.right-panel-min, root.width - Theme.rail-width - Theme.sidebar-width - 400px);
                     left: false;
                 }
                 if Nav.page == Page.server && root.side-panel: Panel {

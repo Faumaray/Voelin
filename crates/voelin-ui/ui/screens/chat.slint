@@ -377,10 +377,36 @@ export component MessageRow inherits Rectangle {
     }
 }
 
-// The messages of the current chat (or of an open topic).
+// The messages of the current chat (or of an open topic). The list starts
+// at the newest message and follows new ones while it is at the end;
+// scrolling up stops that until the end is reached again.
 export component MessageList inherits VerticalLayout {
     in property <[ChatLine]> model;
     in property <bool> older;
+    property <bool> follow: true;
+    property <length> end: min(0px, list.visible-height - list.content-height);
+    property <length> scrolled: list.content-y;
+    changed end => {
+        if root.follow {
+            list.content-y = root.end;
+        }
+    }
+    changed scrolled => { root.follow = root.scrolled <= root.end + 2px; }
+    // Another chat: start at its end.
+    property <int> tab: Bridge.current-tab;
+    changed tab => {
+        root.follow = true;
+        list.content-y = root.end;
+    }
+    // A pinned message was jumped to: scroll to where its row is. Rows
+    // differ in height, so this is the place of an average row (as the
+    // standard list estimates it); the row itself is highlighted.
+    property <int> jumps: Bridge.jump-requests;
+    changed jumps => {
+        if root.older && root.model.length > 0 {
+            list.content-y = max(root.end, min(0px, list.visible-height / 3 - Bridge.jump-index * list.content-height / root.model.length));
+        }
+    }
     if Bridge.local-history: Rectangle {
         height: 30px;
         background: Theme.warning-soft;
@@ -415,7 +441,7 @@ export component MessageList inherits VerticalLayout {
             }
         }
     }
-    ListView {
+    list := ListView {
         vertical-stretch: 1;
         // A long chat must not make the window taller: the list scrolls.
         preferred-height: 0px;

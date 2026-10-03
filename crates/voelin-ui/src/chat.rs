@@ -573,7 +573,18 @@ impl App {
 		let Some(view) = self.view_mut() else { return };
 		let tab = &mut view.tabs[view.current_tab];
 		tab.marked = tab.pins.iter().find(|p| p.key == key).map(|p| p.message.id);
+		// The message is in the chat, not in an open topic.
+		if tab.topic.take().is_some() {
+			tab.topic_messages.clear();
+		}
+		// Older than what is loaded: only highlighted once it is.
+		let row = tab.marked.and_then(|id| tab.messages.iter().position(|m| m.message.id == id));
 		self.refresh_chat();
+		if let (Some(row), Some(ui)) = (row, self.ui.upgrade()) {
+			let bridge = ui.global::<Bridge>();
+			bridge.set_jump_index(row as i32);
+			bridge.set_jump_requests(bridge.get_jump_requests().wrapping_add(1));
+		}
 	}
 
 	/// The topics drawer's search.
