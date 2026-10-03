@@ -1,6 +1,7 @@
 package io.github.faumaray.voelin
 
 import android.app.Application
+import java.io.File
 
 /** The process's application object; the Rust side reaches Android through it. */
 class VoelinApp : Application() {
@@ -8,6 +9,8 @@ class VoelinApp : Application() {
         super.onCreate()
         instance = this
         Notifications.createChannels(this)
+        // Copies of files shared to us (MainActivity.share) from before.
+        File(cacheDir, "shared").deleteRecursively()
     }
 
     companion object {

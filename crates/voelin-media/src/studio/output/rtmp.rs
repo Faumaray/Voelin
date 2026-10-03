@@ -39,6 +39,7 @@ use crate::{Error, Result};
 
 /// Packets waiting for the connection's thread: about two seconds of a
 /// 60 fps stream with its audio.
+#[cfg(feature = "ffmpeg")]
 const QUEUE: usize = 256;
 /// The AAC bitrate (bit/s): what the big services recommend.
 pub const AAC_BITRATE: u64 = 160_000;
@@ -46,13 +47,16 @@ pub const AAC_BITRATE: u64 = 160_000;
 /// before it is given up and made again.
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// Waits between connection attempts: doubling from the first to the last.
+#[cfg(feature = "ffmpeg")]
 const BACKOFF: (Duration, Duration) = (Duration::from_secs(1), Duration::from_secs(30));
 /// How long closing may take (unpublish) before the network is cut off.
 const CLOSE_GRACE: Duration = Duration::from_secs(3);
 /// Audio kept while waiting for the first keyframe (as a recording does).
+#[cfg(feature = "ffmpeg")]
 const BACKLOG_MS: i64 = 2_000;
 /// Audio waits for the video of its time at most this long (it is written in
 /// time order with the video, and the video comes later: the encoders' delay).
+#[cfg(feature = "ffmpeg")]
 const INTERLEAVE_MS: i64 = 1_000;
 
 fn error(message: impl Into<String>) -> Error {
@@ -109,6 +113,10 @@ impl Target {
 }
 
 /// One packet on its way to the connection's thread.
+#[cfg_attr(
+	not(feature = "ffmpeg"),
+	allow(dead_code, reason = "without FFmpeg no connection thread reads them")
+)]
 struct Queued {
 	video: bool,
 	keyframe: bool,

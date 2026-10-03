@@ -335,6 +335,33 @@ impl App {
 		self.refresh_tree();
 	}
 
+	/// A link to the voice channel we are in, for the Invite button (which
+	/// copies it); empty, with a note, without one.
+	pub(crate) fn invite_link(&mut self) -> String {
+		let bookmark = self.current.and_then(|id| self.bookmark(id)).map(|b| b.address.clone());
+		let path = self.view().and_then(|v| {
+			let mut names = Vec::new();
+			let mut channel = v.presence.channels.get(&v.state.own_channel?)?;
+			loop {
+				names.push(channel.name.clone());
+				match v.presence.channels.get(&channel.parent) {
+					Some(parent) if channel.parent != 0 && names.len() < 64 => channel = parent,
+					_ => break,
+				}
+			}
+			names.reverse();
+			Some(names)
+		});
+		let (Some(address), Some(path)) = (bookmark, path) else {
+			self.set_status("Join a voice channel to invite others to it");
+			return String::new();
+		};
+		let path: Vec<&str> = path.iter().map(String::as_str).collect();
+		let link = vm::servers::invite_link(&address, &path);
+		self.set_status(format!("Copied an invite to {}: {link}", path.last().unwrap_or(&"")));
+		link
+	}
+
 	pub(crate) fn toggle_collapse(&mut self, channel: u64) {
 		if let Some(view) = self.view_mut()
 			&& !view.collapsed.remove(&channel)

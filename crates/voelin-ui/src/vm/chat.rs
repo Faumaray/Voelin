@@ -99,6 +99,29 @@ fn without_links(text: &str, files: &[FileRef]) -> String {
 	out.replace("[/URL]", "").replace("[/url]", "").trim().to_owned()
 }
 
+/// A chat's last message for a list of chats, on one line ("Mira: the
+/// banner I promised: guild-banner.png"), and when it came.
+pub fn preview(message: &ChatMessage) -> (String, String) {
+	let text = if message.blocked {
+		"Message from a blocked contact.".to_owned()
+	} else {
+		let files = message.file_refs();
+		let names = files.iter().map(|f| f.name.as_str());
+		let text = without_links(&message.text, &files);
+		std::iter::once(text.as_str()).chain(names).collect::<Vec<_>>().join(" ")
+	};
+	// A one-line text cannot show emoji (they are pictures): left out.
+	let plain = match emoji::runs(&text) {
+		Some(runs) => runs.into_iter().filter(|r| r.emoji.is_none()).map(|r| r.text).collect(),
+		None => text,
+	};
+	let mut text = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+	if text.is_empty() {
+		text = "sent an emoji".into();
+	}
+	(format!("{}: {text}", message.author_name), time_of(message.ts_ms))
+}
+
 fn runs_model(runs: &[emoji::Run]) -> ModelRc<TextRun> {
 	ModelRc::from(Rc::new(VecModel::from(
 		runs.iter()
@@ -287,6 +310,23 @@ mod tests {
 		assert_eq!((file.name.as_str(), file.detail.as_str()), ("plan.pdf", "2.0 kB"));
 		assert!(!line.text.contains("ts3file"), "{}", line.text);
 		assert!(line.text.starts_with("here you go"));
+	}
+
+	#[test]
+	fn previews_are_one_line() {
+		let url = "ts3file://plan.pdf?channel=2&path=/&filename=plan.pdf&isDir=0&size=2048";
+		let text = format!("route\nfor  tonight: [URL={url}]plan.pdf[/URL]");
+		let (last, time) = preview(&message("Mira", &text, 0));
+		assert_eq!(last, "Mira: route for tonight: plan.pdf");
+		assert!(!time.is_empty());
+		assert_eq!(
+			preview(&message("Ari", "co-op later? 👀 Posting", 0)).0,
+			"Ari: co-op later? Posting"
+		);
+		assert_eq!(preview(&message("dex", "🎉🎉", 0)).0, "dex: sent an emoji");
+		let mut blocked = message("X", "secret", 0);
+		blocked.blocked = true;
+		assert_eq!(preview(&blocked).0, "X: Message from a blocked contact.");
 	}
 
 	#[test]

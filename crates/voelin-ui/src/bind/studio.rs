@@ -73,8 +73,8 @@ pub(crate) fn wire(bridge: &StudioBridge) {
 	bridge.on_list_audio(|| {
 		with_app(|app| app.studio_list_audio());
 	});
-	bridge.on_add_audio(|i| {
-		with_app(|app| app.studio_add_audio(index(i)));
+	bridge.on_toggle_audio(|i| {
+		with_app(|app| app.studio_toggle_audio(index(i)));
 	});
 	bridge.on_set_gain(|i, db, done| {
 		with_app(|app| app.studio_set_gain(index(i), db, done));
