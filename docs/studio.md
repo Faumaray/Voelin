@@ -109,6 +109,17 @@ highest rates). `camera::SYNTHETIC` is always listed: the test pattern, for
 tests and machines without a camera. `voelinctl studio cameras` prints the
 list.
 
+Android: the app registers a `camera::CameraProvider` (Camera2 through its
+Kotlin side, [android.md](android.md#cameras)), whose cameras `list()` puts
+first (front ones first). A camera opens into an `ImageReader`
+(YUV_420_888) and its planes arrive as `camera::YuvPlanes` with the turn
+that makes the picture upright for the screen's rotation: an upright planar
+or NV12 picture goes to the source's sink as it is, NV21 and turned ones are
+gathered into I420 in a buffer each camera keeps (nothing is allocated per
+frame). `Camera::mirrored` is the default mirroring (a camera that faces the
+user; not a phone's back camera); the source menu's Switch camera moves a
+camera source to the next camera.
+
 ## Background replacement (`studio::segment`)
 
 A source's `background` is `keep`, `blur` (`strength`: radius as a fraction
@@ -291,5 +302,6 @@ two threads) takes about 3 ms at its own rate (15 fps by default).
 | Camera through the XDG Camera portal (sandboxes) | – | compiles only |
 | Screen, window and portal sources | the existing capture backends ([media.md](media.md#capture)) | as tested there; not run inside the studio here |
 | Background blur, image and colour backdrops on the oval mask | `segment::tests` | tested; **no person segmentation model** (see above) |
-| Windows and Android cameras | – | not implemented: `camera::list()` has only the test pattern there |
+| Android cameras (Camera2): planes borrowed, gathered or turned | `camera::tests::camera_planes_are_borrowed_gathered_and_turned` (the Rust side) | tested on the host; the Camera2 side compiles only (no device here) |
+| Windows cameras | – | not implemented: `camera::list()` has only the test pattern there |
 | RTMP | – | the seam only (refuses with its reason) |
