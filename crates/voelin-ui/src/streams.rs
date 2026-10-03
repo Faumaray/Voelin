@@ -346,6 +346,12 @@ impl App {
 			.and_then(|v| v.streams.iter().find(|s| s.id == watch.stream_id))
 			.map_or(-1, |s| i32::from(s.streamer.0));
 		bridge.set_viewer_streamer_id(streamer);
+		let members = &self.models.members;
+		bridge.set_viewer_streamer_admin(
+			(0..members.row_count())
+				.filter_map(|i| members.row_data(i))
+				.any(|m| m.id == streamer && m.admin),
+		);
 		bridge.set_viewer_elapsed(watch.elapsed().into());
 		let viewers = self.view().and_then(|v| v.stream_viewers.get(&watch.stream_id)).copied();
 		bridge.set_viewer_count(viewers.unwrap_or(0) as i32);

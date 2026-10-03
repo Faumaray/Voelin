@@ -105,12 +105,13 @@ export component StreamsPanel inherits VerticalLayout {
             overflow: elide;
             vertical-alignment: center;
         }
-        IconButton {
-            icon: Icons.x;
-            label: @tr("Close the panel");
+        // The phone's voice channel screen.
+        if Bridge.voice-connected: IconButton {
+            icon: Icons.chevron-right;
+            label: @tr("Open the voice channel");
             size: 28px;
             icon-size: Theme.icon-sm;
-            clicked => { Nav.right-panel-open = false; }
+            clicked => { Nav.show-voice(true); }
         }
     }
     if Bridge.members.length == 0: Text {

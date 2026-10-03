@@ -335,7 +335,17 @@ impl App {
 		let tabs: Vec<ChatTab> = view
 			.tabs
 			.iter()
-			.map(|t| ChatTab {
+			.map(|t| {
+				let (last, time) = t
+					.messages
+					.last()
+					.map(|m| vm::chat::preview(&m.message.message))
+					.unwrap_or_default();
+				(t, last, time)
+			})
+			.map(|(t, last, time)| ChatTab {
+				last: last.into(),
+				time: time.into(),
 				title: t.title.clone().into(),
 				name: t.title.trim_start_matches(['#', '@']).into(),
 				kind: match t.target {

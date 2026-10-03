@@ -67,6 +67,10 @@ export component VoiceCard inherits Rectangle {
     border-color: Theme.border;
     accessible-role: AccessibleRole.groupbox;
     accessible-label: @tr("Voice");
+    // The phone: a tap opens the voice channel screen.
+    if Nav.narrow && Bridge.voice-connected: TouchArea {
+        clicked => { Nav.show-voice(true); }
+    }
     VerticalLayout {
         padding: Theme.space-3;
         spacing: Theme.space-3;
@@ -94,6 +98,14 @@ export component VoiceCard inherits Rectangle {
                     font-size: Theme.font-xs;
                     overflow: elide;
                 }
+            }
+            if Nav.narrow && Bridge.voice-connected: IconButton {
+                icon: Icons.chevron-right;
+                label: @tr("Open the voice channel");
+                size: 32px;
+                icon-size: Theme.icon-sm;
+                y: (parent.height - self.height) / 2;
+                clicked => { Nav.show-voice(true); }
             }
             IconButton {
                 icon: Icons.phone-off;

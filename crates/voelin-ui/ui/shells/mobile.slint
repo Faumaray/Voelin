@@ -1,12 +1,13 @@
 // The narrow (phone) frame: a top bar, one page at a time (@children), and
-// the bottom navigation (Home, Servers, Chat, Activity, You). Used while
+// the bottom navigation (Home, Servers, Chats, Activity, You). Used while
 // the window is narrower than `Nav.narrow-breakpoint`.
 
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge } from "../bridge.slint";
 import { Nav, Page, MobileTab, SettingsSection } from "../nav.slint";
-import { Icon, IconButton, CountBadge } from "../components/index.slint";
+import { Icon, IconButton, CountBadge, PopupMenu, MenuEntry } from "../components/index.slint";
+import { PhoneVoice } from "../screens/mobile-voice.slint";
 
 // One entry of the bottom navigation.
 component NavTab inherits Rectangle {
@@ -68,6 +69,40 @@ component NavTab inherits Rectangle {
     }
 }
 
+// The people in our channel, as a pill (the voice channel screen's top bar).
+component PeoplePill inherits Rectangle {
+    callback clicked();
+    width: row.preferred-width;
+    height: 40px;
+    border-radius: 20px;
+    background: touch.pressed ? Theme.surface-4 : Theme.surface-2;
+    border-width: 1px;
+    border-color: Theme.border;
+    accessible-role: AccessibleRole.button;
+    accessible-label: @tr("{} in voice", Bridge.members.length);
+    accessible-action-default => { root.clicked(); }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    row := HorizontalLayout {
+        padding-left: Theme.space-4;
+        padding-right: Theme.space-4;
+        spacing: Theme.space-2;
+        Icon {
+            source: Icons.users;
+            size: 18px;
+            tint: Theme.icon;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: Bridge.members.length;
+            color: Theme.text;
+            font-size: Theme.font-md;
+            vertical-alignment: center;
+        }
+    }
+}
+
 export component MobileShell inherits Rectangle {
     in property <string> title;
     in property <string> subtitle;
@@ -75,6 +110,12 @@ export component MobileShell inherits Rectangle {
     in property <int> unread;
     // Show a back arrow (sub-pages such as the settings).
     in property <bool> back;
+    // The bottom navigation; pages with their own controls there (the
+    // voice channel, the Stream Studio) go without.
+    in property <bool> navigation: true;
+    // The voice channel screen's buttons in the top bar: the people, the
+    // chats and a menu.
+    in property <bool> voice;
     callback go-back();
     background: Theme.backdrop;
     VerticalLayout {
@@ -117,7 +158,21 @@ export component MobileShell inherits Rectangle {
                         overflow: elide;
                     }
                 }
-                IconButton {
+                // The voice channel we are in, from any page.
+                if !root.voice && Bridge.voice-connected: IconButton {
+                    icon: Icons.volume-2;
+                    label: @tr("Voice channel");
+                    round: true;
+                    filled: true;
+                    dot: true;
+                    dot-color: Theme.success;
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        Nav.show(Page.server);
+                        Nav.show-voice(true);
+                    }
+                }
+                if !root.voice: IconButton {
                     icon: Icons.radio;
                     label: @tr("Stream Studio");
                     round: true;
@@ -126,7 +181,7 @@ export component MobileShell inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                     clicked => { Nav.open-studio(); }
                 }
-                IconButton {
+                if !root.voice: IconButton {
                     icon: Icons.bell;
                     label: @tr("Notifications");
                     round: true;
@@ -135,6 +190,60 @@ export component MobileShell inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                     clicked => { Nav.mobile-tab = MobileTab.activity; Nav.show(Page.server); }
                 }
+                if root.voice: PeoplePill {
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Nav.members-open = true; }
+                }
+                if root.voice: Rectangle {
+                    width: 40px;
+                    height: 40px;
+                    y: (parent.height - self.height) / 2;
+                    IconButton {
+                        icon: Icons.message-square;
+                        label: @tr("Chats");
+                        round: true;
+                        filled: true;
+                        size: 40px;
+                        clicked => {
+                            PhoneVoice.close();
+                            Nav.mobile-tab = MobileTab.chat;
+                        }
+                    }
+                    if root.unread > 0: CountBadge {
+                        x: parent.width - self.width / 2 - 4px;
+                        y: -4px;
+                        count: root.unread;
+                    }
+                }
+                if root.voice: IconButton {
+                    icon: Icons.more-horizontal;
+                    label: @tr("More");
+                    round: true;
+                    filled: true;
+                    y: (parent.height - self.height) / 2;
+                    clicked => { more.show(self.x + self.width - 220px, self.y + self.height + 4px); }
+                }
+            }
+            more := PopupMenu {
+                entries: [
+                    { text: @tr("Stream Studio"), icon: Icons.radio, enabled: Bridge.streams-available },
+                    { text: @tr("Voice Settings"), icon: Icons.settings, enabled: true },
+                    { text: @tr("Activity"), icon: Icons.activity, enabled: true },
+                    { text: @tr("Leave Voice"), icon: Icons.phone-off, danger: true, enabled: true, separator: true },
+                ];
+                activated(i) => {
+                    if i == 0 {
+                        Nav.open-studio();
+                    } else if i == 1 {
+                        Nav.open-settings(SettingsSection.voice);
+                    } else if i == 2 {
+                        PhoneVoice.close();
+                        Nav.mobile-tab = MobileTab.activity;
+                    } else {
+                        PhoneVoice.close();
+                        Bridge.disconnect-voice();
+                    }
+                }
             }
         }
         Rectangle {
@@ -142,7 +251,7 @@ export component MobileShell inherits Rectangle {
             @children
         }
         // Bottom navigation.
-        Rectangle {
+        if root.navigation: Rectangle {
             height: 64px;
             background: Theme.surface;
             border-width: 1px;
@@ -166,8 +275,8 @@ export component MobileShell inherits Rectangle {
                     clicked => { Nav.show(Page.server); Nav.mobile-tab = MobileTab.servers; }
                 }
                 NavTab {
-                    icon: Bridge.viewer-open ? Icons.monitor : Icons.message-circle;
-                    text: Bridge.viewer-open ? @tr("Stream") : @tr("Chat");
+                    icon: Icons.message-circle;
+                    text: @tr("Chats");
                     selected: Nav.mobile-tab == MobileTab.chat && Nav.page != Page.settings;
                     badge: root.unread;
                     clicked => { Nav.show(Page.server); Nav.mobile-tab = MobileTab.chat; }

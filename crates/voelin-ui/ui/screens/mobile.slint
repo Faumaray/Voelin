@@ -1,5 +1,6 @@
 // Pages of the narrow (phone) layout that the desktop shows elsewhere:
-// the server list with the channels, activity, and the "You" page.
+// the server list with the channels, activity, the "You" page, and the
+// pins, topics and members over the page.
 
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
@@ -8,6 +9,8 @@ import { Nav, Page, SettingsSection } from "../nav.slint";
 import { Icon, Button, ButtonKind, IconButton, Avatar, Status, CountBadge, LiveBadge, NavItem, ListItem, SectionHeader, Card, Banner, ScrollView, ActionButton } from "../components/index.slint";
 import { ServerHeader, ConnectActions, ChannelTree } from "channels.slint";
 import { StreamsPanel } from "streams.slint";
+import { PinsDrawer, TopicsDrawer } from "drawers.slint";
+import { MembersPanel } from "members.slint";
 import { VoiceCard, VoiceButtons } from "../shells/common.slint";
 
 // Servers as a horizontal strip, the current server, its channels.
@@ -221,6 +224,35 @@ export component YouPage inherits ScrollView {
             text: @tr("About {}", Bridge.app-name);
             chevron: true;
             clicked => { Nav.open-about(); }
+        }
+    }
+}
+
+// The pins, the topics or the server's members as a page over the current
+// one (the desktop shows them beside the chat).
+export component PhoneSheet inherits Rectangle {
+    background: Theme.bg-app;
+    // Nothing below takes clicks while it is shown.
+    TouchArea { }
+    if Nav.pins-open: PinsDrawer { }
+    if Nav.topics-open && !Nav.pins-open: TopicsDrawer { }
+    if Nav.members-open && !Nav.pins-open && !Nav.topics-open: VerticalLayout {
+        HorizontalLayout {
+            padding-left: Theme.space-3;
+            padding-top: Theme.space-3;
+            spacing: Theme.space-2;
+            alignment: start;
+            IconButton {
+                icon: Icons.arrow-left;
+                label: @tr("Back");
+                round: true;
+                filled: true;
+                size: 36px;
+                clicked => { Nav.members-open = false; }
+            }
+        }
+        MembersPanel {
+            vertical-stretch: 1;
         }
     }
 }

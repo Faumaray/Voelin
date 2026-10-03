@@ -15,7 +15,8 @@
 //!   appearance, or 0-4), `about`, `share`, `bookmark` (add a server),
 //!   `emoji` (the picker), `client` (the volume dialog of the first other
 //!   client once connected), `panel` / `no-panel` (the members panel),
-//!   `voice` (the voice channel view), `pins`, `topics` (the drawers),
+//!   `voice` (the voice channel view; on the phone its own screen),
+//!   `members` (the phone's members page), `pins`, `topics` (the drawers),
 //!   `topic:<id>` (a topic's messages), `member` (the member card of the
 //!   first other client), `watch` (the first stream; with sample data the
 //!   local test pattern in its place), `popout` (the same, popped out),
@@ -157,6 +158,8 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 			"tab" => nav.set_mobile_tab(mobile_tab(arg)),
 			"voice" => nav.invoke_show_voice(true),
 			"pins" => nav.invoke_show_pins(true),
+			// The phone's members page.
+			"members" => nav.set_members_open(true),
 			"topics" => nav.invoke_show_topics(true),
 			"topic" => {
 				with_app(|app| {
