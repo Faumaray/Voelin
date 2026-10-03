@@ -30,12 +30,23 @@ object Bridge {
     }
 
     /**
-     * Run the voice service with this notification text (`muted`: the action
-     * offers Unmute); null stops it.
+     * Run the voice service with this notification (`muted`, `deafened`: the
+     * actions offer Unmute, Undeafen; `sinceMs`: in voice since, Unix ms, 0
+     * while connecting); a null title stops it.
      */
     @JvmStatic
-    fun setVoiceNotification(text: String?, muted: Boolean) {
-        if (text == null) VoiceService.stop(app) else VoiceService.start(app, text, muted)
+    fun setVoiceNotification(title: String?, text: String?, muted: Boolean, deafened: Boolean, sinceMs: Long) {
+        if (title == null) {
+            VoiceService.stop(app)
+        } else {
+            VoiceService.start(app, VoiceService.Notice(title, text ?: "", muted, deafened, sinceMs))
+        }
+    }
+
+    /** What the screen-sharing notification says while our stream is live; null: the default. */
+    @JvmStatic
+    fun setScreenNotification(title: String?, text: String?) {
+        ScreenCaptureService.setNotice(title, text)
     }
 
     /** Ask the user to share the screen; the answer goes to Native.onScreenCaptureResult. */

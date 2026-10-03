@@ -15,7 +15,7 @@ use jni::refs::{Global, Reference as _};
 use jni::sys::{jboolean, jint, jlong};
 use jni::{Env, JavaVM, jni_sig, jni_str, native_method};
 
-use crate::foreground::VoiceNotice;
+use crate::foreground::{ScreenNotice, VoiceNotice};
 
 static BRIDGE: OnceLock<Global<JClass<'static>>> = OnceLock::new();
 
@@ -58,18 +58,56 @@ pub fn request_permissions() -> Result<()> {
 	})
 }
 
+/// A Java string, or `null` for `None`.
+fn string_or_null<'local>(env: &mut Env<'local>, text: Option<&str>) -> Result<JObject<'local>> {
+	Ok(match text {
+		Some(text) => JObject::from(env.new_string(text)?),
+		None => JObject::null(),
+	})
+}
+
 /// Show or update the voice service's notification; `None` stops the service.
 pub fn set_voice_notification(notice: Option<&VoiceNotice>) -> Result<()> {
 	with_bridge(|env, class| {
-		let (text, muted) = match notice {
-			Some(n) => (JObject::from(env.new_string(&n.text)?), n.muted),
-			None => (JObject::null(), false),
-		};
+		let title = string_or_null(env, notice.map(|n| n.title.as_str()))?;
+		let text = string_or_null(env, notice.map(|n| n.text.as_str()))?;
+		let (muted, deafened, since) =
+			notice.map_or((false, false, 0), |n| (n.muted, n.deafened, n.since_ms));
 		env.call_static_method(
 			class,
 			jni_str!("setVoiceNotification"),
-			jni_sig!((text: java.lang.String, muted: jboolean) -> void),
-			&[JValue::Object(&text), JValue::Bool(muted)],
+			jni_sig!(
+				(
+					title: java.lang.String,
+					text: java.lang.String,
+					muted: jboolean,
+					deafened: jboolean,
+					since_ms: jlong,
+				) -> void
+			),
+			&[
+				JValue::Object(&title),
+				JValue::Object(&text),
+				JValue::Bool(muted),
+				JValue::Bool(deafened),
+				JValue::Long(since as jlong),
+			],
+		)?;
+		Ok(())
+	})
+}
+
+/// What the screen-sharing notification says while our stream is live;
+/// `None` puts back the plain "sharing your screen".
+pub fn set_screen_notification(notice: Option<&ScreenNotice>) -> Result<()> {
+	with_bridge(|env, class| {
+		let title = string_or_null(env, notice.map(|n| n.title.as_str()))?;
+		let text = string_or_null(env, notice.map(|n| n.text.as_str()))?;
+		env.call_static_method(
+			class,
+			jni_str!("setScreenNotification"),
+			jni_sig!((title: java.lang.String, text: java.lang.String) -> void),
+			&[JValue::Object(&title), JValue::Object(&text)],
 		)?;
 		Ok(())
 	})
@@ -366,5 +404,27 @@ const _: jni::NativeMethod = native_method! {
 /// "Mute" / "Unmute" in the voice notification.
 fn on_toggle_mute<'local>(_env: &mut Env<'local>, _class: JClass<'local>) -> Result<()> {
 	crate::app::toggle_mute();
+	Ok(())
+}
+
+const _: jni::NativeMethod = native_method! {
+	java_type = "io.github.faumaray.voelin.Native",
+	static extern fn on_toggle_deafen(),
+};
+
+/// "Deafen" / "Undeafen" in the voice notification.
+fn on_toggle_deafen<'local>(_env: &mut Env<'local>, _class: JClass<'local>) -> Result<()> {
+	crate::app::toggle_deafen();
+	Ok(())
+}
+
+const _: jni::NativeMethod = native_method! {
+	java_type = "io.github.faumaray.voelin.Native",
+	static extern fn on_open_voice(),
+};
+
+/// The voice notification was tapped: show the voice channel.
+fn on_open_voice<'local>(_env: &mut Env<'local>, _class: JClass<'local>) -> Result<()> {
+	voelin_ui::request(voelin_ui::Request::ShowVoice);
 	Ok(())
 }

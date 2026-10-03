@@ -49,4 +49,12 @@ object Native {
     /** "Mute" / "Unmute" in the voice notification. */
     @JvmStatic
     external fun onToggleMute()
+
+    /** "Deafen" / "Undeafen" in the voice notification. */
+    @JvmStatic
+    external fun onToggleDeafen()
+
+    /** The voice notification was tapped: show the voice channel. */
+    @JvmStatic
+    external fun onOpenVoice()
 }

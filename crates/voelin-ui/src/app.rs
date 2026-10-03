@@ -621,6 +621,8 @@ pub fn run(options: RunOptions) -> Result<()> {
 	});
 
 	let _dev = crate::dev::start(&ui, &switches);
+	// What the platform asked for before the window ran.
+	crate::inbox::take();
 
 	ui.run()?;
 	// With our own engine, leave servers properly, so no ghost client stays

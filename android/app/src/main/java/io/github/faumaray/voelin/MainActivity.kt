@@ -9,7 +9,7 @@ import java.lang.ref.WeakReference
 /**
  * The window: a NativeActivity running `android_main` of libvoelin_android.so
  * (the Slint UI). Kotlin only handles what needs an Activity: permission
- * prompts and the screen-capture consent dialog.
+ * prompts, the screen-capture consent dialog and a tapped notification.
  */
 class MainActivity : NativeActivity() {
     private var captureFps = 30
@@ -18,6 +18,14 @@ class MainActivity : NativeActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         current = WeakReference(this)
         super.onCreate(savedInstanceState)
+        // Not again when the activity is recreated with the same intent.
+        if (savedInstanceState == null) handle(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handle(intent)
     }
 
     override fun onDestroy() {
@@ -32,6 +40,13 @@ class MainActivity : NativeActivity() {
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         moveTaskToBack(true)
+    }
+
+    /** A tapped voice notification. */
+    private fun handle(intent: Intent?) {
+        when (intent?.action) {
+            VoiceService.ACTION_OPEN_VOICE -> Native.onOpenVoice()
+        }
     }
 
     /** Show the system's "start recording or casting?" dialog. */

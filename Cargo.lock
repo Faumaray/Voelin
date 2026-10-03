@@ -9062,6 +9062,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "tsclientlib",
  "voelin-core",
  "voelin-media",
  "voelin-model",

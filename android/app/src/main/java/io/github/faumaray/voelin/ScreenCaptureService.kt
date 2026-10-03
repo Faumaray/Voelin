@@ -1,6 +1,8 @@
 package io.github.faumaray.voelin
 
 import android.Manifest
+import android.app.Notification
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
@@ -66,21 +68,9 @@ class ScreenCaptureService : Service() {
             return START_NOT_STICKY
         }
         if (projection != null) return START_NOT_STICKY
-        val stop = PendingIntent.getService(
-            this,
-            0,
-            Intent(this, ScreenCaptureService::class.java).setAction(ACTION_STOP),
-            PendingIntent.FLAG_IMMUTABLE,
-        )
-        val notification = Notifications.ongoing(
-            this,
-            Notifications.CHANNEL_SCREEN,
-            getString(R.string.screen_sharing),
-            getString(R.string.stop_sharing) to stop,
-        )
         try {
             // Must be in the foreground before getMediaProjection (Android 14).
-            startForeground(ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            startForeground(ID, notification(this), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
             val data = if (Build.VERSION.SDK_INT >= 33) {
                 intent.getParcelableExtra(EXTRA_DATA, Intent::class.java)
             } else {
@@ -258,6 +248,36 @@ class ScreenCaptureService : Service() {
 
         @Volatile
         private var instance: ScreenCaptureService? = null
+
+        /** Where our stream is live and who watches ("Live in Chill Zone"), or null. */
+        @Volatile
+        private var notice: Pair<String, String>? = null
+
+        private fun notification(context: Context): Notification {
+            val stop = PendingIntent.getService(
+                context,
+                0,
+                Intent(context, ScreenCaptureService::class.java).setAction(ACTION_STOP),
+                PendingIntent.FLAG_IMMUTABLE,
+            )
+            val (title, text) = notice ?: (context.getString(R.string.screen_sharing) to context.getString(R.string.screen_sharing_text))
+            return Notifications.ongoing(
+                context,
+                Notifications.CHANNEL_SCREEN,
+                title,
+                text,
+                Notifications.openApp(context),
+                0,
+                context.getString(R.string.stop_sharing) to stop,
+            )
+        }
+
+        /** What the notification says while our stream is live (null: the default). */
+        fun setNotice(title: String?, text: String?) {
+            notice = if (title != null) title to (text ?: "") else null
+            val service = instance ?: return
+            service.getSystemService(NotificationManager::class.java).notify(ID, notification(service))
+        }
 
         /** Start capturing with the consent the user just gave. */
         fun start(context: Context, resultCode: Int, data: Intent, fps: Int, maxSize: Int) {

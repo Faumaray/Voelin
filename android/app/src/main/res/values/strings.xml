@@ -4,9 +4,12 @@
     <string name="channel_voice">Voice connection</string>
     <string name="channel_screen">Screen sharing</string>
     <string name="voice_connected">Connected to voice</string>
-    <string name="disconnect">Disconnect</string>
+    <string name="leave">Leave</string>
     <string name="mute">Mute</string>
     <string name="unmute">Unmute</string>
+    <string name="deafen">Deafen</string>
+    <string name="undeafen">Undeafen</string>
     <string name="screen_sharing">Sharing your screen</string>
+    <string name="screen_sharing_text">Starting the stream</string>
     <string name="stop_sharing">Stop sharing</string>
 </resources>
