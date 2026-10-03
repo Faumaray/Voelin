@@ -806,7 +806,15 @@ impl FfmpegEncoder {
 			// SVT-AV1 takes CBR from its own `rc=2` and rejects a maximum
 			// that is not above the target.
 			generic("maxrate", if self.spec.name == "libsvtav1" { 0 } else { bitrate }),
-			generic("bufsize", bitrate),
+			// A one-second buffer, except for VA-API AV1: with one second
+			// Mesa's rate control overshot by 3.5 % at 1080p60 / 6 Mbit/s and
+			// 7.9 % at 1440p60 / 10 Mbit/s (RX 7900 GRE, desktop pattern);
+			// with two it lands within 1.2 % at both and at 720p30, no frame
+			// skipped, the largest 68 KB against 64 KB at 1440p60.
+			generic(
+				"bufsize",
+				u64::from(bitrate) * if self.spec.name == "av1_vaapi" { 2 } else { 1 },
+			),
 			generic("g", gop),
 			generic("bf", 0),
 			generic("colorspace", "smpte170m"),
