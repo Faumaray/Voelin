@@ -8,6 +8,7 @@ import android.content.pm.ResolveInfo
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.os.Build
+import android.view.Surface
 import java.io.File
 
 /**
@@ -67,6 +68,16 @@ object Bridge {
     @JvmStatic
     fun stopScreenCapture() {
         ScreenCaptureService.stop(app)
+    }
+
+    /**
+     * Render the shared screen into `surface` (an encoder's input,
+     * `width` x `height`: the zero-copy path), or with null back into the
+     * frame reader.
+     */
+    @JvmStatic
+    fun setScreenSurface(surface: Surface?, width: Int, height: Int) {
+        ScreenCaptureService.redirect(surface, width, height)
     }
 
     /** Capture what the device plays; false without a running screen capture. */

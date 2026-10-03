@@ -10,26 +10,42 @@
 //! H.264 is encoded as High profile without B-frames (the Constrained High
 //! stream TeamSpeak negotiates, see `voelin-stream`), SPS/PPS in front of every
 //! keyframe.
+//!
+//! The zero-copy path: while it is the only MediaCodec encoder in the
+//! process, an encoder takes [`GpuFrame`]s
+//! ([`VideoEncoder::gpu_alignment`]). For the first one it starts a codec
+//! with an input surface and publishes it ([`input_surface`]); Android's
+//! screen capture points its virtual display at that surface, so the
+//! screen goes from the compositor into the encoder without a copy or a
+//! CPU conversion, and the `GpuFrame`s only say a picture is due (the
+//! encoder hands over what it encoded since). With a second encoder (a
+//! simulcast layer, another codec for some viewers) none takes them, and
+//! the capture goes back to frames in memory; so does an encoder whose
+//! surface failed once.
 
 // AMediaCodec handles are used from one thread at a time (`&mut self`), which
 // the NDK allows from any thread; the wrapper only asserts that.
 #![allow(unsafe_code)]
 
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use ndk::media::media_codec::{
 	DequeuedInputBufferResult, DequeuedOutputBufferInfoResult, MediaCodec, MediaCodecDirection,
 };
 use ndk::media::media_format::MediaFormat;
+use ndk::native_window::NativeWindow;
 use tracing::{debug, info};
 
 use super::hw::EncoderFactory;
 use super::image_layout::{
 	COLOR_FORMAT_FLEXIBLE, COLOR_FORMAT_I420, COLOR_FORMAT_NV12, ImageLayout,
 };
-use super::{Codec, EncodedFrame, EncoderBackend, EncoderConfig, VideoDecoder, VideoEncoder};
-use crate::frame::{FrameData, VideoFrame};
+use super::{
+	Codec, EncodedChunk, EncodedFrame, EncoderBackend, EncoderConfig, VideoDecoder, VideoEncoder,
+};
+use crate::frame::{FrameData, GpuFrame, VideoFrame};
 use crate::{Error, Result, convert};
 
 /// `BUFFER_FLAG_KEY_FRAME`.
@@ -48,7 +64,46 @@ const INPUT_WAIT: Duration = Duration::from_millis(20);
 /// How long they wait for the first output of a call.
 const OUTPUT_WAIT: Duration = Duration::from_millis(5);
 
+/// `COLOR_FormatSurface`: pictures come through an input surface.
+const COLOR_FORMAT_SURFACE: i32 = 0x7F00_0789;
+/// On the surface path a still screen is encoded again after this long
+/// (µs), so a keyframe asked for while nothing moves comes this late at
+/// most.
+const REPEAT_AFTER_US: i64 = 100_000;
+
 pub const NAME: &str = "mediacodec";
+
+/// MediaCodec encoders alive in this process.
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+/// The published input surface (see the [module docs](self)).
+static SURFACE: Mutex<Option<InputSurface>> = Mutex::new(None);
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+/// The screen capture's clock origin (`CLOCK_MONOTONIC` ns), which the
+/// surface's presentation times are on.
+static SCREEN_ORIGIN_NS: AtomicI64 = AtomicI64::new(i64::MIN);
+
+/// The input surface of the encoder that takes the screen straight from
+/// the capture, for the capture's virtual display to render into.
+#[derive(Clone)]
+pub struct InputSurface {
+	pub window: NativeWindow,
+	pub width: u32,
+	pub height: u32,
+	/// Changes with every new surface.
+	pub generation: u64,
+}
+
+/// The surface to render the screen into, if an encoder has one.
+pub fn input_surface() -> Option<InputSurface> {
+	SURFACE.lock().unwrap_or_else(PoisonError::into_inner).clone()
+}
+
+/// Where the screen capture's frame times start (`CLOCK_MONOTONIC` ns,
+/// what its frames' times are counted from): the surface path puts its
+/// presentation times, which are on that clock, on the stream's timeline.
+pub fn set_screen_origin(origin_ns: i64) {
+	SCREEN_ORIGIN_NS.store(origin_ns, Ordering::Relaxed);
+}
 
 fn mime(codec: Codec) -> &'static str {
 	match codec {
@@ -159,15 +214,32 @@ impl EncoderFactory for MediaCodecFactory {
 		if !self.codecs.contains(&codec) {
 			return Err(Error::CodecUnavailable { codec, reason: "no MediaCodec encoder".into() });
 		}
-		Ok(Box::new(MediaCodecEncoder { codec, config: config.clone(), session: None }))
+		LIVE.fetch_add(1, Ordering::Relaxed);
+		Ok(Box::new(MediaCodecEncoder {
+			codec,
+			config: config.clone(),
+			session: None,
+			surface_failed: false,
+		}))
 	}
 }
 
-/// A MediaCodec encoder. The codec is (re)created for the frame size.
+/// A MediaCodec encoder. The codec is (re)created for the frame size, and
+/// for frames in memory or on the surface path.
 pub struct MediaCodecEncoder {
 	codec: Codec,
 	config: EncoderConfig,
 	session: Option<EncoderSession>,
+	/// The surface path failed: frames in memory only from now on.
+	surface_failed: bool,
+}
+
+impl Drop for MediaCodecEncoder {
+	fn drop(&mut self) {
+		// Its surface goes first.
+		self.session = None;
+		LIVE.fetch_sub(1, Ordering::Relaxed);
+	}
 }
 
 struct EncoderSession {
@@ -178,6 +250,18 @@ struct EncoderSession {
 	/// Staging buffer for the codec's input layout.
 	staging: Vec<u8>,
 	last_pts_us: Option<u64>,
+	/// The surface path: the generation of the input surface it published.
+	surface: Option<u64>,
+}
+
+impl Drop for EncoderSession {
+	fn drop(&mut self) {
+		let Some(generation) = self.surface else { return };
+		let mut slot = SURFACE.lock().unwrap_or_else(PoisonError::into_inner);
+		if slot.as_ref().is_some_and(|s| s.generation == generation) {
+			*slot = None;
+		}
+	}
 }
 
 impl MediaCodecEncoder {
@@ -241,10 +325,53 @@ impl MediaCodecEncoder {
 					parameter_sets: Vec::new(),
 					staging: Vec::new(),
 					last_pts_us: None,
+					surface: None,
 				});
 			}
 		}
 		Err(encoder_error(codec, "no working configuration", last_error))
+	}
+
+	/// Start a codec for `width` x `height` that takes its pictures through
+	/// an input surface, and publish the surface for the screen capture.
+	fn start_surface(&self, width: u32, height: u32) -> Result<EncoderSession> {
+		let codec = self.codec;
+		let profiles: &[Option<i32>] = if codec == Codec::H264 {
+			&[Some(AVC_PROFILE_CONSTRAINED_HIGH), Some(AVC_PROFILE_HIGH), None]
+		} else {
+			&[None]
+		};
+		let mut last_error = String::from("no configuration tried");
+		for &profile in profiles {
+			let handle = Handle(
+				MediaCodec::from_encoder_type(mime(codec))
+					.ok_or_else(|| encoder_error(codec, "create", "no encoder"))?,
+			);
+			let mut format = self.format(width, height, COLOR_FORMAT_SURFACE, profile);
+			// The display renders at its own rate; encode at most ours.
+			format.set_f32("max-fps-to-encoder", self.config.fps.max(1) as f32);
+			format.set_i64("repeat-previous-frame-after", REPEAT_AFTER_US);
+			if let Err(e) = handle.0.configure(&format, None, MediaCodecDirection::Encoder) {
+				last_error = format!("configure surface input/{profile:?}: {e}");
+				continue;
+			}
+			let window =
+				handle.0.create_input_surface().map_err(|e| encoder_error(codec, "surface", e))?;
+			handle.0.start().map_err(|e| encoder_error(codec, "start", e))?;
+			let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+			*SURFACE.lock().unwrap_or_else(PoisonError::into_inner) =
+				Some(InputSurface { window, width, height, generation });
+			debug!(%codec, width, height, ?profile, "MediaCodec encoder on the surface path");
+			return Ok(EncoderSession {
+				handle,
+				layout: ImageLayout::nv12(width, height, 0, 0),
+				parameter_sets: Vec::new(),
+				staging: Vec::new(),
+				last_pts_us: None,
+				surface: Some(generation),
+			});
+		}
+		Err(encoder_error(codec, "no surface configuration", last_error))
 	}
 }
 
@@ -310,7 +437,9 @@ impl VideoEncoder for MediaCodecEncoder {
 			.session
 			.as_ref()
 			.is_some_and(|s| (s.layout.width, s.layout.height) != (width, height));
-		if resized || self.session.is_none() {
+		// Frames in memory again after the surface path: a codec for them.
+		let surface = self.session.as_ref().is_some_and(|s| s.surface.is_some());
+		if resized || surface || self.session.is_none() {
 			self.session = None;
 			self.session = Some(self.start(width, height)?);
 		}
@@ -367,7 +496,72 @@ impl VideoEncoder for MediaCodecEncoder {
 			// The codec is still busy: skip this frame (rate control).
 			DequeuedInputBufferResult::TryAgainLater => {}
 		}
-		drain_encoder(codec, session)
+		drain_encoder(codec, session, OUTPUT_WAIT)
+	}
+
+	/// Only while it is the only MediaCodec encoder: one input surface
+	/// takes the screen (see the [module docs](self)).
+	fn gpu_alignment(&self) -> Option<(u32, u32)> {
+		(!self.surface_failed && LIVE.load(Ordering::Relaxed) == 1).then_some((2, 2))
+	}
+
+	/// A picture is due: on the first one (and when the size changes) the
+	/// codec starts on the surface path; then what it encoded since goes to
+	/// `out`.
+	fn encode_gpu(
+		&mut self,
+		frame: &GpuFrame,
+		force_keyframe: bool,
+		out: &mut dyn FnMut(EncodedChunk<'_>),
+	) -> Result<()> {
+		let codec = self.codec;
+		let (width, height) = (frame.width & !1, frame.height & !1);
+		if width == 0 || height == 0 {
+			return Err(Error::InvalidFrame(format!("{}x{} frame", frame.width, frame.height)));
+		}
+		let current = self.session.as_ref().is_some_and(|s| {
+			s.surface.is_some() && (s.layout.width, s.layout.height) == (width, height)
+		});
+		if !current {
+			self.session = None;
+			match self.start_surface(width, height) {
+				Ok(session) => self.session = Some(session),
+				Err(e) => {
+					// Frames in memory from now on (the capture follows
+					// `gpu_alignment`).
+					self.surface_failed = true;
+					return Err(e);
+				}
+			}
+		} else if force_keyframe {
+			let mut params = MediaFormat::new();
+			params.set_i32("request-sync", 0);
+			let session = self.session.as_ref().expect("checked above");
+			session
+				.handle
+				.0
+				.set_parameters(params)
+				.map_err(|e| encoder_error(codec, "request keyframe", e))?;
+		}
+		let session = self.session.as_mut().expect("started above");
+		// Wait up to half a frame for what the display rendered.
+		let wait = Duration::from_micros(500_000 / u64::from(self.config.fps.max(1)));
+		for f in drain_encoder(codec, session, wait)? {
+			out(EncodedChunk { data: &f.data, keyframe: f.keyframe, pts_90khz: f.pts_90khz });
+		}
+		Ok(())
+	}
+
+	/// On the surface path the rate caps what the codec takes from the
+	/// display (`max-fps-to-encoder`, fixed when it starts): the next
+	/// picture starts it anew. Frames in memory follow their timestamps.
+	fn set_fps(&mut self, fps: u32) -> Result<()> {
+		let fps = fps.max(1);
+		if fps != self.config.fps && self.session.as_ref().is_some_and(|s| s.surface.is_some()) {
+			self.session = None;
+		}
+		self.config.fps = fps;
+		Ok(())
 	}
 
 	fn set_bitrate(&mut self, bps: u32) -> Result<()> {
@@ -385,10 +579,15 @@ impl VideoEncoder for MediaCodecEncoder {
 	}
 }
 
-/// Collect what the encoder has finished.
-fn drain_encoder(codec: Codec, session: &mut EncoderSession) -> Result<Vec<EncodedFrame>> {
+/// Collect what the encoder has finished, waiting up to `wait` for the
+/// first of it.
+fn drain_encoder(
+	codec: Codec,
+	session: &mut EncoderSession,
+	wait: Duration,
+) -> Result<Vec<EncodedFrame>> {
 	let mut out = Vec::new();
-	let mut wait = OUTPUT_WAIT;
+	let mut wait = wait;
 	loop {
 		let result = session
 			.handle
@@ -424,7 +623,15 @@ fn drain_encoder(codec: Codec, session: &mut EncoderSession) -> Result<Vec<Encod
 					with_sps.append(&mut data);
 					data = with_sps;
 				}
-				let pts_us = u64::try_from(info.presentation_time_us()).unwrap_or(0);
+				let mut pts_us = info.presentation_time_us();
+				if session.surface.is_some() {
+					// The display's clock: onto the capture's timeline.
+					let origin = SCREEN_ORIGIN_NS.load(Ordering::Relaxed);
+					if origin != i64::MIN {
+						pts_us -= origin / 1000;
+					}
+				}
+				let pts_us = u64::try_from(pts_us).unwrap_or(0);
 				out.push(EncodedFrame { data, keyframe, pts_90khz: pts_us * 9 / 100 });
 			}
 			DequeuedOutputBufferInfoResult::OutputFormatChanged

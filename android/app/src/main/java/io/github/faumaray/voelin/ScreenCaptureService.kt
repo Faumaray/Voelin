@@ -36,9 +36,10 @@ import kotlin.math.roundToInt
 /**
  * Screen sharing: holds the MediaProjection (a `mediaProjection` foreground
  * service, as Android requires), mirrors the display into an ImageReader and
- * hands each RGBA frame to Native.onScreenFrame; optionally captures what
- * other apps play (AudioPlaybackCapture: all but us, or one app) for
- * Native.onSystemAudio and Native.onAudioInput.
+ * hands each RGBA frame to Native.onScreenFrame, or (the zero-copy path,
+ * Bridge.setScreenSurface) straight into an encoder's input surface;
+ * optionally captures what other apps play (AudioPlaybackCapture: all but
+ * us, or one app) for Native.onSystemAudio and Native.onAudioInput.
  */
 class ScreenCaptureService : Service() {
     private var projection: MediaProjection? = null
@@ -147,6 +148,32 @@ class ScreenCaptureService : Service() {
             null,
             handler,
         )
+    }
+
+    /**
+     * Point the virtual display at `surface` (an encoder's input surface,
+     * `width` x `height`: the screen goes into the encoder without a copy),
+     * or with null back at the reader, at the reader's size.
+     */
+    @Synchronized
+    private fun redirectTo(surface: Surface?, width: Int, height: Int) {
+        val display = display ?: return
+        val reader = reader ?: return
+        val dpi = resources.displayMetrics.densityDpi
+        try {
+            // Detached while resizing, so neither consumer gets a picture of
+            // the other's size.
+            display.surface = null
+            if (surface != null) {
+                display.resize(width, height, dpi)
+                display.surface = surface
+            } else {
+                display.resize(reader.width, reader.height, dpi)
+                display.surface = reader.surface
+            }
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "cannot point the screen at ${if (surface != null) "the encoder" else "the reader"}", e)
+        }
     }
 
     /**
@@ -291,6 +318,11 @@ class ScreenCaptureService : Service() {
 
         fun stop(context: Context) {
             context.stopService(Intent(context, ScreenCaptureService::class.java))
+        }
+
+        /** See redirectTo; nothing without a running capture. */
+        fun redirect(surface: Surface?, width: Int, height: Int) {
+            instance?.redirectTo(surface, width, height)
         }
 
         fun startAudio(): Boolean {

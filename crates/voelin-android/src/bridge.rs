@@ -113,6 +113,40 @@ pub fn set_screen_notification(notice: Option<&ScreenNotice>) -> Result<()> {
 	})
 }
 
+/// Point the screen's virtual display at an encoder's input surface (the
+/// zero-copy path), or back at the frame reader with `None`.
+pub fn set_screen_surface(
+	surface: Option<&voelin_media::codec::mediacodec::InputSurface>,
+) -> Result<()> {
+	with_bridge(|env, class| {
+		let (object, width, height) = match surface {
+			Some(surface) => {
+				// SAFETY: `env` is this thread's JNI environment, and the
+				// window stays alive (`surface` holds a reference) while
+				// Java makes a Surface of it.
+				#[allow(unsafe_code)]
+				let raw = unsafe { surface.window.to_surface(env.get_raw().cast()) };
+				if raw.is_null() {
+					return Err(Error::NullPtr("encoder surface"));
+				}
+				// SAFETY: `raw` is a new local reference to an
+				// android.view.Surface of this frame.
+				#[allow(unsafe_code)]
+				let object = unsafe { JObject::from_raw(env, raw.cast()) };
+				(object, surface.width, surface.height)
+			}
+			None => (JObject::null(), 0, 0),
+		};
+		env.call_static_method(
+			class,
+			jni_str!("setScreenSurface"),
+			jni_sig!((surface: android.view.Surface, width: jint, height: jint) -> void),
+			&[JValue::Object(&object), JValue::Int(width as jint), JValue::Int(height as jint)],
+		)?;
+		Ok(())
+	})
+}
+
 /// Ask the user to share the screen. The answer comes back through
 /// `Native.onScreenCaptureResult`.
 pub fn request_screen_capture(fps: u32, max_size: u32) -> Result<()> {
@@ -362,9 +396,10 @@ fn on_screen_frame<'local>(
 		return Err(Error::NullPtr("screen frame buffer"));
 	}
 	// SAFETY: a direct buffer's memory is `capacity` bytes at `address`, and
-	// the `Image` it belongs to stays open until this call returns.
+	// the `Image` it belongs to stays open until this call returns (the
+	// frame is borrowed only during it).
 	#[allow(unsafe_code)]
-	let bytes = unsafe { std::slice::from_raw_parts(address, capacity) }.to_vec();
+	let bytes = unsafe { std::slice::from_raw_parts(address, capacity) };
 	Ok(crate::capture::on_frame(
 		bytes,
 		width.max(0) as u32,

@@ -20,8 +20,8 @@ video, recording, a replay buffer, WHIP) is described in
 | `AudioBuffer { samples, channels, timestamp }` | interleaved `f32`, 48 kHz |
 | `convert::to_rgba(&frame, out, stride)`, `to_rgba_vec`, `to_i420`, `psnr` | BT.601 limited range (the WebRTC default). `to_rgba` writes straight into a Slint `SharedPixelBuffer<Rgba8Pixel>` (`make_mut_bytes()`, stride `width * 4`) |
 | `Codec` | `Vp8`, `Vp9`, `H264`, `Av1`; `FromStr` for SDP/MIME names; `From`/`TryFrom` `str0m::format::Codec` with feature `str0m` |
-| `VideoEncoder` | `encode(&frame, force_keyframe) -> Vec<EncodedFrame>`; `encode_with(&frame, force_keyframe, &mut |EncodedChunk| ..)` hands out the encoder's own buffer (no copy); `set_bitrate(bps)` (libvpx: in place, no keyframe), `set_fps`, `speed()`, `codec()`, `backend()`; `gpu_alignment()` / `encode_gpu(&GpuFrame, ..)` for encoders that take frames in GPU memory (VA-API) |
-| `GpuFrame` | a picture in GPU memory (an NV12 VA-API surface), made by `ffmpeg::GpuConverter` from a captured DMA-BUF; `width`, `height`, `timestamp`, `at(timestamp)` (the same surface at another time) |
+| `VideoEncoder` | `encode(&frame, force_keyframe) -> Vec<EncodedFrame>`; `encode_with(&frame, force_keyframe, &mut |EncodedChunk| ..)` hands out the encoder's own buffer (no copy); `set_bitrate(bps)` (libvpx: in place, no keyframe), `set_fps`, `speed()`, `codec()`, `backend()`; `gpu_alignment()` / `encode_gpu(&GpuFrame, ..)` for encoders that take frames in GPU memory (VA-API; MediaCodec's surface path on Android) |
+| `GpuFrame` | a picture in GPU memory (an NV12 VA-API surface), made by `ffmpeg::GpuConverter` from a captured DMA-BUF; `width`, `height`, `timestamp`, `at(timestamp)` (the same surface at another time). On Android `rendered(width, height, timestamp)`: a screen picture the virtual display renders straight into MediaCodec's input surface, only its size and time travel |
 | `EncodedFrame { data, keyframe, pts_90khz }` | one frame for `Peer::write` |
 | `VideoDecoder` | `decode(&[u8]) -> Option<VideoFrame>` (timestamp zero; the caller knows the RTP time) |
 | `EncoderConfig { fps, bitrate_bps, keyframe_interval, content, threads, speed }` | resolution follows the frames; a size change restarts with a keyframe; `threads` is a maximum (0: all CPUs but one), still capped at one per 320x240 pixels; `speed: None` adapts libvpx `cpu-used` to the encode time |
@@ -492,6 +492,25 @@ changes at runtime (`video-bitrate`). Encoder order: the device's hardware
 encoders (H.264, VP9, VP8), then Google's software VP8 and H.264. Decoders
 return the newest finished picture per `decode` call (NV12 or I420).
 
+The zero-copy path for screen sharing: while it is the only MediaCodec
+encoder in the process (one simulcast layer, one codec), an encoder reports a
+`gpu_alignment`, and the capture's sink then takes `GpuFrame`s. The Android
+provider's ticker hands it one per frame at the stream's rate; for the first
+the encoder starts a codec with an input surface (`createInputSurface`,
+`COLOR_FormatSurface`, `max-fps-to-encoder` at the stream's rate,
+`repeat-previous-frame-after` 100 ms so a still screen still answers keyframe
+requests) and publishes it (`mediacodec::input_surface`); the app points its
+virtual display at that surface (`Bridge.setScreenSurface`, resized to the
+layer's size), so the compositor renders the screen into the encoder: no
+`ImageReader` frame, no RGBA to NV12 conversion, no copy. Each `GpuFrame`
+then only collects what the codec encoded since; presentation times are the
+display's (`CLOCK_MONOTONIC`), moved onto the capture's timeline. A second
+encoder (another simulcast layer, another codec a viewer chose) turns the
+path off for every encoder: the display goes back to the reader and frames
+in memory, until it is the only one again. An encoder whose surface fails to
+start stays on frames in memory. A frame-rate change restarts the surface
+codec (the cap is fixed when it starts).
+
 libvpx settings follow libwebrtc's realtime setup: one pass CBR, no lag,
 `VPX_DL_REALTIME`, error resilient, keyframes only at start and on request
 unless `keyframe_interval` is set, screen content tuning
@@ -559,7 +578,7 @@ found at ...").
 | Linux Wayland (`pipewire`, default) | `PortalCapture`: xdg-desktop-portal ScreenCast via `ashpd`, frames from a PipeWire video stream (LINEAR DMA-BUF or shared memory) | `PipeWireAudioCapture`: default sink monitor (`stream.capture.sink = true`) |
 | Linux wlroots (`wlroots`, default) | `WlrootsCapture`: `ext-image-copy-capture-v1`, else `wlr-screencopy-unstable-v1`, outputs only, shared memory | |
 | Windows | `WindowsCapture`: Windows Graphics Capture (`windows-capture`), monitors and windows | `WasapiLoopback`: process loopback excluding our own process tree, falling back to plain loopback |
-| Android | `ExternalScreenCapture` fed by the app (MediaProjection → `ImageReader`, RGBA; see [android.md](android.md)) | `ExternalAudioCapture` fed by the app (`AudioPlaybackCapture` of every app but ours, 48 kHz float) |
+| Android | `ExternalScreenCapture` fed by the app (MediaProjection → `ImageReader`, RGBA borrowed from the reader; or straight into the MediaCodec encoder's input surface, see [MediaCodec](#codecs); [android.md](android.md)) | `ExternalAudioCapture` fed by the app (`AudioPlaybackCapture` of every app but ours, 48 kHz float) |
 
 `default_screen_capture()` picks a registered external provider first
 (`capture::external::set_screen_provider`, which the Android app calls at
@@ -623,7 +642,8 @@ renders into one buffer, conversion and scaling write into recycled frames,
 handoffs are atomic pointer swaps, and libvpx output is borrowed. The one
 allocation per encoded frame is the `Arc<[u8]>` of `EncodedFrame`, whose size
 varies per frame and so cannot be recycled. Backends outside our control add
-their own (x11rb reply buffers; the Android provider hands owned frames).
+their own (x11rb reply buffers; the Android provider's `start` path copies
+frames into the queue, its `start_sink` path, the one streams use, does not).
 
 ```sh
 # The real pipeline on the test pattern, no server:
@@ -956,3 +976,4 @@ has not run on Windows yet.
 | External capture providers (start, refusal, end of capture, default selection) | unit tests | tested |
 | MediaCodec buffer layouts (I420, NV12 with padding, `MediaImage2` NV21, crop) | unit tests (`codec::image_layout`) | tested |
 | MediaCodec encoders and decoders | – | compiles for `aarch64-linux-android` only (no device or emulator here) |
+| MediaCodec zero-copy screen path (virtual display into the encoder's input surface, back to the reader for simulcast) | `cargo ndk -t arm64-v8a clippy` | compiles only (no device or emulator here; fps and CPU not measured) |
