@@ -1,0 +1,616 @@
+// The Stream Studio in the main window (desktop and phone). The pieces are
+// in studio-parts.slint; the detached window is studio-window.slint.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Bridge } from "../bridge.slint";
+import { Nav, Page } from "../nav.slint";
+import { StudioBridge, StudioNav } from "../studio-bridge.slint";
+import { Icon, Button, ButtonKind, IconButton, Avatar, Status, TextField, Select, Slider, Meter, Divider, ScrollView } from "../components/index.slint";
+import { StudioKinds, StudioPanel, PanelTitle, ScenesCard, SourcesCard, StudioPreview, StudioHeader, StudioMark, MixerCard, StudioChat, StreamSettings, DestinationSelect, StudioActions, ViewerRequests, StudioDialogs } from "studio-parts.slint";
+
+// Who streams, at the bottom left.
+component StudioUser inherits HorizontalLayout {
+    spacing: Theme.space-3;
+    VerticalLayout {
+        alignment: center;
+        Avatar {
+            size: 38px;
+            initials: Bridge.nickname != "" ? "" : "?";
+            tint: Theme.accent;
+            label: Bridge.nickname;
+            crown: StudioBridge.status.live;
+            status: Bridge.voice-connected ? Status.online : Status.offline;
+            Icon {
+                source: Icons.user;
+                size: 20px;
+                tint: #ffffff;
+                visible: Bridge.nickname != "";
+            }
+        }
+    }
+    VerticalLayout {
+        alignment: center;
+        horizontal-stretch: 1;
+        Text {
+            text: Bridge.nickname != "" ? Bridge.nickname : Bridge.app-name;
+            color: Theme.text;
+            font-weight: Theme.weight-semibold;
+            overflow: elide;
+        }
+        Text {
+            text: StudioBridge.status.live ? @tr("Live") : Bridge.voice-connected ? @tr("Online") : @tr("Offline");
+            color: StudioBridge.status.live ? Theme.live : Theme.text-muted;
+            font-size: Theme.font-xs;
+        }
+    }
+}
+
+// The studio as a page of the main window: scenes and sources, the
+// preview with the mixer and the chat, the stream settings, the bottom bar.
+export component StudioPage inherits Rectangle {
+    init => { StudioBridge.open(); }
+    VerticalLayout {
+        spacing: Theme.space-3;
+        HorizontalLayout {
+            vertical-stretch: 1;
+            spacing: Theme.space-3;
+            VerticalLayout {
+                width: 250px * max(1.0, Theme.font-scale);
+                spacing: Theme.space-3;
+                ScenesCard {
+                    vertical-stretch: 1;
+                }
+                SourcesCard {
+                    vertical-stretch: 1;
+                }
+            }
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: Theme.space-3;
+                StudioPanel {
+                    vertical-stretch: 1.7;
+                    VerticalLayout {
+                        padding: Theme.space-4;
+                        padding-top: Theme.space-3;
+                        spacing: Theme.space-3;
+                        StudioHeader { }
+                        if StudioBridge.viewers.length > 0: ViewerRequests { }
+                        StudioPreview {
+                            vertical-stretch: 1;
+                            min-height: 160px;
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    vertical-stretch: 1;
+                    min-height: 250px;
+                    spacing: Theme.space-3;
+                    MixerCard {
+                        horizontal-stretch: 1.35;
+                    }
+                    StudioChat {
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+            StudioPanel {
+                width: 300px * max(1.0, Theme.font-scale);
+                ScrollView {
+                    StreamSettings { }
+                }
+            }
+        }
+        HorizontalLayout {
+            height: 64px;
+            spacing: Theme.space-3;
+            StudioUser {
+                width: 250px * max(1.0, Theme.font-scale);
+                padding-left: Theme.space-3;
+            }
+            StudioActions {
+                horizontal-stretch: 1;
+            }
+            Rectangle {
+                width: 150px;
+                Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    height: 48px;
+                    border-radius: Theme.radius-lg;
+                    background: settings-touch.has-hover ? Theme.surface-3 : Theme.surface.transparentize(0.08);
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    accessible-role: AccessibleRole.button;
+                    accessible-label: @tr("Studio Settings");
+                    accessible-action-default => { StudioNav.open-settings(); }
+                    settings-touch := TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => { StudioNav.open-settings(); }
+                    }
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: Theme.space-3;
+                        Icon {
+                            source: Icons.settings;
+                            size: Theme.icon-md;
+                            tint: Theme.text-secondary;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        Text {
+                            text: @tr("Studio Settings");
+                            color: Theme.text;
+                            font-size: Theme.font-sm;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    StudioDialogs {
+        width: parent.width;
+        height: parent.height;
+    }
+}
+
+// A section title of the phone layout with a link at the right.
+component PhoneSection inherits HorizontalLayout {
+    in property <string> text;
+    in property <image> icon;
+    in property <string> action;
+    callback action-clicked();
+    spacing: Theme.space-3;
+    min-height: 32px;
+    if root.icon.width > 0: Icon {
+        source: root.icon;
+        size: Theme.icon-md;
+        tint: Theme.text-secondary;
+        y: (parent.height - self.height) / 2;
+    }
+    Text {
+        text: root.text;
+        color: Theme.text;
+        font-size: Theme.font-lg;
+        font-weight: Theme.weight-semibold;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+    }
+    if root.action != "": Text {
+        text: root.action;
+        color: Theme.accent-text;
+        font-size: Theme.font-sm;
+        vertical-alignment: center;
+        TouchArea {
+            clicked => { root.action-clicked(); }
+        }
+    }
+}
+
+// One of the phone's source cards.
+component SourceCard inherits Rectangle {
+    in property <string> kind;
+    in property <string> title;
+    in property <string> subtitle;
+    in property <image> icon;
+    // A visible source of this kind is in the live scene.
+    in property <bool> shown;
+    height: 104px;
+    horizontal-stretch: 1;
+    border-radius: Theme.radius-lg;
+    background: root.shown ? Theme.accent-soft : touch.has-hover ? Theme.surface-3 : Theme.surface-2;
+    border-width: root.shown ? 2px : 1px;
+    border-color: root.shown ? Theme.accent : Theme.border;
+    accessible-role: AccessibleRole.radio-button;
+    accessible-label: root.title;
+    accessible-description: root.subtitle;
+    accessible-checkable: true;
+    accessible-checked: root.shown;
+    accessible-action-default => { StudioBridge.main-source(root.kind); }
+    touch := TouchArea {
+        clicked => { StudioBridge.main-source(root.kind); }
+    }
+    Rectangle {
+        x: parent.width - 26px;
+        y: 10px;
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        border-width: 2px;
+        border-color: root.shown ? Theme.accent-text : Theme.text-muted;
+        if root.shown: Rectangle {
+            width: 8px;
+            height: 8px;
+            border-radius: 4px;
+            background: Theme.accent-text;
+        }
+    }
+    VerticalLayout {
+        alignment: center;
+        spacing: Theme.space-2;
+        padding: Theme.space-2;
+        HorizontalLayout {
+            alignment: center;
+            Icon {
+                source: root.icon;
+                size: 28px;
+                tint: root.shown ? Theme.accent-text : Theme.icon;
+            }
+        }
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-size: Theme.font-body;
+            font-weight: Theme.weight-medium;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            text: root.subtitle;
+            color: Theme.text-muted;
+            font-size: Theme.font-xs;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+// An audio row of the phone layout.
+component PhoneAudioRow inherits Rectangle {
+    in property <int> index;
+    property <bool> valid: index < StudioBridge.audio.length;
+    height: 72px;
+    border-radius: Theme.radius-lg;
+    background: Theme.surface-2.transparentize(0.3);
+    border-width: 1px;
+    border-color: Theme.border;
+    HorizontalLayout {
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-2;
+        spacing: Theme.space-3;
+        Rectangle {
+            width: 42px;
+            height: 42px;
+            y: (parent.height - self.height) / 2;
+            border-radius: Theme.radius-md;
+            background: Theme.surface-3;
+            Icon {
+                source: StudioKinds.icon(root.valid ? StudioBridge.audio[root.index].kind : "");
+                size: 22px;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: Theme.space-2;
+            HorizontalLayout {
+                Text {
+                    text: root.valid ? StudioBridge.audio[root.index].name + (StudioBridge.audio[root.index].detail != "" ? " (" + StudioBridge.audio[root.index].detail + ")" : "") : "";
+                    color: Theme.text;
+                    font-size: Theme.font-sm;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                Text {
+                    text: !root.valid ? "" : StudioBridge.audio[root.index].muted ? @tr("muted") : @tr("{} dB", round(StudioBridge.audio[root.index].gain-db * 10) / 10);
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-xs;
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-3;
+                Meter {
+                    y: (parent.height - self.height) / 2;
+                    height: 8px;
+                    segments: 14;
+                    floor: -60;
+                    min-width: 60px;
+                    level: root.valid ? StudioBridge.audio[root.index].level : -100;
+                    active: root.valid && !StudioBridge.audio[root.index].muted;
+                }
+                Slider {
+                    width: 46%;
+                    horizontal-stretch: 0;
+                    y: (parent.height - self.height) / 2;
+                    minimum: -60;
+                    maximum: 20;
+                    step: 0.5;
+                    value: root.valid ? StudioBridge.audio[root.index].gain-db : 0;
+                    label: @tr("Gain");
+                    changed(v) => { StudioBridge.set-gain(root.index, v, false); }
+                    released(v) => { StudioBridge.set-gain(root.index, v, true); }
+                }
+            }
+        }
+        IconButton {
+            icon: root.valid && StudioBridge.audio[root.index].muted ? Icons.volume-x : Icons.volume-2;
+            label: @tr("Mute");
+            checked: root.valid && StudioBridge.audio[root.index].muted;
+            danger: true;
+            size: 34px;
+            y: (parent.height - self.height) / 2;
+            clicked => { StudioBridge.toggle-mute(root.index); }
+        }
+    }
+}
+
+// The studio in the phone layout: preview, what to share, audio, details,
+// Go Live.
+export component MobileStudio inherits Rectangle {
+    init => { StudioBridge.open(); }
+    sv := ScrollView {
+        VerticalLayout {
+            width: sv.visible-width;
+            padding: Theme.space-4;
+            padding-top: Theme.space-2;
+            spacing: Theme.space-4;
+            // Header: back, the mark, title, destination.
+            HorizontalLayout {
+                spacing: Theme.space-3;
+                IconButton {
+                    icon: Icons.chevron-left;
+                    label: @tr("Back");
+                    size: 32px;
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Nav.show(Page.server); }
+                }
+                StudioMark {
+                    size: 40px;
+                    y: (parent.height - self.height) / 2;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: @tr("Stream Studio");
+                        color: Theme.text;
+                        font-size: Theme.font-xl;
+                        font-weight: Theme.weight-semibold;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: StudioBridge.status.live ? @tr("Live · {}", StudioBridge.status.elapsed) : StudioBridge.chat-name != "" ? @tr("Go live to {}", StudioBridge.chat-name) : StudioBridge.status.hint;
+                        color: StudioBridge.status.live ? Theme.live : Theme.accent-text;
+                        font-size: Theme.font-sm;
+                        overflow: elide;
+                    }
+                }
+            }
+            // The preview.
+            Rectangle {
+                height: (sv.visible-width - 2 * Theme.space-4) * 9 / 16;
+                border-radius: Theme.radius-lg;
+                border-width: 1px;
+                border-color: Theme.accent.transparentize(0.4);
+                clip: true;
+                StudioPreview {
+                    large: false;
+                    caption: false;
+                }
+                Rectangle {
+                    x: Theme.space-3;
+                    y: Theme.space-3;
+                    width: badge.preferred-width + 16px;
+                    height: 24px;
+                    border-radius: Theme.radius-xs;
+                    background: Theme.live;
+                    visible: !StudioBridge.status.live;
+                    badge := Text {
+                        text: @tr("LIVE PREVIEW");
+                        color: #ffffff;
+                        font-size: Theme.font-xs;
+                        font-weight: Theme.weight-bold;
+                    }
+                }
+                Rectangle {
+                    x: parent.width - self.width - Theme.space-3;
+                    y: Theme.space-3;
+                    width: fmt.preferred-width + 20px;
+                    height: 26px;
+                    border-radius: Theme.radius-pill;
+                    background: #060a18c8;
+                    border-width: 1px;
+                    border-color: #ffffff20;
+                    fmt := Text {
+                        text: StudioBridge.status.output-height + "p • " + StudioBridge.status.fps + " FPS";
+                        color: #ffffff;
+                        font-size: Theme.font-xs;
+                    }
+                }
+            }
+            // What to share.
+            PhoneSection {
+                text: @tr("Source");
+                action: @tr("What do you want to share?");
+            }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                SourceCard {
+                    kind: "screen";
+                    title: @tr("Screen / Game");
+                    subtitle: @tr("Apps or games");
+                    icon: Icons.gamepad-2;
+                    shown: StudioBridge.status.screen-shown;
+                }
+                SourceCard {
+                    kind: "camera";
+                    title: @tr("Camera");
+                    subtitle: @tr("Front or back");
+                    icon: Icons.video;
+                    shown: StudioBridge.status.camera-shown;
+                }
+                SourceCard {
+                    kind: "window";
+                    title: @tr("App Window");
+                    subtitle: @tr("A single app");
+                    icon: Icons.smartphone;
+                    shown: StudioBridge.status.window-shown;
+                }
+            }
+            // Audio.
+            PhoneSection {
+                text: @tr("Audio");
+                icon: Icons.mic;
+                action: @tr("Add a source");
+                action-clicked => { StudioNav.pick-audio(); }
+            }
+            for audio[i] in StudioBridge.audio: PhoneAudioRow {
+                index: i;
+            }
+            // Details.
+            PhoneSection {
+                text: @tr("Stream Details");
+                icon: Icons.file-text;
+            }
+            TextField {
+                text: StudioBridge.form.title;
+                placeholder: @tr("What are you streaming?");
+                label: @tr("Stream title");
+                edited(t) => { StudioBridge.edit-form("title", t); }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-3;
+                VerticalLayout {
+                    spacing: Theme.space-2;
+                    Text {
+                        text: @tr("Game");
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                    }
+                    TextField {
+                        text: StudioBridge.form.game;
+                        placeholder: @tr("Category");
+                        label: @tr("Game or category");
+                        edited(t) => { StudioBridge.edit-form("game", t); }
+                    }
+                }
+                VerticalLayout {
+                    spacing: Theme.space-2;
+                    Text {
+                        text: @tr("Quality");
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                    }
+                    Select {
+                        model: ["720p • 30 FPS", "720p • 60 FPS", "1080p • 30 FPS", "1080p • 60 FPS"];
+                        current-value: StudioBridge.status.output-height + "p • " + StudioBridge.status.fps + " FPS";
+                        label: @tr("Output quality");
+                        selected(v) => {
+                            if v == "720p • 30 FPS" {
+                                StudioBridge.set-output("1280", "720", "30");
+                            } else if v == "720p • 60 FPS" {
+                                StudioBridge.set-output("1280", "720", "60");
+                            } else if v == "1080p • 30 FPS" {
+                                StudioBridge.set-output("1920", "1080", "30");
+                            } else {
+                                StudioBridge.set-output("1920", "1080", "60");
+                            }
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-3;
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    Icon {
+                        source: Icons.radio;
+                        tint: Theme.accent-text;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    Text {
+                        text: @tr("Go Live To");
+                        color: Theme.accent-text;
+                        vertical-alignment: center;
+                    }
+                }
+                DestinationSelect {
+                    horizontal-stretch: 1;
+                }
+            }
+            // Go live (or end) and save a clip.
+            HorizontalLayout {
+                spacing: Theme.space-3;
+                height: 68px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    border-radius: Theme.radius-lg;
+                    background: StudioBridge.status.live || StudioBridge.status.starting ? Theme.danger-soft : !StudioBridge.status.can-go-live ? Theme.surface-3 : go.pressed ? Theme.accent-pressed : Theme.accent;
+                    border-width: 1px;
+                    border-color: StudioBridge.status.live ? Theme.danger : Theme.accent-hover;
+                    accessible-role: AccessibleRole.button;
+                    accessible-label: StudioBridge.status.live ? @tr("End Stream") : @tr("Go Live");
+                    accessible-description: StudioBridge.status.hint;
+                    go := TouchArea {
+                        clicked => {
+                            if StudioBridge.status.live || StudioBridge.status.starting {
+                                StudioBridge.end-stream();
+                            } else if StudioBridge.status.can-go-live {
+                                StudioBridge.go-live();
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: Theme.space-4;
+                        Icon {
+                            source: StudioBridge.status.live ? Icons.square : Icons.radio;
+                            size: 30px;
+                            tint: StudioBridge.status.live ? Theme.danger : Theme.on-accent;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: StudioBridge.status.live ? @tr("End Stream") : StudioBridge.status.starting ? @tr("Starting…") : @tr("Go Live");
+                                color: StudioBridge.status.live ? Theme.danger : Theme.on-accent;
+                                font-size: Theme.font-xl;
+                                font-weight: Theme.weight-semibold;
+                            }
+                            Text {
+                                text: StudioBridge.status.live ? StudioBridge.status.elapsed : StudioBridge.chat-name != "" ? @tr("Start streaming to {}", StudioBridge.chat-name) : StudioBridge.status.hint;
+                                color: StudioBridge.status.live ? Theme.danger : #ffffffc0;
+                                font-size: Theme.font-xs;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+                Rectangle {
+                    width: 88px;
+                    border-radius: Theme.radius-lg;
+                    background: clip.pressed ? Theme.surface-4 : Theme.surface-2;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    accessible-role: AccessibleRole.button;
+                    accessible-label: @tr("Save a clip");
+                    clip := TouchArea {
+                        clicked => { StudioBridge.save-clip(); }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: Theme.space-1;
+                        HorizontalLayout {
+                            alignment: center;
+                            Icon {
+                                source: Icons.record;
+                                size: 26px;
+                                tint: Theme.live;
+                            }
+                        }
+                        Text {
+                            text: @tr("Clip");
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-sm;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+            }
+            if StudioBridge.viewers.length > 0: ViewerRequests { }
+        }
+    }
+    StudioDialogs {
+        width: parent.width;
+        height: parent.height;
+    }
+}

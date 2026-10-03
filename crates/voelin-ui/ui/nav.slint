@@ -3,6 +3,7 @@
 // development switch VOELIN_OPEN (src/dev.rs).
 
 import { Bridge, BookmarkForm, ShareForm } from "bridge.slint";
+import { StudioBridge } from "studio-bridge.slint";
 
 export enum Page {
     // Welcome page: servers at a glance.
@@ -10,6 +11,8 @@ export enum Page {
     // A server: channels, chat or the stream viewer, members and streams.
     server,
     settings,
+    // The Stream Studio (scenes, preview, mixer, going live).
+    studio,
 }
 
 // Sections of the settings page, in the order of its navigation.
@@ -101,6 +104,15 @@ export global Nav {
     public function open-client(id: int) {
         if Bridge.open-client(id) {
             client-open = true;
+        }
+    }
+
+    // The Stream Studio: its page, or its window when it has one.
+    public function open-studio() {
+        if StudioBridge.status.detached {
+            StudioBridge.open();
+        } else {
+            show(Page.studio);
         }
     }
 

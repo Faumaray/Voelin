@@ -1,0 +1,136 @@
+// The Stream Studio in a window of its own, while the main window goes on.
+// Same pieces as the integrated studio (screens/studio-parts.slint), more
+// compact; it has its own globals, which Rust fills from the same models
+// (src/studio.rs). Closing it docks the studio back into the main window.
+
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { StudioBridge, StudioNav } from "studio-bridge.slint";
+import { IconButton } from "components/index.slint";
+import { ScenesCard, SourcesCard, StudioPanel, PanelTitle, StudioPreview, MixerCard, StreamSettings, StudioActions, ViewerRequests, StudioDialogs } from "screens/studio-parts.slint";
+
+export component StudioWindow inherits Window {
+    title: @tr("Stream Studio");
+    preferred-width: 900px;
+    preferred-height: 720px;
+    min-width: 640px;
+    min-height: 480px;
+    background: Theme.bg-app;
+    default-font-family: "Inter";
+    default-font-size: Theme.font-body;
+    icon: Icons.logo;
+
+    Rectangle {
+        background: Theme.backdrop;
+        VerticalLayout {
+            padding: Theme.space-3;
+            padding-top: 0;
+            spacing: Theme.space-3;
+            // The app and what this is, and back into the main window.
+            HorizontalLayout {
+                height: 52px;
+                spacing: Theme.space-3;
+                padding-left: Theme.space-2;
+                Image {
+                    width: 28px;
+                    height: 28px;
+                    y: (parent.height - self.height) / 2;
+                    source: Icons.logo;
+                }
+                Text {
+                    text: "Voelin";
+                    color: Theme.text;
+                    font-size: Theme.font-xl;
+                    font-weight: Theme.weight-semibold;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: @tr("Stream Studio");
+                    color: Theme.accent-text;
+                    font-size: Theme.font-md;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                IconButton {
+                    icon: Icons.minimize-2;
+                    label: @tr("Back into the main window");
+                    y: (parent.height - self.height) / 2;
+                    clicked => { StudioBridge.dock(); }
+                }
+            }
+            HorizontalLayout {
+                vertical-stretch: 1;
+                spacing: Theme.space-3;
+                VerticalLayout {
+                    width: 216px * max(1.0, Theme.font-scale);
+                    spacing: Theme.space-3;
+                    ScenesCard {
+                        compact: true;
+                        vertical-stretch: 1;
+                    }
+                    SourcesCard {
+                        compact: true;
+                        vertical-stretch: 1;
+                    }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: Theme.space-3;
+                    StudioPanel {
+                        vertical-stretch: 1.25;
+                        VerticalLayout {
+                            padding: Theme.space-3;
+                            spacing: Theme.space-2;
+                            PanelTitle {
+                                text: @tr("Stream Preview");
+                                compact: true;
+                            }
+                            if StudioBridge.viewers.length > 0: ViewerRequests { }
+                            StudioPreview {
+                                vertical-stretch: 1;
+                                large: false;
+                                caption: false;
+                                controls: true;
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        vertical-stretch: 1;
+                        min-height: 220px;
+                        spacing: Theme.space-3;
+                        MixerCard {
+                            compact: true;
+                            horizontal-stretch: 1.15;
+                        }
+                        StudioPanel {
+                            horizontal-stretch: 1;
+                            StreamSettings {
+                                compact: true;
+                            }
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                height: 52px;
+                spacing: Theme.space-3;
+                StudioActions {
+                    compact: true;
+                    horizontal-stretch: 1;
+                }
+                IconButton {
+                    icon: Icons.settings;
+                    label: @tr("Studio Settings");
+                    filled: true;
+                    size: 44px;
+                    y: (parent.height - self.height) / 2;
+                    clicked => { StudioNav.open-settings(); }
+                }
+            }
+        }
+    }
+    StudioDialogs {
+        width: parent.width;
+        height: parent.height;
+    }
+}

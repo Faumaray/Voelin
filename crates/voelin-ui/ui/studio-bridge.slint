@@ -1,0 +1,322 @@
+// The Stream Studio's data and callbacks (Rust: src/studio.rs, the view
+// models in src/vm/studio.rs). The main window and the detached studio
+// window each have their own instance of these globals: Rust sets the same
+// models and values on both, and wires both to the same controller.
+
+import { ChatLine } from "bridge.slint";
+
+// A scene of the studio.
+export struct StudioScene {
+    id: int,
+    name: string,
+    // Its sources, front first: "Screen + Camera + Text".
+    detail: string,
+    // Composited now (the live scene).
+    live: bool,
+    // The kind of its front-most source (for the icon).
+    kind: string,
+}
+
+// A source of the live scene, front first.
+export struct StudioSource {
+    id: int,
+    name: string,
+    // screen, window, portal, camera, image, text, colour, pattern
+    kind: string,
+    visible: bool,
+    locked: bool,
+    // keep, blur, image, colour
+    background: string,
+    // Why it shows nothing ("" while it works).
+    error: string,
+    // "1920×1080 · 60 fps"
+    info: string,
+    // At the front or the back (cannot move further).
+    front: bool,
+    back: bool,
+}
+
+// An audio source of the stream (`stream.audio_sources`).
+export struct StudioAudio {
+    name: string,
+    // "Elgato Wave:3", the application...
+    detail: string,
+    // microphone, desktop, app, window, tone
+    kind: string,
+    gain-db: float,
+    muted: bool,
+    // The meter in dBFS, after the gain.
+    level: float,
+    // Why it captures nothing.
+    error: string,
+}
+
+// A simulcast layer (`stream.layers`) as typed: any numbers.
+export struct StudioLayer {
+    // "1280x720"; empty: `scale` of the output.
+    size: string,
+    scale: string,
+    // Frame-rate cap; empty: the output's.
+    fps: string,
+    // kbit/s.
+    bitrate: string,
+    // kbit/s a viewer needs for this layer.
+    min-bitrate: string,
+}
+
+// A viewer of the studio's stream.
+export struct StudioViewer {
+    client: int,
+    name: string,
+    // requested, connecting, connected
+    state: string,
+}
+
+// An entry of a picker (screens, windows, cameras, audio sources).
+export struct StudioPick {
+    name: string,
+    detail: string,
+    // For the icon: monitor, window, portal, camera, microphone, desktop, app, tone
+    kind: string,
+}
+
+// The header, the preview's badges and the bottom bar.
+export struct StudioStatus {
+    // The engine runs (preview, mixer, replay buffer).
+    running: bool,
+    // "Chill Zone • Starfall Community"; empty without a destination.
+    destination: string,
+    // 0: not live, 1: poor, 2: fair, 3: good, 4: excellent.
+    quality: int,
+    quality-text: string,
+    // "1080p • 60 FPS • 8,250 kbps"
+    format: string,
+    // The numbers behind it, for the info button.
+    details: string,
+    live: bool,
+    // Going live: waiting for the server.
+    starting: bool,
+    // "00:12:34"
+    elapsed: string,
+    viewers: int,
+    participants: int,
+    can-go-live: bool,
+    // Why Go Live is off, or what goes wrong.
+    hint: string,
+    recording: bool,
+    recorded: string,
+    // The replay buffer's window (0: off) and what it holds now.
+    replay-seconds: int,
+    replay-held: string,
+    output-width: int,
+    output-height: int,
+    fps: int,
+    detached: bool,
+    // The live scene shows a screen, a camera, a window (the phone's cards).
+    screen-shown: bool,
+    camera-shown: bool,
+    window-shown: bool,
+}
+
+// The stream settings panel (`studio.stream`, `stream.bitrate_kbps`).
+export struct StudioForm {
+    destination: int,
+    title: string,
+    game: string,
+    message: string,
+    show-viewers: bool,
+    show-chat: bool,
+    show-now-playing: bool,
+    audio: bool,
+    // kbit/s of the stream without layers, as typed.
+    bitrate: string,
+}
+
+// The source properties dialog (also for adding text, colour and image
+// sources: `id` -1). Numbers as typed.
+export struct StudioSourceForm {
+    id: int,
+    name: string,
+    kind: string,
+    x: string,
+    y: string,
+    // Empty: the source's own size times `scale`.
+    width: string,
+    height: string,
+    scale: string,
+    // contain, cover, stretch
+    fit: string,
+    crop-left: string,
+    crop-top: string,
+    crop-right: string,
+    crop-bottom: string,
+    // Percent.
+    opacity: float,
+    locked: bool,
+    visible: bool,
+    // keep, blur, image, colour
+    background: string,
+    // Blur radius in percent of the picture's height.
+    blur: string,
+    background-path: string,
+    background-colour: string,
+    // Text, colour ("#rrggbb" or "#rrggbbaa") and image sources.
+    text: string,
+    text-size: string,
+    colour: string,
+    path: string,
+    mirror: bool,
+}
+
+// The studio settings dialog (`studio.*` keys and the preview).
+export struct StudioSettingsForm {
+    replay-seconds: string,
+    replay-memory: string,
+    recording-dir: string,
+    preview-width: string,
+    preview-fps: string,
+}
+
+export global StudioBridge {
+    in property <StudioStatus> status;
+    in property <StudioForm> form;
+    // The composite, downscaled (the engine's preview tap).
+    in property <image> preview;
+    in property <bool> has-preview;
+    in property <[StudioScene]> scenes;
+    in property <[StudioSource]> sources;
+    in property <[StudioAudio]> audio;
+    in property <[StudioLayer]> layers;
+    // "Chill Zone • Starfall Community", one per server the stream can go to.
+    in property <[string]> destinations;
+    in property <[StudioViewer]> viewers;
+    // The chat of the channel the stream goes to, and its name.
+    in property <[ChatLine]> chat;
+    in property <string> chat-name;
+    // Filled right before a picker shows.
+    in property <[StudioPick]> picks;
+    // Where recordings and clips go.
+    in property <string> recordings-dir;
+
+    // The studio page or window appeared: start the engine.
+    callback open();
+    // Into a window of its own, and back.
+    callback detach();
+    callback dock();
+
+    callback select-scene(int);
+    callback add-scene();
+    callback rename-scene(int, string);
+    callback remove-scene(int);
+
+    // Fill `picks` for adding a screen, window or camera source; false:
+    // nothing to pick (it was added directly, e.g. through the portal).
+    callback list-sources(string) -> bool;
+    callback add-picked(string, int);
+    // Text, colour and image sources from the dialog.
+    callback add-source(StudioSourceForm);
+    callback source-form(int) -> StudioSourceForm;
+    callback apply-source(StudioSourceForm);
+    callback toggle-source(int);
+    // up, down, lock, remove, bg-keep, bg-blur
+    callback source-action(int, string);
+    // The phone layout's source cards: screen, camera, window.
+    callback main-source(string);
+
+    // Audio: fill `picks` with what can be added; add, change, remove.
+    callback list-audio();
+    callback add-audio(int);
+    // While dragging (`done` false) and at the end.
+    callback set-gain(int, float, bool);
+    callback toggle-mute(int);
+    callback remove-audio(int);
+
+    // A field of the stream settings: title, game, message, show-viewers,
+    // show-chat, show-now-playing, audio ("true"/"false"), bitrate,
+    // destination (its index).
+    callback edit-form(string, string);
+    callback set-output(string, string, string);
+    callback set-layer(int, StudioLayer);
+    callback add-layer();
+    callback remove-layer(int);
+    callback advanced-settings();
+
+    // Bottom bar.
+    callback share(string);
+    callback save-clip();
+    callback toggle-recording();
+    callback open-recordings();
+    callback go-live();
+    callback end-stream();
+    callback settings-form() -> StudioSettingsForm;
+    callback apply-settings(StudioSettingsForm);
+
+    callback respond-viewer(int, bool);
+    callback send-chat(string);
+    callback open-chat();
+}
+
+// What one window shows of the studio: dialogs and pickers (each window has
+// its own).
+export global StudioNav {
+    // "", "pick", "source", "scene", "settings"
+    in-out property <string> dialog;
+    // What the picker picks: screen, window, camera, audio
+    in-out property <string> pick-kind;
+    in-out property <StudioSourceForm> source-form;
+    // The scene being renamed.
+    in-out property <int> scene-id: -1;
+    in-out property <string> scene-name;
+    in-out property <StudioSettingsForm> settings-form;
+
+    public function pick(kind: string) {
+        if StudioBridge.list-sources(kind) {
+            pick-kind = kind;
+            dialog = "pick";
+        }
+    }
+
+    public function pick-audio() {
+        StudioBridge.list-audio();
+        pick-kind = "audio";
+        dialog = "pick";
+    }
+
+    public function edit-source(id: int) {
+        source-form = StudioBridge.source-form(id);
+        dialog = "source";
+    }
+
+    // A new text, colour or image source.
+    public function new-source(kind: string) {
+        source-form = {
+            id: -1,
+            kind: kind,
+            name: kind == "text" ? @tr("Text") : kind == "colour" ? @tr("Colour") : @tr("Image"),
+            text: @tr("Your text"),
+            text-size: "64",
+            colour: kind == "text" ? "#ffffff" : "#101a3c",
+            opacity: 100,
+            visible: true,
+            fit: "contain",
+            scale: "1",
+            background: "keep",
+        };
+        dialog = "source";
+    }
+
+    public function rename-scene(id: int, name: string) {
+        scene-id = id;
+        scene-name = name;
+        dialog = "scene";
+    }
+
+    public function open-settings() {
+        settings-form = StudioBridge.settings-form();
+        dialog = "settings";
+    }
+
+    public function close() {
+        dialog = "";
+    }
+}
