@@ -215,7 +215,12 @@ impl App {
 		let current = self.current;
 		let mut items: Vec<StreamItem> = Vec::new();
 		if let Some(view) = view.filter(|v| v.streams_available()) {
-			for s in &view.streams {
+			// Every channel's streams (they can be watched from anywhere),
+			// ours first.
+			let own_channel = view.state.own_channel;
+			let mut streams: Vec<_> = view.streams.iter().collect();
+			streams.sort_by_key(|s| view.channel_of(s.streamer.0) != own_channel);
+			for s in streams {
 				let watching = self
 					.watch
 					.as_ref()
@@ -224,6 +229,7 @@ impl App {
 					id: s.id.clone().into(),
 					name: s.name.clone().into(),
 					streamer: view.nickname(s.streamer.0).into(),
+					channel: view.other_channel_name(s.streamer.0).into(),
 					streamer_id: i32::from(s.streamer.0),
 					viewers: view.stream_viewers.get(&s.id).map_or(0, |v| *v as i32),
 					audio: s.audio,
@@ -239,20 +245,17 @@ impl App {
 					bitrate: bitrate_text(s.bitrate).into(),
 				});
 			}
-			// Streams that started before we joined: the server did not
-			// announce them, and the engine is looking them up (they arrive
-			// in `StreamsChanged` like the others). Until then only the
-			// streaming flag is known.
-			let channel = view.state.own_channel;
+			// Streams that started before we joined, or in another channel:
+			// the server did not announce them, and the engine is looking
+			// them up (they arrive in `StreamsChanged` like the others).
+			// Until then only the streaming flag is known.
 			for c in view.presence.clients.values() {
 				let announced = view.streams.iter().any(|s| s.streamer.0 == c.id);
-				if c.streaming == Some(true)
-					&& Some(c.channel) == channel
-					&& !announced && view.state.own_client != Some(c.id)
-				{
+				if c.streaming == Some(true) && !announced && view.state.own_client != Some(c.id) {
 					items.push(StreamItem {
 						name: c.nickname.clone().into(),
 						streamer: c.nickname.clone().into(),
+						channel: view.other_channel_name(c.id).into(),
 						streamer_id: i32::from(c.id),
 						..StreamItem::default()
 					});
@@ -346,6 +349,11 @@ impl App {
 			.and_then(|v| v.streams.iter().find(|s| s.id == watch.stream_id))
 			.map_or(-1, |s| i32::from(s.streamer.0));
 		bridge.set_viewer_streamer_id(streamer);
+		let channel = u16::try_from(streamer).ok().and_then(|id| {
+			let view = self.view()?;
+			view.presence.channels.get(&view.channel_of(id)?).map(|c| c.name.clone())
+		});
+		bridge.set_viewer_channel(channel.unwrap_or_default().into());
 		bridge.set_viewer_elapsed(watch.elapsed().into());
 		let viewers = self.view().and_then(|v| v.stream_viewers.get(&watch.stream_id)).copied();
 		bridge.set_viewer_count(viewers.unwrap_or(0) as i32);

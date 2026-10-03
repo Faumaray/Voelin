@@ -174,9 +174,12 @@ for A. So metadata would work as a fallback between Voelin clients, but
   optional `id` for the empty answer) and `notifystreamupdated`.
 - `voelin_stream::discovery::Discovery` follows the clients on the server:
   their channel and `client_is_streaming`. It keeps the stream directory to
-  the streams in our own channel. It looks up a client that streams in our
-  channel and whose stream we were not told:
+  the streams of every client on the server that streams, in any channel
+  (a stream can be watched from another channel, see below). It looks up a
+  client that streams and whose stream we were not told:
   - after connecting;
+  - when a client in another channel starts streaming (the server announces
+    a stream only in its channel);
   - after we or the streamer change channels;
   - when a streamer in our channel starts and its `notifystreamstarted`
     has not arrived by the next update of the client list.
@@ -193,6 +196,17 @@ for A. So metadata would work as a fallback between Voelin clients, but
 - `notifystreamupdated` updates the directory (name, bitrate, …).
 - The engine (`voelin-core`) and `voelinctl stream list/watch` feed the
   client list into `Streams::update_clients`.
+
+Watching from another channel (confirmed, 6.0.0-beta13.1, 2026-10-03): with
+B in the default channel and A's stream in another one, `requeststreaminfo
+clid=<A>` answers as above and `joinstreamrequest` reaches A
+(`notifyjoinstreamrequest`), the probe above shows it. The whole join with
+media works too: `scripts/it-smoke.sh`, step "late stream", has a viewer in
+the default channel watch a stream in `smoke-elsewhere`, and the app (no
+gateway) listed and played a stream in another channel. Voelin lists the
+streams of every channel, ours first; as a streamer with `stream.permissions
+= channel` (the default) it lets its channel in and asks the user about
+viewers from other channels.
 
 Fallbacks (i) and (ii) from the plan were not built, because the native
 command works. (i) would have been a re-announcement by the streamer; (ii)
