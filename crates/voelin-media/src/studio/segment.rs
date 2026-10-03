@@ -20,13 +20,12 @@
 //! a placeholder — it exercises the mask path and the tests, and gives a
 //! usable "blur everything but the middle" — but it does not find a person.
 //!
-//! A real segmenter is a small neural network (the MediaPipe-style selfie
-//! segmentation models are what this is sized for: one 256x144 or 256x256
-//! input, one mask output). That is not in this build: nothing here loads an
-//! ONNX model yet, so [`Background::Blur`](crate::studio::scene::Background)
-//! blurs around an oval rather than around a person. The seam is
-//! [`Segmenter`]; a model-backed implementation drops in behind it without
-//! touching the frame path.
+//! [`HumanSeg`] (feature `segment`, on by default) finds the person:
+//! PP-HumanSeg, PaddleSeg's portrait segmentation network (bundled in
+//! `models/`, Apache-2.0), run on the CPU by tract. It is the default
+//! segmenter when built in; if its model cannot be loaded, [`Ellipse`] stands
+//! in. Other models drop in behind [`Segmenter`] without touching the frame
+//! path.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -94,6 +93,137 @@ pub trait Segmenter: Send {
 	/// to at most 256 pixels wide with its aspect ratio kept. A model with a
 	/// fixed input size scales it to that itself; the mask may have any size.
 	fn mask(&mut self, frame: &VideoFrame, mask: &mut Mask) -> Result<()>;
+}
+
+/// PP-HumanSeg, PaddleSeg's portrait segmentation model, as OpenCV Zoo ships
+/// it (`models/pphumanseg-2023mar.onnx`, Apache-2.0, see `models/README.md`),
+/// run on the CPU by tract: the frame squeezed to 192x192 RGB in, the
+/// probability of a person per pixel out, as a 192x192 mask the frame path
+/// stretches back over the frame. The model is loaded once per process, on
+/// the segmentation thread the first time it runs; if that fails,
+/// [`Ellipse`] stands in.
+#[cfg(feature = "segment")]
+pub struct HumanSeg {
+	plan: Option<std::sync::Arc<tract_onnx::prelude::TypedSimplePlan>>,
+	/// The input tensor, filled in place for each mask.
+	input: tract_onnx::prelude::Tensor,
+	fallback: Option<Ellipse>,
+}
+
+#[cfg(feature = "segment")]
+mod model {
+	use std::sync::{Arc, OnceLock};
+
+	use tract_onnx::prelude::*;
+
+	/// Width and height of the model's input and output.
+	pub const SIZE: usize = 192;
+
+	static ONNX: &[u8] = include_bytes!("../../models/pphumanseg-2023mar.onnx");
+
+	/// The optimised model, made once.
+	pub fn plan() -> Result<Arc<TypedSimplePlan>, String> {
+		static PLAN: OnceLock<Result<Arc<TypedSimplePlan>, String>> = OnceLock::new();
+		PLAN.get_or_init(|| {
+			tract_onnx::onnx()
+				.model_for_read(&mut &ONNX[..])
+				.and_then(|m| m.with_input_fact(0, f32::fact([1, 3, SIZE, SIZE]).into()))
+				.and_then(|m| m.into_optimized())
+				.and_then(|m| m.into_runnable())
+				.map_err(|e| format!("{e:#}"))
+		})
+		.clone()
+	}
+}
+
+#[cfg(feature = "segment")]
+impl HumanSeg {
+	pub fn new() -> Self {
+		let size = model::SIZE;
+		Self {
+			plan: None,
+			input: tract_onnx::prelude::Tensor::zero::<f32>(&[1, 3, size, size])
+				.expect("a small tensor"),
+			fallback: None,
+		}
+	}
+
+	/// Fill the input from `frame` (packed RGBA): nearest sample per input
+	/// pixel, planar RGB, `value / 127.5 - 1`.
+	fn fill_input(&mut self, frame: &VideoFrame) -> Result<()> {
+		let FrameData::Rgba(plane) = &frame.data else {
+			return Err(Error::InvalidFrame("segmentation needs RGBA frames".into()));
+		};
+		let size = model::SIZE;
+		let (width, height) = (frame.width.max(1) as usize, frame.height.max(1) as usize);
+		let mut input =
+			self.input.try_as_plain_ram_mut().map_err(|e| Error::Segmentation(e.to_string()))?;
+		let input = input.as_slice_mut::<f32>().map_err(|e| Error::Segmentation(e.to_string()))?;
+		let (red, rest) = input.split_at_mut(size * size);
+		let (green, blue) = rest.split_at_mut(size * size);
+		for y in 0..size {
+			let row = plane.row(y * height / size, width * 4);
+			for x in 0..size {
+				let px = &row[x * width / size * 4..][..3];
+				let i = y * size + x;
+				red[i] = f32::from(px[0]) / 127.5 - 1.0;
+				green[i] = f32::from(px[1]) / 127.5 - 1.0;
+				blue[i] = f32::from(px[2]) / 127.5 - 1.0;
+			}
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "segment")]
+impl Default for HumanSeg {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+#[cfg(feature = "segment")]
+impl Segmenter for HumanSeg {
+	fn name(&self) -> &'static str {
+		"pp-humanseg"
+	}
+
+	fn mask(&mut self, frame: &VideoFrame, mask: &mut Mask) -> Result<()> {
+		use tract_onnx::prelude::{IntoTValue, tvec};
+
+		if let Some(fallback) = &mut self.fallback {
+			return fallback.mask(frame, mask);
+		}
+		if self.plan.is_none() {
+			match model::plan() {
+				Ok(plan) => self.plan = Some(plan),
+				Err(e) => {
+					warn!("the segmentation model does not load, using an oval: {e}");
+					return self.fallback.insert(Ellipse::person()).mask(frame, mask);
+				}
+			}
+		}
+		self.fill_input(frame)?;
+		let plan = self.plan.as_ref().expect("loaded above");
+		// ponytail: tract takes the input by value; a 442 KiB copy per mask
+		// (a few a second) next to its own intermediates.
+		let outputs = plan
+			.run(tvec![self.input.clone().into_tvalue()])
+			.map_err(|e| Error::Segmentation(format!("{e:#}")))?;
+		let output =
+			outputs[0].try_as_plain_ram().map_err(|e| Error::Segmentation(e.to_string()))?;
+		let person = output.as_slice::<f32>().map_err(|e| Error::Segmentation(e.to_string()))?;
+		let size = model::SIZE;
+		// Channel 1 of the 1x2xHxW probabilities is the person.
+		let person = person
+			.get(size * size..2 * size * size)
+			.ok_or_else(|| Error::Segmentation(format!("an output of {} values", person.len())))?;
+		mask.resize(size as u32, size as u32);
+		for (m, p) in mask.data.iter_mut().zip(person) {
+			*m = (p.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+		}
+		Ok(())
+	}
 }
 
 /// The segmenter that is always available: a centred oval covering most of
@@ -340,8 +470,12 @@ impl BackgroundFilter {
 		}
 	}
 
-	/// A filter with the built-in [`Ellipse`] segmenter.
+	/// A filter with the default segmenter: [`HumanSeg`] when built in, else
+	/// [`Ellipse`].
 	pub fn with_default_segmenter(mode: Background) -> Self {
+		#[cfg(feature = "segment")]
+		return Self::new(mode, Box::new(HumanSeg::new()));
+		#[cfg(not(feature = "segment"))]
 		Self::new(mode, Box::new(Ellipse::person()))
 	}
 
@@ -598,6 +732,36 @@ fn flat_rgba(width: u32, height: u32, rgba: [u8; 4]) -> VideoFrame {
 mod tests {
 	use super::*;
 
+	/// A filter with the oval: these tests check the frame path, which
+	/// needs a mask that is known in advance.
+	fn oval_filter(mode: Background) -> BackgroundFilter {
+		BackgroundFilter::new(mode, Box::new(Ellipse::person()))
+	}
+
+	/// The bundled model loads and runs: a 192x192 mask of probabilities,
+	/// next to nothing in an empty, evenly lit room, and fast enough for a
+	/// few masks a second on one core.
+	#[cfg(feature = "segment")]
+	#[test]
+	fn the_model_finds_nobody_in_an_empty_room() {
+		let mut segmenter = HumanSeg::new();
+		let frame = flat_rgba(256, 144, [128, 120, 110, 255]);
+		let mut mask = Mask::default();
+		segmenter.mask(&frame, &mut mask).unwrap();
+		assert!(segmenter.fallback.is_none(), "the model did not load");
+		assert_eq!((mask.width, mask.height), (192, 192));
+		let mean = mask.data.iter().map(|&v| u64::from(v)).sum::<u64>() / mask.data.len() as u64;
+		assert!(mean < 64, "a person in an empty room: mean {mean}");
+		let start = Instant::now();
+		for _ in 0..5 {
+			segmenter.mask(&frame, &mut mask).unwrap();
+		}
+		let each = start.elapsed() / 5;
+		eprintln!("one mask in {each:?}");
+		// Debug builds run tract unoptimised; release is several times faster.
+		assert!(each < Duration::from_secs(2), "{each:?} per mask");
+	}
+
 	fn pixel(frame: &VideoFrame, x: u32, y: u32) -> [u8; 4] {
 		let FrameData::Rgba(p) = &frame.data else { panic!("not RGBA") };
 		p.row(y as usize, frame.width as usize * 4)[x as usize * 4..][..4].try_into().unwrap()
@@ -657,9 +821,7 @@ mod tests {
 
 	#[test]
 	fn a_colour_background_replaces_everything_but_the_subject() {
-		let mut filter = BackgroundFilter::with_default_segmenter(Background::Colour {
-			colour: Colour::rgb(200, 0, 0),
-		});
+		let mut filter = oval_filter(Background::Colour { colour: Colour::rgb(200, 0, 0) });
 		assert_eq!(filter.segmenter(), "ellipse");
 		let mut frame = flat_rgba(64, 64, [0, 255, 0, 255]);
 		// Wait for the first mask.
@@ -699,8 +861,7 @@ mod tests {
 		std::fs::create_dir_all(&dir).unwrap();
 		let path = dir.join("behind.png");
 		image::RgbaImage::from_pixel(16, 16, image::Rgba([0, 0, 220, 255])).save(&path).unwrap();
-		let mut filter =
-			BackgroundFilter::with_default_segmenter(Background::Image { path: path.clone() });
+		let mut filter = oval_filter(Background::Image { path: path.clone() });
 		let started = Instant::now();
 		let mut frame = flat_rgba(64, 64, [0, 255, 0, 255]);
 		while pixel(&frame, 0, 0) != [0, 0, 220, 255] {
@@ -715,8 +876,7 @@ mod tests {
 
 	#[test]
 	fn a_blurred_background_keeps_the_subject_sharp() {
-		let mut filter =
-			BackgroundFilter::with_default_segmenter(Background::Blur { strength: 0.1 });
+		let mut filter = oval_filter(Background::Blur { strength: 0.1 });
 		filter.set_mask_fps(60);
 		// A checkerboard, so blurring is visible.
 		let mut frame = flat_rgba(64, 64, [0, 0, 0, 255]);
