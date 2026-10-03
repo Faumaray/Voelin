@@ -25,7 +25,8 @@ import { VoiceView } from "screens/voice.slint";
 import { StreamViewer } from "screens/streams.slint";
 import { SettingsNav, SettingsPage } from "screens/settings.slint";
 import { HomeNav, HomePage } from "screens/home.slint";
-import { MobileServers, ActivityPage, YouPage } from "screens/mobile.slint";
+import { MobileServers, ActivityPage, YouPage, PhoneSheet } from "screens/mobile.slint";
+import { MobileVoice } from "screens/mobile-voice.slint";
 import { BookmarkDialog, ShareDialog, ClientAudioDialog, AboutDialog } from "screens/dialogs.slint";
 import { StudioBridge } from "studio-bridge.slint";
 import { StudioPage, MobileStudio } from "screens/studio.slint";
@@ -171,26 +172,38 @@ export component MainWindow inherits Window {
 
             if Nav.narrow && root.chrome: MobileShell {
                 title: Nav.page == Page.settings ? @tr("Settings")
+                    : Nav.phone-voice ? Bridge.app-name
                     : Nav.mobile-tab == MobileTab.home ? Bridge.app-name
                     : Nav.mobile-tab == MobileTab.you ? @tr("You")
                     : Nav.mobile-tab == MobileTab.activity ? @tr("Activity")
                     : Bridge.server-title;
-                subtitle: Nav.page == Page.settings ? "" : Nav.mobile-tab == MobileTab.chat && Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length ? Bridge.tabs[Bridge.current-tab].title : Nav.mobile-tab == MobileTab.servers ? Bridge.server-stats : "";
+                subtitle: Nav.page == Page.settings ? ""
+                    : Nav.phone-voice ? Bridge.server-title
+                    : Nav.mobile-tab == MobileTab.chat && Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length ? Bridge.tabs[Bridge.current-tab].title
+                    : Nav.mobile-tab == MobileTab.servers ? Bridge.server-stats
+                    : Nav.page == Page.home || Nav.mobile-tab == MobileTab.home ? @tr("Talk. Watch. Share.") : "";
                 back: Nav.page == Page.settings;
                 unread: Bridge.unread-total;
+                voice: Nav.phone-voice;
+                // The voice channel and the studio bring their own controls.
+                navigation: !Nav.phone-voice && Nav.page != Page.studio;
                 go-back => { Nav.show(Page.server); }
                 if Nav.page == Page.settings: SettingsPage {
                     compact: true;
                 }
-                if Nav.page != Page.settings && Nav.page != Page.studio && (Nav.page == Page.home || Nav.mobile-tab == MobileTab.home): HomePage { }
-                if Nav.page == Page.server && Nav.mobile-tab == MobileTab.servers: MobileServers { }
-                if Nav.page == Page.server && Nav.mobile-tab == MobileTab.chat && Bridge.viewer-open: StreamViewer { }
-                if Nav.page == Page.server && Nav.mobile-tab == MobileTab.chat && !Bridge.viewer-open: ChatView {
+                if Nav.page != Page.settings && Nav.page != Page.studio && !Nav.phone-voice && (Nav.page == Page.home || Nav.mobile-tab == MobileTab.home): HomePage { }
+                if Nav.phone-voice: MobileVoice { }
+                if Nav.page == Page.server && !Nav.phone-voice && Nav.mobile-tab == MobileTab.servers: MobileServers { }
+                // Watching without voice (the local test stream): the player.
+                if Nav.page == Page.server && !Nav.phone-voice && Nav.mobile-tab == MobileTab.chat && Bridge.viewer-open: StreamViewer { }
+                if Nav.page == Page.server && !Nav.phone-voice && Nav.mobile-tab == MobileTab.chat && !Bridge.viewer-open: ChatView {
                     header: false;
                 }
-                if Nav.page == Page.server && Nav.mobile-tab == MobileTab.activity: ActivityPage { }
-                if Nav.page == Page.server && Nav.mobile-tab == MobileTab.you: YouPage { }
+                if Nav.page == Page.server && !Nav.phone-voice && Nav.mobile-tab == MobileTab.activity: ActivityPage { }
+                if Nav.page == Page.server && !Nav.phone-voice && Nav.mobile-tab == MobileTab.you: YouPage { }
                 if Nav.page == Page.studio && !StudioBridge.status.detached: MobileStudio { }
+                // Pins, topics or the members, over the page.
+                if Nav.page == Page.server && (Nav.pins-open || Nav.topics-open || Nav.members-open): PhoneSheet { }
             }
         }
     }

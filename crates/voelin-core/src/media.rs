@@ -1584,7 +1584,8 @@ impl Ingest {
 	}
 
 	/// Whether frames go to the GPU: every layer's encoders take GPU frames
-	/// and the GPU stage has not failed.
+	/// and the GPU stage has not failed. On Android: the screen can render
+	/// straight into the encoder (`mediacodec`'s surface path).
 	fn gpu_path(&self) -> bool {
 		#[cfg(all(target_os = "linux", feature = "media-desktop"))]
 		{
@@ -1595,7 +1596,18 @@ impl Ingest {
 					.iter()
 					.all(|l| l.layer.stopped() || l.layer.gpu.load(Ordering::Relaxed) != 0)
 		}
-		#[cfg(not(all(target_os = "linux", feature = "media-desktop")))]
+		#[cfg(target_os = "android")]
+		{
+			!self.layers.is_empty()
+				&& self
+					.layers
+					.iter()
+					.all(|l| l.layer.stopped() || l.layer.gpu.load(Ordering::Relaxed) != 0)
+		}
+		#[cfg(not(any(
+			all(target_os = "linux", feature = "media-desktop"),
+			target_os = "android"
+		)))]
 		false
 	}
 
@@ -1719,7 +1731,38 @@ impl FrameSink for Ingest {
 	}
 
 	fn accepts_dmabuf(&self) -> bool {
-		self.gpu_path()
+		cfg!(all(target_os = "linux", feature = "media-desktop")) && self.gpu_path()
+	}
+
+	fn accepts_gpu(&self) -> bool {
+		cfg!(target_os = "android") && self.gpu_path()
+	}
+
+	/// Android: the screen goes straight into each due layer's encoder,
+	/// which draws it at the layer's size; only its size and time come here.
+	#[cfg(target_os = "android")]
+	fn gpu(&mut self, frame: GpuFrame) -> bool {
+		if self.shared.stopped() {
+			return false;
+		}
+		self.pacer.keep(frame.timestamp);
+		self.refresh();
+		let shared = &self.shared;
+		shared.captured.fetch_add(1, Ordering::Relaxed);
+		shared
+			.size
+			.store(u64::from(frame.width) << 32 | u64::from(frame.height), Ordering::Relaxed);
+		if shared.sink().is_none() {
+			return true;
+		}
+		for l in &mut self.layers {
+			if !l.layer.stopped() && l.pacer.take(frame.timestamp) {
+				let (width, height) = l.spec.output_size(frame.width, frame.height);
+				l.layer.gpu_inbox.put(Arc::new(frame.sized(width, height)));
+			}
+		}
+		shared.gpu_converted.fetch_add(1, Ordering::Relaxed);
+		true
 	}
 
 	/// The tiled layout the GPU's own RGB surfaces have, once the GPU stage

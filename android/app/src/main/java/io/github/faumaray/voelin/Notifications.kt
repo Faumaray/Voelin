@@ -12,6 +12,9 @@ object Notifications {
     const val CHANNEL_VOICE = "voice"
     const val CHANNEL_SCREEN = "screen"
 
+    /** The app's accent (Theme.accent of the UI). */
+    private const val ACCENT = 0xFF2D6BFF.toInt()
+
     fun createChannels(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
@@ -30,31 +33,45 @@ object Notifications {
         )
     }
 
-    /** Tapping a notification brings the app back. */
-    private fun openApp(context: Context): PendingIntent = PendingIntent.getActivity(
+    /** Tapping a notification brings the app back, with `action` for MainActivity. */
+    fun openApp(context: Context, action: String? = null): PendingIntent = PendingIntent.getActivity(
         context,
-        0,
-        Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
+        action.hashCode(),
+        Intent(context, MainActivity::class.java)
+            .setAction(action)
+            .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
         PendingIntent.FLAG_IMMUTABLE,
     )
 
-    /** An ongoing notification with `actions` (title, intent). */
+    /**
+     * An ongoing notification: `title` and `text`, a chronometer from
+     * `sinceMs` (Unix ms; 0: none), `actions` (title, intent).
+     */
     fun ongoing(
         context: Context,
         channel: String,
+        title: String,
         text: String,
+        open: PendingIntent,
+        sinceMs: Long,
         vararg actions: Pair<String, PendingIntent>,
     ): Notification {
         val builder = Notification.Builder(context, channel)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(context.getString(R.string.app_name))
+            .setColor(ACCENT)
+            .setContentTitle(title)
             .setContentText(text)
-            .setContentIntent(openApp(context))
+            .setContentIntent(open)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setCategory(Notification.CATEGORY_CALL)
-        for ((title, intent) in actions) {
-            builder.addAction(Notification.Action.Builder(null, title, intent).build())
+        if (sinceMs > 0) {
+            builder.setWhen(sinceMs).setShowWhen(true).setUsesChronometer(true)
+        } else {
+            builder.setShowWhen(false)
+        }
+        for ((label, intent) in actions) {
+            builder.addAction(Notification.Action.Builder(null, label, intent).build())
         }
         return builder.build()
     }

@@ -15,7 +15,7 @@ use jni::refs::{Global, Reference as _};
 use jni::sys::{jboolean, jint, jlong};
 use jni::{Env, JavaVM, jni_sig, jni_str, native_method};
 
-use crate::foreground::VoiceNotice;
+use crate::foreground::{ScreenNotice, VoiceNotice};
 
 static BRIDGE: OnceLock<Global<JClass<'static>>> = OnceLock::new();
 
@@ -58,18 +58,90 @@ pub fn request_permissions() -> Result<()> {
 	})
 }
 
+/// A Java string, or `null` for `None`.
+fn string_or_null<'local>(env: &mut Env<'local>, text: Option<&str>) -> Result<JObject<'local>> {
+	Ok(match text {
+		Some(text) => JObject::from(env.new_string(text)?),
+		None => JObject::null(),
+	})
+}
+
 /// Show or update the voice service's notification; `None` stops the service.
 pub fn set_voice_notification(notice: Option<&VoiceNotice>) -> Result<()> {
 	with_bridge(|env, class| {
-		let (text, muted) = match notice {
-			Some(n) => (JObject::from(env.new_string(&n.text)?), n.muted),
-			None => (JObject::null(), false),
-		};
+		let title = string_or_null(env, notice.map(|n| n.title.as_str()))?;
+		let text = string_or_null(env, notice.map(|n| n.text.as_str()))?;
+		let (muted, deafened, since) =
+			notice.map_or((false, false, 0), |n| (n.muted, n.deafened, n.since_ms));
 		env.call_static_method(
 			class,
 			jni_str!("setVoiceNotification"),
-			jni_sig!((text: java.lang.String, muted: jboolean) -> void),
-			&[JValue::Object(&text), JValue::Bool(muted)],
+			jni_sig!(
+				(
+					title: java.lang.String,
+					text: java.lang.String,
+					muted: jboolean,
+					deafened: jboolean,
+					since_ms: jlong,
+				) -> void
+			),
+			&[
+				JValue::Object(&title),
+				JValue::Object(&text),
+				JValue::Bool(muted),
+				JValue::Bool(deafened),
+				JValue::Long(since as jlong),
+			],
+		)?;
+		Ok(())
+	})
+}
+
+/// What the screen-sharing notification says while our stream is live;
+/// `None` puts back the plain "sharing your screen".
+pub fn set_screen_notification(notice: Option<&ScreenNotice>) -> Result<()> {
+	with_bridge(|env, class| {
+		let title = string_or_null(env, notice.map(|n| n.title.as_str()))?;
+		let text = string_or_null(env, notice.map(|n| n.text.as_str()))?;
+		env.call_static_method(
+			class,
+			jni_str!("setScreenNotification"),
+			jni_sig!((title: java.lang.String, text: java.lang.String) -> void),
+			&[JValue::Object(&title), JValue::Object(&text)],
+		)?;
+		Ok(())
+	})
+}
+
+/// Point the screen's virtual display at an encoder's input surface (the
+/// zero-copy path), or back at the frame reader with `None`.
+pub fn set_screen_surface(
+	surface: Option<&voelin_media::codec::mediacodec::InputSurface>,
+) -> Result<()> {
+	with_bridge(|env, class| {
+		let (object, width, height) = match surface {
+			Some(surface) => {
+				// SAFETY: `env` is this thread's JNI environment, and the
+				// window stays alive (`surface` holds a reference) while
+				// Java makes a Surface of it.
+				#[allow(unsafe_code)]
+				let raw = unsafe { surface.window.to_surface(env.get_raw().cast()) };
+				if raw.is_null() {
+					return Err(Error::NullPtr("encoder surface"));
+				}
+				// SAFETY: `raw` is a new local reference to an
+				// android.view.Surface of this frame.
+				#[allow(unsafe_code)]
+				let object = unsafe { JObject::from_raw(env, raw.cast()) };
+				(object, surface.width, surface.height)
+			}
+			None => (JObject::null(), 0, 0),
+		};
+		env.call_static_method(
+			class,
+			jni_str!("setScreenSurface"),
+			jni_sig!((surface: android.view.Surface, width: jint, height: jint) -> void),
+			&[JValue::Object(&object), JValue::Int(width as jint), JValue::Int(height as jint)],
 		)?;
 		Ok(())
 	})
@@ -143,8 +215,9 @@ pub fn stop_audio_input(id: u64) -> Result<()> {
 	})
 }
 
-/// Launchable apps other than ours, as `(label, package)`, sorted by label.
-pub fn launchable_apps() -> Result<Vec<(String, String)>> {
+/// Launchable apps other than ours, as `(label, package, icon)`, sorted by
+/// label; `icon` is the path of a PNG in the app's cache, or empty.
+pub fn launchable_apps() -> Result<Vec<(String, String, String)>> {
 	let lines = with_bridge(|env, class| {
 		let value = env
 			.call_static_method(
@@ -163,17 +236,69 @@ pub fn launchable_apps() -> Result<Vec<(String, String)>> {
 	Ok(parse_apps(&lines))
 }
 
-/// `label<TAB>package` lines.
-fn parse_apps(lines: &str) -> Vec<(String, String)> {
+/// `label<TAB>package<TAB>icon` lines (the icon may be missing).
+fn parse_apps(lines: &str) -> Vec<(String, String, String)> {
 	lines
 		.lines()
 		.filter_map(|line| {
-			let (label, package) = line.split_once('\t')?;
-			let package = package.trim();
-			let label = if label.trim().is_empty() { package } else { label.trim() };
-			(!package.is_empty()).then(|| (label.to_owned(), package.to_owned()))
+			let mut parts = line.split('\t');
+			let label = parts.next()?.trim();
+			let package = parts.next()?.trim();
+			let icon = parts.next().unwrap_or_default().trim();
+			let label = if label.is_empty() { package } else { label };
+			(!package.is_empty()).then(|| (label.to_owned(), package.to_owned(), icon.to_owned()))
 		})
 		.collect()
+}
+
+/// The cameras (`CameraCapture.list`): `id<TAB>facing<TAB>sizes<TAB>maxFps`
+/// lines.
+pub fn cameras() -> Result<String> {
+	with_bridge(|env, class| {
+		let value = env
+			.call_static_method(class, jni_str!("cameras"), jni_sig!(() -> java.lang.String), &[])?
+			.l()?;
+		if value.is_null() {
+			return Ok(String::new());
+		}
+		let value = env.cast_local::<JString>(value)?;
+		value.try_to_string(env)
+	})
+}
+
+/// Open camera `device` for feed `id` (frames to `Native.onCameraFrame`,
+/// later failures to `Native.onCameraError`); 0 x 0: its default size.
+pub fn start_camera(id: u64, device: &str, width: u32, height: u32, fps: u32) -> Result<bool> {
+	with_bridge(|env, class| {
+		let device = JObject::from(env.new_string(device)?);
+		env.call_static_method(
+			class,
+			jni_str!("startCamera"),
+			jni_sig!(
+				(id: jlong, camera_id: java.lang.String, width: jint, height: jint, fps: jint) -> jboolean
+			),
+			&[
+				JValue::Long(id as jlong),
+				JValue::Object(&device),
+				JValue::Int(width as jint),
+				JValue::Int(height as jint),
+				JValue::Int(fps as jint),
+			],
+		)?
+		.z()
+	})
+}
+
+pub fn stop_camera(id: u64) -> Result<()> {
+	with_bridge(|env, class| {
+		env.call_static_method(
+			class,
+			jni_str!("stopCamera"),
+			jni_sig!((id: jlong) -> void),
+			&[JValue::Long(id as jlong)],
+		)?;
+		Ok(())
+	})
 }
 
 pub fn secret_get(key: &str) -> Result<Option<String>> {
@@ -271,9 +396,10 @@ fn on_screen_frame<'local>(
 		return Err(Error::NullPtr("screen frame buffer"));
 	}
 	// SAFETY: a direct buffer's memory is `capacity` bytes at `address`, and
-	// the `Image` it belongs to stays open until this call returns.
+	// the `Image` it belongs to stays open until this call returns (the
+	// frame is borrowed only during it).
 	#[allow(unsafe_code)]
-	let bytes = unsafe { std::slice::from_raw_parts(address, capacity) }.to_vec();
+	let bytes = unsafe { std::slice::from_raw_parts(address, capacity) };
 	Ok(crate::capture::on_frame(
 		bytes,
 		width.max(0) as u32,
@@ -331,7 +457,9 @@ fn on_audio_input<'local>(
 	channels: jint,
 ) -> Result<jboolean> {
 	thread_local! {
-		// One per capture thread, reused for every call.
+		// One per capture thread, reused for every call. (It is `const`;
+		// clippy for Android does not see that through the expansion.)
+		#[allow(clippy::missing_const_for_thread_local)]
 		static BUFFER: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
 	}
 	let id = id as u64;
@@ -343,6 +471,101 @@ fn on_audio_input<'local>(
 		samples.get_region(env, 0, buffer)?;
 		Ok(crate::capture::on_input(id, buffer, channels.clamp(1, 8) as u16))
 	})
+}
+
+/// The memory of a direct buffer: its address and capacity.
+fn direct(env: &Env<'_>, buffer: &JByteBuffer<'_>, what: &'static str) -> Result<(*mut u8, usize)> {
+	let address = env.get_direct_buffer_address(buffer)?;
+	if address.is_null() {
+		return Err(Error::NullPtr(what));
+	}
+	Ok((address, env.get_direct_buffer_capacity(buffer)?))
+}
+
+const _: jni::NativeMethod = native_method! {
+	java_type = "io.github.faumaray.voelin.Native",
+	static extern fn on_camera_frame(
+		id: jlong,
+		y: JByteBuffer,
+		u: JByteBuffer,
+		v: JByteBuffer,
+		y_row_stride: jint,
+		uv_row_stride: jint,
+		uv_pixel_stride: jint,
+		width: jint,
+		height: jint,
+		rotation: jint,
+		timestamp_ns: jlong,
+	) -> jboolean,
+};
+
+/// A YUV_420_888 camera frame (see `crate::camera`). Returns `false` once
+/// it is no longer wanted.
+#[allow(clippy::too_many_arguments)]
+fn on_camera_frame<'local>(
+	env: &mut Env<'local>,
+	_class: JClass<'local>,
+	id: jlong,
+	y: JByteBuffer<'local>,
+	u: JByteBuffer<'local>,
+	v: JByteBuffer<'local>,
+	y_row_stride: jint,
+	uv_row_stride: jint,
+	uv_pixel_stride: jint,
+	width: jint,
+	height: jint,
+	rotation: jint,
+	timestamp_ns: jlong,
+) -> Result<jboolean> {
+	let (y_at, y_len) = direct(env, &y, "camera luma")?;
+	let (u_at, u_len) = direct(env, &u, "camera U")?;
+	let (v_at, v_len) = direct(env, &v, "camera V")?;
+	let step = uv_pixel_stride.max(1) as usize;
+	// SAFETY: a direct buffer's memory is `capacity` bytes at its address,
+	// and the `Image` the planes belong to stays open until this call
+	// returns. With V one byte after U (interleaved, U first), U's address
+	// and V's length plus one span both planes up to the end of V's buffer:
+	// memory of the same image.
+	#[allow(unsafe_code)]
+	let (y, u, v, nv12) = unsafe {
+		let nv12 = (step == 2 && v_at as usize == u_at as usize + 1)
+			.then(|| std::slice::from_raw_parts(u_at, v_len + 1));
+		(
+			std::slice::from_raw_parts(y_at, y_len),
+			std::slice::from_raw_parts(u_at, u_len),
+			std::slice::from_raw_parts(v_at, v_len),
+			nv12,
+		)
+	};
+	let planes = voelin_media::studio::camera::YuvPlanes {
+		width: width.max(0) as u32,
+		height: height.max(0) as u32,
+		y,
+		y_stride: y_row_stride.max(0) as usize,
+		u,
+		v,
+		uv_stride: uv_row_stride.max(0) as usize,
+		uv_step: step,
+		nv12,
+		rotation: rotation.max(0) as u32,
+	};
+	Ok(crate::camera::on_frame(id as u64, &planes, timestamp_ns))
+}
+
+const _: jni::NativeMethod = native_method! {
+	java_type = "io.github.faumaray.voelin.Native",
+	static extern fn on_camera_error(id: jlong, message: JString),
+};
+
+fn on_camera_error<'local>(
+	env: &mut Env<'local>,
+	_class: JClass<'local>,
+	id: jlong,
+	message: JString<'local>,
+) -> Result<()> {
+	let message = if message.is_null() { String::new() } else { message.try_to_string(env)? };
+	crate::camera::on_error(id as u64, message);
+	Ok(())
 }
 
 const _: jni::NativeMethod = native_method! {
@@ -364,5 +587,47 @@ const _: jni::NativeMethod = native_method! {
 /// "Mute" / "Unmute" in the voice notification.
 fn on_toggle_mute<'local>(_env: &mut Env<'local>, _class: JClass<'local>) -> Result<()> {
 	crate::app::toggle_mute();
+	Ok(())
+}
+
+const _: jni::NativeMethod = native_method! {
+	java_type = "io.github.faumaray.voelin.Native",
+	static extern fn on_toggle_deafen(),
+};
+
+/// "Deafen" / "Undeafen" in the voice notification.
+fn on_toggle_deafen<'local>(_env: &mut Env<'local>, _class: JClass<'local>) -> Result<()> {
+	crate::app::toggle_deafen();
+	Ok(())
+}
+
+const _: jni::NativeMethod = native_method! {
+	java_type = "io.github.faumaray.voelin.Native",
+	static extern fn on_open_voice(),
+};
+
+/// The voice notification was tapped: show the voice channel.
+fn on_open_voice<'local>(_env: &mut Env<'local>, _class: JClass<'local>) -> Result<()> {
+	voelin_ui::request(voelin_ui::Request::ShowVoice);
+	Ok(())
+}
+
+const _: jni::NativeMethod = native_method! {
+	java_type = "io.github.faumaray.voelin.Native",
+	static extern fn on_share(text: JString, paths: JString),
+};
+
+/// Shared to the app: text, and copies of the shared files (one path per
+/// line).
+fn on_share<'local>(
+	env: &mut Env<'local>,
+	_class: JClass<'local>,
+	text: JString<'local>,
+	paths: JString<'local>,
+) -> Result<()> {
+	let text = if text.is_null() { None } else { Some(text.try_to_string(env)?) };
+	let paths = if paths.is_null() { String::new() } else { paths.try_to_string(env)? };
+	let files = paths.lines().filter(|l| !l.is_empty()).map(std::path::PathBuf::from).collect();
+	voelin_ui::request(voelin_ui::Request::Share { text, files });
 	Ok(())
 }

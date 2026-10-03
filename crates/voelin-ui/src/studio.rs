@@ -12,7 +12,7 @@
 //! VecModels) and get the same values; their callbacks come here
 //! (bind/studio.rs). Commands go to the studio through one task, in order.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
@@ -28,8 +28,8 @@ use voelin_core::media::voelin_media::handoff::Handoff;
 use voelin_core::media::voelin_media::mix::SourceHandle;
 use voelin_core::media::voelin_media::{VideoFrame, convert};
 use voelin_core::media::{
-	AudioApps, AudioSourceSpec, Latest, Streamer, StreamerConfigUpdate, StreamerStats, audio_apps,
-	audio_source_specs, screen_sources,
+	AudioApps, AudioSourceSpec, AudioSourceStats, Latest, Streamer, StreamerConfigUpdate,
+	StreamerStats, audio_apps, audio_source_specs, screen_sources,
 };
 use voelin_core::settings::{
 	AudioSourceKindSetting, AudioSourceSetting, Key, Kind, STREAM_AUDIO_SOURCES,
@@ -38,7 +38,7 @@ use voelin_core::settings::{
 };
 use voelin_core::stream::{EndReason, StreamSetup, ViewerInfo, ViewerState};
 use voelin_core::studio::scene::{
-	Align, Background, Colour, Fit, Scene, Scenes, Source, SourceKind, Transform,
+	Align, Background, Colour, Crop, Fit, Scene, Scenes, Source, SourceKind, Transform,
 };
 use voelin_core::studio::{self, SourceChange, Stats, Status, Studio, camera};
 use voelin_core::{Command, HistoryMessage, HistorySource, StreamState};
@@ -329,15 +329,16 @@ fn demo_settings() -> Settings {
 	let mut cam = source(2, "Camera", camera.clone(), Transform::default());
 	cam.transform = vm::studio::placement(&camera, (1920, 1080));
 	cam.background = Background::Blur { strength: 0.04 };
-	main.sources = vec![
-		source(
-			1,
-			"Game Capture",
-			SourceKind::Pattern { size: (1280, 720) },
-			Transform { fit: Fit::Cover, ..Transform::full(1920, 1080) },
-		),
-		cam,
-	];
+	let mut game = source(
+		1,
+		"Game Capture",
+		SourceKind::Pattern { size: (1280, 720) },
+		Transform { fit: Fit::Cover, ..Transform::full(1920, 1080) },
+	);
+	// The pattern's frame counter sits in its top-left corner, under the
+	// preview's LIVE badge and timer: cropped away.
+	game.crop = Crop { top: 120, ..Crop::default() };
+	main.sources = vec![game, cam];
 	let mut chatting = Scene::new(2, "Just Chatting");
 	chatting.sources = vec![source(
 		1,
@@ -420,8 +421,9 @@ fn file_name(what: &str) -> String {
 }
 
 impl App {
-	/// The studio's settings (made once).
-	fn studio_settings(&mut self) -> Settings {
+	/// The studio's settings (made once): its mixer's `stream.audio_sources`
+	/// are the share dialog's too.
+	pub(crate) fn studio_settings(&mut self) -> Settings {
 		let demo = self.demo_ui;
 		let prefs = &self.prefs;
 		self.studio
@@ -477,14 +479,19 @@ impl App {
 			|| self.ui.upgrade().is_some_and(|ui| ui.global::<Nav>().get_page() == Page::Studio)
 	}
 
-	/// The studio page or window appeared: show it and start the studio.
-	pub(crate) fn studio_open(&mut self) {
+	/// The models in the main window's StudioBridge (once).
+	fn studio_attach_main(&mut self) {
 		if !self.studio.attached
 			&& let Some(ui) = self.ui.upgrade()
 		{
 			self.studio_attach(&ui.global::<StudioBridge>());
 			self.studio.attached = true;
 		}
+	}
+
+	/// The studio page or window appeared: show it and start the studio.
+	pub(crate) fn studio_open(&mut self) {
+		self.studio_attach_main();
 		if let Some(window) = &self.studio.window
 			&& let Err(e) = window.show()
 		{
@@ -725,12 +732,23 @@ impl App {
 		vm::list::sync(&m.sources, &vm::studio::sources(self.studio.scenes.active(), stats));
 	}
 
+	/// The streamer whose mixer the audio rows show: a quick share's while
+	/// one runs (what goes out; both mix `stream.audio_sources`), else the
+	/// studio's encoder.
+	fn mixer_streamer(&self) -> Option<&Streamer> {
+		self.share_streamer().or_else(|| self.studio_streamer())
+	}
+
+	/// What the mixer says about each of its sources now.
+	fn mixer_stats(&self) -> Vec<AudioSourceStats> {
+		self.mixer_streamer().map(|s| s.stats().audio_sources).unwrap_or_default()
+	}
+
 	/// The mixer source of each audio row, and why one captures nothing.
 	fn studio_map_meters(&mut self) {
 		let sources = self.studio.settings.as_ref().map(|s| s.get(&STREAM_AUDIO_SOURCES));
-		let streamer = self.studio_streamer();
-		let mixer = streamer.and_then(Streamer::audio_mixer);
-		let stats = self.studio.encoder.as_ref().map(|s| &s.audio_sources[..]).unwrap_or_default();
+		let mixer = self.mixer_streamer().and_then(Streamer::audio_mixer);
+		let stats = self.mixer_stats();
 		self.studio.meters = sources
 			.unwrap_or_default()
 			.iter()
@@ -745,7 +763,7 @@ impl App {
 	fn studio_refresh_audio(&self) {
 		let Some(settings) = &self.studio.settings else { return };
 		let sources = settings.get(&STREAM_AUDIO_SOURCES);
-		let stats = self.studio.encoder.as_ref().map(|s| &s.audio_sources[..]).unwrap_or_default();
+		let stats = self.mixer_stats();
 		let live: Vec<Option<vm::studio::AudioLive>> = sources
 			.iter()
 			.enumerate()
@@ -760,8 +778,38 @@ impl App {
 		vm::list::sync(&self.studio.models.audio, &vm::studio::audio(&sources, &live));
 	}
 
+	/// The share dialog's audio: the studio's mixer rows and picker in the
+	/// main window, without starting the studio.
+	pub(crate) fn mixer_show(&mut self) {
+		self.studio_attach_main();
+		self.studio_settings();
+		self.mixer_refresh();
+	}
+
+	/// The audio rows again: which mixer source each meter reads, levels
+	/// and errors.
+	pub(crate) fn mixer_refresh(&mut self) {
+		self.studio_map_meters();
+		self.studio_refresh_audio();
+	}
+
+	/// Once a second while the studio does not run (it has its own tick):
+	/// the share's rows, and the picker's application list let go once the
+	/// share dialog is closed.
+	pub(crate) fn mixer_tick(&mut self) {
+		if self.studio.run.is_some() {
+			return;
+		}
+		if self.share.is_some() {
+			self.mixer_refresh();
+		}
+		if !self.ui.upgrade().is_some_and(|ui| ui.global::<Nav>().get_share_open()) {
+			self.studio.apps = None;
+		}
+	}
+
 	/// The meters, about 15 times a second (only rows that moved redraw).
-	fn studio_meters(&mut self) {
+	pub(crate) fn studio_meters(&mut self) {
 		let model = &self.studio.models.audio;
 		for (i, meter) in self.studio.meters.iter().enumerate() {
 			let level = meter.as_ref().map_or(-100.0, |m| m.level().peak_db().max(-100.0));
@@ -830,7 +878,12 @@ impl App {
 			.iter()
 			.map(|(id, _)| {
 				let (channel, server) = self.studio_destination_parts(*id);
-				StudioPick { name: channel.into(), detail: server.into(), kind: "server".into() }
+				StudioPick {
+					name: channel.into(),
+					detail: server.into(),
+					kind: "server".into(),
+					..Default::default()
+				}
 			})
 			.collect();
 		vm::list::sync(&self.studio.models.destinations, &rows);
@@ -1363,6 +1416,35 @@ impl App {
 			"remove" => {
 				self.studio_op(Op::Apply(studio::Command::RemoveSource { scene, source: id }));
 			}
+			// The next camera (a phone's front and back), mirrored as that
+			// camera is by default.
+			"next-camera" => {
+				let SourceKind::Camera { device, size, fps, .. } = source.kind.clone() else {
+					return;
+				};
+				let name = source.name.clone();
+				let cameras = if self.demo_ui { Vec::new() } else { camera::list() };
+				let real: Vec<_> = cameras.iter().filter(|c| c.backend != "synthetic").collect();
+				let at = real.iter().position(|c| c.id == device);
+				let next = at.map_or(real.first(), |i| real.get((i + 1) % real.len()));
+				let Some(next) = next.filter(|c| c.id != device) else {
+					self.set_status("There is no other camera.");
+					return;
+				};
+				let kind = SourceKind::Camera {
+					device: next.id.clone(),
+					size,
+					fps,
+					mirror: next.mirrored,
+				};
+				// A source named after its camera is named after the next.
+				let renamed = name.is_empty() || at.is_some_and(|i| real[i].name == name);
+				let name = renamed.then(|| next.name.clone());
+				self.studio_update(
+					id,
+					SourceChange { kind: Some(kind), name, ..Default::default() },
+				);
+			}
 			"bg-keep" | "bg-blur" => {
 				let background = if action == "bg-blur" {
 					Background::Blur { strength: 0.04 }
@@ -1423,6 +1505,7 @@ impl App {
 			name: name.into(),
 			detail: detail.into(),
 			kind: icon.into(),
+			..Default::default()
 		};
 		let mut picks: Vec<(Pick, StudioPick)> = Vec::new();
 		let source = |name: &str, kind: SourceKind| Pick::Source { name: name.into(), kind };
@@ -1434,6 +1517,7 @@ impl App {
 						camera::SYNTHETIC.to_owned(),
 						"Test pattern".to_owned(),
 						"1280×720".to_owned(),
+						true,
 					)]
 				} else {
 					camera::list()
@@ -1443,12 +1527,12 @@ impl App {
 								c.formats.iter().flat_map(|f| &f.sizes).max_by_key(|(w, h)| w * h);
 							let detail =
 								biggest.map_or(String::new(), |(w, h)| format!("up to {w}×{h}"));
-							(c.id, c.name, detail)
+							(c.id, c.name, detail, c.mirrored)
 						})
 						.collect()
 				};
-				for (device, name, detail) in cameras {
-					let kind = SourceKind::Camera { device, size: None, fps: None, mirror: true };
+				for (device, name, detail, mirror) in cameras {
+					let kind = SourceKind::Camera { device, size: None, fps: None, mirror };
 					picks.push((source(&name, kind), row(&name, detail, "camera")));
 				}
 			}
@@ -1580,11 +1664,24 @@ impl App {
 		let settings = self.studio_settings();
 		let current = settings.get(&STREAM_AUDIO_SOURCES);
 		let mut picks: Vec<(Pick, StudioPick)> = Vec::new();
-		let mut add = |setting: AudioSourceSetting, name: String, detail: String| {
-			let (_, _, kind) = vm::studio::audio_label(&setting.kind);
-			let row = StudioPick { name: name.into(), detail: detail.into(), kind: kind.into() };
-			picks.push((Pick::Audio(setting), row));
-		};
+		let mut add =
+			|setting: AudioSourceSetting, name: String, detail: String, icon: Option<&str>| {
+				let (_, _, kind) = vm::studio::audio_label(&setting.kind);
+				let row = StudioPick {
+					name: name.into(),
+					detail: detail.into(),
+					kind: kind.into(),
+					// An application's own icon, when it gave a file (Android
+					// does; a desktop icon theme name is left out).
+					icon: icon
+						.map(Path::new)
+						.filter(|p| p.is_absolute())
+						.map(crate::images::file)
+						.unwrap_or_default(),
+					selected: current.iter().any(|s| s.kind == setting.kind),
+				};
+				picks.push((Pick::Audio(setting), row));
+			};
 		let fixed = [
 			(AudioSourceKindSetting::Microphone, "Microphone", "What you say in voice, cleaned up"),
 			(
@@ -1599,14 +1696,17 @@ impl App {
 			),
 		];
 		for (kind, name, detail) in fixed {
-			if !current.iter().any(|s| s.kind == kind) {
-				add(AudioSourceSetting::new(kind), name.into(), detail.into());
+			// A phone shares the whole screen: there is no window's app.
+			if cfg!(target_os = "android") && kind == AudioSourceKindSetting::Window {
+				continue;
 			}
+			add(AudioSourceSetting::new(kind), name.into(), detail.into(), None);
 		}
 		if self.demo_ui {
-			for frequency in [330, 550] {
+			for frequency in [440, 660, 330] {
 				let kind = AudioSourceKindSetting::Synthetic { frequency };
-				add(AudioSourceSetting::new(kind), "Test tone".into(), format!("{frequency} Hz"));
+				let detail = format!("{frequency} Hz");
+				add(AudioSourceSetting::new(kind), "Test tone".into(), detail, None);
 			}
 		} else {
 			if self.studio.apps.is_none() {
@@ -1623,7 +1723,7 @@ impl App {
 					.media
 					.clone()
 					.unwrap_or_else(|| if app.playing { "playing".into() } else { String::new() });
-				add(AudioSourceSetting::new(kind), app.name, detail);
+				add(AudioSourceSetting::new(kind), app.name, detail, app.icon.as_deref());
 			}
 		}
 		self.studio_set_picks(picks);
@@ -1636,13 +1736,24 @@ impl App {
 		if let Err(e) = settings.set(&STREAM_AUDIO_SOURCES, sources) {
 			self.set_status(e.to_string());
 		}
+		// A quick share follows at once (the studio through its watch).
+		self.share_audio_changed();
 		self.studio_refresh_audio();
 	}
 
-	pub(crate) fn studio_add_audio(&mut self, index: usize) {
+	/// Mix a picked source in, or take it out if it is (the picker
+	/// chooses several at once), and mark the picks again.
+	pub(crate) fn studio_toggle_audio(&mut self, index: usize) {
 		let Some(Pick::Audio(setting)) = self.studio.picks.get(index) else { return };
 		let setting = setting.clone();
-		self.studio_audio_sources(|sources| sources.push(setting));
+		self.studio_audio_sources(|sources| {
+			if sources.iter().any(|s| s.kind == setting.kind) {
+				sources.retain(|s| s.kind != setting.kind);
+			} else {
+				sources.push(setting);
+			}
+		});
+		self.studio_list_audio();
 	}
 
 	/// While dragging the gain goes to the mixer directly; at the end it is

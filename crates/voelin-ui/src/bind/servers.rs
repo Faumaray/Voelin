@@ -61,4 +61,5 @@ pub(super) fn wire(ui: &MainWindow) {
 	bridge.on_client_audio_changed(|form| {
 		with_app(|app| app.client_playback_changed(&form));
 	});
+	bridge.on_invite(|| with_app(|app| app.invite_link()).unwrap_or_default().into());
 }
