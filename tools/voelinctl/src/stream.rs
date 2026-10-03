@@ -132,6 +132,10 @@ pub enum StreamCommand {
 		/// Save the last decoded picture as PNG.
 		#[arg(long)]
 		save_frame: Option<PathBuf>,
+		/// Ask for this simulcast layer (by id) once the streamer's offer
+		/// lists its layers (Voelin streamers with several do).
+		#[arg(long)]
+		layer: Option<u16>,
 	},
 }
 
@@ -281,8 +285,9 @@ pub async fn run(con: &mut Connection, args: &StreamArgs) -> Result<()> {
 		StreamCommand::List { settle_ms } => {
 			list(con, &mut driver, Duration::from_millis(*settle_ms)).await
 		}
-		StreamCommand::Watch { id, streamer_nick, expect_frames, timeout, save_frame } => {
-			let target = Target { id: id.clone(), streamer_nick: streamer_nick.clone() };
+		StreamCommand::Watch { id, streamer_nick, expect_frames, timeout, save_frame, layer } => {
+			let target =
+				Target { id: id.clone(), streamer_nick: streamer_nick.clone(), layer: *layer };
 			let timeout = timeout.map(Duration::from_secs);
 			let expect = *expect_frames;
 			let save = save_frame.as_deref();
@@ -727,6 +732,8 @@ async fn list(con: &mut Connection, driver: &mut Driver, settle: Duration) -> Re
 struct Target {
 	id: Option<String>,
 	streamer_nick: Option<String>,
+	/// The simulcast layer to ask for.
+	layer: Option<u16>,
 }
 
 impl Target {
@@ -859,6 +866,16 @@ async fn watch(
 			}
 			match event {
 				WatchEvent::Accepted => println!("accepted, connecting"),
+				WatchEvent::Layers(layers) => {
+					println!(
+						"layers offered: {:?}",
+						layers.iter().map(|l| l.id).collect::<Vec<_>>()
+					);
+					if let Some(layer) = target.layer {
+						driver.streams.set_watch_layer(&id, Some(layer))?;
+						println!("asked for layer {layer}");
+					}
+				}
 				WatchEvent::Connected => println!("connected"),
 				WatchEvent::Frame(f) => {
 					match f.kind {

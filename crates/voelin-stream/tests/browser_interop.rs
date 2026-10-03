@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 use tokio::time::timeout;
 use voelin_stream::{
-	Codec, FrameSource, MediaKind, Peer, PeerConfig, PeerEvent, Signal, SrtpProfile,
+	Codec, FrameSource, LayerSpec, MediaKind, Peer, PeerConfig, PeerEvent, Signal, SrtpProfile,
 	SyntheticSource,
 };
 
@@ -50,6 +50,14 @@ async fn rust_streams_to_browser() {
 	let mut browser = Browser::start().await;
 	let config = PeerConfig::loopback();
 	let (mut peer, offer) = Peer::offer(&config, "interop").await.unwrap();
+	// As a Voelin streamer with several layers offers: with the list of its
+	// layers, which libwebrtc (the official client's stack) must skip.
+	let layers = [
+		LayerSpec::single(4_000_000),
+		LayerSpec { id: 1, scale: 0.5, ..LayerSpec::single(1_000_000) },
+	];
+	let offer = voelin_stream::layer::add_to_sdp(&offer, &layers);
+	assert!(offer.contains("\r\na=x-voelin-layers:0/1/4000000 1/0.5/1000000\r\n"), "{offer}");
 	let answer = browser.call(json!({ "op": "answer", "sdp": offer })).await;
 	let answer = answer["sdp"].as_str().unwrap();
 	eprintln!("browser answer:\n{answer}");

@@ -218,6 +218,19 @@ then for the leaves it is not told about: `StreamInfo::viewers`
 (`voelin_stream`), kept by `StreamDirectory` and refreshed one stream at a
 time every 5 s by the engine (`Streams::refresh_viewer_counts`).
 
+### Voelin's own additions (not TeamSpeak's)
+
+Between Voelin clients only, a viewer can pick the streamer's simulcast
+layer: the offer of a Voelin streamer with several layers carries a
+session-level `a=x-voelin-layers:<id>/<WxH or scale>/<bitrate>[/<fps>] ...`
+line, and a Voelin viewer that saw it may send
+`streamsignaling json={"cmd":"x-voelin-layer","args":{"layer":<id or null>}}`.
+The server relays both unchanged (6.0.0-beta13.1). Official clients are not
+affected: libwebrtc skips unknown session attributes (headless Chromium 152
+answers and decodes such an offer), and official streamers never put the
+attribute in their offers, so they are never sent the signal. Details in
+[media.md](../media.md).
+
 ### WebRTC interop with Chromium (confirmed, Chromium 141, 2026-09-26)
 
 `crates/voelin-stream/tests/browser_interop.rs` (`VOELIN_INTEROP=1`, see

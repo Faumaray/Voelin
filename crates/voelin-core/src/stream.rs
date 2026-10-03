@@ -160,6 +160,10 @@ pub(crate) enum StreamInput {
 	RequestKeyframe {
 		stream_id: String,
 	},
+	WatchLayer {
+		stream_id: String,
+		layer: Option<LayerId>,
+	},
 	/// Simulcast layers of our stream (now and for streams started later).
 	Layers(Vec<LayerSpec>),
 	/// SRTP profile order of new connections.
@@ -369,6 +373,10 @@ impl StreamTask {
 				self.streams.request_keyframe(&stream_id);
 				Ok(())
 			}
+			StreamInput::WatchLayer { stream_id, layer } => self
+				.streams
+				.set_watch_layer(&stream_id, layer)
+				.map(|()| self.watch_layers(&stream_id)),
 			StreamInput::Layers(layers) => {
 				self.layers = layers.clone();
 				// Without a stream they are used for the next one.
@@ -537,6 +545,7 @@ impl StreamTask {
 						}
 						WatchState::Ended(reason)
 					}
+					WatchEvent::Layers(_) => return self.watch_layers(&id),
 					WatchEvent::Frame(frame) => {
 						if let (MediaKind::Audio, Some(audio)) = (frame.kind, &self.audio) {
 							audio.send(AudioIn::StreamAudio {
@@ -552,6 +561,17 @@ impl StreamTask {
 				self.emit(Event::WatchState { session, stream_id: id, state });
 			}
 		}
+	}
+
+	/// Tell the layers of watched stream `id` and the one we asked for.
+	fn watch_layers(&self, id: &str) {
+		let Some(watched) = self.streams.watching().find(|v| v.id() == id) else { return };
+		self.emit(Event::WatchLayers {
+			session: self.session,
+			stream_id: id.to_owned(),
+			layers: watched.layers().to_vec(),
+			layer: watched.layer(),
+		});
 	}
 
 	/// The answer `stream.permissions` gives to a join request; `None`: ask.

@@ -197,6 +197,23 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   ([protocol notes](protocol-notes/ts6-streaming.md#viewer-counts-confirmed-600-beta131-2026-10-03)).
   The app shows it, and the gateway directory's count where the server
   gave none.
+- A viewer picks a simulcast layer (the watch screen's quality picker): a
+  Voelin streamer with several layers lists them in its offer, in a
+  session-level SDP attribute (`a=x-voelin-layers:0/1/6000000
+  1/640x360/1500000/15`: id, size or scale, bitrate, frame-rate cap;
+  `voelin_stream::layer::SDP_ATTRIBUTE`). The viewer reports them
+  (`WatchEvent::Layers`, `Event::WatchLayers`), and `Command::SetWatchLayer`
+  sends `{"cmd":"x-voelin-layer","args":{"layer":1}}` through
+  `streamsignaling` (`Signal::Layer`; `null` is "Auto"). The streamer moves
+  that viewer to the layer at its next keyframe and keeps it there whatever
+  its estimate says, and such a viewer no longer lowers its layer's bitrate
+  for the others; "Auto" hands it back to the estimate. Official clients
+  never see either: libwebrtc skips session attributes it does not know
+  (headless Chromium 152 answers such an offer and decodes, see the
+  browser interop test), and a viewer sends the request only to a streamer
+  whose offer had the attribute, which only Voelin streamers add. Not with
+  RID simulcast (that viewer gets every layer), and a streamer that changes
+  its layers live is seen with its next offer.
 - The audio of watched streams does not go through this module: the session
   hands the Opus frames to its audio thread, which plays them through the
   jitter buffer and mixer under a made-up client id, with its own volume.
@@ -1010,6 +1027,8 @@ has not run on Windows yet.
 | Offer [VP9, VP8], a viewer that decodes only VP8 → its own VP8 encoder, VP9 idle, pictures decoded | `voelin-core/tests/media_live.rs` `ts6_viewer_gets_the_codec_it_chose` (`VOELIN_LIVE=1`) | tested against the TeamSpeak 6 dev server (our client on both ends) |
 | Several codecs against official TeamSpeak viewers | – | not tested (no official client here) |
 | Viewer counts: `viewer` of `notifystreaminfo`, counted up and down from the viewers joining and leaving, refreshed one stream at a time | `voelin-stream` `proto::tests::stream_info_answers`, `session::tests::viewer_counts`; `voelinctl stream list` | tested; against the TeamSpeak 6 dev server `stream list` printed "1 watching" while a viewer watched and "0 watching" after |
+| A viewer picks a layer: the offer's `a=x-voelin-layers`, `Signal::Layer`, the streamer moving it (and back with "Auto"); no request to a streamer whose offer lists no layers | `voelin-stream` `layer::tests::layers_in_the_sdp`, `tests/sessions.rs` `viewer_picks_a_layer` and `no_layer_request_without_the_offer_listing_layers` (two sessions, peers on loopback); `voelinctl stream watch --layer 1` against `stream start --placeholder --layer 1.0:2000k --layer 0.5:500k` | tested, also through the TeamSpeak 6 dev server (the viewer stayed on layer 1 at a 2.5 Mbit/s estimate that fits layer 0) |
+| An offer with `a=x-voelin-layers` against libwebrtc | `tests/browser_interop.rs` `rust_streams_to_browser` (`VOELIN_INTEROP=1`, system Chromium 152 through `playwright-core`) | tested: answered and decoded as before. The official client itself not tried |
 | Test pattern → VP8 → decoder, rectangle position and colour | `voelin-core` `media::tests::local_preview_decodes_the_pattern` | tested |
 | Test pattern → two engine stream tasks → str0m peers on loopback → decoder | `voelin-core` `stream::tests::test_pattern_through_stream_tasks` | tested |
 | Stream audio (RTP time → jitter buffer ids, volume, end) | `voelin-core` `audio::tests::stream_audio_with_volume`, stream task test | tested |

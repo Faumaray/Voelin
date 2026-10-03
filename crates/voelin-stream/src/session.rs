@@ -39,7 +39,7 @@ use tsproto_packets::packets::OutCommand;
 use crate::discovery::{ClientState, Discovery, StreamLookup};
 use crate::dtls::SrtpProfile;
 use crate::feedback::LayerFeedback;
-use crate::layer::{LayerId, LayerSet, LayerSpec};
+use crate::layer::{self, LayerId, LayerSet, LayerSpec};
 use crate::peer::{MediaFrame, OfferOptions, Peer, PeerConfig, PeerEvent, VideoCodec};
 use crate::proto::{self, LeaveReason, StreamInfo, StreamNotification, StreamSetup};
 use crate::signal::Signal;
@@ -189,6 +189,10 @@ pub enum WatchEvent {
 	Connected,
 	/// An encoded video or audio frame.
 	Frame(MediaFrame),
+	/// The simulcast layers the streamer's offer lists
+	/// ([`layer::SDP_ATTRIBUTE`]): pick one with [`Streams::set_watch_layer`].
+	/// Only Voelin streamers list them, and only with several layers.
+	Layers(Vec<LayerSpec>),
 	Ended(EndReason),
 }
 
@@ -252,6 +256,10 @@ pub enum SessionError {
 	NotWatching(String),
 	#[error("cannot watch our own stream")]
 	OwnStream,
+	#[error("stream {0} has no layers to choose from")]
+	NoLayers(String),
+	#[error("stream {0} has no layer {1}")]
+	UnknownLayer(String, LayerId),
 }
 
 /// The streams in our channel, from `notifystreamstarted`/`notifystreaminfo`/
@@ -561,6 +569,9 @@ struct ViewerSlot {
 	srtp_profile: Option<SrtpProfile>,
 	/// The video codec its answer chose.
 	codec: Option<VideoCodec>,
+	/// The layer the viewer asked for ([`Signal::Layer`]); `None`: its
+	/// estimate decides.
+	pinned: Option<LayerId>,
 }
 
 impl ViewerSlot {
@@ -574,6 +585,7 @@ impl ViewerSlot {
 			estimate: None,
 			srtp_profile: None,
 			codec: None,
+			pinned: None,
 		}
 	}
 
@@ -760,8 +772,30 @@ impl StreamerSession {
 					self.offer(viewer, true, out).await;
 				}
 			}
+			Signal::Layer { layer } => self.pin(viewer, layer, out),
 			other => debug!(viewer = viewer.0, "ignoring signal {other:?}"),
 		}
+	}
+
+	/// A viewer asks for `layer` ([`Signal::Layer`]; `None`: its estimate
+	/// decides again). It moves at the layer's next keyframe, which is
+	/// requested. An unknown layer counts as `None`; viewers with RID
+	/// simulcast get every layer anyway.
+	fn pin(&mut self, viewer: ClientId, layer: Option<LayerId>, out: &mut Outbox) {
+		let start = self.start_bitrate();
+		let Some(slot) = self.viewers.get_mut(&viewer.0).filter(|s| s.rids.is_none()) else {
+			return;
+		};
+		slot.pinned = layer.filter(|l| self.layers.index(*l).is_some());
+		slot.choice.up_since = None;
+		let fitting = self.layers.fitting(slot.estimate.unwrap_or(start));
+		let target = slot.pinned.unwrap_or(self.layers.specs[fitting].id);
+		debug!(viewer = viewer.0, ?layer, target, "viewer picks a layer");
+		if let Some(layer) = slot.choice.switch_to(target) {
+			self.keyframe_request(layer, out);
+		}
+		self.emit_viewers(out);
+		self.update_targets(out);
 	}
 
 	/// The estimate a new viewer starts with.
@@ -809,10 +843,19 @@ impl StreamerSession {
 		};
 		match Peer::offer_with(&self.config, &id, &options).await {
 			Ok((peer, sdp)) => {
+				// Voelin viewers learn the layers and may pick one (other
+				// clients skip the attribute); not with RID simulcast, where
+				// a viewer gets them all.
+				let sdp = if self.layers.len() > 1 && !rid_offer {
+					layer::add_to_sdp(&sdp, &self.layers.specs)
+				} else {
+					sdp
+				};
 				if let Some(slot) = self.viewers.get_mut(&viewer.0) {
 					slot.peer = Some(peer);
 					slot.state = ViewerState::Connecting;
-					slot.choice = LayerChoice::new(layer);
+					// A reconnecting viewer keeps the layer it asked for.
+					slot.choice = LayerChoice::new(slot.pinned.unwrap_or(layer));
 					slot.codec = None;
 					slot.rids = None;
 					slot.estimate = None;
@@ -916,14 +959,17 @@ impl StreamerSession {
 		let start = self.start_bitrate();
 		let mut keyframes = LayerSet::new();
 		for slot in self.viewers.values_mut() {
+			slot.pinned = slot.pinned.filter(|l| self.layers.index(*l).is_some());
 			if slot.peer.is_none() {
-				slot.choice = LayerChoice::new(self.layers.specs[self.layers.fitting(start)].id);
+				let fitting = self.layers.specs[self.layers.fitting(start)].id;
+				slot.choice = LayerChoice::new(slot.pinned.unwrap_or(fitting));
 				continue;
 			}
 			if slot.rids.is_none() {
 				let fitting = self.layers.fitting(slot.estimate.unwrap_or(start));
 				slot.choice.up_since = None;
-				if let Some(layer) = slot.choice.switch_to(self.layers.specs[fitting].id) {
+				let target = slot.pinned.unwrap_or(self.layers.specs[fitting].id);
+				if let Some(layer) = slot.choice.switch_to(target) {
 					keyframes.insert(layer);
 				}
 				if slot.connected() {
@@ -1139,7 +1185,7 @@ impl StreamerSession {
 		let (keyframe, affected) = match &slot.rids {
 			Some(_) => (None, None),
 			None => {
-				let keyframe = if self.layers.len() > 1 {
+				let keyframe = if self.layers.len() > 1 && slot.pinned.is_none() {
 					slot.choice.estimate(&self.layers, bitrate, now)
 				} else {
 					None
@@ -1182,7 +1228,9 @@ impl StreamerSession {
 		let lowest = self
 			.viewers
 			.values()
-			.filter(|v| v.connected())
+			// A viewer that picked its layer takes it as it is: a slow one
+			// must not lower the picture of everyone else on that layer.
+			.filter(|v| v.connected() && v.pinned.is_none())
 			.filter_map(|v| {
 				let estimate = v.estimate?;
 				match &v.rids {
@@ -1253,6 +1301,11 @@ pub struct ViewerSession {
 	reconnects: u32,
 	/// The RID simulcast layer we play, if the streamer sends several.
 	layer_rid: Option<Rid>,
+	/// The layers the streamer's offer listed; `None`: it listed none (not
+	/// a Voelin streamer, or one layer), so we never ask for one.
+	layers: Option<Vec<LayerSpec>>,
+	/// The layer we asked for; `None`: the streamer's estimate decides.
+	layer: Option<LayerId>,
 }
 
 impl ViewerSession {
@@ -1275,6 +1328,8 @@ impl ViewerSession {
 			peer: None,
 			reconnects: 0,
 			layer_rid: None,
+			layers: None,
+			layer: None,
 		}
 	}
 
@@ -1345,6 +1400,13 @@ impl ViewerSession {
 				self.peer = Some(peer);
 				self.state = WatchState::Connecting;
 				self.signal(Signal::Answer { sdp }, out);
+				let layers = layer::from_sdp(offer).filter(|l| l.len() > 1);
+				if layers != self.layers {
+					self.layer =
+						self.layer.filter(|id| layers.iter().flatten().any(|l| l.id == *id));
+					self.layers = layers;
+					self.event(WatchEvent::Layers(self.layers.clone().unwrap_or_default()), out);
+				}
 			}
 			Err(e) => self.fail(format!("cannot answer the streamer's offer: {e}"), out),
 		}
@@ -1373,6 +1435,36 @@ impl ViewerSession {
 		if let Some(peer) = &self.peer {
 			peer.request_keyframe();
 		}
+	}
+
+	/// The layers the streamer offers to choose from (see
+	/// [`WatchEvent::Layers`]).
+	pub fn layers(&self) -> &[LayerSpec] {
+		self.layers.as_deref().unwrap_or_default()
+	}
+
+	/// The layer we asked for ([`set_layer`](Self::set_layer)).
+	pub fn layer(&self) -> Option<LayerId> {
+		self.layer
+	}
+
+	/// Ask the streamer for simulcast layer `layer` (`None`: let our
+	/// bandwidth estimate decide again). Only if its offer listed layers:
+	/// other streamers never get the request.
+	pub fn set_layer(
+		&mut self,
+		layer: Option<LayerId>,
+		out: &mut Outbox,
+	) -> Result<(), SessionError> {
+		let layers = self.layers.as_ref().ok_or_else(|| SessionError::NoLayers(self.id.clone()))?;
+		if let Some(id) = layer
+			&& !layers.iter().any(|l| l.id == id)
+		{
+			return Err(SessionError::UnknownLayer(self.id.clone(), id));
+		}
+		self.layer = layer;
+		self.signal(Signal::Layer { layer }, out);
+		Ok(())
 	}
 
 	/// Drop the connection and ask the streamer for a new offer (`reconnect`).
@@ -1666,6 +1758,18 @@ impl Streams {
 		if let Some(v) = self.viewers.get(id) {
 			v.request_keyframe();
 		}
+	}
+
+	/// Watch simulcast layer `layer` of a stream (`None`: as our bandwidth
+	/// allows); see [`ViewerSession::set_layer`].
+	pub fn set_watch_layer(
+		&mut self,
+		id: &str,
+		layer: Option<LayerId>,
+	) -> Result<(), SessionError> {
+		let viewer =
+			self.viewers.get_mut(id).ok_or_else(|| SessionError::NotWatching(id.into()))?;
+		viewer.set_layer(layer, &mut self.out)
 	}
 
 	/// Reconnect to a watched stream: the streamer sends a new offer.

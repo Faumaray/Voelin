@@ -154,6 +154,17 @@ impl App {
 			Event::WatchState { session, stream_id, state } => {
 				self.watch_state(session as i64, &stream_id, state);
 			}
+			Event::WatchLayers { session, stream_id, layers, layer } => {
+				if let Some(watch) = self
+					.watch
+					.as_mut()
+					.filter(|w| w.session == Some(session as i64) && w.stream_id == stream_id)
+				{
+					watch.layers = layers;
+					watch.layer = layer;
+					self.refresh_viewer();
+				}
+			}
 			// Also flagged on the sink, which the encoder reads.
 			Event::StreamKeyframeRequest { .. } => {}
 			_ => {}
@@ -369,17 +380,17 @@ impl App {
 	}
 
 	/// A simulcast layer of the watched stream (0: follow the bandwidth
-	/// estimate). The streamer picks the layer from each viewer's estimate,
-	/// so this asks for the picture again; a viewer-side choice needs an
-	/// engine API that does not exist yet.
+	/// estimate), asked of the streamer; the engine confirms with
+	/// `WatchLayers`.
 	pub(crate) fn set_stream_quality(&mut self, index: i32) {
 		let Some(watch) = &mut self.watch else { return };
 		watch.layer =
 			usize::try_from(index - 1).ok().and_then(|i| watch.layers.get(i)).map(|l| l.id);
 		if let Some(session) = watch.session {
-			self.engine.send(Command::RequestStreamKeyframe {
+			self.engine.send(Command::SetWatchLayer {
 				session: session as u64,
 				stream_id: watch.stream_id.clone(),
+				layer: watch.layer,
 			});
 		}
 		self.refresh_viewer();

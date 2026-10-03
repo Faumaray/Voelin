@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use tsclientlib::ClientId;
 use voelin_stream::{
-	ClientState, EndReason, FrameSource, LeaveReason, MediaKind, Output, PeerConfig, Request,
-	StreamEvent, StreamInfo, StreamKind, StreamNotification, StreamSetup, StreamerEvent,
-	StreamerOptions, Streams, SyntheticSource, ViewerState, WatchEvent,
+	ClientState, EndReason, FrameSource, LayerSpec, LeaveReason, MediaKind, Output, PeerConfig,
+	Request, SessionError, Signal, StreamEvent, StreamInfo, StreamKind, StreamNotification,
+	StreamSetup, StreamerEvent, StreamerOptions, Streams, SyntheticSource, ViewerState, WatchEvent,
 };
 
 const STREAMER: usize = 0;
@@ -109,6 +109,10 @@ struct Net {
 	source: Option<SyntheticSource>,
 	video: usize,
 	audio: usize,
+	/// The layer of the last video frame the viewer got (layered sources).
+	layer: Option<u8>,
+	/// Every signal relayed, with the sender's index.
+	signals: Vec<(usize, Signal)>,
 }
 
 impl Net {
@@ -121,6 +125,8 @@ impl Net {
 			source: None,
 			video: 0,
 			audio: 0,
+			layer: None,
+			signals: Vec::new(),
 		}
 	}
 
@@ -131,11 +137,19 @@ impl Net {
 			for (i, client) in self.clients.iter_mut().enumerate() {
 				while let Some(output) = client.poll_output() {
 					match output {
-						Output::Request(r) => notes.extend(self.server.relay(IDS[i], r)),
+						Output::Request(r) => {
+							if let Request::Signal { signal, .. } = &r {
+								self.signals.push((i, signal.clone()));
+							}
+							notes.extend(self.server.relay(IDS[i], r));
+						}
 						Output::Event(StreamEvent::Watch {
 							event: WatchEvent::Frame(f), ..
 						}) => match f.kind {
-							MediaKind::Video => self.video += 1,
+							MediaKind::Video => {
+								self.video += 1;
+								self.layer = SyntheticSource::frame_layer(&f.data);
+							}
 							MediaKind::Audio => self.audio += 1,
 						},
 						Output::Event(e) => self.events.push((i, e)),
@@ -183,6 +197,28 @@ impl Net {
 		})
 		.await
 		.unwrap_or_else(|_| panic!("timed out waiting for {what}; events: {:?}", self.events));
+	}
+
+	/// Run until the viewer's video comes from `layer` (and the streamer
+	/// reports it on that layer).
+	async fn on_layer(&mut self, layer: u8) {
+		let deadline = Instant::now() + Duration::from_secs(10);
+		loop {
+			let streamer = self.clients[STREAMER].streamer().unwrap().viewers();
+			let reported = streamer.first().and_then(|v| v.layer) == Some(u16::from(layer));
+			let video = self.video;
+			// Frames of the new layer, after the switch.
+			if self.layer == Some(layer) && reported {
+				while self.video < video + 5 {
+					self.step().await;
+				}
+				if self.layer == Some(layer) {
+					return;
+				}
+			}
+			assert!(Instant::now() < deadline, "video stays on layer {:?}", self.layer);
+			self.step().await;
+		}
 	}
 
 	/// Run until the viewer received `n` more video and audio frames.
@@ -334,4 +370,97 @@ async fn late_viewer_finds_the_stream() {
 		i == VIEWER && matches!(e, StreamEvent::Streams(l) if l.is_empty())
 	})
 	.await;
+}
+
+/// A Voelin streamer with layers lists them in its offer; the viewer picks
+/// one, and "Auto" hands the choice back to its bandwidth estimate.
+#[tokio::test(flavor = "multi_thread")]
+async fn viewer_picks_a_layer() {
+	let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
+	let mut net = Net::new();
+	// Without `min_bitrate`s every estimate fits the top layer.
+	let layers = vec![
+		LayerSpec { id: 0, ..LayerSpec::single(1_500_000) },
+		LayerSpec { id: 1, scale: 0.5, max_fps: Some(15), ..LayerSpec::single(400_000) },
+	];
+	let options =
+		StreamerOptions { auto_accept: true, layers: layers.clone(), ..Default::default() };
+	net.clients[STREAMER].start(options).unwrap();
+	net.until("stream in the viewer's list", |i, e| {
+		i == VIEWER && matches!(e, StreamEvent::Streams(l) if l.len() == 1)
+	})
+	.await;
+	let id = net.clients[VIEWER].directory().by_streamer(IDS[STREAMER]).unwrap().id.clone();
+	net.clients[VIEWER].watch(&id, "").unwrap();
+	net.until("the offer's layers", |i, e| {
+		i == VIEWER
+			&& watch_event(e, |e| {
+				matches!(e, WatchEvent::Layers(l)
+					if l.iter().map(|l| (l.id, l.scale, l.max_fps)).eq([(0, 1.0, None), (1, 0.5, Some(15))]))
+			})
+	})
+	.await;
+	net.until("viewer connected", |i, e| {
+		i == VIEWER && watch_event(e, |e| matches!(e, WatchEvent::Connected))
+	})
+	.await;
+	net.source = Some(SyntheticSource::with_layers(30, 0, true, &layers));
+	net.on_layer(0).await;
+
+	net.clients[VIEWER].set_watch_layer(&id, Some(1)).unwrap();
+	assert_eq!(net.clients[VIEWER].watching().next().unwrap().layer(), Some(1));
+	net.on_layer(1).await;
+	// The estimate does not move it back while it is picked.
+	net.frames(20).await;
+	assert_eq!(net.layer, Some(1));
+
+	net.clients[VIEWER].set_watch_layer(&id, None).unwrap();
+	net.on_layer(0).await;
+	let asked: Vec<_> = net
+		.signals
+		.iter()
+		.filter_map(|(i, s)| match s {
+			Signal::Layer { layer } => Some((*i, *layer)),
+			_ => None,
+		})
+		.collect();
+	assert_eq!(asked, [(VIEWER, Some(1)), (VIEWER, None)]);
+	assert_eq!(
+		net.clients[VIEWER].set_watch_layer(&id, Some(7)),
+		Err(SessionError::UnknownLayer(id.clone(), 7))
+	);
+}
+
+/// A streamer whose offer lists no layers (one layer here; an official
+/// client always) is never asked for one.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_layer_request_without_the_offer_listing_layers() {
+	let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
+	let mut net = Net::new();
+	let options = StreamerOptions { auto_accept: true, ..Default::default() };
+	net.clients[STREAMER].start(options).unwrap();
+	net.until("stream in the viewer's list", |i, e| {
+		i == VIEWER && matches!(e, StreamEvent::Streams(l) if l.len() == 1)
+	})
+	.await;
+	let id = net.clients[VIEWER].directory().by_streamer(IDS[STREAMER]).unwrap().id.clone();
+	net.clients[VIEWER].watch(&id, "").unwrap();
+	net.until("viewer connected", |i, e| {
+		i == VIEWER && watch_event(e, |e| matches!(e, WatchEvent::Connected))
+	})
+	.await;
+	net.source = Some(SyntheticSource::new(30, 4000, true));
+	net.frames(10).await;
+	assert!(
+		!net.events.iter().any(|(_, e)| watch_event(e, |e| matches!(e, WatchEvent::Layers(_)))),
+		"{:?}",
+		net.events
+	);
+	let viewer = &mut net.clients[VIEWER];
+	assert!(viewer.watching().next().unwrap().layers().is_empty());
+	assert_eq!(viewer.set_watch_layer(&id, Some(0)), Err(SessionError::NoLayers(id.clone())));
+	assert_eq!(viewer.set_watch_layer(&id, None), Err(SessionError::NoLayers(id.clone())));
+	assert!(viewer.poll_output().is_none(), "nothing sent");
+	net.flush().await;
+	assert!(!net.signals.iter().any(|(_, s)| matches!(s, Signal::Layer { .. })));
 }

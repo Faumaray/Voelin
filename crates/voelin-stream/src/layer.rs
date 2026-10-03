@@ -79,6 +79,56 @@ impl LayerSpec {
 	}
 }
 
+/// The session-level SDP attribute in which a Voelin streamer's offer lists
+/// its layers, so that a Voelin viewer can pick one (`Signal::Layer`):
+/// `a=x-voelin-layers:<layer> <layer> ...`, each layer
+/// `<id>/<WxH or scale>/<bitrate>[/<fps>]`. WebRTC stacks skip session
+/// attributes they do not know (libwebrtc, which the official TeamSpeak
+/// client is built on, and str0m), so other viewers are unaffected, and a
+/// viewer asks for a layer only when the offer had it.
+pub const SDP_ATTRIBUTE: &str = "x-voelin-layers";
+
+/// `sdp` with the [`SDP_ATTRIBUTE`] line listing `layers` at the end of its
+/// session section (before the first `m=` line).
+pub fn add_to_sdp(sdp: &str, layers: &[LayerSpec]) -> String {
+	let list: Vec<String> = layers
+		.iter()
+		.map(|l| {
+			let size = l.size.map_or_else(|| l.scale.to_string(), |(w, h)| format!("{w}x{h}"));
+			let fps = l.max_fps.map(|f| format!("/{f}")).unwrap_or_default();
+			format!("{}/{size}/{}{fps}", l.id, l.bitrate)
+		})
+		.collect();
+	let line = format!("a={SDP_ATTRIBUTE}:{}\r\n", list.join(" "));
+	let at = sdp.find("\r\nm=").map_or(sdp.len(), |i| i + 2);
+	let mut out = String::with_capacity(sdp.len() + line.len());
+	out.push_str(&sdp[..at]);
+	out.push_str(&line);
+	out.push_str(&sdp[at..]);
+	out
+}
+
+/// The layers an SDP lists in [`SDP_ATTRIBUTE`]; `None` without the
+/// attribute. Entries that do not parse are left out.
+pub fn from_sdp(sdp: &str) -> Option<Vec<LayerSpec>> {
+	let prefix = format!("a={SDP_ATTRIBUTE}:");
+	let value = sdp.lines().find_map(|l| l.trim_end().strip_prefix(prefix.as_str()))?;
+	let layer = |entry: &str| {
+		let mut parts = entry.split('/');
+		let id = parts.next()?.parse().ok()?;
+		let size = parts.next()?;
+		let bitrate = parts.next()?.parse().ok()?;
+		let max_fps = parts.next().map(str::parse).transpose().ok()?;
+		let mut layer = LayerSpec { id, max_fps, ..LayerSpec::single(bitrate) };
+		match size.split_once('x') {
+			Some((w, h)) => layer.size = Some((w.parse().ok()?, h.parse().ok()?)),
+			None => layer.scale = size.parse().ok()?,
+		}
+		Some(layer)
+	};
+	Some(value.split_whitespace().filter_map(layer).collect())
+}
+
 /// A set of layers, e.g. those waiting for a keyframe. Grows as needed.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct LayerSet {
@@ -190,6 +240,30 @@ mod tests {
 		assert_eq!(format!("{set:?}"), format!("{{1, 3, {}}}", LayerId::MAX));
 		set.clear();
 		assert!(set.is_empty());
+	}
+
+	#[test]
+	fn layers_in_the_sdp() {
+		let layers = vec![
+			LayerSpec { id: 0, size: Some((1920, 1080)), ..LayerSpec::single(6_000_000) },
+			LayerSpec { id: 3, scale: 0.5, max_fps: Some(15), ..LayerSpec::single(800_000) },
+		];
+		let sdp = "v=0\r\no=- 1 2 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\n\
+		           m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:0\r\n";
+		let with = add_to_sdp(sdp, &layers);
+		assert_eq!(
+			with,
+			"v=0\r\no=- 1 2 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\n\
+			 a=x-voelin-layers:0/1920x1080/6000000 3/0.5/800000/15\r\n\
+			 m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:0\r\n"
+		);
+		assert_eq!(from_sdp(&with), Some(layers));
+		assert_eq!(from_sdp(sdp), None);
+		// Garbled entries are left out.
+		assert_eq!(
+			from_sdp("a=x-voelin-layers:x/1/2 1/0.5 2/1/700000\r\n").unwrap(),
+			[LayerSpec { id: 2, ..LayerSpec::single(700_000) }]
+		);
 	}
 
 	#[test]
