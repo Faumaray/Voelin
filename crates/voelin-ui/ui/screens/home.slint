@@ -439,8 +439,10 @@ component FriendBubble inherits Rectangle {
 // title, the streamer and where it is over its darker lower part.
 component LiveCard inherits Rectangle {
     in property <LiveItem> room;
-    width: 256px;
-    height: 170px;
+    // The phone: smaller, two in view.
+    in property <bool> compact;
+    width: compact ? 200px : 256px;
+    height: compact ? 150px : 170px;
     border-radius: Theme.radius-lg;
     clip: true;
     background: Theme.surface-2;
@@ -987,6 +989,33 @@ export component HomePage inherits Rectangle {
                     chat: chat;
                 }
             }
+            // The phone: the servers come before the live streams, a row
+            // to swipe through.
+            if root.compact: Section {
+                text: @tr("Your Servers");
+                icon: Icons.layout-grid;
+                action: @tr("Add a Server");
+                action-clicked => { Nav.add-server(); }
+            }
+            if root.compact && Bridge.servers.length == 0: Text {
+                text: @tr("No servers yet. Add one with its address and your nickname.");
+                color: Theme.text-muted;
+                font-size: Theme.font-sm;
+                wrap: word-wrap;
+            }
+            if root.compact && Bridge.servers.length > 0: Flickable {
+                height: 170px;
+                content-width: max(self.width, servers-row.preferred-width);
+                content-height: self.height;
+                servers-row := HorizontalLayout {
+                    spacing: Theme.space-3;
+                    alignment: start;
+                    for server in Bridge.servers: ServerCard {
+                        width: 220px;
+                        server: server;
+                    }
+                }
+            }
             Section {
                 text: root.compact ? @tr("Live Now") : @tr("Featured Live Rooms");
                 icon: Icons.radio;
@@ -1000,7 +1029,7 @@ export component HomePage inherits Rectangle {
                 wrap: word-wrap;
             }
             Rectangle {
-                height: Bridge.live-rooms.length > 0 ? 170px : 0px;
+                height: Bridge.live-rooms.length == 0 ? 0px : root.compact ? 150px : 170px;
                 live-list := Flickable {
                     content-width: max(self.width, live-row.preferred-width);
                     content-height: self.height;
@@ -1009,6 +1038,7 @@ export component HomePage inherits Rectangle {
                         alignment: start;
                         for room in Bridge.live-rooms: LiveCard {
                             room: room;
+                            compact: root.compact;
                         }
                     }
                 }
@@ -1023,13 +1053,13 @@ export component HomePage inherits Rectangle {
                     clicked => { root.more-live(); }
                 }
             }
-            Section {
+            if !root.compact: Section {
                 text: @tr("Your Servers");
                 icon: Icons.layout-grid;
                 action: @tr("Add a Server");
                 action-clicked => { Nav.add-server(); }
             }
-            if Bridge.servers.length == 0: Text {
+            if !root.compact && Bridge.servers.length == 0: Text {
                 text: @tr("No servers yet. Add one with its address and your nickname.");
                 color: Theme.text-muted;
                 font-size: Theme.font-sm;
@@ -1040,20 +1070,6 @@ export component HomePage inherits Rectangle {
                 alignment: stretch;
                 for server in Bridge.servers: ServerCard {
                     server: server;
-                }
-            }
-            // The phone: a row to swipe through.
-            if root.compact && Bridge.servers.length > 0: Flickable {
-                height: 170px;
-                content-width: max(self.width, servers-row.preferred-width);
-                content-height: self.height;
-                servers-row := HorizontalLayout {
-                    spacing: Theme.space-3;
-                    alignment: start;
-                    for server in Bridge.servers: ServerCard {
-                        width: 220px;
-                        server: server;
-                    }
                 }
             }
             if !root.compact: Section {
