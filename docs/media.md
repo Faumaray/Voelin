@@ -24,11 +24,14 @@ described in [studio.md](studio.md).
 | `VideoEncoder` | `encode(&frame, force_keyframe) -> Vec<EncodedFrame>`; `encode_with(&frame, force_keyframe, &mut |EncodedChunk| ..)` hands out the encoder's own buffer (no copy); `set_bitrate(bps)` (libvpx: in place, no keyframe), `set_fps`, `speed()`, `codec()`, `backend()`; `gpu_alignment()` / `encode_gpu(&GpuFrame, ..)` for encoders that take frames in GPU memory (VA-API; MediaCodec's surface path on Android) |
 | `GpuFrame` | a picture in GPU memory (an NV12 VA-API surface), made by `ffmpeg::GpuConverter` from a captured DMA-BUF; `width`, `height`, `timestamp`, `at(timestamp)` (the same surface at another time). On Android `rendered(width, height, timestamp)`: a screen picture the virtual display renders straight into MediaCodec's input surface, only its size and time travel |
 | `EncodedFrame { data, keyframe, pts_90khz }` | one frame for `Peer::write` |
-| `VideoDecoder` | `decode(&[u8]) -> Option<VideoFrame>` (timestamp zero; the caller knows the RTP time) |
+| `VideoDecoder` | `decode(&[u8]) -> Option<VideoFrame>` (timestamp zero; the caller knows the RTP time); `decode_into(&[u8], &mut VideoFrame) -> bool` reuses the frame's buffers (FFmpeg's decoders: no allocation per picture); `conceals_errors()` (FFmpeg's H.264 and HEVC: frames after a lost one still decode) |
 | `EncoderConfig { fps, bitrate_bps, keyframe_interval, content, threads, speed }` | resolution follows the frames; a size change restarts with a keyframe; `threads` is a maximum (0: all CPUs but one), still capped at one per 320x240 pixels; `speed: None` adapts libvpx `cpu-used` to the encode time |
-| `Codecs` | `new()` (probes FFmpeg / MediaCodec once per process), `builtin()` (compiled-in codecs only), `with_openh264(lib)`, `with_preference(EncoderPreference)` / `set_preference`, `decoders()` (viewer order), `encoders()` / `encoder_codecs()` (streamer order under the preference), `encoders_for(&pref)`, `new_decoder(codec)`, `new_encoder(codec, config)`, `new_encoder_preferring(codec, config, &pref)`, `new_encoder_with(codec, backend, config)`, `pick_encoder(&accepted)`, `is_hardware(backend)`, `report()`; cheap to clone |
+| `Codecs` | `new()` (probes FFmpeg / MediaCodec once per process), `builtin()` (compiled-in codecs only), `with_openh264(lib)`, `with_preference(EncoderPreference)` / `set_preference`, `decoders()` (viewer order: every codec one decoder here decodes), `decoders_for(codec)` (that codec's decoders, best first: the ladder), `with_decoder_preference(DecoderPreference)` / `set_decoder_preference`, `with_decoder(factory)` (an application's decoder, first), `encoders()` / `encoder_codecs()` (streamer order under the preference), `encoders_for(&pref)`, `new_decoder(codec)` (the first of the ladder that opens), `new_decoder_with(codec, DecoderBackend)`, `new_encoder(codec, config)`, `new_encoder_preferring(codec, config, &pref)`, `new_encoder_with(codec, backend, config)`, `pick_encoder(&accepted)`, `is_hardware(backend)`, `report()`; cheap to clone |
 | `EncoderPreference { hardware, backend: BackendChoice }` | settings `stream.hardware_acceleration` and `stream.encoder_backend` (`auto`, `software`, or a backend name such as `h264_vaapi`, `libx264`, `libvpx`, `openh264`) |
-| `EncoderReport { ffmpeg, zero_copy, encoders: Vec<EncoderInfo> }` | for the UI: FFmpeg's release and path (or why none), whether DMA-BUF import works, and per backend `name`, `api`, `codec`, `hardware`, `status` (self-test result or why it cannot be used) and `rank` under the current preference |
+| `EncoderReport { ffmpeg, zero_copy, encoders: Vec<EncoderInfo>, decoders: Vec<DecoderInfo> }` | for the UI: FFmpeg's release and path (or why none), whether DMA-BUF import works, and per backend `name`, `api`, `codec`, `hardware`, `status` (self-test result or why it cannot be used) and `rank` under the current preference (for a decoder: its place in its codec's ladder) |
+| `DecoderBackend` | `Ffmpeg("h264_vaapi")`, `Ffmpeg("libdav1d")`, `Libvpx`, `OpenH264`, `Dav1d`, `Hardware("mediacodec")`; `name()` is the settings spelling |
+| `DecoderPreference` | the `EncoderPreference` type for decoders: settings `stream.hardware_decoding` and `stream.decoder_backend` (`auto`, `software`, or a decoder's name such as `h264_vaapi`, `h264`, `libdav1d`, `libvpx`, `openh264`) |
+| `ffmpeg::{FfmpegDecoder, DECODERS, decoder::probe}` | FFmpeg's decoders, see [FFmpeg decoders](#ffmpeg-decoders-loaded-at-runtime) |
 | `EncoderBackend` | `Libvpx`, `OpenH264`, `Ffmpeg("h264_vaapi")`, `Hardware("mediacodec")`; `name()` is the settings spelling |
 | `ffmpeg::{Ffmpeg, probe, FfmpegEncoder, BACKENDS}` | FFmpeg loaded at runtime (feature `ffmpeg`), see [FFmpeg encoders](#ffmpeg-encoders-loaded-at-runtime) |
 | `ffmpeg::avio::Connection`, `ffmpeg::audio::AacEncoder` | bytes written through libavformat's protocols (`rtmp://`, `rtmps://`) with their write errors and an abort flag; the studio's Opus as AAC through FFmpeg's own codecs. See [RTMP output](#rtmp-output) |
@@ -186,18 +189,33 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   never below 3.1, the level offered before); str0m's other H.264 variants
   are only accepted, never offered, so a viewer cannot answer a profile we
   do not send.
-- `VideoPipeline` decodes on its own thread. It starts at a keyframe, and
-  after a lost frame (`contiguous == false`, a lagging frame bus, a queue
-  longer than 30 frames) or a decoder error it skips to the next keyframe,
-  asking for one at most every 500 ms. Keyframes are recognised from the
+- `VideoPipeline` decodes on its own thread, with the first decoder of the
+  stream codec's ladder that opens (`Codecs::decoders_for`, see
+  [FFmpeg decoders](#ffmpeg-decoders-loaded-at-runtime)). It starts at a
+  keyframe. After a lost frame (`contiguous == false`, a lagging frame
+  bus, a queue longer than 30 frames) a decoder that conceals losses
+  (`conceals_errors`: FFmpeg's H.264 and HEVC) goes on decoding while a
+  keyframe is asked for; the others skip to the next keyframe, as they do
+  after a decoder error. A keyframe that is wanted is asked for again every
+  500 ms until one decodes, also while no frame arrives. A decoder that
+  fails three times in a row (an error, or ten frames without a picture,
+  which also asks for a keyframe; decoders of streams with B-frames hold a
+  few) is replaced by the next of the ladder without ending the watch: the
+  keyframe that failed starts the next one at once, otherwise it waits for
+  the next keyframe, and the switch is logged with its reason. The last
+  decoder of the ladder stays. Keyframes are recognised from the
   bitstream (VP8 frame tag, VP9 header, H.264 IDR/SPS NAL units, AV1
-  sequence header OBU). `stats()` (`DecodeStats`) tells the codec, the
-  picture's size, pictures decoded and skipped, the video bytes received,
-  and the decoded frame rate and received bitrate since the previous call
-  (at least half a second); the watch screen shows codec, size, rate and
-  bitrate over the player and in Stream Info, refreshed once a second.
-  These are read from the pipeline, which runs in the app, not sent as
-  engine events: the engine never sees the decoded pictures.
+  sequence header OBU). Pictures go to the callback as `Arc<VideoFrame>`
+  from a pool of four: the decoder writes into one nobody holds
+  (`decode_into`), so a consumer that converts and drops each picture, as
+  the app does, costs no allocations. `stats()` (`DecodeStats`) tells the
+  codec, the decoder in use, the picture's size, pictures decoded and
+  skipped, the video bytes received, and the decoded frame rate and
+  received bitrate since the previous call (at least half a second); the
+  watch screen shows codec, size, rate and bitrate over the player and in
+  Stream Info, refreshed once a second. These are read from the pipeline,
+  which runs in the app, not sent as engine events: the engine never sees
+  the decoded pictures.
 - `Viewer` feeds a `VideoPipeline` from the engine and sends
   `RequestStreamKeyframe`; `LocalPreview` runs capture → encoder → decoder
   without a server (the desktop app's `VOELIN_DEMO_STREAM`).
@@ -301,7 +319,10 @@ e.g. calls).
 
 ## Codecs
 
-Preference: a viewer accepts VP9 > VP8 > AV1 > H.264; a streamer encodes with
+Preference: a viewer accepts AV1 > HEVC > VP9 > H.264 > VP8, each with the
+best decoder that works here (hardware, then FFmpeg's software decoders,
+then the built-in ones; see [FFmpeg decoders](#ffmpeg-decoders-loaded-at-runtime));
+a streamer encodes with
 hardware (H.264 > AV1 > VP9 > VP8 > HEVC) > VP8 (libvpx) > H.264 (x264 and
 OpenH264 through FFmpeg, then Cisco's OpenH264) > VP9 (libvpx, expensive in
 software) > AV1 (SVT-AV1, libaom through FFmpeg). `Codecs` filters both lists
@@ -316,13 +337,14 @@ off), the automatic order after it.
 | libvpx | `vpx` (default) | VP8, VP9 | VP8, VP9 | system libvpx (1.14 tested), dynamically linked; bindings from `libvpx-native-sys` (pre-generated, no bindgen) |
 | OpenH264 | `openh264` (default) | H.264 Constrained High / Baseline | H.264 | Cisco's prebuilt binary, loaded at runtime |
 | dav1d | `av1` | – | AV1 | system libdav1d >= 1.3 (1.4.1 tested) |
-| FFmpeg | `ffmpeg` (default; off on Android) | H.264, HEVC, AV1, VP9, VP8 in hardware; H.264 (x264, OpenH264), AV1 (SVT-AV1, libaom, rav1e) in software | – | the system's (or `VOELIN_FFMPEG_DIR`'s) libavcodec / libavutil, any major version, loaded at runtime; see below |
+| FFmpeg | `ffmpeg` (default; off on Android) | H.264, HEVC, AV1, VP9, VP8 in hardware; H.264 (x264, OpenH264), AV1 (SVT-AV1, libaom, rav1e) in software | AV1, HEVC, VP9, H.264, VP8 in hardware (VA-API, NVDEC, D3D11VA, DXVA2, VideoToolbox) and in software (dav1d, libaom, FFmpeg's own) | the system's (or `VOELIN_FFMPEG_DIR`'s) libavcodec / libavutil, any major version, loaded at runtime; see below |
 | MediaCodec (Android) | – | H.264, VP8, VP9 | VP8, VP9, H.264, AV1 | the device's default codec per type through the NDK (`ndk` crate); an encoder factory named `mediacodec` |
 
 HEVC (`Codec::H265`): str0m packetizes and depacketizes H.265, so it can be
 negotiated; it is offered last and only when a hardware encoder has it, i.e.
-used only by a peer that takes none of the other codecs. There is no HEVC
-decoder, so viewers never accept it.
+used only by a peer that takes none of the other codecs. Viewers accept it
+where FFmpeg decodes it (in hardware, or with FFmpeg's own decoder, which
+every build has).
 
 ### FFmpeg encoders, loaded at runtime
 
@@ -356,7 +378,8 @@ the software encoders above are used as before.
   {0, 1}, `AV_NOPTS_VALUE` in exactly one layout), `AVCodecContext.hw_frames_ctx`
   (for VA-API; located from the offsets `av_opt_find` reports for its
   neighbours `hwaccel_flags` and `err_detect` / `extra_hw_frames` (libavcodec
-  61+) or `max_pixels` (up to 60), and NULL in a new context),
+  61+) or `max_pixels` (up to 60), and NULL in a new context), and
+  `hw_device_ctx` beside it (the device of hardware decoders),
   `AVHWFramesContext` `format`, `sw_format`, `width`, `height`,
   `initial_pool_size` (with or without `internal`, which libavutil 59
   removed; `device_ctx` and both formats checked in a new context), and for
@@ -518,6 +541,87 @@ the software encoders above are used as before.
   RX 7900 GRE `0x200000028a01f04`), offered only if it needs a single plane
   (no compression metadata); the portal offers it ahead of LINEAR (see
   [Capture](#capture)). See [the measurements](#zero-copy-measured).
+
+### FFmpeg decoders, loaded at runtime
+
+The same runtime-loaded FFmpeg decodes (`ffmpeg/decoder.rs`). Every codec a
+viewer may get has a ladder of decoders, tried best first
+(`Codecs::decoders_for`), and a viewer accepts every codec one of them
+decodes (`Codecs::decoders`, which `peer_config` puts in
+`accept_video_codecs`):
+
+1. hardware, through FFmpeg's hwaccel API (`ffmpeg::DECODERS`; the names are
+   FFmpeg's names of its hwaccels): `av1_vaapi`, `hevc_vaapi`, `vp9_vaapi`,
+   `h264_vaapi`, `vp8_vaapi` and, for NVIDIA's driver, which has no VA-API
+   of its own, `*_nvdec` (Linux); `*_d3d11va`, then `*_dxva2` (Windows; AV1,
+   HEVC, VP9, H.264); `*_videotoolbox` (macOS; the same four). On Android
+   MediaCodec instead, which hardware decoding off does not leave out
+   (Android has no other decoders);
+2. FFmpeg's software decoders: `libdav1d`, then `libaom-av1` (AV1; FFmpeg's
+   own `av1` decoder decodes only in hardware), `hevc`, `vp9`, `h264`, `vp8`;
+3. the built-in ones: `libvpx` (VP8, VP9), `openh264` (H.264, once Cisco's
+   library is loaded), `dav1d` (AV1, feature `av1`).
+
+The settings choose like the encoders' (`DecoderPreference`):
+`stream.hardware_decoding` (on by default) leaves the first group out, and
+`stream.decoder_backend` is `auto`, `software`, or a decoder's name, which
+then comes first for its codec (even in hardware with hardware decoding
+off). The app applies them when they change, to streams watched from then
+on (`Video::set_decoder_preference`); a running watch keeps its decoder.
+
+- Hardware decoding: FFmpeg's own decoder (`av1`, `hevc`, `vp9`, `h264`,
+  `vp8`) gets the process's device in `AVCodecContext.hw_device_ctx`, a
+  field without an AVOption, located like `hw_frames_ctx` (right before
+  `hwaccel_flags` in every layout from libavcodec 58; checked to be NULL in
+  a new context; 560 in FFmpeg 9's headers, as the test compares). FFmpeg's
+  default `get_format` then picks the device's surfaces, so no callback is
+  installed. The devices are shared: VA-API's is the encoders' (the first
+  render node, or `VOELIN_VAAPI_DEVICE`), the others the type's default.
+  Pictures are copied out of the GPU with `av_hwframe_transfer_data` into
+  an NV12 frame of the decoder's own, reused while the size stays, and
+  from there into the caller's `VideoFrame` (`decode_into` reuses its
+  buffers): no Rust allocation per picture for any decoder
+  (`tests/decoder_alloc.rs`). Zero-copy display was not the goal; both
+  copies are part of the 2.4-2.5 ms per 1440p picture measured in
+  [Decoders, measured](#decoders-measured).
+- Packets are handed over without a reference, so FFmpeg copies them into
+  its own padded buffer; pictures come out as `yuv420p` (or `yuvj420p`)
+  and are taken as I420, or as NV12; anything else (10-bit, 4:4:4) is an
+  error, and the ladder moves on.
+- Latency: slice threads only (frame threads would hold a picture per
+  thread before the first comes out), `threads` up to 8 in software and 1
+  in hardware, dav1d's `max_frame_delay` 1 (`framethreads` 1 before FFmpeg
+  5.0). Every frame's picture comes out of the call that decoded it, except
+  what B-frames reorder.
+- The self-test (`ffmpeg::decoder::probe()`, once per process, every decoder
+  on a thread of its own, at the same time as the encoders' probe in
+  `Codecs::new()`): each decoder decodes a three-frame clip of its codec
+  (`src/ffmpeg/clips/`, a keyframe and two frames that predict from it, of a
+  test picture at 320x240 made by our own encoders: `h264_vaapi`,
+  `hevc_vaapi`, `av1_vaapi` and libvpx; `write_self_test_clips`, ignored,
+  writes them again). Every frame must give its picture at once, at its
+  size, above 30 dB against the test picture, and a hardware decoder must
+  have decoded on the GPU: when the GPU lacks the codec, FFmpeg silently
+  decodes in software (VP8 on AMD), which the self-test reports as
+  unusable with FFmpeg's reason, since FFmpeg's software decoder follows
+  in the ladder anyway. NVDEC is not tried without an NVIDIA GPU (the
+  encoders' vendor check). Here the probe takes about 50 ms.
+- At runtime, when the GPU does not take a stream (a profile or a size it
+  lacks), FFmpeg decodes it in software through the same decoder
+  (`FfmpegDecoder::cpu_pictures`), except AV1, which FFmpeg decodes only in
+  hardware: that is an error, and the pipeline's ladder moves on to dav1d.
+
+`voelinctl stream encoders` lists the decoders with their self-test
+results and each codec's ladder. On the Radeon RX 7900 GRE with FFmpeg
+9.0.1:
+
+| Codec | Ladder | Not used |
+|---|---|---|
+| AV1 | `av1_vaapi` > `libdav1d` > `libaom-av1` | `av1_nvdec` (no NVIDIA GPU), `dav1d` (built without `av1`) |
+| HEVC | `hevc_vaapi` > `hevc` | `hevc_nvdec` |
+| VP9 | `vp9_vaapi` > `vp9` > `libvpx` | `vp9_nvdec` |
+| H.264 | `h264_vaapi` > `h264` (> `openh264` once loaded) | `h264_nvdec` |
+| VP8 | `vp8` > `libvpx` | `vp8_vaapi` (the GPU has no VP8 decoder: "No support for codec vp8 profile"), `vp8_nvdec` |
 
 ### RTMP output
 
@@ -889,6 +993,39 @@ self-test: 1920x1080 is sent as 1920x1072, 1366x768 as 1344x768. H.264 has
 no such problem; its SPS crops whatever the hardware pads (exact at all 12
 sizes tried, 320x240 to 3440x1440).
 
+### Decoders, measured
+
+An H.264 stream with B-frames at 2560x1440 and 60 fps, as the official
+client sends it (AMF on an AMD GPU: B-frames, a lookahead, keyframes
+rarely), made with the `ffmpeg` command (x264 `veryfast` with 3 B-frames,
+`h264_vaapi` with 2; `testsrc2`, 8 Mbit/s, a keyframe every 10 s). Release
+build, Radeon RX 7900 GRE, FFmpeg 9.0.1, Cisco's OpenH264 2.6.0.
+
+Decoding as fast as it goes (`tests/ffmpeg_decoders.rs`
+`h264_with_b_frames_at_1440p60`, `--ignored`): pictures out of 600 frames,
+pictures per second of decoding (copied into a `VideoFrame`), the slowest
+frame. Both FFmpeg decoders give the same pictures, in order.
+
+| Decoder | x264 stream | `h264_vaapi` stream |
+|---|---|---|
+| `h264_vaapi` | 598, 424 fps, 6.8 ms | 599, 398 fps, 4.0 ms |
+| `h264` (software) | 598, 276 fps, 8.0 ms | 599, 302 fps, 6.6 ms |
+| OpenH264 | 8, 592 errors | 8, 592 errors |
+
+Played in real time into a `VideoPipeline` whose consumer converts every
+picture to RGBA as the app does (`voelin-core/tests/decode_rate.rs`,
+`--ignored`), both streams alike:
+
+| Decoders | No loss | A frame lost every second |
+|---|---|---|
+| the ladder (`h264_vaapi`) | 59.9 fps | 58.9 fps (concealed; a keyframe asked for every 500 ms meanwhile) |
+| OpenH264 alone (the app before FFmpeg's decoders) | 0.8 fps | 0.8 fps |
+
+OpenH264 does not decode B-frames: every B-frame is an error, and the
+pipeline then waited for keyframes the encoder sends every few seconds at
+most. That was the "very bad frame rate" of an official client's stream in
+the app.
+
 ### Wayland screen capture, measured
 
 Same machine, a 2560x1440 Wayland desktop through the ScreenCast portal,
@@ -994,7 +1131,9 @@ test -p voelin-media` (skipped without `DISPLAY`). FFmpeg needs nothing at
 build time (feature `ffmpeg` only adds `libloading`); its tests run with the
 runtime libraries installed (`libavcodec60` on Ubuntu 24.04) and are
 skipped without them; `VOELIN_OPENH264_LIB` lets them decode x264's output
-with Cisco's OpenH264, `--features av1` AV1 with dav1d.
+with Cisco's OpenH264, `--features av1` AV1 with dav1d. The decoder tests
+(`tests/ffmpeg_decoders.rs`, `tests/decoder_alloc.rs`) need the same and an
+encoder per codec they check (each is skipped without one).
 
 Windows: libvpx is not found through pkg-config there. Install it (e.g.
 `vcpkg install libvpx:x64-windows`) and set `VPX_LIB_DIR`, `VPX_INCLUDE_DIR`
@@ -1035,6 +1174,15 @@ has not run on Windows yet.
 | OpenH264 download, SHA-256 check, reuse | `tests/openh264.rs -- --ignored` | tested locally (network) |
 | H.264 library missing / unknown file | unit + integration tests | tested |
 | AV1 decoder construction, garbage input | unit test (`--features av1`) | tested; streams of SVT-AV1, rav1e, libaom, `av1_vaapi` and `av1_amf` decoded (rows below) |
+| FFmpeg decoders' self-test: every decoder of the build, the clips and the test picture, a GPU decoder that falls back to software reported as unusable | `ffmpeg::decoder::tests`, `tests/ffmpeg_decoders.rs` `probe_reports_every_decoder` | tested on the Radeon RX 7900 GRE: VA-API decodes AV1, HEVC, VP9 and H.264; `vp8_vaapi` reported unusable (the GPU has no VP8 decoder); NVDEC skipped (no NVIDIA GPU) |
+| Every encoder of the machine → every decoder of its codec (PSNR > 28 dB, every frame a picture) | `tests/ffmpeg_decoders.rs` `every_encoder_decodes_with_every_decoder` | tested: 20 pairs (`av1_vaapi`, SVT-AV1, libaom → `av1_vaapi`, `libdav1d`, `libaom-av1`; `h264_vaapi`, x264 → `h264_vaapi`, `h264`; `hevc_vaapi` → `hevc_vaapi`, `hevc`; libvpx → `vp9_vaapi`, `vp9`, `vp8`, `libvpx`), 36.4-38.1 dB |
+| VA-API decoding on the GPU (every picture from a VA-API surface, none from FFmpeg's software path), 320x240 and 1920x1080 | `tests/ffmpeg_decoders.rs` `vaapi_decodes_on_the_gpu` | tested: `av1_vaapi`, `hevc_vaapi`, `vp9_vaapi`, `h264_vaapi`; skipped where no VA-API decoder works |
+| No allocation per picture in any FFmpeg decoder | `tests/decoder_alloc.rs` (counting allocator) | tested: 0 allocations over 30 pictures for each of the ten decoders that work here |
+| What a viewer accepts with and without FFmpeg (`VOELIN_FFMPEG=0`) | `tests/ffmpeg_decoders.rs` `decoders_with_and_without_ffmpeg` (the second half in a child process) | tested: AV1, HEVC, VP9, H.264, VP8 with FFmpeg; VP9, VP8 (libvpx) without |
+| A failing decoder replaced by the next of the ladder (errors, or no pictures), pictures going on; after a loss a concealing decoder goes on and one that does not skips to the keyframe, keyframes asked for every 500 ms until one comes | `voelin-core` `media::tests::a_failing_decoder_is_replaced_by_the_next`, `losses_ask_for_keyframes_until_one_comes` | tested (a decoder made to fail ahead of libvpx) |
+| H.264 with B-frames at 1440p60: every decoder, and the pipeline in real time with and without losses | `tests/ffmpeg_decoders.rs` `h264_with_b_frames_at_1440p60`, `voelin-core/tests/decode_rate.rs` (both `--ignored`, `--release`) | measured, see [Decoders, measured](#decoders-measured) |
+| Chromium's AV1, VP9 and H.264 → our viewer → the pipeline, at their size | `voelin-core/tests/browser_codecs.rs` `browser_streams_decode_in_the_pipeline` (`VOELIN_INTEROP=1`, system Chromium 152) | tested: decoded by `av1_vaapi`, `vp9_vaapi`, `h264_vaapi` |
+| Hardware decoders NVDEC, D3D11VA, DXVA2, VideoToolbox | – | not tested (no such hardware here); NVDEC is skipped by the vendor check, the Windows table type-checks for `x86_64-pc-windows-gnu`, the macOS one is not compiled here |
 | X11 capture (MIT-SHM and GetImage), sources, window capture → VP8 → decode, cursor | `tests/x11_capture.rs` under Xvfb (`VOELIN_X11_TEST_DISPLAY`) | tested |
 | wlroots capture (wlr-screencopy v3): outputs, pixels, a change arriving as a new frame, queue API | `tests/wlroots_capture.rs` against headless sway 1.9 (`VOELIN_WLROOTS_TEST_DISPLAY`) | tested; the ext-image-copy-capture path is untested (sway 1.9 predates it) |
 | Converter (strides, unpadded last row, odd sizes, RGBA/I420/NV12), scaler (flat, area average, half), pyramid (sharing, recycling, steady-state pools) | unit tests | tested |
@@ -1053,7 +1201,7 @@ has not run on Windows yet.
 | Answer's codec reported to the streamer, H.264 level in the offer, HEVC offered | `voelin-stream` `peer::tests::streamer_learns_the_answered_codec`, `h264::tests` | tested (str0m on loopback) |
 | x264 / SVT-AV1 / libaom in the streamer pipeline | `voelinctl stream bench --encoder ...` | 720p30: x264 8.7 ms per frame, SVT-AV1 1.3 ms, libaom 37 ms; 1.1 allocations per encoded frame |
 | Hardware encoders VA-API and AMF (H.264, HEVC, AV1) in the streamer pipeline | `voelinctl stream bench` on a Radeon RX 7900 GRE, 1080p60 / 1440p60 / simulcast | tested: full frame rate, 0.20-0.52 cores against 1.16-2.55 for software, 1.02 allocations per encoded frame, every backend within 2 % of the target bitrate once `av1_vaapi` got a two-second buffer (it overshot by 3.5-8 %; see the tables above) |
-| Hardware encoders → our decoders: `h264_vaapi` / `h264_amf` → OpenH264, `av1_vaapi` / `av1_amf` → dav1d (PSNR > 28 dB, decoded size, keyframes at start and on request, timestamps, bitrate change) at 320x240 and 1920x1080 | `tests/ffmpeg.rs` `hardware_encoders_roundtrip` (`VOELIN_OPENH264_LIB`, `--features av1`) | tested on the Radeon RX 7900 GRE: it found the AV1 encoder padding 1080 rows to 1082 (and other sizes to 64x16), now cropped (see above). HEVC is not decoded (no decoder here) |
+| Hardware encoders → our decoders: `h264_vaapi` / `h264_amf` → OpenH264, `av1_vaapi` / `av1_amf` → dav1d (PSNR > 28 dB, decoded size, keyframes at start and on request, timestamps, bitrate change) at 320x240 and 1920x1080 | `tests/ffmpeg.rs` `hardware_encoders_roundtrip` (`VOELIN_OPENH264_LIB`, `--features av1`) | tested on the Radeon RX 7900 GRE: it found the AV1 encoder padding 1080 rows to 1082 (and other sizes to 64x16), now cropped (see above). HEVC is decoded by FFmpeg's decoders in `tests/ffmpeg_decoders.rs` |
 | The alignment an AV1 encoder pads to, from the sequence header it writes | `ffmpeg::encoder::tests::av1_declared_size_and_alignment` (every optional header field), the self-test on the GPU | tested: (64, 16) for `av1_vaapi` and `av1_amf`, (2, 2) for SVT-AV1, rav1e and libaom |
 | Hardware encoders NVENC, Quick Sync, Media Foundation, VideoToolbox | – | not tested (no such hardware here); NVENC and Quick Sync are skipped by the vendor check and the Windows code type-checks for `x86_64-pc-windows-gnu` |
 | H.264 SPS against the offered `profile-level-id` (`profile_idc`, `level_idc`) for every usable backend, two sizes, both profiles | `tests/ffmpeg.rs` `sps_carries_the_offered_profile_and_level` | tested: it found `h264_amf` emitting level 4.2 where the offer said 3.1; with the level now set, all backends emit the offered level |
