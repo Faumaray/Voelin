@@ -993,6 +993,8 @@ impl Task {
 		&mut self,
 		mut stun_servers: mpsc::UnboundedReceiver<SocketAddr>,
 	) -> Result<(), PeerError> {
+		// Turns in a row str0m wanted again at once.
+		let mut immediate = 0u32;
 		loop {
 			let now = Instant::now();
 			self.rtc.handle_input(Input::Timeout(now))?;
@@ -1022,6 +1024,18 @@ impl Task {
 				}
 			};
 			let deadline = self.stall.due(self.offerer).map_or(deadline, |due| due.min(deadline));
+			// The pacer asks for a timeout at once after every packet it lets
+			// out. Tokio's timer rounds that up to its next millisecond, so a
+			// paced stream sent one packet a millisecond: 9.5 Mbit/s at 1188
+			// bytes (str0m's probes measured exactly that, and the estimate
+			// of a 60 Mbit/s stream on loopback fell to 9 Mbit/s). A due
+			// timeout is handled at once instead, a bounded number of turns
+			// in a row so packets and commands are still read in between.
+			if deadline <= Instant::now() && immediate < 256 {
+				immediate += 1;
+				continue;
+			}
+			immediate = 0;
 			let sleep = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
 			tokio::select! {
 				packet = self.net.incoming.recv() => {

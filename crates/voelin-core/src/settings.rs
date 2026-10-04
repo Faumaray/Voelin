@@ -831,14 +831,15 @@ pub static STREAM_FPS: Key<u32> =
 	Key::new("stream.fps", Kind::UInt { min: 1 }, "Frames per second of our stream.", || 60)
 		.validated(at_least_one);
 
-/// Video bitrate of our stream in kbit/s (no maximum).
+/// Video bitrate of our stream in kbit/s (no maximum); 0, the default:
+/// automatic, from the size and frame rate streamed
+/// (`media::auto_bitrate`, up to 60 Mbit/s), following both live.
 pub static STREAM_BITRATE_KBPS: Key<u32> = Key::new(
 	"stream.bitrate_kbps",
-	Kind::UInt { min: 1 },
-	"Video bitrate of our stream in kbit/s.",
-	|| 8000,
-)
-.validated(at_least_one);
+	Kind::UInt { min: 0 },
+	"Video bitrate of our stream in kbit/s (0: automatic, up to 60 Mbit/s).",
+	|| 0,
+);
 
 /// One simulcast layer as stored; see [`LayerSpec`] for the fields. The
 /// serde form of a layer: `{"scale": 0.5, "max_fps": 30, "bitrate": 1500000}`
@@ -1400,7 +1401,7 @@ mod tests {
 	fn defaults_and_registry() {
 		let s = Settings::in_memory();
 		assert_eq!(s.get(&STREAM_FPS), 60);
-		assert_eq!(s.get(&STREAM_BITRATE_KBPS), 8000);
+		assert_eq!(s.get(&STREAM_BITRATE_KBPS), 0, "automatic");
 		assert!(s.get(&STREAM_LAYERS).is_empty());
 		assert_eq!(s.get(&STREAM_CODEC), CodecChoice::Auto);
 		assert_eq!(s.get(&STREAM_PERMISSIONS), StreamPermissions::Channel);
@@ -1476,6 +1477,8 @@ mod tests {
 		s.set_json("stream.fps", json!(1000)).unwrap();
 		s.set(&STREAM_BITRATE_KBPS, u32::MAX).unwrap();
 		assert_eq!(s.get(&STREAM_BITRATE_KBPS), u32::MAX);
+		// 0 is automatic again.
+		s.set(&STREAM_BITRATE_KBPS, 0).unwrap();
 	}
 
 	#[test]

@@ -150,8 +150,10 @@ pub const LOG_QUIET: c_int = -8;
 pub const LOG_ERROR: c_int = 16;
 pub const LOG_WARNING: c_int = 24;
 
-/// `AV_HWFRAME_MAP_READ` and `AV_HWFRAME_MAP_DIRECT`.
+/// `AV_HWFRAME_MAP_READ`, `_WRITE`, `_OVERWRITE` and `_DIRECT`.
 pub const HWFRAME_MAP_READ: c_int = 1;
+pub const HWFRAME_MAP_WRITE: c_int = 2;
+pub const HWFRAME_MAP_OVERWRITE: c_int = 4;
 pub const HWFRAME_MAP_DIRECT: c_int = 8;
 
 /// `AVERROR(EAGAIN)`: FFmpeg errors are negated `errno` values of the C

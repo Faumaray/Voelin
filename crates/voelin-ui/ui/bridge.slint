@@ -270,13 +270,15 @@ export struct SourceItem {
 export struct ShareForm {
     source: int,
     name: string,
-    // Index into the frame rate choices (15, 30, 60).
+    // Index into the frame rate choices (15, 30, 60, 120, 144, 240, 320).
     fps-index: int,
     // Frames per second as typed; a choice fills it in. Any number above 0.
     fps: string,
-    // Index into the bitrate choices (2.5, 4.6, 8, 10 Mbit/s).
+    // Index into the bitrate choices (Auto, 2.5, 4.6, 8, 10, 20, 40, 60
+    // Mbit/s).
     bitrate-index: int,
-    // Video bitrate in kbit/s as typed; a choice fills it in.
+    // Video bitrate in kbit/s as typed; a choice fills it in. Empty with
+    // Auto: from the size and frame rate shared, up to 60 Mbit/s.
     bitrate: string,
     audio: bool,
     auto-accept: bool,

@@ -532,7 +532,11 @@ async fn no_layer_request_without_the_offer_listing_layers() {
 	assert!(viewer.watching().next().unwrap().layers().is_empty());
 	assert_eq!(viewer.set_watch_layer(&id, Some(0)), Err(SessionError::NoLayers(id.clone())));
 	assert_eq!(viewer.set_watch_layer(&id, None), Err(SessionError::NoLayers(id.clone())));
-	assert!(viewer.poll_output().is_none(), "nothing sent");
+	// Nothing sent (frames that arrived meanwhile are events, not requests).
+	let requests = std::iter::from_fn(|| viewer.poll_output())
+		.filter(|o| matches!(o, Output::Request(_)))
+		.count();
+	assert_eq!(requests, 0, "nothing sent");
 	net.flush().await;
 	assert!(!net.signals.iter().any(|(_, s)| matches!(s, Signal::Layer { .. })));
 }

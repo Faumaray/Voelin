@@ -12,12 +12,12 @@
 //! Type-checked on Linux (`--target x86_64-pc-windows-gnu`), not run yet.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tracing::{debug, warn};
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame;
-use windows_capture::graphics_capture_api::InternalCaptureControl;
+use windows_capture::graphics_capture_api::{GraphicsCaptureApi, InternalCaptureControl};
 use windows_capture::monitor::Monitor;
 use windows_capture::settings::{
 	ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
@@ -105,13 +105,20 @@ where
 	} else {
 		CursorCaptureSettings::WithoutCursor
 	};
+	// Left alone, Windows delivers about 60 frames a second (reported for
+	// a default and for anything under 1 ms: robmikh/Win32CaptureSample#82).
+	// 1 ms lets the sink's frame-rate cap decide, which can change while
+	// capturing. Windows 10 has no such setting.
+	let interval = match GraphicsCaptureApi::is_minimum_update_interval_supported() {
+		Ok(true) => MinimumUpdateIntervalSettings::Custom(Duration::from_millis(1)),
+		_ => MinimumUpdateIntervalSettings::Default,
+	};
 	let settings = Settings::new(
 		item,
 		cursor,
 		DrawBorderSettings::WithoutBorder,
 		SecondaryWindowSettings::Default,
-		// No minimum: the frame rate can change while capturing.
-		MinimumUpdateIntervalSettings::Default,
+		interval,
 		DirtyRegionSettings::Default,
 		ColorFormat::Bgra8,
 		(sink, Instant::now()),

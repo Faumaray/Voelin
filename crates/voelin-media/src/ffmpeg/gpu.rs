@@ -22,7 +22,7 @@ use super::layout::{self, FrameRefs};
 use super::sys::{self, FrameHead, Ptr};
 use super::{Ffmpeg, vpp};
 use crate::capture::{DRM_MOD_INVALID, DRM_MOD_LINEAR, DmaBufRef, drm_fourcc};
-use crate::frame::GpuFrame;
+use crate::frame::{FrameRef, GpuFrame, PixelsRef, PlaneRef};
 use crate::{Error, Result};
 
 /// The DRM formats of RGB buffers the conversion takes (8 bits per
@@ -138,6 +138,142 @@ pub(crate) fn map_dmabuf(
 	Ok(())
 }
 
+/// A VA-API surface of `sw_format` (holding `picture`, BGRA, if given)
+/// exported as a DRM PRIME DMA-BUF: a buffer in video memory as a
+/// compositor hands one over, the driver's tiling modifier and all. The
+/// buffer ([`frame`](Self::frame)) is valid while this lives.
+#[cfg(target_os = "linux")]
+pub(crate) struct Exported {
+	pool: Ptr,
+	surface: Ptr,
+	drm: Ptr,
+	pub(crate) frame: DmaBufRef,
+}
+
+// SAFETY: the frames and the pool are ours; FFmpeg's buffer references are
+// thread-safe and the surface is only read once it is made.
+#[cfg(target_os = "linux")]
+unsafe impl Send for Exported {}
+
+#[cfg(target_os = "linux")]
+impl Exported {
+	pub(crate) fn new(
+		(width, height): (u32, u32),
+		sw_format: c_int,
+		fourcc: u32,
+		picture: Option<&crate::frame::VideoFrame>,
+	) -> std::result::Result<Self, String> {
+		let ffmpeg = Ffmpeg::get().map_err(str::to_owned)?;
+		let api = &ffmpeg.api;
+		let pool = vaapi_pool(ffmpeg, width, height, sw_format)?;
+		let mut exported = Exported {
+			pool,
+			// SAFETY: allocations, checked below; the drop frees them.
+			surface: unsafe { (api.av_frame_alloc)() },
+			drm: unsafe { (api.av_frame_alloc)() },
+			frame: DmaBufRef {
+				width,
+				height,
+				timestamp: Duration::ZERO,
+				fourcc,
+				modifier: 0,
+				fd: -1,
+				size: 0,
+				planes: [(0, 0); 4],
+				plane_count: 0,
+			},
+		};
+		let (surface, drm) = (exported.surface, exported.drm);
+		if surface.is_null() || drm.is_null() {
+			return Err("out of memory".into());
+		}
+		// SAFETY: `pool` is a live frames context of this process's VA-API
+		// device; the frames are ours. The exported frame's `data[0]` is the
+		// AVDRMFrameDescriptor FFmpeg filled, valid while the frame holds
+		// the mapping; a picture's rows are `width * 4` bytes.
+		unsafe {
+			let ret = (api.av_hwframe_get_buffer)(pool, surface, 0);
+			if ret < 0 {
+				return Err(format!("VA-API surface: {}", api.error_text(ret)));
+			}
+			if let Some(picture) = picture {
+				let crate::frame::FrameData::Bgra(pixels) = &picture.data else {
+					return Err("only BGRA pictures are uploaded".into());
+				};
+				let mut sw = (api.av_frame_alloc)();
+				if sw.is_null() {
+					return Err("out of memory".into());
+				}
+				let head = sw.cast::<FrameHead>();
+				((*head).width, (*head).height) = (width as c_int, height as c_int);
+				(*head).format = sw_format;
+				let mut ret = (api.av_frame_get_buffer)(sw, 0);
+				if ret >= 0 {
+					let stride = (*head).linesize[0] as usize;
+					let rows =
+						std::slice::from_raw_parts_mut((*head).data[0], stride * height as usize);
+					for (y, row) in rows.chunks_exact_mut(stride).enumerate() {
+						row[..width as usize * 4]
+							.copy_from_slice(pixels.row(y, width as usize * 4));
+					}
+					ret = (api.av_hwframe_transfer_data)(surface, sw, 0);
+				}
+				(api.av_frame_free)(&mut sw);
+				if ret < 0 {
+					return Err(format!("upload: {}", api.error_text(ret)));
+				}
+			}
+			(*drm.cast::<FrameHead>()).format =
+				ffmpeg.pix.drm_prime.ok_or("no DRM PRIME format")?;
+			let flags = sys::HWFRAME_MAP_READ | sys::HWFRAME_MAP_DIRECT;
+			if (api.av_hwframe_map)(drm, surface, flags) < 0 {
+				return Err("this driver cannot export a VA-API surface as a DMA-BUF".into());
+			}
+			let descriptor = *(*drm.cast::<FrameHead>()).data[0].cast::<sys::DrmFrameDescriptor>();
+			if descriptor.nb_objects != 1 {
+				return Err(format!("{} buffer objects, not one", descriptor.nb_objects));
+			}
+			// The driver may describe a surface one plane per layer (NV12 as
+			// R8 for Y and GR88 for UV) rather than as one layer, which is how
+			// a compositor hands it over. Both name the same bytes of the same
+			// object, so the layers are flattened into planes.
+			let object = descriptor.objects[0];
+			let frame = &mut exported.frame;
+			let layers = descriptor.layers.iter().take(descriptor.nb_layers.max(0) as usize);
+			for layer in layers {
+				for plane in layer.planes.iter().take(layer.nb_planes.max(0) as usize) {
+					if frame.plane_count == frame.planes.len() {
+						return Err("more than four planes".into());
+					}
+					frame.planes[frame.plane_count] = (plane.offset as usize, plane.pitch as usize);
+					frame.plane_count += 1;
+				}
+			}
+			(frame.modifier, frame.fd, frame.size) =
+				(object.format_modifier, object.fd, object.size);
+			if frame.fd < 0 || frame.size == 0 {
+				return Err("no DMA-BUF exported".into());
+			}
+		}
+		Ok(exported)
+	}
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Exported {
+	fn drop(&mut self) {
+		if let Ok(ffmpeg) = Ffmpeg::get() {
+			// SAFETY: ours (or NULL); the mapping goes before the surface it
+			// maps.
+			unsafe {
+				(ffmpeg.api.av_frame_free)(&mut self.drm);
+				(ffmpeg.api.av_frame_free)(&mut self.surface);
+				(ffmpeg.api.av_buffer_unref)(&mut self.pool);
+			}
+		}
+	}
+}
+
 /// One output of [`GpuConverter::convert`]: a layer's size, the multiple
 /// its encoder takes, and whether it wants this frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -180,8 +316,12 @@ pub struct GpuConverter {
 	vpp: Option<(vpp::Converter, (u32, u32))>,
 	/// The frames context DMA-BUFs of this size are mapped onto.
 	import: Option<(Ptr, (u32, u32))>,
-	/// Holds a mapping while it is converted.
+	/// Surfaces pictures in memory of this size and format are copied into.
+	upload: Option<(Ptr, (u32, u32), c_int)>,
+	/// Holds a mapping (or an uploaded surface) while it is converted.
 	mapped: Surface,
+	/// An uploaded surface mapped into memory while its rows are written.
+	writable: Surface,
 	outputs: Vec<Output>,
 	modifiers: Vec<u64>,
 }
@@ -205,7 +345,9 @@ impl GpuConverter {
 			display,
 			vpp: None,
 			import: None,
+			upload: None,
 			mapped: Surface::alloc(ffmpeg)?,
+			writable: Surface::alloc(ffmpeg)?,
 			outputs: Vec::new(),
 			modifiers: Vec::new(),
 		};
@@ -275,10 +417,105 @@ impl GpuConverter {
 		self.prepare(source)?;
 		let pool = self.import.as_ref().expect("prepared").0;
 		map_dmabuf(self.ffmpeg, frame, pool, self.mapped.0, self.refs).map_err(Error::Convert)?;
-		let result = self.convert_mapped(frame, layers, out);
+		let result = self.convert_mapped(source, frame.timestamp, layers, out);
 		// SAFETY: our frame; this lets the buffer go.
 		unsafe { (self.ffmpeg.api.av_frame_unref)(self.mapped.0) };
 		result
+	}
+
+	/// Whether [`convert_memory`](Self::convert_memory) takes pictures like
+	/// `pixels`: BGRx or RGBx (alpha is ignored).
+	pub fn takes(&self, pixels: &PixelsRef<'_>) -> bool {
+		self.upload_format(pixels).is_some()
+	}
+
+	fn upload_format<'a>(&self, pixels: &PixelsRef<'a>) -> Option<(PlaneRef<'a>, c_int)> {
+		match *pixels {
+			PixelsRef::Bgra(plane) => Some((plane, self.ffmpeg.pix.bgr0?)),
+			PixelsRef::Rgba(plane) => Some((plane, self.ffmpeg.pix.rgb0?)),
+			_ => None,
+		}
+	}
+
+	/// Convert `frame`, an RGB picture in memory ([`takes`](Self::takes)),
+	/// like [`convert`](Self::convert): it is copied into a surface of its
+	/// own, which the GPU converts and scales for every due layer. That copy
+	/// is all the CPU does, where converting the picture to I420 and scaling
+	/// it on every core, then uploading each layer from its encoder's
+	/// thread, cost several times as much. Measured on a Radeon RX 7900
+	/// GRE: 11.9 ms a 7680x4320 frame, 5.7 ms of it the copy on the CPU and
+	/// the rest the GPU's upload and conversion, waited for. More threads
+	/// copying gained little (9.9 ms with eight) for several times the CPU
+	/// (26 ms), so it is one. Not waiting for the GPU (only before the next
+	/// copy into the same surface) was slower in the streamer: 36 fps at
+	/// 7680x4320 against 42, the encoder then waiting for the conversion.
+	pub fn convert_memory(
+		&mut self,
+		frame: &FrameRef<'_>,
+		layers: &[GpuLayer],
+		out: &mut [Option<Arc<GpuFrame>>],
+	) -> Result<()> {
+		let Some((plane, format)) = self.upload_format(&frame.pixels) else {
+			return Err(Error::Convert("not an RGB picture".into()));
+		};
+		let source = (frame.width, frame.height);
+		let (row, rows) = (frame.width as usize * 4, frame.height as usize);
+		if rows == 0 || plane.stride < row || plane.data.len() < plane.stride * (rows - 1) + row {
+			return Err(Error::InvalidFrame("the picture is smaller than its size".into()));
+		}
+		self.outputs.retain(|o| layers.iter().any(|l| exact_size(l.size, l.alignment) == o.size));
+		self.prepare(source)?;
+		if self.upload.as_ref().is_none_or(|&(_, size, f)| (size, f) != (source, format)) {
+			if let Some((mut pool, ..)) = self.upload.take() {
+				// SAFETY: our reference.
+				unsafe { (self.ffmpeg.api.av_buffer_unref)(&mut pool) };
+			}
+			let pool =
+				vaapi_pool(self.ffmpeg, source.0, source.1, format).map_err(Error::Convert)?;
+			self.upload = Some((pool, source, format));
+		}
+		let pool = self.upload.as_ref().expect("made above").0;
+		let api = &self.ffmpeg.api;
+		let (surface, writable) = (self.mapped.0, self.writable.0);
+		// SAFETY: our frames; `surface` takes a surface of our pool and
+		// `writable` maps it (`format` is the pool's), so its first plane
+		// is `linesize[0]` bytes per row for `height` rows until the unref,
+		// which writes it to the surface (`vaPutImage`).
+		let mapped = unsafe {
+			let ret = (api.av_hwframe_get_buffer)(pool, surface, 0);
+			if ret < 0 {
+				return Err(Error::Convert(format!("VA-API surface: {}", api.error_text(ret))));
+			}
+			(*writable.cast::<FrameHead>()).format = format;
+			let flags = sys::HWFRAME_MAP_WRITE | sys::HWFRAME_MAP_OVERWRITE;
+			let ret = (api.av_hwframe_map)(writable, surface, flags);
+			if ret < 0 {
+				(api.av_frame_unref)(surface);
+				return Err(Error::Convert(format!("mapping a surface: {}", api.error_text(ret))));
+			}
+			let head = &*writable.cast::<FrameHead>();
+			std::slice::from_raw_parts_mut(head.data[0], head.linesize[0] as usize * rows)
+		};
+		for (y, out) in mapped.chunks_exact_mut(mapped.len() / rows).enumerate() {
+			out[..row].copy_from_slice(plane.row(y, row));
+		}
+		// SAFETY: our mapping; unmapping uploads it.
+		unsafe { (api.av_frame_unref)(writable) };
+		let result = self.convert_mapped(source, frame.timestamp, layers, out);
+		// SAFETY: our frame; the surface goes back to the pool.
+		unsafe { (api.av_frame_unref)(surface) };
+		result
+	}
+
+	/// Map `frame` and let it go again: the import alone, for measuring.
+	#[cfg(test)]
+	pub(crate) fn import_only(&mut self, frame: &DmaBufRef) -> Result<()> {
+		self.prepare((frame.width, frame.height))?;
+		let pool = self.import.as_ref().expect("prepared").0;
+		map_dmabuf(self.ffmpeg, frame, pool, self.mapped.0, self.refs).map_err(Error::Convert)?;
+		// SAFETY: our frame.
+		unsafe { (self.ffmpeg.api.av_frame_unref)(self.mapped.0) };
+		Ok(())
 	}
 
 	/// The import pool and the video processing for buffers of `source`'s
@@ -302,9 +539,12 @@ impl GpuConverter {
 		Ok(())
 	}
 
+	/// Convert and scale the picture in `mapped`, `size` large, taken at
+	/// `timestamp`, for every due layer.
 	fn convert_mapped(
 		&mut self,
-		frame: &DmaBufRef,
+		size: (u32, u32),
+		timestamp: Duration,
 		layers: &[GpuLayer],
 		out: &mut [Option<Arc<GpuFrame>>],
 	) -> Result<()> {
@@ -319,11 +559,8 @@ impl GpuConverter {
 			let part = |full: u32, kept: u32, of: u32| {
 				(u64::from(full) * u64::from(kept) / u64::from(of.max(1))).max(1) as u32
 			};
-			let src = (
-				part(frame.width, exact.0, layer.size.0),
-				part(frame.height, exact.1, layer.size.1),
-			);
-			let gpu = self.output(exact, frame.timestamp)?;
+			let src = (part(size.0, exact.0, layer.size.0), part(size.1, exact.1, layer.size.1));
+			let gpu = self.output(exact, timestamp)?;
 			let (vpp, _) = self.vpp.as_ref().expect("prepared");
 			vpp.convert(input, src, gpu.surface.id(), exact).map_err(Error::Convert)?;
 			*slot = Some(gpu);
@@ -378,6 +615,10 @@ impl Drop for GpuConverter {
 	fn drop(&mut self) {
 		self.outputs.clear();
 		if let Some((mut pool, _)) = self.import.take() {
+			// SAFETY: our reference.
+			unsafe { (self.ffmpeg.api.av_buffer_unref)(&mut pool) };
+		}
+		if let Some((mut pool, ..)) = self.upload.take() {
 			// SAFETY: our reference.
 			unsafe { (self.ffmpeg.api.av_buffer_unref)(&mut pool) };
 		}

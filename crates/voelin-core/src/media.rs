@@ -69,6 +69,7 @@ use voelin_stream::{
 };
 
 use crate::settings::{AudioSourceKindSetting, AudioSourceSetting};
+pub use crate::stream::LayerFormat;
 use crate::stream::StreamSink;
 use crate::{Command, Engine, SessionId};
 
@@ -274,6 +275,22 @@ pub fn test_pattern_source() -> CaptureSource {
 	}
 }
 
+/// The most an automatic bitrate ([`auto_bitrate`]) gives, in bit/s. A
+/// typed bitrate may be higher: nothing in Voelin caps it.
+pub const AUTO_BITRATE_MAX: u64 = 60_000_000;
+
+/// The least an automatic bitrate gives, in bit/s.
+pub const AUTO_BITRATE_MIN: u64 = 300_000;
+
+/// The automatic bitrate (bit/s) of a `width` x `height` stream at `fps`:
+/// 0.12 bits per pixel and frame (7.5 Mbit/s at 1080p30, 15 at 1080p60, 27
+/// at 1440p60), from [`AUTO_BITRATE_MIN`] up to [`AUTO_BITRATE_MAX`], which
+/// 3840x2160 reaches at 60 fps and 1920x1080 at 240.
+pub fn auto_bitrate(width: u32, height: u32, fps: u32) -> u64 {
+	let pixels = u128::from(width) * u128::from(height) * u128::from(fps.max(1));
+	(pixels * 12 / 100).clamp(AUTO_BITRATE_MIN.into(), AUTO_BITRATE_MAX.into()) as u64
+}
+
 /// Where a [`Streamer`] puts encoded frames.
 pub trait MediaSink: Send + Sync {
 	/// Send one frame; `false` once nobody takes frames any more.
@@ -309,6 +326,16 @@ pub trait MediaSink: Send + Sync {
 	fn video_codecs(&self, out: &mut Vec<VideoFormat>) {
 		let _ = out;
 	}
+
+	/// What layer `layer` is encoded at: size, frame rate and bitrate (an
+	/// automatic one, [`auto_bitrate`] of its size and frame rate, so marked).
+	/// Told when the sink is attached (from the size captured so far), with
+	/// the layer's first frame, and whenever it changes, so the stream's
+	/// connections can probe for the bitrate and offers can declare the
+	/// H.264 level the stream needs.
+	fn layer_format(&self, layer: LayerId, format: LayerFormat) {
+		let _ = (layer, format);
+	}
 }
 
 impl MediaSink for StreamSink {
@@ -334,6 +361,10 @@ impl MediaSink for StreamSink {
 
 	fn layer_bitrate(&self, layer: LayerId) -> Option<u64> {
 		StreamSink::layer_bitrate(self, layer)
+	}
+
+	fn layer_format(&self, layer: LayerId, format: LayerFormat) {
+		StreamSink::layer_format(self, layer, format);
 	}
 }
 
@@ -538,7 +569,8 @@ pub struct StreamerConfig {
 	/// gives up to this rate; layers may cap lower.
 	pub fps: u32,
 	/// Video bitrate in kbit/s, as in `StreamSetup::bitrate`, for the single
-	/// layer when `layers` is empty.
+	/// layer when `layers` is empty; 0: automatic, [`auto_bitrate`] of the
+	/// size and frame rate encoded, following both as they change.
 	pub bitrate_kbps: u32,
 	/// The codec of our offer, see [`stream_codec`].
 	pub codec: Codec,
@@ -560,6 +592,9 @@ pub struct StreamerConfig {
 	/// ([`SyntheticScreen::with_dmabuf`]): drives the GPU path without a
 	/// portal (Linux, `/dev/udmabuf`).
 	pub synthetic_dmabuf: bool,
+	/// With `synthetic_dmabuf`: buffers in video memory drawn in advance, as
+	/// a compositor's are ([`SyntheticScreen::with_video_memory`]; VA-API).
+	pub synthetic_video_memory: bool,
 	/// Portal restore token from an earlier share: the desktop may skip its
 	/// dialog. The new one is [`Streamer::restore_token`].
 	pub restore_token: Option<String>,
@@ -583,6 +618,7 @@ impl Default for StreamerConfig {
 			synthetic_size: (1280, 720),
 			synthetic_pattern: Pattern::Simple,
 			synthetic_dmabuf: false,
+			synthetic_video_memory: false,
 			restore_token: None,
 			layers: Vec::new(),
 		}
@@ -591,10 +627,10 @@ impl Default for StreamerConfig {
 
 impl StreamerConfig {
 	/// The layers that are encoded: [`layers`](Self::layers), or one layer at
-	/// `bitrate_kbps`.
+	/// `bitrate_kbps` (bitrate 0: automatic).
 	pub fn effective_layers(&self) -> Vec<LayerSpec> {
 		if self.layers.is_empty() {
-			vec![LayerSpec::single(u64::from(self.bitrate_kbps.max(1)) * 1000)]
+			vec![LayerSpec::single(u64::from(self.bitrate_kbps) * 1000)]
 		} else {
 			self.layers.clone()
 		}
@@ -607,7 +643,8 @@ impl StreamerConfig {
 pub struct StreamerConfigUpdate {
 	/// Frame-rate cap; the capture follows without restarting.
 	pub fps: Option<u32>,
-	/// Bitrate of the single layer (used while `layers` is empty).
+	/// Bitrate of the single layer (used while `layers` is empty); 0:
+	/// automatic.
 	pub bitrate_kbps: Option<u32>,
 	/// Another codec: new encoders, starting with keyframes.
 	pub codec: Option<Codec>,
@@ -673,11 +710,13 @@ pub struct StreamerStats {
 	/// Mean time to convert a captured frame to I420 and scale it for every
 	/// layer that is due, on the CPU.
 	pub convert_time: Duration,
-	/// Captured frames that never reached the CPU: DMA-BUFs converted to
-	/// NV12 and scaled for every layer on the GPU, for VA-API encoders.
+	/// Captured frames converted to NV12 and scaled for every layer on the
+	/// GPU, for VA-API encoders: DMA-BUFs, which the CPU never reads, and
+	/// pictures in memory, which it copies into a surface first.
 	pub gpu_frames: u64,
-	/// Mean time the capture thread spends on such a frame (it waits for
-	/// the GPU, so the buffer can go back to the compositor).
+	/// Mean time the capture thread spends on such a frame (the copy, if
+	/// any, and the wait for the GPU, so the buffer can go back to the
+	/// compositor).
 	pub gpu_convert_time: Duration,
 	/// Why the GPU path stopped (it fell back to the CPU), if it did.
 	pub gpu_error: Option<String>,
@@ -712,7 +751,7 @@ struct Layer {
 	/// A keyframe was asked for.
 	keyframe: AtomicBool,
 	stop: AtomicBool,
-	/// Configured bitrate and cap (0: none), bit/s.
+	/// Configured bitrate (0: automatic) and cap (0: none), bit/s.
 	bitrate: AtomicU64,
 	max_bitrate: AtomicU64,
 	/// Frame rate the encoder plans for.
@@ -746,7 +785,7 @@ impl Layer {
 			gpu: AtomicU64::new(0),
 			keyframe: AtomicBool::new(false),
 			stop: AtomicBool::new(false),
-			bitrate: AtomicU64::new(spec.bitrate.max(1)),
+			bitrate: AtomicU64::new(spec.bitrate),
 			max_bitrate: AtomicU64::new(spec.max_bitrate.unwrap_or(0)),
 			fps: AtomicU32::new(layer_fps(spec, fps)),
 			next_encoder: Mutex::new(None),
@@ -766,13 +805,24 @@ impl Layer {
 
 	fn update(&self, spec: &LayerSpec, fps: u32) {
 		*lock(&self.spec) = spec.clone();
-		self.bitrate.store(spec.bitrate.max(1), Ordering::Relaxed);
+		self.bitrate.store(spec.bitrate, Ordering::Relaxed);
 		self.max_bitrate.store(spec.max_bitrate.unwrap_or(0), Ordering::Relaxed);
 		self.fps.store(layer_fps(spec, fps), Ordering::Relaxed);
 	}
 
 	fn stopped(&self) -> bool {
 		self.stop.load(Ordering::Relaxed)
+	}
+
+	/// What the layer encodes pictures of `size` at: its bitrate, or the
+	/// automatic one for that size and its frame rate.
+	fn format(&self, (width, height): (u32, u32)) -> LayerFormat {
+		let fps = self.fps.load(Ordering::Relaxed);
+		let (bitrate, automatic) = match self.bitrate.load(Ordering::Relaxed) {
+			0 => (auto_bitrate(width, height, fps), true),
+			bitrate => (bitrate, false),
+		};
+		LayerFormat { width, height, fps, bitrate, automatic }
 	}
 }
 
@@ -916,6 +966,8 @@ fn cores() -> u32 {
 fn encoder_config(spec: &LayerSpec, fps: u32, threads: u32) -> EncoderConfig {
 	EncoderConfig {
 		fps: layer_fps(spec, fps),
+		// An automatic bitrate (0) is set with the first frame, whose size it
+		// takes.
 		bitrate_bps: spec.bitrate.clamp(1, u64::from(u32::MAX)) as u32,
 		content: ContentHint::Screen,
 		threads,
@@ -1040,7 +1092,8 @@ impl Streamer {
 			SourceId::Synthetic => {
 				let (w, h) = config.synthetic_size;
 				let mut screen = SyntheticScreen::with_pattern(w, h, config.synthetic_pattern)
-					.with_dmabuf(config.synthetic_dmabuf);
+					.with_dmabuf(config.synthetic_dmabuf)
+					.with_video_memory(config.synthetic_video_memory);
 				screen.start_sink(&SourceId::Synthetic, &options, ingest).await?;
 				(Box::new(screen), None)
 			}
@@ -1210,6 +1263,15 @@ impl Streamer {
 
 	/// Start encoding into `sink` (replacing an earlier one).
 	pub fn attach(&self, sink: Arc<dyn MediaSink>) {
+		// What the layers are, from the size captured so far: a viewer may
+		// join before the first frame is encoded.
+		let size = self.shared.size.load(Ordering::Relaxed);
+		if size != 0 {
+			for layer in lock(&self.shared.layers).iter() {
+				let picture = lock(&layer.spec).output_size((size >> 32) as u32, size as u32);
+				sink.layer_format(layer.id, layer.format(picture));
+			}
+		}
 		*lock(&self.shared.sink) = Some(sink);
 	}
 
@@ -1255,6 +1317,25 @@ impl Streamer {
 	/// The ids of the layers being encoded.
 	pub fn layer_ids(&self) -> Vec<LayerId> {
 		lock(&self.shared.layers).iter().map(|l| l.id).collect()
+	}
+
+	/// The stream's video bitrate in kbit/s, for `StreamSetup::bitrate`: its
+	/// highest layer's; an automatic one ([`auto_bitrate`]) from the size
+	/// captured last and the layer's frame rate, [`AUTO_BITRATE_MAX`] while
+	/// nothing was captured yet.
+	pub fn bitrate_kbps(&self) -> u32 {
+		let size = self.shared.size.load(Ordering::Relaxed);
+		let (width, height) = ((size >> 32) as u32, size as u32);
+		let layers = lock(&self.shared.layers).clone();
+		let bitrate = layers.iter().map(|layer| match layer.bitrate.load(Ordering::Relaxed) {
+			0 if size == 0 => AUTO_BITRATE_MAX,
+			0 => {
+				let (w, h) = lock(&layer.spec).output_size(width, height);
+				auto_bitrate(w, h, layer.fps.load(Ordering::Relaxed))
+			}
+			bitrate => bitrate,
+		});
+		u32::try_from(bitrate.max().unwrap_or(0) / 1000).unwrap_or(u32::MAX)
 	}
 
 	pub fn stats(&self) -> StreamerStats {
@@ -1590,6 +1671,15 @@ struct Ingest {
 	gpu: GpuStage,
 }
 
+/// What the GPU stage converts: a DMA-BUF, or a picture in memory, which
+/// it copies into a surface first.
+#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+#[derive(Clone, Copy)]
+enum GpuInput<'a, 'b> {
+	Dmabuf(&'a DmaBufRef),
+	Memory(&'a FrameRef<'b>),
+}
+
 /// The GPU stage of [`Ingest`].
 #[cfg(all(target_os = "linux", feature = "media-desktop"))]
 #[derive(Default)]
@@ -1649,33 +1739,36 @@ impl Ingest {
 		false
 	}
 
+	/// The GPU stage's converter, made for the first frame; `None` once
+	/// making it (or a conversion) failed.
+	#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+	fn gpu_converter(&mut self) -> Option<&mut voelin_media::ffmpeg::GpuConverter> {
+		if self.gpu.converter.is_none() {
+			match voelin_media::ffmpeg::GpuConverter::new() {
+				Ok(converter) => self.gpu.converter = Some(Ok(converter)),
+				Err(e) => {
+					warn!("no GPU conversion of captured frames, the CPU converts them: {e}");
+					*lock(&self.shared.gpu_error) = Some(e.to_string());
+					self.gpu.converter = Some(Err(()));
+				}
+			}
+		}
+		self.gpu.converter.as_mut()?.as_mut().ok()
+	}
+
 	/// Convert DMA-BUF `frame` on the GPU for every layer that is due; `None`
 	/// if it is not taken (the backend maps it for [`FrameSink::frame`]).
 	#[cfg(all(target_os = "linux", feature = "media-desktop"))]
 	fn gpu_frame(&mut self, frame: &DmaBufRef) -> Option<bool> {
-		use voelin_media::ffmpeg::{GpuConverter, GpuLayer};
-
 		if self.shared.stopped() {
 			return Some(false);
 		}
 		if !self.gpu_path() {
 			return None;
 		}
-		let shared = self.shared.clone();
-		let converter = match &mut self.gpu.converter {
-			Some(Ok(converter)) => converter,
-			Some(Err(())) => return None,
-			None => match GpuConverter::new() {
-				Ok(converter) => self.gpu.converter.insert(Ok(converter)).as_mut().ok()?,
-				Err(e) => {
-					warn!("no GPU conversion of captured frames, the CPU converts them: {e}");
-					*lock(&shared.gpu_error) = Some(e.to_string());
-					self.gpu.converter = Some(Err(()));
-					return None;
-				}
-			},
-		};
+		self.gpu_converter()?;
 		self.pacer.keep(frame.timestamp);
+		let shared = &self.shared;
 		shared.captured.fetch_add(1, Ordering::Relaxed);
 		shared
 			.size
@@ -1683,32 +1776,55 @@ impl Ingest {
 		if shared.sink().is_none() {
 			return Some(true);
 		}
+		self.gpu_convert(GpuInput::Dmabuf(frame));
+		Some(true)
+	}
+
+	/// Convert `input` on the GPU for every layer that is due, into their
+	/// GPU inboxes. A failure turns the GPU stage off: the frame is dropped
+	/// (its layers' pacing taken) and the next one takes the CPU path.
+	#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+	fn gpu_convert(&mut self, input: GpuInput<'_, '_>) {
+		use voelin_media::ffmpeg::GpuLayer;
+
+		let ((width, height), timestamp) = match input {
+			GpuInput::Dmabuf(f) => ((f.width, f.height), f.timestamp),
+			GpuInput::Memory(f) => ((f.width, f.height), f.timestamp),
+		};
 		let mut any = false;
 		self.gpu.layers.clear();
 		for l in &mut self.layers {
-			let due = !l.layer.stopped() && l.pacer.take(frame.timestamp);
+			let due = !l.layer.stopped() && l.pacer.take(timestamp);
 			any |= due;
 			let alignment = l.layer.gpu.load(Ordering::Relaxed);
 			self.gpu.layers.push(GpuLayer {
-				size: l.spec.output_size(frame.width, frame.height),
+				size: l.spec.output_size(width, height),
 				alignment: ((alignment >> 32) as u32, alignment as u32),
 				due,
 			});
 		}
 		if !any {
-			return Some(true);
+			return;
 		}
 		self.gpu.out.clear();
 		self.gpu.out.resize(self.layers.len(), None);
+		let Some(Ok(converter)) = &mut self.gpu.converter else { return };
 		let started = Instant::now();
-		if let Err(e) = converter.convert(frame, &self.gpu.layers, &mut self.gpu.out) {
+		let result = match input {
+			GpuInput::Dmabuf(frame) => {
+				converter.convert(frame, &self.gpu.layers, &mut self.gpu.out)
+			}
+			GpuInput::Memory(frame) => {
+				converter.convert_memory(frame, &self.gpu.layers, &mut self.gpu.out)
+			}
+		};
+		let shared = &self.shared;
+		if let Err(e) = result {
 			warn!("GPU conversion failed, the CPU converts captured frames from now on: {e}");
 			*lock(&shared.gpu_error) = Some(e.to_string());
 			self.gpu.converter = Some(Err(()));
 			self.gpu.out.clear();
-			// This frame is counted and its layers' pacing taken: it is
-			// dropped, and the next one takes the CPU path.
-			return Some(true);
+			return;
 		}
 		shared.gpu_convert_ns.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 		shared.gpu_converted.fetch_add(1, Ordering::Relaxed);
@@ -1717,7 +1833,6 @@ impl Ingest {
 				l.layer.gpu_inbox.put(frame);
 			}
 		}
-		Some(true)
 	}
 
 	/// Pick up layer and frame-rate changes.
@@ -1840,6 +1955,15 @@ impl FrameSink for Ingest {
 		if shared.sink().is_none() {
 			return true;
 		}
+		// While every encoder takes GPU frames, a picture in memory is
+		// copied into a surface and converted and scaled there.
+		#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+		if self.gpu_path()
+			&& self.gpu_converter().is_some_and(|converter| converter.takes(&frame.pixels))
+		{
+			self.gpu_convert(GpuInput::Memory(&frame));
+			return true;
+		}
 		let mut any = false;
 		for (i, l) in self.layers.iter_mut().enumerate() {
 			self.sizes[i] = l.spec.output_size(frame.width, frame.height);
@@ -1850,6 +1974,7 @@ impl FrameSink for Ingest {
 			return true;
 		}
 		let started = Instant::now();
+		let shared = &self.shared;
 		if let Err(e) = self.pyramid.process(&frame, &self.sizes, &self.due, &mut self.out) {
 			warn!("cannot convert a captured frame: {e}");
 			shared.set_error(e);
@@ -2096,6 +2221,8 @@ fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 	let mut generation = shared.encoders_generation.load(Ordering::Relaxed);
 	// Whether the stream codec was encoded for the last frame.
 	let mut primary_on = true;
+	// What the layer was last told to be, and to which sink.
+	let mut told: Option<(LayerFormat, *const ())> = None;
 	// The last picture, and when it came: a static screen sends no frames,
 	// so keyframe requests are answered by encoding it again.
 	let mut last: Option<(Picture, Instant)> = None;
@@ -2199,9 +2326,20 @@ fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 			None => continue,
 		};
 		// Follow the layer's bitrate, or what the viewers' estimates allow.
-		let configured = layer.bitrate.load(Ordering::Relaxed);
+		let format = layer.format(picture.size());
+		let to = Arc::as_ptr(&sink).cast::<()>();
+		if told != Some((format, to)) {
+			told = Some((format, to));
+			sink.layer_format(layer.id, format);
+		}
+		// Estimates move it down, and back up to the layer's bitrate or its
+		// `max_bitrate` (`LayerSpec::bitrate`), never beyond: an automatic
+		// bitrate stays within `AUTO_BITRATE_MAX`, a typed one is what was
+		// typed. With the pacer no longer held to one packet a millisecond,
+		// a 60 Mbit/s stream's estimate rose to 110 Mbit/s on loopback.
+		let configured = format.bitrate;
 		let cap = match layer.max_bitrate.load(Ordering::Relaxed) {
-			0 => u64::MAX,
+			0 => configured,
 			max => max,
 		};
 		let target = sink.layer_bitrate(layer.id).unwrap_or(configured).clamp(1, cap);
@@ -3304,6 +3442,8 @@ mod tests {
 		codecs: Mutex<Vec<VideoFormat>>,
 		frames: Mutex<Vec<(VideoFormat, EncodedFrame)>>,
 		keyframe: AtomicBool,
+		/// What [`MediaSink::layer_format`] told, in order.
+		formats: Mutex<Vec<(LayerId, LayerFormat)>>,
 	}
 
 	impl MediaSink for CodecSink {
@@ -3323,6 +3463,93 @@ mod tests {
 		fn video_codecs(&self, out: &mut Vec<VideoFormat>) {
 			out.extend(lock(&self.codecs).iter());
 		}
+
+		fn layer_format(&self, layer: LayerId, format: LayerFormat) {
+			lock(&self.formats).push((layer, format));
+		}
+	}
+
+	#[test]
+	fn automatic_bitrates() {
+		assert_eq!(auto_bitrate(1920, 1080, 30), 7_464_960);
+		assert_eq!(auto_bitrate(1920, 1080, 60), 14_929_920);
+		assert_eq!(auto_bitrate(2560, 1440, 60), 26_542_080);
+		// The ceiling: 4K60, 1080p240 and anything beyond.
+		assert_eq!(auto_bitrate(3840, 2160, 60), 59_719_680);
+		assert_eq!(auto_bitrate(3840, 2160, 120), AUTO_BITRATE_MAX);
+		assert_eq!(auto_bitrate(7680, 4320, 320), AUTO_BITRATE_MAX);
+		assert_eq!(auto_bitrate(1920, 1080, 320), AUTO_BITRATE_MAX);
+		// The floor, and no overflow at absurd sizes.
+		assert_eq!(auto_bitrate(160, 120, 1), AUTO_BITRATE_MIN);
+		assert_eq!(auto_bitrate(u32::MAX, u32::MAX, u32::MAX), AUTO_BITRATE_MAX);
+		assert_eq!(auto_bitrate(0, 0, 0), AUTO_BITRATE_MIN);
+	}
+
+	/// Bitrate 0 is automatic: the encoder runs at the stream's own
+	/// automatic bitrate, and the sink is told the layer's format (once per
+	/// change, not per frame), which follows a new frame rate.
+	#[cfg(feature = "media-desktop")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn an_automatic_bitrate_follows_the_stream() {
+		let codecs = Codecs::builtin();
+		let config = StreamerConfig {
+			source: SourceId::Synthetic,
+			synthetic_size: (640, 480),
+			fps: 30,
+			bitrate_kbps: 0,
+			audio: false,
+			..StreamerConfig::default()
+		};
+		let streamer = Streamer::start(&codecs, config).await.unwrap();
+		let sink = Arc::new(CodecSink::default());
+		streamer.attach(sink.clone());
+		let told = |fps: u32| {
+			let sink = sink.clone();
+			let format = LayerFormat {
+				width: 640,
+				height: 480,
+				fps,
+				bitrate: auto_bitrate(640, 480, fps),
+				automatic: true,
+			};
+			async move {
+				let deadline = Instant::now() + Duration::from_secs(10);
+				while lock(&sink.formats).last() != Some(&(0, format)) {
+					assert!(Instant::now() < deadline, "{:?}", lock(&sink.formats));
+					tokio::time::sleep(Duration::from_millis(20)).await;
+				}
+			}
+		};
+		told(30).await;
+		assert_eq!(streamer.bitrate_kbps(), 1105);
+		// Not per frame.
+		let count = lock(&sink.formats).len();
+		tokio::time::sleep(Duration::from_millis(200)).await;
+		assert_eq!(lock(&sink.formats).len(), count);
+		assert_eq!(streamer.stats().layers[0].bitrate, auto_bitrate(640, 480, 30));
+		let update = StreamerConfigUpdate { fps: Some(15), ..StreamerConfigUpdate::default() };
+		streamer.reconfigure(&codecs, update).unwrap();
+		told(15).await;
+		// A typed bitrate is not automatic.
+		let update =
+			StreamerConfigUpdate { bitrate_kbps: Some(2000), ..StreamerConfigUpdate::default() };
+		streamer.reconfigure(&codecs, update).unwrap();
+		assert_eq!(streamer.bitrate_kbps(), 2000);
+		let typed = LayerFormat {
+			fps: 15,
+			bitrate: 2_000_000,
+			automatic: false,
+			..lock(&sink.formats)[0].1
+		};
+		let deadline = Instant::now() + Duration::from_secs(10);
+		while lock(&sink.formats).last() != Some(&(0, typed)) {
+			assert!(Instant::now() < deadline, "{:?}", lock(&sink.formats));
+			tokio::time::sleep(Duration::from_millis(20)).await;
+		}
+		// A new sink is told at once, from the size captured.
+		let next = Arc::new(CodecSink::default());
+		streamer.attach(next.clone());
+		assert_eq!(lock(&next.formats).first(), Some(&(0, typed)));
 	}
 
 	impl CodecSink {
@@ -3719,6 +3946,53 @@ mod tests {
 		assert_eq!(stats.gpu_error, None, "a planned switch, not a failure");
 	}
 
+	/// Pictures in memory take the GPU path too while every encoder takes
+	/// GPU frames: copied into a surface and converted and scaled there, in
+	/// the right colours (a red-blue swap would turn the orange rectangle
+	/// blue). Skipped without `h264_vaapi` or an H.264 decoder.
+	#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn memory_frames_take_the_gpu_path_too() {
+		let vaapi = voelin_media::ffmpeg::probe()
+			.iter()
+			.any(|s| s.spec.name == "h264_vaapi" && s.available.is_ok());
+		let codecs = Codecs::new();
+		if !vaapi || codecs.new_decoder(Codec::H264).is_err() {
+			eprintln!("no h264_vaapi or H.264 decoder, skipped");
+			return;
+		}
+		let config = StreamerConfig {
+			source: SourceId::Synthetic,
+			synthetic_size: (640, 360),
+			fps: 30,
+			audio: false,
+			codec: Codec::H264,
+			encoder: EncoderPreference { hardware: true, backend: "h264_vaapi".parse().unwrap() },
+			layers: vec![layer(0, 1.0, None, 1_000_000), layer(5, 0.5, Some(15), 300_000)],
+			..StreamerConfig::default()
+		};
+		let streamer = Streamer::start(&codecs, config).await.unwrap();
+		let mut source = EncodedSource::new(streamer);
+		let count = |frames: &[EncodedFrame], id| frames.iter().filter(|f| f.layer == id).count();
+		let frames = collect(&mut source, |f| count(f, 0) >= 20 && count(f, 5) >= 5).await;
+		let stats = source.streamer().stats();
+		assert_eq!(stats.gpu_error, None);
+		let on_cpu = stats.captured_frames - stats.gpu_frames;
+		assert!(on_cpu <= 1, "{on_cpu} of {} frames on the CPU", stats.captured_frames);
+		assert_eq!(decoded_size(Codec::H264, &frames, 5), ((320, 180), true));
+		let mut decoder = codecs.new_decoder(Codec::H264).unwrap();
+		let mut picture = None;
+		for f in frames.iter().filter(|f| f.layer == 0) {
+			picture = decoder.decode(&f.data).unwrap().or(picture);
+		}
+		let picture = picture.expect("pictures of layer 0");
+		assert_eq!((picture.width, picture.height), (640, 360));
+		let rgba = voelin_media::convert::to_rgba_vec(&picture).unwrap();
+		let middle = &rgba[180 * 640 * 4..181 * 640 * 4];
+		let orange = middle.chunks_exact(4).any(|p| p[0] > 180 && p[2] < 100);
+		assert!(orange, "no orange rectangle in the middle row");
+	}
+
 	/// Two layers at their own sizes and frame rates, keyframes per layer,
 	/// then a new codec and another layer set while streaming.
 	#[cfg(feature = "media-desktop")]
@@ -3758,16 +4032,24 @@ mod tests {
 
 		// A viewer's estimate lowers layer 5's encoder bitrate only.
 		source.set_layer_bitrate(5, 150_000);
-		let target = |id| {
+		let target = |source: &EncodedSource, id| {
 			let stats = source.streamer().stats();
 			stats.layers.iter().find(|l| l.id == id).map(|l| l.bitrate)
 		};
 		let deadline = Instant::now() + Duration::from_secs(5);
-		while target(5) != Some(150_000) {
-			assert!(Instant::now() < deadline, "layer 5 at {:?}", target(5));
+		while target(&source, 5) != Some(150_000) {
+			assert!(Instant::now() < deadline, "layer 5 at {:?}", target(&source, 5));
 			tokio::time::sleep(Duration::from_millis(20)).await;
 		}
-		assert_eq!(target(0), Some(800_000));
+		assert_eq!(target(&source, 0), Some(800_000));
+		// A higher one raises it back to its bitrate, not beyond.
+		source.set_layer_bitrate(5, 50_000_000);
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while target(&source, 5) == Some(150_000) {
+			assert!(Instant::now() < deadline, "layer 5 at {:?}", target(&source, 5));
+			tokio::time::sleep(Duration::from_millis(20)).await;
+		}
+		assert_eq!(target(&source, 5), Some(300_000));
 
 		// VP9, layer 5 gone, a new layer 7 at a fixed size.
 		let fixed = LayerSpec { size: Some((96, 64)), ..layer(7, 1.0, None, 200_000) };

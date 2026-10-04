@@ -411,11 +411,11 @@ component VideoCard inherits Card {
         Field {
             label: @tr("Frame Rate");
             Select {
-                model: ["15 FPS", "24 FPS", "30 FPS", "60 FPS", "120 FPS"];
-                current-index: Bridge.video.fps == "15" ? 0 : Bridge.video.fps == "24" ? 1 : Bridge.video.fps == "30" ? 2 : Bridge.video.fps == "120" ? 4 : 3;
+                model: ["15 FPS", "24 FPS", "30 FPS", "60 FPS", "120 FPS", "144 FPS", "240 FPS", "320 FPS"];
+                current-index: Bridge.video.fps == "15" ? 0 : Bridge.video.fps == "24" ? 1 : Bridge.video.fps == "30" ? 2 : Bridge.video.fps == "120" ? 4 : Bridge.video.fps == "144" ? 5 : Bridge.video.fps == "240" ? 6 : Bridge.video.fps == "320" ? 7 : 3;
                 label: @tr("Frame rate");
                 selected => {
-                    Bridge.video.fps = self.current-index == 0 ? "15" : self.current-index == 1 ? "24" : self.current-index == 2 ? "30" : self.current-index == 4 ? "120" : "60";
+                    Bridge.video.fps = ["15", "24", "30", "60", "120", "144", "240", "320"][self.current-index];
                     Bridge.video-changed(Bridge.video);
                 }
             }
@@ -544,6 +544,24 @@ component QualityCard inherits Card {
                 Bridge.video-changed(Bridge.video);
             }
         }
+        PresetTile {
+            text: "4K";
+            detail: "2160p";
+            selected: Bridge.video.quality == 4;
+            clicked => {
+                Bridge.video.quality = 4;
+                Bridge.video-changed(Bridge.video);
+            }
+        }
+        PresetTile {
+            text: "8K";
+            detail: "4320p";
+            selected: Bridge.video.quality == 5;
+            clicked => {
+                Bridge.video.quality = 5;
+                Bridge.video-changed(Bridge.video);
+            }
+        }
     }
     if Bridge.video.quality < 0: Text {
         text: @tr("Your own simulcast layers are set (Streaming page); a preset replaces them.");
@@ -562,7 +580,8 @@ component QualityCard inherits Card {
             y: (parent.height - self.height) / 2;
             horizontal-stretch: 1;
             minimum: 500;
-            maximum: 20000;
+            // 60 Mbit/s; any number can be typed, and 0 is automatic.
+            maximum: 60000;
             step: 250;
             value: Bridge.video.bitrate;
             label: @tr("Stream bitrate");
@@ -573,12 +592,14 @@ component QualityCard inherits Card {
         }
         TextField {
             width: 80px;
-            text: round(Bridge.video.bitrate);
+            // Empty: automatic (from the size and frame rate, up to 60 Mbit/s).
+            text: Bridge.video.bitrate == 0 ? "" : round(Bridge.video.bitrate);
+            placeholder: @tr("auto");
             input-type: number;
             label: @tr("Stream bitrate in kbit/s");
             accepted(t) => {
-                if t.is-float() && t.to-float() >= 1 {
-                    Bridge.video.bitrate = t.to-float();
+                if t == "" || (t.is-float() && t.to-float() >= 0) {
+                    Bridge.video.bitrate = t == "" ? 0 : t.to-float();
                     Bridge.video-changed(Bridge.video);
                 }
             }
@@ -598,7 +619,9 @@ component QualityCard inherits Card {
             y: (parent.height - self.height) / 2;
         }
         Text {
-            text: @tr("Estimated Upload Usage: ~{} GB per hour", round(Bridge.video.bitrate * 3600 / 8 / 100000) / 10);
+            text: Bridge.video.bitrate == 0
+                ? @tr("Automatic: from the size and frame rate, up to 60 Mbit/s (~27 GB per hour)")
+                : @tr("Estimated Upload Usage: ~{} GB per hour", round(Bridge.video.bitrate * 3600 / 8 / 100000) / 10);
             color: Theme.text-muted;
             font-size: Theme.font-sm;
         }

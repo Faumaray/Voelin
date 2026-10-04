@@ -233,10 +233,16 @@ pub fn page_keys() -> [&'static dyn voelin_core::settings::Setting; 10] {
 	]
 }
 
-/// Frame rates and bitrates (kbit/s) the share dialog offers; any other
-/// value can be typed in.
-pub const FPS_CHOICES: [u32; 3] = [15, 30, 60];
-pub const BITRATE_CHOICES: [u32; 4] = [2500, 4608, 8000, 10_000];
+/// Frame rates and bitrates (kbit/s; 0: automatic) the share dialog
+/// offers, in the order of its lists (`dialogs.slint`); any other value can
+/// be typed in.
+pub const FPS_CHOICES: [u32; 7] = [15, 30, 60, 120, 144, 240, 320];
+pub const BITRATE_CHOICES: [u32; 8] = [0, 2500, 4608, 8000, 10_000, 20_000, 40_000, 60_000];
+
+/// The share dialog's lists before they grew, which [`ShareDefaults`]
+/// indexes for older versions.
+pub const LEGACY_FPS_CHOICES: [u32; 3] = [15, 30, 60];
+pub const LEGACY_BITRATE_CHOICES: [u32; 4] = [2500, 4608, 8000, 10_000];
 
 /// The index of the choice closest to `value`.
 pub fn nearest_choice(choices: &[u32], value: u32) -> usize {
@@ -279,7 +285,8 @@ impl Default for UiSettings {
 
 /// The last choices in the share dialog. Frame rate and bitrate are the
 /// settings `stream.fps` and `stream.bitrate_kbps`; the indices of the
-/// closest choices are kept for older versions.
+/// closest choices of the old lists ([`LEGACY_FPS_CHOICES`],
+/// [`LEGACY_BITRATE_CHOICES`]) are kept for older versions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShareDefaults {
@@ -484,9 +491,12 @@ mod tests {
 	#[test]
 	fn free_values() {
 		assert_eq!(nearest_choice(&FPS_CHOICES, 60), 2);
-		assert_eq!(nearest_choice(&FPS_CHOICES, 144), 2);
-		assert_eq!(nearest_choice(&BITRATE_CHOICES, 3000), 0);
-		assert_eq!(nearest_choice(&BITRATE_CHOICES, 50_000), 3);
+		assert_eq!(nearest_choice(&FPS_CHOICES, 144), 4);
+		assert_eq!(nearest_choice(&FPS_CHOICES, 1000), 6);
+		assert_eq!(nearest_choice(&BITRATE_CHOICES, 0), 0, "automatic");
+		assert_eq!(nearest_choice(&BITRATE_CHOICES, 3000), 1);
+		assert_eq!(nearest_choice(&BITRATE_CHOICES, 55_000), 7);
+		assert_eq!(nearest_choice(&BITRATE_CHOICES, 120_000), 7);
 		assert_eq!(parse_positive(" 144 "), Some(144));
 		assert_eq!(parse_positive("0"), None);
 		assert_eq!(parse_positive("fast"), None);
