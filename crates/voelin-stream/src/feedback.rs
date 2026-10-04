@@ -1,6 +1,6 @@
 //! Feedback from the stream sessions to the encoders of our stream's layers:
 //! keyframe requests and bitrate targets per [`LayerId`], and the video
-//! codecs the viewers negotiated.
+//! formats (codec and H.264 profile) the viewers negotiated.
 //!
 //! [`LayerFeedback`] is shared between the stream session (which writes) and
 //! encoder threads (which read every frame). Both sides only use atomics;
@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU64, Ordering};
 
 use crate::layer::{LayerId, LayerSet};
-use crate::peer::VideoCodec;
+use crate::peer::VideoFormat;
 
 /// Words of the keyframe bitmap: one bit per layer id.
 const WORDS: usize = (LayerId::MAX as usize + 1) / 64;
@@ -32,7 +32,7 @@ pub struct LayerFeedback {
 	top: AtomicU16,
 	/// Bitrate targets (bit/s, 0: none) in chunks of [`CHUNK`] layer ids.
 	bitrates: Box<[OnceLock<Box<[AtomicU64]>>]>,
-	/// [`VideoCodec::bit`]s of the codecs connected viewers negotiated.
+	/// [`VideoFormat::bit`]s of the formats connected viewers negotiated.
 	codecs: AtomicU8,
 }
 
@@ -128,15 +128,15 @@ impl LayerFeedback {
 		(bitrate != 0).then_some(bitrate)
 	}
 
-	/// The video codecs the viewers negotiated.
-	pub fn set_codecs(&self, codecs: impl IntoIterator<Item = VideoCodec>) {
-		let bits = codecs.into_iter().fold(0, |bits, c| bits | c.bit());
+	/// The video formats the viewers negotiated.
+	pub fn set_codecs(&self, formats: impl IntoIterator<Item = VideoFormat>) {
+		let bits = formats.into_iter().fold(0, |bits, f| bits | f.bit());
 		self.codecs.store(bits, Ordering::Relaxed);
 	}
 
-	/// Whether a viewer negotiated `codec`.
-	pub fn has_codec(&self, codec: VideoCodec) -> bool {
-		self.codecs.load(Ordering::Relaxed) & codec.bit() != 0
+	/// Whether a viewer negotiated `format`.
+	pub fn has_codec(&self, format: VideoFormat) -> bool {
+		self.codecs.load(Ordering::Relaxed) & format.bit() != 0
 	}
 
 	/// Whether any viewer negotiated a codec yet.
@@ -184,11 +184,16 @@ mod tests {
 
 	#[test]
 	fn codecs() {
+		use crate::h264::H264Profile::{ConstrainedBaseline, ConstrainedHigh};
 		let f = LayerFeedback::new();
 		assert!(!f.has_codecs());
-		f.set_codecs([VideoCodec::Vp8, VideoCodec::H265, VideoCodec::Vp8]);
-		assert!(f.has_codec(VideoCodec::Vp8) && f.has_codec(VideoCodec::H265));
-		assert!(!f.has_codec(VideoCodec::H264));
+		f.set_codecs([VideoFormat::Vp8, VideoFormat::H265, VideoFormat::Vp8]);
+		assert!(f.has_codec(VideoFormat::Vp8) && f.has_codec(VideoFormat::H265));
+		assert!(!f.has_codec(VideoFormat::H264(ConstrainedHigh)));
+		// H.264 in each profile is a format of its own.
+		f.set_codecs([VideoFormat::H264(ConstrainedBaseline)]);
+		assert!(f.has_codec(VideoFormat::H264(ConstrainedBaseline)));
+		assert!(!f.has_codec(VideoFormat::H264(ConstrainedHigh)));
 		f.set_codecs([]);
 		assert!(!f.has_codecs());
 	}

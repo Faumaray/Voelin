@@ -14,6 +14,7 @@ pub mod dtls;
 pub mod feedback;
 pub mod h264;
 pub mod layer;
+pub mod mdns;
 pub mod peer;
 pub mod proto;
 pub mod session;
@@ -26,7 +27,9 @@ pub use dtls::SrtpProfile;
 pub use feedback::LayerFeedback;
 pub use h264::H264Profile;
 pub use layer::{LayerId, LayerSet, LayerSpec};
-pub use peer::{MediaFrame, OfferOptions, Peer, PeerConfig, PeerError, PeerEvent, VideoCodec};
+pub use peer::{
+	MediaFrame, OfferOptions, Peer, PeerConfig, PeerError, PeerEvent, VideoCodec, VideoFormat,
+};
 pub use proto::{LeaveReason, StreamInfo, StreamKind, StreamNotification, StreamSetup};
 pub use session::{
 	EndReason, Output, Request, SessionError, StreamDirectory, StreamEvent, StreamerEvent,

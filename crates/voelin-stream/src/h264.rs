@@ -3,14 +3,30 @@
 //! H.264 Table A-1), instead of a fixed level.
 
 /// Profile of our H.264 streams.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum H264Profile {
 	/// Constrained High (`profile_idc` 100, `constraint_set4` and `5`): what
 	/// TeamSpeak clients decode.
 	#[default]
 	ConstrainedHigh,
-	/// Constrained Baseline (`profile_idc` 66, `constraint_set0` and `1`).
+	/// Constrained Baseline (`profile_idc` 66, `constraint_set0` and `1`):
+	/// what every H.264 decoder takes; libwebrtc's software decoder lists
+	/// no High profile.
 	ConstrainedBaseline,
+}
+
+impl H264Profile {
+	/// The order an offer lists them in: Constrained High (better pictures
+	/// for the bitrate), then Constrained Baseline for peers that take only
+	/// that. The streamer encodes each viewer in the one its answer chose.
+	pub const LADDER: [Self; 2] = [Self::ConstrainedHigh, Self::ConstrainedBaseline];
+
+	/// The profile of a `profile-level-id` (`profile_idc` and `profile-iop`
+	/// as [`profile_level_id`] writes them; any level); `None` for other
+	/// profiles.
+	pub fn from_profile_level_id(id: u32) -> Option<Self> {
+		Self::LADDER.into_iter().find(|p| profile_level_id(*p, 0) == id & !0xff)
+	}
 }
 
 /// Level limits: `level_idc`, macroblocks per second, macroblocks per frame,
@@ -127,5 +143,14 @@ mod tests {
 		assert_eq!(profile_level_id(H264Profile::ConstrainedBaseline, 31), 0x42e01f);
 		assert_eq!(offer_profile_level_id(HIGH, 320, 240, 15, 200_000), 0x640c1f);
 		assert_eq!(offer_profile_level_id(HIGH, 1920, 1080, 60, 8_000_000), 0x640c2a);
+		// Back from the SDP, at any level; other profiles are not ours.
+		assert_eq!(H264Profile::from_profile_level_id(0x640c2a), Some(HIGH));
+		assert_eq!(
+			H264Profile::from_profile_level_id(0x42e01f),
+			Some(H264Profile::ConstrainedBaseline)
+		);
+		for other in [0x42001f, 0x4d001f, 0x64001f] {
+			assert_eq!(H264Profile::from_profile_level_id(other), None);
+		}
 	}
 }
