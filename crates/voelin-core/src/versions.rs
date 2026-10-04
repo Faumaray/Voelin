@@ -10,6 +10,9 @@ use tsclientlib::Version;
 
 const VERSIONS_CSV: &str = include_str!("../../proto/tsproto-structs/declarations/Versions.csv");
 
+/// The signed generic version of every platform, tsclientlib's default.
+const GENERIC_VERSION: &str = "3.?.? [Build: 5680278000]";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KnownVersion {
 	pub version: String,
@@ -92,9 +95,11 @@ fn compatibility_version(os: &str) -> Result<Version> {
 		"ios" => "iOS",
 		_ => bail!("no signed compatibility version for operating system {os:?}"),
 	};
+	// The library's generic version: its build passes servers' minimum client
+	// version, which a real (older) build such as 3.6.0 may not.
 	known_versions()
 		.into_iter()
-		.find(|version| version.platform == platform && version.version.contains("3.6"))
+		.find(|version| version.platform == platform && version.version == GENERIC_VERSION)
 		.with_context(|| format!("missing signed compatibility version for {platform}"))?
 		.to_version()
 }
