@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package com.teamspeak.myteamspeak.proto.push;
+
+import "google/protobuf/any.proto";
+
+message IntermediateData {
+    string uuid = 1;
+    google.protobuf.Any payload = 2;
+}
+
+message PushNotification {
+    google.protobuf.Any payload = 1;
+}
+
+message SimpleNotification {
+    SimpleNotificationType type = 1;
+    bool relogin_neccessary = 2;
+}
+
+message ContactAvatarChanged {
+    repeated string kid = 1;
+}
+
+message TsChatAvatarChanged {
+    repeated bytes mytsid = 1;
+}
+
+message AuthTokenUsed {
+    string id_hash = 1;
+}
+
+enum SimpleNotificationType {
+    SIMPLE_NOTIFICATION_TYPE_INVALID = 0;
+    SIMPLE_NOTIFICATION_SYNC_DATA_CHANGED = 1;
+    SIMPLE_NOTIFICATION_SESSION_EXPIRED = 2;
+    SIMPLE_NOTIFICATION_CONTACT_HOMEBASE_CHANGED = 3;
+}

@@ -1,0 +1,6513 @@
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: voelin-ui VERSION\n"
+"POT-Creation-Date: 2026-10-04 15:14+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#: crates/voelin-ui/ui/app.slint:134 crates/voelin-ui/ui/app.slint:220
+msgctxt "MainWindow"
+msgid "Settings"
+msgstr ""
+
+#: crates/voelin-ui/ui/app.slint:134
+msgctxt "MainWindow"
+msgid "Stream Studio"
+msgstr ""
+
+#: crates/voelin-ui/ui/app.slint:221
+msgctxt "MainWindow"
+msgid "Friends"
+msgstr ""
+
+#: crates/voelin-ui/ui/app.slint:222
+msgctxt "MainWindow"
+msgid "Messages"
+msgstr ""
+
+#: crates/voelin-ui/ui/app.slint:223
+msgctxt "MainWindow"
+msgid "Library"
+msgstr ""
+
+#: crates/voelin-ui/ui/app.slint:224
+msgctxt "MainWindow"
+msgid "Events"
+msgstr ""
+
+#: crates/voelin-ui/ui/app.slint:227
+msgctxt "MainWindow"
+msgid "You"
+msgstr ""
+
+#: crates/voelin-ui/ui/app.slint:228
+msgctxt "MainWindow"
+msgid "Activity"
+msgstr ""
+
+#: crates/voelin-ui/ui/app.slint:232
+msgctxt "MainWindow"
+msgid "Find your people. Talk beyond."
+msgstr ""
+
+#: crates/voelin-ui/ui/bridge.slint:816
+msgctxt "Bridge"
+msgid "No server selected"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/badge.slint:30
+msgctxt "LiveBadge"
+msgid "LIVE"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/emoji.slint:72
+msgctxt "EmojiPicker"
+msgid "Smileys"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/emoji.slint:72
+msgctxt "EmojiPicker"
+msgid "People"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/emoji.slint:72
+msgctxt "EmojiPicker"
+msgid "Nature"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/emoji.slint:72
+msgctxt "EmojiPicker"
+msgid "Food"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/emoji.slint:72
+msgctxt "EmojiPicker"
+msgid "Activities"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/emoji.slint:73
+msgctxt "EmojiPicker"
+msgid "Travel"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/emoji.slint:73
+msgctxt "EmojiPicker"
+msgid "Objects"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/emoji.slint:73
+msgctxt "EmojiPicker"
+msgid "Symbols"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/emoji.slint:73
+msgctxt "EmojiPicker"
+msgid "Flags"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/emoji.slint:87
+msgctxt "EmojiPicker"
+msgid "Emoji"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/emoji.slint:101
+msgctxt "EmojiPicker"
+msgid "Search emoji"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/emoji.slint:132
+msgctxt "EmojiPicker"
+msgid "No emoji found"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/emoji.slint:132
+msgctxt "EmojiPicker"
+msgid "Search results"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/icon.slint:24
+msgctxt "Spinner"
+msgid "Loading"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/meter.slint:23
+msgctxt "Meter"
+msgid "Microphone level"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/meter.slint:24
+msgctxt "Meter"
+msgid "{} dB"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/overlay.slint:220
+msgctxt "Modal"
+msgid "Close"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/overlay.slint:287
+msgctxt "ResizeHandle"
+msgid "Panel width"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/tabs.slint:72
+msgctxt "TabItem"
+msgid "{} unread"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/tabs.slint:123
+msgctxt "TabItem"
+msgid "Close {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/text-field.slint:84
+msgctxt "TextField"
+msgid "Cut"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/text-field.slint:89
+msgctxt "TextField"
+msgid "Copy"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/text-field.slint:94
+msgctxt "TextField"
+msgid "Paste"
+msgstr ""
+
+#: crates/voelin-ui/ui/components/text-field.slint:99
+msgctxt "TextField"
+msgid "Select All"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:26
+#: crates/voelin-ui/ui/screens/account.slint:26
+msgctxt "LoginForm"
+msgid "Email"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:35
+#: crates/voelin-ui/ui/screens/account.slint:35
+msgctxt "LoginForm"
+msgid "Password"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:44
+#: crates/voelin-ui/ui/screens/account.slint:44
+msgctxt "LoginForm"
+msgid "One-time code"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:54
+msgctxt "LoginForm"
+msgid "Sign in"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:59
+msgctxt "LoginForm"
+msgid "Create account in browser"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:64
+msgctxt "LoginForm"
+msgid "Forgot password?"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:68
+msgctxt "LoginForm"
+msgid ""
+"Registration and password recovery open the official myTeamSpeak website. "
+"Return here to sign in when finished."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:72
+msgctxt "AccountCard"
+msgid "myTeamSpeak"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:74
+msgctxt "AccountCard"
+msgid ""
+"Saved session could not be validated. Your saved credentials were retained; "
+"sign in again or clear them."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:75
+msgctxt "AccountCard"
+msgid "Enter your password again and the one-time code."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:76
+msgctxt "AccountCard"
+msgid ""
+"Sign-in failed. Check your credentials and connection; the experimental "
+"service may be unavailable."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:77
+msgctxt "AccountCard"
+msgid "Signed out."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:78
+msgctxt "AccountCard"
+msgid ""
+"Signed out and saved credentials cleared. Remote session revocation failed."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:79
+msgctxt "AccountCard"
+msgid ""
+"Could not open your browser. Visit myteamspeak.com to manage your account."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:80
+msgctxt "AccountCard"
+msgid ""
+"Account website opened in your browser. When finished, return here and sign "
+"in again to apply changes."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:81
+msgctxt "AccountCard"
+msgid ""
+"Your email address has not been verified. Activate your account using the "
+"link in your email, or request a new activation email."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:82
+msgctxt "AccountCard"
+msgid "The one-time code was not accepted. Enter your password and a new code."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:83
+msgctxt "AccountCard"
+msgid "Your saved session has expired. Sign in again."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:84
+msgctxt "AccountCard"
+msgid "Email or password was not accepted. Check your details and try again."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:85
+msgctxt "AccountCard"
+msgid "Too many requests. Wait a while before trying again."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:86
+msgctxt "AccountCard"
+msgid "Account sign-in is available on desktop."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:90
+msgctxt "AccountCard"
+msgid "Primary account"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:100
+#: crates/voelin-ui/ui/screens/account.slint:100
+msgctxt "AccountCard"
+msgid "Account ID"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:108
+#: crates/voelin-ui/ui/screens/account.slint:108
+msgctxt "AccountCard"
+msgid "myTS ID"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:116
+msgctxt "AccountCard"
+msgid "Your account identity is available for authentication on voice servers."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:119
+msgctxt "AccountCard"
+msgid ""
+"Sign out and sign in with your password to enable your myTS ID on voice "
+"servers."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:122
+msgctxt "AccountCard"
+msgid ""
+"Signed in, but the account identity could not be unlocked. Voice servers "
+"will not receive your myTS ID. Try signing in again; older account "
+"encryption may be unsupported."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:124
+msgctxt "AccountCard"
+msgid ""
+"This is your main app profile. Server identities and server nicknames are "
+"managed separately."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:125
+msgctxt "AccountCard"
+msgid ""
+"Account management opens the official website. Check which account is signed "
+"in there. Sign in again here after making changes."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:127
+msgctxt "AccountCard"
+msgid "Manage account in browser"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:132
+msgctxt "AccountCard"
+msgid "Change username"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:133
+msgctxt "AccountCard"
+msgid "Change email"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:134
+msgctxt "AccountCard"
+msgid "Change password"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:135
+msgctxt "AccountCard"
+msgid "Two-factor authentication"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:136
+msgctxt "AccountCard"
+msgid "Manage account deletion"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:137
+msgctxt "AccountCard"
+msgid "Export account data"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:145
+msgctxt "AccountCard"
+msgid "Contacting account service…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:148
+msgctxt "AccountCard"
+msgid ""
+"Saved account credentials could not be read. Unlock the keyring or clear the "
+"saved session."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:151
+msgctxt "AccountCard"
+msgid ""
+"Account credentials could not be saved. This session will not be restored "
+"after restarting."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:154
+msgctxt "AccountCard"
+msgid ""
+"Account credentials could not be saved, and older credentials could not be "
+"removed. Unlock your keyring and clear the saved session."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:157
+msgctxt "AccountCard"
+msgid ""
+"Signed out locally, but saved credentials could not be removed. Unlock your "
+"keyring and clear the saved session again."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:160
+msgctxt "AccountCard"
+msgid "Resend activation email in browser"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:165
+msgctxt "AccountCard"
+msgid "Check session"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:165
+msgctxt "AccountCard"
+msgid "Retry saved session"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:169
+msgctxt "AccountCard"
+msgid "Cancel and clear session"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:169
+msgctxt "AccountCard"
+msgid "Sign out"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:169
+msgctxt "AccountCard"
+msgid "Clear saved session"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:187
+msgctxt "LoginPage"
+msgid "Welcome to {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:193
+msgctxt "LoginPage"
+msgid "Sign in to make your myTeamSpeak account your main profile."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:196
+msgctxt "LoginPage"
+msgid "Continue without an account"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/account.slint:199
+msgctxt "LoginPage"
+msgid ""
+"You can connect to servers without an account and sign in later in Settings "
+"→ My Account."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:57
+msgctxt "ServerHeader"
+msgid "Server menu"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:74
+msgctxt "ServerHeader"
+msgid "Connecting…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:75
+msgctxt "ServerHeader"
+msgid "Not connected"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:75
+msgctxt "ServerHeader"
+msgid "Add a server to start"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:84
+msgctxt "ServerHeader"
+msgid "Edit server"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:85
+msgctxt "ServerHeader"
+msgid "Stop observing"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:85
+msgctxt "ServerHeader"
+msgid "Observe invisibly"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:86
+msgctxt "ServerHeader"
+msgid "Add server"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:107
+msgctxt "ConnectActions"
+msgid "Connecting…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:107
+msgctxt "ConnectActions"
+msgid "Connect"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:113
+msgctxt "ConnectActions"
+msgid "Stop observing"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:113
+msgctxt "ConnectActions"
+msgid "Observe"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:131
+msgctxt "TreeRow"
+msgid "Channel {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:132
+msgctxt "TreeRow"
+msgid "talking"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:132
+msgctxt "TreeRow"
+msgid "streaming"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:132
+msgctxt "TreeRow"
+msgid "microphone off"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:132
+#: crates/voelin-ui/ui/screens/channels.slint:132
+msgctxt "TreeRow"
+msgid "muted for you"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:162
+msgctxt "TreeRow"
+msgid "Expand"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:162
+msgctxt "TreeRow"
+msgid "Collapse"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:234
+msgctxt "TreeRow"
+msgid "Your stream"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:234
+msgctxt "TreeRow"
+msgid "Watch {}'s stream"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:259
+msgctxt "TreeRow"
+msgid "{}%"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:270
+msgctxt "TreeRow"
+msgid "mic off"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:278
+msgctxt "TreeRow"
+msgid "sound off"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:281
+msgctxt "TreeRow"
+msgid "away"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:294
+msgctxt "ChannelTree"
+msgid "Channels"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:299
+msgctxt "ChannelTree"
+msgid "No server yet."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:299
+msgctxt "ChannelTree"
+msgid "Connect or observe to see the channels."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/channels.slint:307
+msgctxt "ChannelTree"
+msgid "Channels and clients"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:76
+msgctxt "Reactions"
+msgid "{} reacted {} times"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:115
+msgctxt "Reactions"
+msgid "Add a reaction"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:196
+msgctxt "FileCard"
+msgid "Downloaded"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:196
+msgctxt "FileCard"
+msgid "Download {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:257
+msgctxt "MessageActions"
+msgid "React"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:272
+msgctxt "MessageActions"
+msgid "More emoji"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:282
+msgctxt "MessageActions"
+msgid "Unpin"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:282
+msgctxt "MessageActions"
+msgid "Pin"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:290
+msgctxt "MessageActions"
+msgid "Start a topic"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:350
+msgctxt "MessageRow"
+msgid "via relay"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:356
+msgctxt "MessageRow"
+msgid "pinned"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:369
+msgctxt "MessageRow"
+msgid "Message from a blocked contact."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:463
+msgctxt "MessageList"
+msgid "Only messages seen by this device."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:477
+msgctxt "MessageList"
+msgid "Loading…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:477
+msgctxt "MessageList"
+msgid "Older messages"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:488
+msgctxt "MessageList"
+msgid "Messages"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:510
+msgctxt "Composer"
+msgid "Attach a file"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:533
+msgctxt "Composer"
+msgid "Message"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:547
+msgctxt "Composer"
+msgid "Emoji"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:557
+msgctxt "Composer"
+msgid "Send"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:601
+msgctxt "ChatView"
+msgid "Pinned Messages"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:608
+msgctxt "ChatView"
+msgid "Topics"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:616
+msgctxt "ChatView"
+msgid "Voice channel"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:622
+msgctxt "ChatView"
+msgid "Members"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:637
+msgctxt "ChatView"
+msgid "Open folder"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:644
+msgctxt "ChatView"
+msgid "Delete"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:650
+msgctxt "ChatView"
+msgid "Dismiss"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:662
+msgctxt "ChatView"
+msgid "Chats"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:691
+msgctxt "ChatView"
+msgid "Back to the chat"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:724
+msgctxt "ChatView"
+msgid "Reply in {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:725
+msgctxt "ChatView"
+msgid "Message {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/chat.slint:725
+msgctxt "ChatView"
+msgid "Message"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:28
+msgctxt "BookmarkDialog"
+msgid "Join a server"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:28
+msgctxt "BookmarkDialog"
+msgid "Add server"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:28
+msgctxt "BookmarkDialog"
+msgid "Edit server"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:29
+msgctxt "BookmarkDialog"
+msgid "Only the address is needed; Voelin finds the rest."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:42
+#: crates/voelin-ui/ui/screens/dialogs.slint:42
+msgctxt "BookmarkDialog"
+msgid "Address"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:43
+msgctxt "BookmarkDialog"
+msgid ""
+"Host name, IP address or server nickname; a port only if the server needs "
+"one."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:47
+msgctxt "BookmarkDialog"
+msgid "Server password (optional)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:48
+msgctxt "BookmarkDialog"
+msgid "Server password"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:56
+msgctxt "BookmarkDialog"
+msgid "Advanced"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:60
+msgctxt "BookmarkDialog"
+msgid "Name, nickname, gateway, ServerQuery"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:71
+#: crates/voelin-ui/ui/screens/dialogs.slint:71
+msgctxt "BookmarkDialog"
+msgid "Name"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:72
+msgctxt "BookmarkDialog"
+msgid "Empty: the address, then the server's own name once connected."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:73
+msgctxt "BookmarkDialog"
+msgid "The server's name"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:76
+#: crates/voelin-ui/ui/screens/dialogs.slint:76
+msgctxt "BookmarkDialog"
+msgid "Nickname"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:77
+msgctxt "BookmarkDialog"
+msgid "Empty: the nickname of your identity."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:81
+msgctxt "BookmarkDialog"
+msgid "Invisible presence and chat without joining"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:87
+#: crates/voelin-ui/ui/screens/dialogs.slint:87
+msgctxt "BookmarkDialog"
+msgid "Gateway URL"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:88
+msgctxt "BookmarkDialog"
+msgid "Empty: looked up in DNS, as published by the server's admin."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:89
+msgctxt "BookmarkDialog"
+msgid "Found automatically"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:94
+#: crates/voelin-ui/ui/screens/dialogs.slint:94
+msgctxt "BookmarkDialog"
+msgid "Query transport"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:103
+#: crates/voelin-ui/ui/screens/dialogs.slint:103
+msgctxt "BookmarkDialog"
+msgid "Query address"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:110
+#: crates/voelin-ui/ui/screens/dialogs.slint:110
+msgctxt "BookmarkDialog"
+msgid "Query login"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:114
+#: crates/voelin-ui/ui/screens/dialogs.slint:114
+msgctxt "BookmarkDialog"
+msgid "Query password"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:125
+msgctxt "BookmarkDialog"
+msgid "Delete"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:133
+msgctxt "BookmarkDialog"
+msgid "Cancel"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:138
+msgctxt "BookmarkDialog"
+msgid "Join"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:138
+msgctxt "BookmarkDialog"
+msgid "Add"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:138
+msgctxt "BookmarkDialog"
+msgid "Save"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:223
+#: crates/voelin-ui/ui/screens/dialogs.slint:223
+msgctxt "ShareAudio"
+msgid "Audio sources"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:233
+msgctxt "ShareAudio"
+msgid "Add"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:238
+msgctxt "ShareAudio"
+msgid "No audio: add your microphone, the desktop or an application."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:261
+msgctxt "ShareCard"
+msgid "You are sharing your screen"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:261
+#: crates/voelin-ui/ui/screens/dialogs.slint:261
+msgctxt "ShareCard"
+msgid "Starting…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:261
+msgctxt "ShareCard"
+msgid "Share screen"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:262
+msgctxt "ShareCard"
+msgid "Stream to the people in your channel."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:272
+#: crates/voelin-ui/ui/screens/dialogs.slint:272
+msgctxt "ShareCard"
+msgid "Viewers"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:277
+msgctxt "ShareCard"
+msgid ""
+"Nobody is watching yet. Viewers in your channel can join from their streams "
+"list."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:311
+msgctxt "ShareCard"
+msgid "asks to watch"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:311
+msgctxt "ShareCard"
+msgid "asks to watch: {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:311
+msgctxt "ShareCard"
+msgid "connecting"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:311
+msgctxt "ShareCard"
+msgid "watching"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:320
+msgctxt "ShareCard"
+msgid "Accept"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:326
+msgctxt "ShareCard"
+msgid "Deny"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:332
+msgctxt "ShareCard"
+msgid "Remove"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:333
+msgctxt "ShareCard"
+msgid "Remove {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:344
+msgctxt "ShareCard"
+msgid "This stream has no sound."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:350
+msgctxt "ShareCard"
+msgid "Close"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:356
+msgctxt "ShareCard"
+msgid "Stop sharing"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:365
+#: crates/voelin-ui/ui/screens/dialogs.slint:365
+msgctxt "ShareCard"
+msgid "What to share"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:384
+#: crates/voelin-ui/ui/screens/dialogs.slint:384
+msgctxt "ShareCard"
+msgid "Stream name"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:390
+#: crates/voelin-ui/ui/screens/dialogs.slint:390
+msgctxt "ShareCard"
+msgid "Frame rate"
+msgstr ""
+
+#. FPS_CHOICES (settings.rs).
+#: crates/voelin-ui/ui/screens/dialogs.slint:395
+msgctxt "ShareCard"
+msgid "15 fps"
+msgstr ""
+
+#. FPS_CHOICES (settings.rs).
+#: crates/voelin-ui/ui/screens/dialogs.slint:395
+msgctxt "ShareCard"
+msgid "30 fps"
+msgstr ""
+
+#. FPS_CHOICES (settings.rs).
+#: crates/voelin-ui/ui/screens/dialogs.slint:395
+msgctxt "ShareCard"
+msgid "60 fps"
+msgstr ""
+
+#. FPS_CHOICES (settings.rs).
+#: crates/voelin-ui/ui/screens/dialogs.slint:395
+msgctxt "ShareCard"
+msgid "120 fps"
+msgstr ""
+
+#. FPS_CHOICES (settings.rs).
+#: crates/voelin-ui/ui/screens/dialogs.slint:395
+msgctxt "ShareCard"
+msgid "144 fps"
+msgstr ""
+
+#. FPS_CHOICES (settings.rs).
+#: crates/voelin-ui/ui/screens/dialogs.slint:395
+msgctxt "ShareCard"
+msgid "240 fps"
+msgstr ""
+
+#. FPS_CHOICES (settings.rs).
+#: crates/voelin-ui/ui/screens/dialogs.slint:395
+msgctxt "ShareCard"
+msgid "320 fps"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:403
+msgctxt "ShareCard"
+msgid "fps"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:404
+msgctxt "ShareCard"
+msgid "Frames per second"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:412
+#: crates/voelin-ui/ui/screens/dialogs.slint:412
+msgctxt "ShareCard"
+msgid "Quality"
+msgstr ""
+
+#. BITRATE_CHOICES (settings.rs); Auto leaves the field empty.
+#: crates/voelin-ui/ui/screens/dialogs.slint:417
+msgctxt "ShareCard"
+msgid "Auto (up to 60 Mbit/s)"
+msgstr ""
+
+#. BITRATE_CHOICES (settings.rs); Auto leaves the field empty.
+#: crates/voelin-ui/ui/screens/dialogs.slint:417
+msgctxt "ShareCard"
+msgid "Low (2.5 Mbit/s)"
+msgstr ""
+
+#. BITRATE_CHOICES (settings.rs); Auto leaves the field empty.
+#: crates/voelin-ui/ui/screens/dialogs.slint:417
+msgctxt "ShareCard"
+msgid "Standard (4.6 Mbit/s)"
+msgstr ""
+
+#. BITRATE_CHOICES (settings.rs); Auto leaves the field empty.
+#: crates/voelin-ui/ui/screens/dialogs.slint:417
+msgctxt "ShareCard"
+msgid "High (8 Mbit/s)"
+msgstr ""
+
+#. BITRATE_CHOICES (settings.rs); Auto leaves the field empty.
+#: crates/voelin-ui/ui/screens/dialogs.slint:417
+msgctxt "ShareCard"
+msgid "10 Mbit/s"
+msgstr ""
+
+#. BITRATE_CHOICES (settings.rs); Auto leaves the field empty.
+#: crates/voelin-ui/ui/screens/dialogs.slint:417
+msgctxt "ShareCard"
+msgid "20 Mbit/s"
+msgstr ""
+
+#. BITRATE_CHOICES (settings.rs); Auto leaves the field empty.
+#: crates/voelin-ui/ui/screens/dialogs.slint:417
+msgctxt "ShareCard"
+msgid "40 Mbit/s"
+msgstr ""
+
+#. BITRATE_CHOICES (settings.rs); Auto leaves the field empty.
+#: crates/voelin-ui/ui/screens/dialogs.slint:417
+msgctxt "ShareCard"
+msgid "Best (60 Mbit/s)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:425
+msgctxt "ShareCard"
+msgid "auto"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:425
+msgctxt "ShareCard"
+msgid "kbit/s"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:426
+msgctxt "ShareCard"
+msgid "Bitrate in kbit/s"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:436
+msgctxt "ShareCard"
+msgid "Share system audio"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:444
+msgctxt "ShareCard"
+msgid "Let everyone in the channel watch without asking"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:455
+msgctxt "ShareCard"
+msgid "Cancel"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:461
+msgctxt "ShareCard"
+msgid "Start sharing"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:497
+msgctxt "ClientAudioDialog"
+msgid "Only changes what you hear."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:505
+msgctxt "ClientAudioDialog"
+msgid "Volume"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:516
+msgctxt "ClientAudioDialog"
+msgid "Volume of {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:523
+msgctxt "ClientAudioDialog"
+msgid "{}%"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:531
+msgctxt "ClientAudioDialog"
+msgid "Mute for me"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:542
+msgctxt "ClientAudioDialog"
+msgid "Watch {}'s stream"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:551
+msgctxt "ClientAudioDialog"
+msgid "Reset"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:561
+msgctxt "ClientAudioDialog"
+msgid "Close"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:571
+msgctxt "Credits"
+msgid "Fonts, icons and emoji"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:598
+msgctxt "AboutDialog"
+msgid ""
+"Unofficial TeamSpeak 3/6 compatible client. Not affiliated with TeamSpeak "
+"Systems GmbH."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:628
+#: crates/voelin-ui/ui/screens/dialogs.slint:628
+msgctxt "AboutDialog"
+msgid "Third-party notices"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/dialogs.slint:653
+msgctxt "AboutDialog"
+msgid "Close"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/drawers.slint:42
+msgctxt "Drawer"
+msgid "Close"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/drawers.slint:107
+msgctxt "PinCard"
+msgid "Unpin"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/drawers.slint:157
+msgctxt "PinsDrawer"
+msgid "Pinned Messages"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/drawers.slint:169
+msgctxt "PinsDrawer"
+msgid "Nothing pinned yet."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/drawers.slint:175
+msgctxt "PinsDrawer"
+msgid "Hover a message and press the pin."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/drawers.slint:184
+msgctxt "PinsDrawer"
+msgid "Pinned messages"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/drawers.slint:274
+#: crates/voelin-ui/ui/screens/drawers.slint:274
+msgctxt "TopicsDrawer"
+msgid "Topics"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/drawers.slint:282
+msgctxt "TopicsDrawer"
+msgid "Search topics…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/drawers.slint:283
+msgctxt "TopicsDrawer"
+msgid "Search topics"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/drawers.slint:296
+msgctxt "TopicsDrawer"
+msgid "No topics yet."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/drawers.slint:302
+msgctxt "TopicsDrawer"
+msgid "Start one from a message, or below."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/drawers.slint:328
+msgctxt "TopicsDrawer"
+msgid "Create Topic"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/drawers.slint:336
+msgctxt "TopicDialog"
+msgid "Start a topic"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/drawers.slint:337
+msgctxt "TopicDialog"
+msgid "From the chosen message."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/drawers.slint:337
+msgctxt "TopicDialog"
+msgid "A new thread in this chat."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/drawers.slint:347
+msgctxt "TopicDialog"
+msgid "What is it about?"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/drawers.slint:348
+msgctxt "TopicDialog"
+msgid "Title"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/drawers.slint:361
+msgctxt "TopicDialog"
+msgid "Cancel"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/drawers.slint:367
+msgctxt "TopicDialog"
+msgid "Create"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:17
+msgctxt "ServerLinks"
+msgid "Events"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:25
+msgctxt "ServerLinks"
+msgid "Members"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:141
+msgctxt "EventCard"
+msgid "Stream"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:206
+msgctxt "EventCard"
+msgid "Going"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:213
+msgctxt "EventCard"
+msgid "Maybe"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:220
+msgctxt "EventCard"
+msgid "Not going"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:230
+msgctxt "EventCard"
+msgid "Watch"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:237
+msgctxt "EventCard"
+msgid "Hide"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:237
+msgctxt "EventCard"
+msgid "Who answered"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:242
+msgctxt "EventCard"
+msgid "Edit {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:249
+msgctxt "EventCard"
+msgid "Delete {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:260
+msgctxt "EventCard"
+msgid "No answers yet."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:260
+msgctxt "EventCard"
+msgid "Answers"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:274
+msgctxt "EventCard"
+msgid "Created by {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:301
+msgctxt "EventsPage"
+msgid "Events"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:307
+msgctxt "EventsPage"
+msgid "Scheduled on {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:316
+msgctxt "EventsPage"
+msgid "Create Event"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:322
+msgctxt "EventsPage"
+msgid "This server's gateway does not keep events (or there is no gateway)."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:327
+msgctxt "EventsPage"
+msgid "Loading events…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:327
+msgctxt "EventsPage"
+msgid ""
+"Nothing scheduled. Create an event to invite people, or schedule a stream."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:349
+msgctxt "EventDialog"
+msgid "Create Event"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:349
+msgctxt "EventDialog"
+msgid "Edit Event"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:350
+msgctxt "EventDialog"
+msgid "Everyone on {} can see it and answer."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:362
+#: crates/voelin-ui/ui/screens/events.slint:362
+msgctxt "EventDialog"
+msgid "Title"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:363
+msgctxt "EventDialog"
+msgid "Raid night"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:366
+#: crates/voelin-ui/ui/screens/events.slint:366
+msgctxt "EventDialog"
+msgid "Description"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:367
+msgctxt "EventDialog"
+msgid "What happens, what to bring"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:372
+#: crates/voelin-ui/ui/screens/events.slint:372
+msgctxt "EventDialog"
+msgid "Starts"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:373
+msgctxt "EventDialog"
+msgid "YYYY-MM-DD HH:MM, local time"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:377
+msgctxt "EventDialog"
+msgid "Ends (optional)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:378
+msgctxt "EventDialog"
+msgid "Empty: no end"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:379
+msgctxt "EventDialog"
+msgid "Ends"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:383
+msgctxt "EventDialog"
+msgid "Where"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:388
+msgctxt "EventDialog"
+msgid "Channel"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:393
+msgctxt "EventDialog"
+msgid "A scheduled stream"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:394
+msgctxt "EventDialog"
+msgid "Linked to the stream directory once the host goes live."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:400
+#: crates/voelin-ui/ui/screens/events.slint:400
+msgctxt "EventDialog"
+msgid "Stream title"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:404
+#: crates/voelin-ui/ui/screens/events.slint:404
+msgctxt "EventDialog"
+msgid "Game or subject"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:420
+msgctxt "EventDialog"
+msgid "Delete"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:428
+msgctxt "EventDialog"
+msgid "Cancel"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:434
+msgctxt "EventDialog"
+msgid "Create"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/events.slint:434
+msgctxt "EventDialog"
+msgid "Save"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:62
+msgctxt "ContactRow"
+msgid "Blocked"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:88
+msgctxt "ContactRow"
+msgid "Message {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:98
+msgctxt "ContactRow"
+msgid "Poke {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:108
+msgctxt "ContactRow"
+msgid "Join {}'s channel"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:118
+msgctxt "ContactRow"
+msgid "Watch {}'s stream"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:146
+msgctxt "FriendsPage"
+msgid "Friends"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:155
+msgctxt "FriendsPage"
+msgid "Online — {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:155
+msgctxt "FriendsPage"
+msgid "All — {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:155
+msgctxt "FriendsPage"
+msgid "Blocked — {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:157
+#: crates/voelin-ui/ui/screens/friends.slint:157
+msgctxt "FriendsPage"
+msgid "Which contacts"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:171
+#: crates/voelin-ui/ui/screens/friends.slint:171
+#: crates/voelin-ui/ui/screens/friends.slint:171
+#: crates/voelin-ui/ui/screens/friends.slint:171
+msgctxt "FriendsPage"
+msgid "Search contacts"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:177
+msgctxt "FriendsPage"
+msgid "Online"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:177
+msgctxt "FriendsPage"
+msgid "All"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:177
+msgctxt "FriendsPage"
+msgid "Blocked"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:197
+msgctxt "FriendsPage"
+msgid "None of your friends is online right now."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:198
+msgctxt "FriendsPage"
+msgid "You have blocked no one."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:199
+msgctxt "FriendsPage"
+msgid "No contacts yet."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:205
+msgctxt "FriendsPage"
+msgid ""
+"Open a person's card in a server's members panel to add them as a friend or "
+"to block them. Friends show up here on every server they are on."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:215
+msgctxt "FriendsPage"
+msgid "Go to a server"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:223
+msgctxt "FriendsPage"
+msgid "Contacts"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:246
+msgctxt "ContactPanel"
+msgid "Close"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:285
+msgctxt "ContactPanel"
+msgid "Friend"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:290
+msgctxt "ContactPanel"
+msgid "Blocked"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:302
+msgctxt "ContactPanel"
+msgid "Message"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:310
+msgctxt "ContactPanel"
+msgid "Poke"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:321
+msgctxt "ContactPanel"
+msgid "Join"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:329
+msgctxt "ContactPanel"
+msgid "Watch"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:336
+msgctxt "ContactPanel"
+msgid "Where"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:336
+msgctxt "ContactPanel"
+msgid "Last seen"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:357
+msgctxt "ContactPanel"
+msgid "Not seen on your servers yet."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:364
+msgctxt "ContactPanel"
+msgid "Note"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:365
+msgctxt "ContactPanel"
+msgid "Only on this device. Press Enter to keep it."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:368
+msgctxt "ContactPanel"
+msgid "Add a note"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:370
+msgctxt "ContactPanel"
+msgid "Note about {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:378
+msgctxt "ContactPanel"
+msgid "Volume for me"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:384
+msgctxt "ContactPanel"
+msgid "{}%"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:393
+msgctxt "ContactPanel"
+msgid "Unmute for me"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:393
+msgctxt "ContactPanel"
+msgid "Mute for me"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:407
+msgctxt "ContactPanel"
+msgid "Volume of {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:417
+msgctxt "ContactPanel"
+msgid "Remove friend"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:417
+msgctxt "ContactPanel"
+msgid "Add friend"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:424
+msgctxt "ContactPanel"
+msgid "Unblock"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:424
+msgctxt "ContactPanel"
+msgid "Block"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/friends.slint:431
+msgctxt "ContactPanel"
+msgid "Forget this contact"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:105
+msgctxt "SidebarArt"
+msgid "Hang out"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:105
+msgctxt "SidebarArt"
+msgid "Play together"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:105
+msgctxt "SidebarArt"
+msgid "Find your people"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:128
+msgctxt "HomeNav"
+msgid "Home"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:134
+msgctxt "HomeNav"
+msgid "Friends"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:140
+msgctxt "HomeNav"
+msgid "Direct Messages"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:147
+msgctxt "HomeNav"
+msgid "Library"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:157
+msgctxt "HomeNav"
+msgid "Quick Actions"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:165
+msgctxt "HomeNav"
+msgid "Add a Server"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:170
+msgctxt "HomeNav"
+msgid "Join a Server"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:175
+msgctxt "HomeNav"
+msgid "Find Friends"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:257
+msgctxt "HomeBanner"
+msgid "Talk."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:257
+msgctxt "HomeBanner"
+msgid "Watch."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:257
+msgctxt "HomeBanner"
+msgid "Share."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:257
+msgctxt "HomeBanner"
+msgid "Together."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:308
+msgctxt "HomeBanner"
+msgid "Voice, chat and streams\non TeamSpeak servers."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:309
+msgctxt "HomeBanner"
+msgid "Not reached yet"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:316
+msgctxt "HomeBanner"
+msgid "Talk. Watch. Share. Or look in without joining."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:327
+msgctxt "HomeBanner"
+msgid "Add a Server"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:333
+msgctxt "HomeBanner"
+msgid "Connecting…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:333
+msgctxt "HomeBanner"
+msgid "Connect"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:339
+msgctxt "HomeBanner"
+msgid "Open"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:350
+msgctxt "HomeBanner"
+msgid "Previous"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:357
+msgctxt "HomeBanner"
+msgid "Next"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:650
+msgctxt "ServerCard"
+msgid "Invisible"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:660
+msgctxt "ServerCard"
+msgid "Open"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:660
+msgctxt "ServerCard"
+msgid "Connecting…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:660
+msgctxt "ServerCard"
+msgid "Join"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:911
+msgctxt "HomePage"
+msgid "Friends Online"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:913
+msgctxt "HomePage"
+msgid "View All ({})"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:921
+msgctxt "HomePage"
+msgid ""
+"No friends online. Add friends from a person's card on a server: they show "
+"up here, wherever they are."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:950
+#: crates/voelin-ui/ui/screens/home.slint:950
+#: crates/voelin-ui/ui/screens/home.slint:950
+msgctxt "HomePage"
+msgid "Find Friends"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:981
+msgctxt "HomePage"
+msgid "Messages"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:983
+#: crates/voelin-ui/ui/screens/home.slint:983
+msgctxt "HomePage"
+msgid "See All"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:995
+#: crates/voelin-ui/ui/screens/home.slint:995
+msgctxt "HomePage"
+msgid "Your Servers"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:997
+#: crates/voelin-ui/ui/screens/home.slint:997
+msgctxt "HomePage"
+msgid "Add a Server"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1001
+#: crates/voelin-ui/ui/screens/home.slint:1001
+msgctxt "HomePage"
+msgid "No servers yet. Add one with its address."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1020
+msgctxt "HomePage"
+msgid "Live Now"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1020
+msgctxt "HomePage"
+msgid "Featured Live Rooms"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1022
+#: crates/voelin-ui/ui/screens/home.slint:1022
+msgctxt "HomePage"
+msgid "See More Live"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1026
+msgctxt "HomePage"
+msgid ""
+"No one is live on your servers right now. Streams of TeamSpeak 6 servers and "
+"those a gateway lists show up here."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1076
+msgctxt "HomePage"
+msgid "Recent Chats"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1078
+msgctxt "HomePage"
+msgid "View All"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1082
+msgctxt "HomePage"
+msgid "Chats you had show up here, from every server."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1093
+msgctxt "HomePage"
+msgid "Recent Activity"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1246
+msgctxt "HomeAside"
+msgid "Friend Activity"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1247
+msgctxt "HomeAside"
+msgid "See All"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1251
+msgctxt "HomeAside"
+msgid "What your friends do shows up here."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1265
+msgctxt "HomeAside"
+msgid "Quick Actions"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1269
+msgctxt "HomeAside"
+msgid "Find Friends"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1270
+msgctxt "HomeAside"
+msgid "Search your contacts"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1279
+msgctxt "HomeAside"
+msgid "Join a Server"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1280
+msgctxt "HomeAside"
+msgid "Enter an address"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1285
+msgctxt "HomeAside"
+msgid "Add a Server"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1286
+msgctxt "HomeAside"
+msgid "Save it for later"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1291
+msgctxt "HomeAside"
+msgid "What's Happening"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1294
+msgctxt "HomeAside"
+msgid "Events, scheduled streams and news of your servers show up here."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1325
+msgctxt "LibraryPage"
+msgid "Library"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1331
+msgctxt "LibraryPage"
+msgid "Recordings and clips from the Stream Studio, in {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1339
+msgctxt "LibraryPage"
+msgid "Open Folder"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1345
+msgctxt "LibraryPage"
+msgid ""
+"Nothing recorded yet. Recordings and clips saved in the Stream Studio appear "
+"here."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/home.slint:1397
+msgctxt "LibraryPage"
+msgid "Play"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:21
+msgctxt "MemberBadges"
+msgid "server admin"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:28
+msgctxt "MemberBadges"
+msgid "priority speaker"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:35
+msgctxt "MemberBadges"
+msgid "channel commander"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:42
+msgctxt "MemberBadges"
+msgid "recording"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:60
+msgctxt "GroupHeader"
+msgid "{} — {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:177
+msgctxt "MemberRow"
+msgid "talk power {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:227
+msgctxt "MemberCardPopup"
+msgid "Close"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:242
+msgctxt "MemberCardPopup"
+msgid "Groups"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:258
+msgctxt "MemberCardPopup"
+msgid "talk power {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:273
+msgctxt "MemberCardPopup"
+msgid "Volume"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:280
+msgctxt "MemberCardPopup"
+msgid "{}%"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:290
+msgctxt "MemberCardPopup"
+msgid "Unmute for me"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:290
+msgctxt "MemberCardPopup"
+msgid "Mute for me"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:305
+msgctxt "MemberCardPopup"
+msgid "Volume of {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:315
+msgctxt "MemberCardPopup"
+msgid "Watch stream"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:324
+msgctxt "MemberCardPopup"
+msgid "Message"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:332
+msgctxt "MemberCardPopup"
+msgid "Poke"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:342
+msgctxt "MemberCardPopup"
+msgid "Friend"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:342
+msgctxt "MemberCardPopup"
+msgid "Add friend"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:352
+msgctxt "MemberCardPopup"
+msgid "Blocked"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:352
+msgctxt "MemberCardPopup"
+msgid "Block"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:372
+msgctxt "MembersPanel"
+msgid "Members — {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:382
+#: crates/voelin-ui/ui/screens/members.slint:382
+msgctxt "MembersPanel"
+msgid "Search members"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:400
+msgctxt "MembersPanel"
+msgid "Search members…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:410
+msgctxt "MembersPanel"
+msgid "Connect or observe to see who is here."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/members.slint:419
+msgctxt "MembersPanel"
+msgid "Members"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:139
+msgctxt "ConversationList"
+msgid "Messages"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:148
+msgctxt "ConversationList"
+msgid "New message"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:159
+msgctxt "ConversationList"
+msgid "Search messages…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:160
+msgctxt "ConversationList"
+msgid "Search messages"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:167
+msgctxt "ConversationList"
+msgid "All"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:175
+msgctxt "ConversationList"
+msgid "Unread"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:184
+msgctxt "ConversationList"
+msgid "Inbox"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:194
+msgctxt "ConversationList"
+msgid ""
+"No offline messages. Servers keep them for you while you are away; connect "
+"with voice to fetch them."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:195
+msgctxt "ConversationList"
+msgid "Nothing unread."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:196
+msgctxt "ConversationList"
+msgid ""
+"No conversations yet. Message someone from their card on a server, or with "
+"the + above."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:204
+msgctxt "ConversationList"
+msgid "Conversations"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:230
+msgctxt "Conversation"
+msgid "Pick a conversation, or start one with +."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:283
+msgctxt "Conversation"
+msgid "Poke {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:291
+msgctxt "Conversation"
+msgid "Join {}'s channel"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:299
+msgctxt "Conversation"
+msgid "Remove friend"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:299
+msgctxt "Conversation"
+msgid "Add friend"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:308
+msgctxt "Conversation"
+msgid "More"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:322
+msgctxt "Conversation"
+msgid "Unmute for me"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:322
+msgctxt "Conversation"
+msgid "Mute for me"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:323
+msgctxt "Conversation"
+msgid "Write an offline message"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:324
+msgctxt "Conversation"
+msgid "Unblock"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:324
+msgctxt "Conversation"
+msgid "Block"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:366
+msgctxt "Conversation"
+msgid "Fetching the message…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:377
+msgctxt "Conversation"
+msgid "Reply"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:383
+msgctxt "Conversation"
+msgid "Mark unread"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:389
+msgctxt "Conversation"
+msgid "Delete"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:416
+msgctxt "Conversation"
+msgid "Connect"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:423
+msgctxt "Conversation"
+msgid "Offline message"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:432
+msgctxt "Conversation"
+msgid "Message @{}…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:432
+msgctxt "Conversation"
+msgid "{} cannot get messages now"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:479
+msgctxt "DmProfile"
+msgid "Online"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:479
+msgctxt "DmProfile"
+msgid "Offline"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:501
+msgctxt "DmProfile"
+msgid "About"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:506
+msgctxt "DmProfile"
+msgid "No note. Add one on the Friends page."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:528
+msgctxt "DmProfile"
+msgid "Servers — {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:556
+msgctxt "DmProfile"
+msgid "Shared Media — {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:576
+msgctxt "DmProfile"
+msgid "Picture {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:612
+msgctxt "DmProfile"
+msgid "Shared Files — {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:649
+msgctxt "DmProfile"
+msgid "Files linked in this conversation show up here."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:659
+msgctxt "DmProfile"
+msgid "Volume for me"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:665
+msgctxt "DmProfile"
+msgid "{}%"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:674
+msgctxt "DmProfile"
+msgid "Unmute for me"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:674
+msgctxt "DmProfile"
+msgid "Mute for me"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:688
+msgctxt "DmProfile"
+msgid "Volume of {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:702
+msgctxt "OfflineDialog"
+msgid "Offline message to {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:703
+msgctxt "OfflineDialog"
+msgid "The server keeps it until {} reads it."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:709
+#: crates/voelin-ui/ui/screens/messages.slint:709
+#: crates/voelin-ui/ui/screens/messages.slint:709
+msgctxt "OfflineDialog"
+msgid "Subject"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:717
+#: crates/voelin-ui/ui/screens/messages.slint:717
+msgctxt "OfflineDialog"
+msgid "Message"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:720
+msgctxt "OfflineDialog"
+msgid "Your message"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:731
+msgctxt "OfflineDialog"
+msgid "Cancel"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/messages.slint:737
+msgctxt "OfflineDialog"
+msgid "Send"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:32
+msgctxt "ChannelBar"
+msgid "Back"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:65
+msgctxt "ChannelBar"
+msgid "Leave"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:122
+msgctxt "PhonePlayer"
+msgid "Stream picture"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:167
+msgctxt "PhonePlayer"
+msgid "Quality"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:173
+msgctxt "PhonePlayer"
+msgid "{}p"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:178
+msgctxt "PhonePlayer"
+msgid "Full screen"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:229
+msgctxt "PhonePlayer"
+msgid "Mute"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:229
+msgctxt "PhonePlayer"
+msgid "Unmute"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:242
+msgctxt "PhonePlayer"
+msgid "Stream volume"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:247
+msgctxt "PhonePlayer"
+msgid "Close"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:247
+msgctxt "PhonePlayer"
+msgid "Stop watching"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:284
+msgctxt "StreamPrompt"
+msgid "{} is streaming"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:284
+msgctxt "StreamPrompt"
+msgid "Untitled stream"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:292
+msgctxt "StreamPrompt"
+msgid "Looking it up…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:292
+msgctxt "StreamPrompt"
+msgid "In {}; looking it up…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:293
+msgctxt "StreamPrompt"
+msgid "Your stream"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:294
+msgctxt "StreamPrompt"
+msgid "{} · in {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:295
+msgctxt "StreamPrompt"
+msgid "{} · {} watching"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:306
+msgctxt "StreamPrompt"
+msgid "Show"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:306
+msgctxt "StreamPrompt"
+msgid "Watch"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:415
+msgctxt "ChatHeader"
+msgid "{} Chat"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:422
+msgctxt "ChatHeader"
+msgid "Linked to this voice channel"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:430
+msgctxt "ChatHeader"
+msgid "Pinned Messages"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:440
+msgctxt "ChatHeader"
+msgid "Topics"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:449
+msgctxt "ChatHeader"
+msgid "Members"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:518
+msgctxt "VoiceBar"
+msgid "Voice"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:526
+msgctxt "VoiceBar"
+msgid "Unmute"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:526
+msgctxt "VoiceBar"
+msgid "Mute"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:533
+msgctxt "VoiceBar"
+msgid "Undeafen"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:533
+msgctxt "VoiceBar"
+msgid "Deafen"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:544
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:544
+msgctxt "VoiceBar"
+msgid "Go Live"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:562
+msgctxt "VoiceBar"
+msgid "Live"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:571
+msgctxt "VoiceBar"
+msgid "Sharing"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:571
+msgctxt "VoiceBar"
+msgid "Share"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:577
+msgctxt "VoiceBar"
+msgid "Leave"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:596
+msgctxt "TalkButton"
+msgid "Hold to talk"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:668
+msgctxt "MobileVoice"
+msgid "Invite: copy a link to this channel"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:683
+msgctxt "MobileVoice"
+msgid "Invite"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile-voice.slint:703
+msgctxt "MobileVoice"
+msgid "Message #{}…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:62
+msgctxt "MobileServers"
+msgid "Add server"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:89
+msgctxt "ActivityPage"
+msgid "Dismiss"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:151
+msgctxt "YouPage"
+msgid "Offline"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:161
+msgctxt "YouPage"
+msgid "Unmute"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:161
+msgctxt "YouPage"
+msgid "Mute"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:169
+msgctxt "YouPage"
+msgid "Undeafen"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:169
+msgctxt "YouPage"
+msgid "Deafen"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:179
+msgctxt "YouPage"
+msgid "Live"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:179
+msgctxt "YouPage"
+msgid "Go Live"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:187
+msgctxt "YouPage"
+msgid "Leave"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:196
+msgctxt "YouPage"
+msgid "Settings"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:201
+msgctxt "YouPage"
+msgid "My Account"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:202
+msgctxt "YouPage"
+msgid "Profiles"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:203
+msgctxt "YouPage"
+msgid "Appearance"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:204
+msgctxt "YouPage"
+msgid "Voice & Video"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:205
+msgctxt "YouPage"
+msgid "Streaming"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:206
+msgctxt "YouPage"
+msgid "Notifications"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:207
+msgctxt "YouPage"
+msgid "Privacy & Safety"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:208
+msgctxt "YouPage"
+msgid "Devices"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:209
+msgctxt "YouPage"
+msgid "Keybinds"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:210
+msgctxt "YouPage"
+msgid "Integrations"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:211
+msgctxt "YouPage"
+msgid "Advanced"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:220
+msgctxt "YouPage"
+msgid "About {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/mobile.slint:243
+msgctxt "PhoneSheet"
+msgid "Back"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/overlays.slint:112
+#: crates/voelin-ui/ui/screens/overlays.slint:112
+msgctxt "NotificationsPanel"
+msgid "Notifications"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/overlays.slint:139
+msgctxt "NotificationsPanel"
+msgid "Mark all read"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/overlays.slint:146
+msgctxt "NotificationsPanel"
+msgid "Clear all"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/overlays.slint:155
+msgctxt "NotificationsPanel"
+msgid "Notification settings"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/overlays.slint:185
+msgctxt "NotificationsPanel"
+msgid "{} want to watch your stream"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/overlays.slint:225
+msgctxt "NotificationsPanel"
+msgid ""
+"Nothing new. Mentions, pokes, messages, event reminders and friends coming "
+"online show up here."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/overlays.slint:343
+#: crates/voelin-ui/ui/screens/overlays.slint:343
+msgctxt "SearchPalette"
+msgid "Search"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/overlays.slint:353
+msgctxt "SearchPalette"
+msgid "Search servers, channels, people, settings…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/overlays.slint:391
+msgctxt "SearchPalette"
+msgid "Type to find a server, a channel, a person or a settings page."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/overlays.slint:391
+msgctxt "SearchPalette"
+msgid "Nothing matches “{}”."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/overlays.slint:417
+msgctxt "SearchPalette"
+msgid "to choose"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/overlays.slint:427
+msgctxt "SearchPalette"
+msgid "to open"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/overlays.slint:437
+msgctxt "SearchPalette"
+msgid "to close"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/overlays.slint:451
+msgctxt "Lightbox"
+msgid "Picture"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/overlays.slint:477
+msgctxt "Lightbox"
+msgid "Close"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:174
+msgctxt "AccountSection"
+msgid "Identity in use"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:176
+msgctxt "AccountSection"
+msgid "On {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:176
+msgctxt "AccountSection"
+msgid "The default identity"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:200
+msgctxt "AccountSection"
+msgid "Identity “{}” · security level {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:207
+msgctxt "AccountSection"
+msgid "Manage identities"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:213
+msgctxt "AccountSection"
+msgid "Unique id on TeamSpeak 3 servers"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:217
+msgctxt "AccountSection"
+msgid "Unique id on TeamSpeak 6 servers"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:221
+msgctxt "AccountSection"
+msgid ""
+"Servers know you by this id: your groups and permissions belong to it. Your "
+"nickname is set per server, in the server's bookmark."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:232
+msgctxt "IdentityActions"
+msgid "Use as default"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:239
+msgctxt "IdentityActions"
+msgid "Export"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:245
+msgctxt "IdentityActions"
+msgid "Delete {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:276
+msgctxt "IdentityRow"
+msgid "Name of the identity"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:280
+msgctxt "IdentityRow"
+msgid "Default"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:298
+msgctxt "IdentityRow"
+msgid "TeamSpeak 3: {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:304
+msgctxt "IdentityRow"
+msgid "TeamSpeak 6: {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:313
+msgctxt "IdentityRow"
+msgid ""
+"{} · security level {}; raising it to {} on every core (best so far: {})…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:314
+msgctxt "IdentityRow"
+msgid "{} · security level {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:329
+msgctxt "IdentityRow"
+msgid "Level to reach"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:334
+msgctxt "IdentityRow"
+msgid "Stop"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:334
+msgctxt "IdentityRow"
+msgid "Raise"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:346
+msgctxt "IdentityRow"
+msgid "Used by {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:358
+msgctxt "ProfilesSection"
+msgid "Identities"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:360
+msgctxt "ProfilesSection"
+msgid ""
+"Each identity is a unique id on every server. Keys never leave this device "
+"unless you export them."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:371
+msgctxt "ProfilesSection"
+msgid ""
+"Servers know you by the default identity's unique id, from the next "
+"connection on, unless a server names another below. The security level is "
+"hash cash: servers may require a minimum (often 8). Each level takes about "
+"twice as long as the one before. Exported identities are written as "
+"TeamSpeak 3 .ini files into your downloads folder; they hold the private key."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:375
+msgctxt "ProfilesSection"
+msgid "Import from TeamSpeak"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:377
+msgctxt "ProfilesSection"
+msgid ""
+"From the official clients' settings and .ini exports on this device; their "
+"files are only read."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:379
+msgctxt "ProfilesSection"
+msgid "Import identities from TeamSpeak on start"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:380
+msgctxt "ProfilesSection"
+msgid ""
+"While you use the identity Voelin made for you, the one TeamSpeak uses "
+"becomes your default, once."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:389
+msgctxt "ProfilesSection"
+msgid "Find identities"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:395
+msgctxt "ProfilesSection"
+msgid "Import the chosen ones"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:412
+msgctxt "ProfilesSection"
+msgid "{} (already here)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:412
+msgctxt "ProfilesSection"
+msgid "{} · level {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:426
+msgctxt "ProfilesSection"
+msgid "Identity per server"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:429
+msgctxt "ProfilesSection"
+msgid "Add a server first."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:445
+msgctxt "ProfilesSection"
+msgid "Identity for {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:459
+msgctxt "LayerRow"
+msgid "Size or scale"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:460
+msgctxt "LayerRow"
+msgid "Max fps"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:461
+msgctxt "LayerRow"
+msgid "kbit/s"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:462
+msgctxt "LayerRow"
+msgid "Min kbit/s"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:463
+msgctxt "LayerRow"
+msgid "Max kbit/s"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:485
+#: crates/voelin-ui/ui/screens/settings-pages.slint:485
+msgctxt "LayerRow"
+msgid "Remove the layer"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:506
+msgctxt "GainSlider"
+msgid "Gain of {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:513
+msgctxt "GainSlider"
+msgid "{}%"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:565
+msgctxt "SourceRow"
+msgid "Unmute"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:565
+msgctxt "SourceRow"
+msgid "Mute"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:577
+msgctxt "SourceRow"
+msgid "Remove {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:596
+msgctxt "StreamingSection"
+msgid "Stream defaults"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:599
+msgctxt "StreamingSection"
+msgid "Frame rate"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:600
+msgctxt "StreamingSection"
+msgid "The most frames a second; the source may give fewer."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:609
+msgctxt "StreamingSection"
+msgid "Video bitrate"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:610
+msgctxt "StreamingSection"
+msgid ""
+"Of the single layer, when no layers are set below. 0: automatic, from the "
+"size and frame rate, up to 60 Mbit/s."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:619
+msgctxt "StreamingSection"
+msgid "Video codec"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:621
+#: crates/voelin-ui/ui/screens/settings-pages.slint:621
+msgctxt "StreamingSection"
+msgid "Auto"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:629
+msgctxt "StreamingSection"
+msgid "Screen capture"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:631
+msgctxt "StreamingSection"
+msgid "Portal"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:640
+msgctxt "StreamingSection"
+msgid "Simulcast layers"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:642
+msgctxt "StreamingSection"
+msgid ""
+"Copies of the stream at other sizes and bitrates; each viewer gets the one "
+"their connection carries. None: one layer."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:651
+msgctxt "StreamingSection"
+msgid "Add a layer"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:656
+msgctxt "StreamingSection"
+msgid ""
+"Size is WIDTHxHEIGHT (1280x720) or a scale of the source (0.5). Changes "
+"apply to a live stream at once."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:660
+msgctxt "StreamingSection"
+msgid "Audio sources"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:662
+msgctxt "StreamingSection"
+msgid "Mixed into the stream's sound; none: the stream is silent."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:672
+msgctxt "StreamingSection"
+msgid "Desktop without {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:678
+msgctxt "StreamingSection"
+msgid "Microphone"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:684
+msgctxt "StreamingSection"
+msgid "The shared window's app"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:694
+msgctxt "StreamingSection"
+msgid "No application plays audio now"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:695
+msgctxt "StreamingSection"
+msgid "Application"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:700
+msgctxt "StreamingSection"
+msgid "Add the application"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:708
+msgctxt "StreamingSection"
+msgid "Recording and replay"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:711
+msgctxt "StreamingSection"
+msgid "Replay buffer"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:712
+msgctxt "StreamingSection"
+msgid "Seconds kept for saving a clip after the fact (0: off)."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:721
+msgctxt "StreamingSection"
+msgid "Replay memory"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:722
+msgctxt "StreamingSection"
+msgid "Kept in memory; older parts go to a temporary file."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:731
+msgctxt "StreamingSection"
+msgid "Recordings and clips go to"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:732
+msgctxt "StreamingSection"
+msgid "Empty: Videos/{}. Press Enter to apply."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:736
+msgctxt "StreamingSection"
+msgid "Recording folder"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:774
+msgctxt "ConfigRow"
+msgid "Reset {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:783
+msgctxt "ConfigRow"
+msgid "(read at start only)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:814
+msgctxt "PermRow"
+msgid "Everyone may {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:819
+msgctxt "PermRow"
+msgid "server groups"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:820
+msgctxt "PermRow"
+msgid "Server groups for {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:824
+msgctxt "PermRow"
+msgid "channel groups"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:825
+msgctxt "PermRow"
+msgid "Channel groups for {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:829
+msgctxt "PermRow"
+msgid "Set"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:835
+msgctxt "PermRow"
+msgid "Reset {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:881
+msgctxt "IntegrationsSection"
+msgid "Gateways"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:883
+msgctxt "IntegrationsSection"
+msgid ""
+"A gateway gives a server invisible presence, chat without joining, history, "
+"pins, reactions, topics, events and the stream directory."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:885
+msgctxt "IntegrationsSection"
+msgid ""
+"None of your servers has a gateway. Add its URL to a server's bookmark (Edit "
+"server)."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:916
+msgctxt "IntegrationsSection"
+msgid "Administer"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:933
+msgctxt "IntegrationsSection"
+msgid "Gateway administration"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:935
+msgctxt "IntegrationsSection"
+msgid ""
+"The gateway's settings and who may do what. Values are JSON; Enter applies."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:941
+msgctxt "IntegrationsSection"
+msgid "Reload its file"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:946
+msgctxt "IntegrationsSection"
+msgid "Close"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:955
+msgctxt "IntegrationsSection"
+msgid "Permissions"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:963
+msgctxt "IntegrationsSection"
+msgid "Groups are TeamSpeak group ids, separated by commas."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:967
+msgctxt "IntegrationsSection"
+msgid "Video encoders and decoders"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:984
+msgctxt "IntegrationsSection"
+msgid "Check again"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:996
+msgctxt "IntegrationsSection"
+msgid "Encoders"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1004
+msgctxt "IntegrationsSection"
+msgid "Decoders"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1009
+msgctxt "IntegrationsSection"
+msgid ""
+"Each codec's decoders in the order they are tried: when one fails the next "
+"takes over."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1056
+msgctxt "SettingRow"
+msgid "Reset {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1076
+msgctxt "AdvancedSection"
+msgid "Video encoding and decoding"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1079
+msgctxt "AdvancedSection"
+msgid "Encoder"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1080
+msgctxt "AdvancedSection"
+msgid ""
+"auto, software, or the name of an encoder from Integrations. Press Enter to "
+"apply."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1083
+msgctxt "AdvancedSection"
+msgid "Encoder backend"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1091
+msgctxt "AdvancedSection"
+msgid "Hardware acceleration"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1092
+msgctxt "AdvancedSection"
+msgid "GPU encoders where available"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1100
+msgctxt "AdvancedSection"
+msgid "Decoder"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1101
+msgctxt "AdvancedSection"
+msgid ""
+"auto, software, or the name of a decoder from Integrations; for streams "
+"watched from now on. Press Enter to apply."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1104
+msgctxt "AdvancedSection"
+msgid "Decoder backend"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1112
+msgctxt "AdvancedSection"
+msgid "Hardware decoding"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1113
+msgctxt "AdvancedSection"
+msgid "GPU decoders where available, before the software ones"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1122
+msgctxt "AdvancedSection"
+msgid "Stream encryption"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1124
+msgctxt "AdvancedSection"
+msgid "SRTP profiles offered for stream media, most preferred first."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1135
+msgctxt "AdvancedSection"
+msgid "Earlier"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1143
+msgctxt "AdvancedSection"
+msgid "Later"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1151
+msgctxt "AdvancedSection"
+msgid "Do not offer {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1169
+msgctxt "AdvancedSection"
+msgid "Offer"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1175
+msgctxt "AdvancedSection"
+msgid "Chat history"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1178
+msgctxt "AdvancedSection"
+msgid "Keep chat history on this device"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1179
+msgctxt "AdvancedSection"
+msgid "Off: messages are kept in memory for this run only"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1187
+msgctxt "AdvancedSection"
+msgid "Messages per page"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1188
+msgctxt "AdvancedSection"
+msgid "Shown when a chat opens and per step back (0: all)."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1196
+msgctxt "AdvancedSection"
+msgid "Delete messages after"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1197
+msgctxt "AdvancedSection"
+msgid "Pinned ones stay (0: keep all)."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1199
+msgctxt "AdvancedSection"
+msgid "days"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1206
+msgctxt "AdvancedSection"
+msgid "Same message within"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1207
+msgctxt "AdvancedSection"
+msgid "Two copies from different sources this close are one."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1216
+msgctxt "AdvancedSection"
+msgid "Pictures in chat up to"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1217
+msgctxt "AdvancedSection"
+msgid "Linked pictures this small are downloaded and shown (0: never)."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1227
+msgctxt "AdvancedSection"
+msgid "Cache"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1230
+msgctxt "AdvancedSection"
+msgid "Avatars and icons on disk"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1231
+msgctxt "AdvancedSection"
+msgid "The least recently used go first (0: no limit)."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1240
+msgctxt "AdvancedSection"
+msgid "Download avatars and icons"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1241
+msgctxt "AdvancedSection"
+msgid "Of the servers you are on"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1249
+msgctxt "AdvancedSection"
+msgid "Transfer progress every"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1250
+msgctxt "AdvancedSection"
+msgid "How often file transfers report (0: continuously)."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1260
+msgctxt "AdvancedSection"
+msgid "Logs and crash reports"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1268
+msgctxt "AdvancedSection"
+msgid "Crash reports: {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1268
+msgctxt "AdvancedSection"
+msgid "No crash report folder."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1278
+msgctxt "AdvancedSection"
+msgid "Open"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1285
+msgctxt "AdvancedSection"
+msgid "All settings"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1287
+msgctxt "AdvancedSection"
+msgid ""
+"Every setting by its key, as JSON. For what the pages do not show; Enter "
+"applies, the arrow resets."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1291
+#: crates/voelin-ui/ui/screens/settings-pages.slint:1291
+msgctxt "AdvancedSection"
+msgid "Filter settings"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:20
+msgctxt "SettingsNav"
+msgid "Settings"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:26
+msgctxt "SettingsNav"
+msgid "Customize your {} experience"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:38
+msgctxt "SettingsNav"
+msgid "My Account"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:39
+msgctxt "SettingsNav"
+msgid "Identity in use, unique ids"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:45
+msgctxt "SettingsNav"
+msgid "Profiles"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:46
+msgctxt "SettingsNav"
+msgid "Who servers see you as, import, export"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:52
+msgctxt "SettingsNav"
+msgid "Appearance"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:53
+msgctxt "SettingsNav"
+msgid "Themes, layout, text size"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:59
+msgctxt "SettingsNav"
+msgid "Voice & Video"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:60
+msgctxt "SettingsNav"
+msgid "Audio, camera, streaming"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:66
+msgctxt "SettingsNav"
+msgid "Streaming"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:67
+msgctxt "SettingsNav"
+msgid "Go live, stream settings"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:73
+msgctxt "SettingsNav"
+msgid "Devices"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:74
+msgctxt "SettingsNav"
+msgid "Manage your devices"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:80
+msgctxt "SettingsNav"
+msgid "Notifications"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:81
+msgctxt "SettingsNav"
+msgid "Messages, mentions, alerts"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:87
+msgctxt "SettingsNav"
+msgid "Privacy & Safety"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:88
+msgctxt "SettingsNav"
+msgid "Blocked people, who can reach you"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:94
+msgctxt "SettingsNav"
+msgid "Keybinds"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:95
+msgctxt "SettingsNav"
+msgid "Shortcuts, push-to-talk"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:101
+msgctxt "SettingsNav"
+msgid "Integrations"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:102
+msgctxt "SettingsNav"
+msgid "Gateways, encoders, decoders"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:109
+msgctxt "SettingsNav"
+msgid "Advanced"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:110
+msgctxt "SettingsNav"
+msgid "Experimental features"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:116
+msgctxt "SettingsNav"
+msgid "About"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:117
+msgctxt "SettingsNav"
+msgid "Version and notices"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:126
+#: crates/voelin-ui/ui/screens/settings.slint:126
+msgctxt "MicrophoneCard"
+msgid "Microphone"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:142
+msgctxt "MicrophoneCard"
+msgid "Stop Test"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:142
+msgctxt "MicrophoneCard"
+msgid "Test Mic"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:145
+msgctxt "MicrophoneCard"
+msgid "Stop the microphone test"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:145
+msgctxt "MicrophoneCard"
+msgid "Test the microphone"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:150
+msgctxt "MicrophoneCard"
+msgid "Input Volume"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:151
+msgctxt "MicrophoneCard"
+msgid "{} dB"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:157
+msgctxt "MicrophoneCard"
+msgid "Input volume"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:167
+msgctxt "MicrophoneCard"
+msgid "Input Level"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:187
+msgctxt "MicrophoneCard"
+msgid "Noise Suppression"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:188
+msgctxt "MicrophoneCard"
+msgid "Reduces background noise"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:196
+msgctxt "MicrophoneCard"
+msgid "Low"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:196
+msgctxt "MicrophoneCard"
+msgid "Moderate"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:196
+msgctxt "MicrophoneCard"
+msgid "High"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:196
+msgctxt "MicrophoneCard"
+msgid "Very high"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:198
+msgctxt "MicrophoneCard"
+msgid "Noise suppression level"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:206
+msgctxt "MicrophoneCard"
+msgid "Echo Cancellation"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:207
+msgctxt "MicrophoneCard"
+msgid "Prevents audio feedback"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:216
+msgctxt "MicrophoneCard"
+msgid "Automatic Gain Control"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:217
+msgctxt "MicrophoneCard"
+msgid "Keeps your volume consistent"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:228
+msgctxt "OutputCard"
+msgid "Output"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:236
+msgctxt "OutputCard"
+msgid "Speakers"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:244
+msgctxt "OutputCard"
+msgid "Test Sound"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:249
+msgctxt "OutputCard"
+msgid "Output Volume"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:250
+msgctxt "OutputCard"
+msgid "{}%"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:256
+msgctxt "OutputCard"
+msgid "Output volume"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:267
+msgctxt "PermissionsCard"
+msgid "Streaming Permissions"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:269
+msgctxt "PermissionsCard"
+msgid "Choose who can watch your streams without asking."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:271
+msgctxt "PermissionsCard"
+msgid "Everyone"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:271
+msgctxt "PermissionsCard"
+msgid "Anyone who asks can watch your streams"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:272
+msgctxt "PermissionsCard"
+msgid "Friends Only"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:272
+msgctxt "PermissionsCard"
+msgid "Only your friends can watch; others are asked"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:273
+msgctxt "PermissionsCard"
+msgid "Voice Channel Only"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:273
+msgctxt "PermissionsCard"
+msgid "Only people in your voice channel can watch"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:274
+msgctxt "PermissionsCard"
+msgid "No One"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:274
+msgctxt "PermissionsCard"
+msgid "Nobody can watch your streams"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:289
+#: crates/voelin-ui/ui/screens/settings.slint:289
+msgctxt "CameraCard"
+msgid "Camera"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:305
+msgctxt "CameraCard"
+msgid "Camera devices"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:335
+msgctxt "CameraCard"
+msgid "The preview is off."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:355
+msgctxt "CameraCard"
+msgid "Camera Preview"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:365
+msgctxt "CameraCard"
+msgid "Stop the preview"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:365
+msgctxt "CameraCard"
+msgid "Start the preview"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:376
+msgctxt "CameraCard"
+msgid "Background Effects"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:381
+msgctxt "CameraCard"
+msgid "None"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:381
+msgctxt "CameraCard"
+msgid "Blur"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:384
+msgctxt "CameraCard"
+msgid "Background effect"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:395
+msgctxt "VideoCard"
+msgid "Video Settings"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:400
+msgctxt "VideoCard"
+msgid "Resolution"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:402
+msgctxt "VideoCard"
+msgid "Auto"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:404
+msgctxt "VideoCard"
+msgid "Camera resolution"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:412
+msgctxt "VideoCard"
+msgid "Frame Rate"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:416
+msgctxt "VideoCard"
+msgid "Frame rate"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:424
+msgctxt "VideoCard"
+msgid "Video Codec"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:426
+msgctxt "VideoCard"
+msgid "Auto (best)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:428
+msgctxt "VideoCard"
+msgid "Video codec"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:437
+msgctxt "VideoCard"
+msgid "Enable Hardware Acceleration"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:445
+msgctxt "VideoCard"
+msgid "Mirror My Video"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:506
+msgctxt "QualityCard"
+msgid "Stream Quality"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:512
+msgctxt "QualityCard"
+msgid "Auto"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:513
+msgctxt "QualityCard"
+msgid "The source's size"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:522
+msgctxt "QualityCard"
+msgid "Lower bandwidth"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:531
+msgctxt "QualityCard"
+msgid "Full HD"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:540
+msgctxt "QualityCard"
+msgid "Higher quality"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:567
+msgctxt "QualityCard"
+msgid ""
+"Your own simulcast layers are set (Streaming page); a preset replaces them."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:575
+msgctxt "QualityCard"
+msgid "Stream Bitrate"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:587
+msgctxt "QualityCard"
+msgid "Stream bitrate"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:597
+msgctxt "QualityCard"
+msgid "auto"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:599
+msgctxt "QualityCard"
+msgid "Stream bitrate in kbit/s"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:623
+msgctxt "QualityCard"
+msgid ""
+"Automatic: from the size and frame rate, up to 60 Mbit/s (~27 GB per hour)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:624
+msgctxt "QualityCard"
+msgid "Estimated Upload Usage: ~{} GB per hour"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:669
+msgctxt "KeybindsSection"
+msgid "Voice transmission"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:672
+#: crates/voelin-ui/ui/screens/settings.slint:672
+msgctxt "KeybindsSection"
+msgid "Push-to-talk"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:672
+msgctxt "KeybindsSection"
+msgid "Voice activation"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:672
+msgctxt "KeybindsSection"
+msgid "Continuously"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:674
+msgctxt "KeybindsSection"
+msgid "Transmit"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:681
+#: crates/voelin-ui/ui/screens/settings.slint:681
+msgctxt "KeybindsSection"
+msgid "Voice activation level"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:682
+msgctxt "KeybindsSection"
+msgid "{} dB"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:699
+msgctxt "KeybindsSection"
+msgid "Input level"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:720
+msgctxt "KeybindsSection"
+msgid "Global push-to-talk key"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:721
+msgctxt "KeybindsSection"
+msgid "Works while other windows have focus"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:732
+msgctxt "KeybindsSection"
+msgid "Push-to-talk key"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:736
+msgctxt "KeybindsSection"
+msgid "Apply"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:748
+msgctxt "KeybindsSection"
+msgid ""
+"Keys are written like Ctrl+Shift+T, Alt+F1, CapsLock or MouseBack. On "
+"Wayland the desktop asks to confirm the key and may let you pick another "
+"one. The \"Hold to talk\" button in the window always works."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:752
+msgctxt "KeybindsSection"
+msgid "Shortcuts in the window"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:755
+msgctxt "KeybindsSection"
+msgid "Search servers, channels, people and settings"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:756
+msgctxt "KeybindsSection"
+msgid "Choose and open a search result"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:757
+msgctxt "KeybindsSection"
+msgid "Close the search, a dialog or a picture"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:758
+msgctxt "KeybindsSection"
+msgid "Send a message"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:781
+msgctxt "PrivacySection"
+msgid "Who can reach you"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:784
+msgctxt "PrivacySection"
+msgid "Private messages"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:785
+msgctxt "PrivacySection"
+msgid "Messages of everyone else are dropped."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:786
+#: crates/voelin-ui/ui/screens/settings.slint:786
+msgctxt "PrivacySection"
+msgid "Everyone"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:786
+#: crates/voelin-ui/ui/screens/settings.slint:786
+msgctxt "PrivacySection"
+msgid "Friends"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:786
+#: crates/voelin-ui/ui/screens/settings.slint:786
+msgctxt "PrivacySection"
+msgid "Nobody"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:794
+msgctxt "PrivacySection"
+msgid "Pokes"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:795
+msgctxt "PrivacySection"
+msgid "Pokes of everyone else are dropped."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:805
+msgctxt "PrivacySection"
+msgid "Blocked people"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:807
+msgctxt "PrivacySection"
+msgid ""
+"Their messages in channels show as \"blocked\"; their voice is muted for you."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:809
+msgctxt "PrivacySection"
+msgid "Their private messages and pokes"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:810
+msgctxt "PrivacySection"
+msgid "Hide them"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:810
+msgctxt "PrivacySection"
+msgid "Show flagged"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:818
+msgctxt "PrivacySection"
+msgid ""
+"You have blocked no one. Block people from their card on a server or on the "
+"Friends page."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:846
+msgctxt "PrivacySection"
+msgid "Unblock"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:854
+msgctxt "PrivacySection"
+msgid "Crash reports"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:857
+msgctxt "PrivacySection"
+msgid "Save crash reports on this device"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:858
+msgctxt "PrivacySection"
+msgid "Never uploaded"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:863
+msgctxt "PrivacySection"
+msgid ""
+"A report is a text file with the error and where it happened. It may contain "
+"a server address from the error message. You can attach it to a bug report "
+"yourself; the app never sends it anywhere."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:872
+msgctxt "NotificationsSection"
+msgid "Notify me about"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:874
+msgctxt "NotificationsSection"
+msgid "In the app: the bell. On the desktop: also a system notification."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:876
+msgctxt "NotificationsSection"
+msgid "Mentions"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:877
+msgctxt "NotificationsSection"
+msgid "Your name in a channel or server chat"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:878
+#: crates/voelin-ui/ui/screens/settings.slint:878
+#: crates/voelin-ui/ui/screens/settings.slint:878
+#: crates/voelin-ui/ui/screens/settings.slint:878
+#: crates/voelin-ui/ui/screens/settings.slint:878
+msgctxt "NotificationsSection"
+msgid "Off"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:878
+#: crates/voelin-ui/ui/screens/settings.slint:878
+#: crates/voelin-ui/ui/screens/settings.slint:878
+#: crates/voelin-ui/ui/screens/settings.slint:878
+#: crates/voelin-ui/ui/screens/settings.slint:878
+msgctxt "NotificationsSection"
+msgid "In the app"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:878
+#: crates/voelin-ui/ui/screens/settings.slint:878
+#: crates/voelin-ui/ui/screens/settings.slint:878
+#: crates/voelin-ui/ui/screens/settings.slint:878
+#: crates/voelin-ui/ui/screens/settings.slint:878
+msgctxt "NotificationsSection"
+msgid "Desktop"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:886
+msgctxt "NotificationsSection"
+msgid "Private messages"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:895
+msgctxt "NotificationsSection"
+msgid "Pokes"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:904
+msgctxt "NotificationsSection"
+msgid "Event reminders"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:905
+msgctxt "NotificationsSection"
+msgid "Before events you can join start"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:914
+msgctxt "NotificationsSection"
+msgid "Friends coming online"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:926
+msgctxt "NotificationsSection"
+msgid "Send a test notification"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:937
+msgctxt "DevicesSection"
+msgid "Audio"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:940
+#: crates/voelin-ui/ui/screens/settings.slint:940
+msgctxt "DevicesSection"
+msgid "Microphone"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:953
+#: crates/voelin-ui/ui/screens/settings.slint:953
+msgctxt "DevicesSection"
+msgid "Speakers"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:966
+#: crates/voelin-ui/ui/screens/settings.slint:966
+msgctxt "DevicesSection"
+msgid "Playback buffer"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:967
+msgctxt "DevicesSection"
+msgid "{} ms"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:982
+msgctxt "DevicesSection"
+msgid ""
+"A device that is unplugged stays chosen and is used again when it comes back."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:986
+msgctxt "DevicesSection"
+msgid "Cameras"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1004
+msgctxt "DevicesSection"
+msgid ""
+"Cameras are used as sources in the Stream Studio; the camera chosen under "
+"Voice & Video is the default."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1008
+msgctxt "DevicesSection"
+msgid "Screen capture"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1011
+msgctxt "DevicesSection"
+msgid "Capture with"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1013
+msgctxt "DevicesSection"
+msgid "Automatic"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1013
+msgctxt "DevicesSection"
+msgid "Desktop portal (Wayland)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1013
+msgctxt "DevicesSection"
+msgid "wlroots"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1015
+msgctxt "DevicesSection"
+msgid "Capture backend"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1044
+#: crates/voelin-ui/ui/screens/settings.slint:1044
+msgctxt "AppearanceSection"
+msgid "Theme"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1047
+msgctxt "AppearanceSection"
+msgid "Dark"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1047
+msgctxt "AppearanceSection"
+msgid "Light"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1047
+msgctxt "AppearanceSection"
+msgid "System"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1056
+#: crates/voelin-ui/ui/screens/settings.slint:1056
+msgctxt "AppearanceSection"
+msgid "Text size"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1057
+msgctxt "AppearanceSection"
+msgid "{}%"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1073
+msgctxt "AppearanceSection"
+msgid "Layout"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1076
+msgctxt "AppearanceSection"
+msgid "Phone layout below this window width (pixels)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1077
+msgctxt "AppearanceSection"
+msgid "Narrower windows show one page at a time with a bottom navigation."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1082
+msgctxt "AppearanceSection"
+msgid "Phone layout below this width"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1092
+msgctxt "AppearanceSection"
+msgid "Image cache (MB)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1093
+msgctxt "AppearanceSection"
+msgid "Decoded avatars, icons, emoji and pictures kept in memory. In use: {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1098
+msgctxt "AppearanceSection"
+msgid "Image cache in megabytes"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1125
+#: crates/voelin-ui/ui/screens/settings.slint:1125
+msgctxt "SettingsPage"
+msgid "Voice & Video"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1126
+#: crates/voelin-ui/ui/screens/settings.slint:1126
+msgctxt "SettingsPage"
+msgid "Keybinds"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1127
+#: crates/voelin-ui/ui/screens/settings.slint:1127
+msgctxt "SettingsPage"
+msgid "Streaming"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1128
+#: crates/voelin-ui/ui/screens/settings.slint:1128
+msgctxt "SettingsPage"
+msgid "Privacy & Safety"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1129
+#: crates/voelin-ui/ui/screens/settings.slint:1129
+msgctxt "SettingsPage"
+msgid "My Account"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1130
+#: crates/voelin-ui/ui/screens/settings.slint:1130
+msgctxt "SettingsPage"
+msgid "Profiles"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1131
+#: crates/voelin-ui/ui/screens/settings.slint:1131
+msgctxt "SettingsPage"
+msgid "Devices"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1132
+#: crates/voelin-ui/ui/screens/settings.slint:1132
+msgctxt "SettingsPage"
+msgid "Notifications"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1133
+#: crates/voelin-ui/ui/screens/settings.slint:1133
+msgctxt "SettingsPage"
+msgid "Integrations"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1134
+#: crates/voelin-ui/ui/screens/settings.slint:1134
+msgctxt "SettingsPage"
+msgid "Advanced"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1134
+#: crates/voelin-ui/ui/screens/settings.slint:1134
+msgctxt "SettingsPage"
+msgid "Appearance"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1135
+msgctxt "SettingsPage"
+msgid "Set up your audio, video, and streaming preferences for {}."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1136
+msgctxt "SettingsPage"
+msgid "How your voice goes out, and the keys for it."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1137
+msgctxt "SettingsPage"
+msgid "Defaults of your streams, their layers and their sound."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1138
+msgctxt "SettingsPage"
+msgid "Who can reach you, blocked people, what the app keeps."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1139
+msgctxt "SettingsPage"
+msgid "Your main account and server identity."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1140
+msgctxt "SettingsPage"
+msgid "Your identities: each is a unique id on every server."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1141
+msgctxt "SettingsPage"
+msgid "Microphones, speakers, cameras and screens."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1142
+msgctxt "SettingsPage"
+msgid "What the bell and the desktop tell you."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1143
+msgctxt "SettingsPage"
+msgid "Gateways of your servers, the video encoders and decoders here."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1144
+msgctxt "SettingsPage"
+msgid "Encoding, encryption, history, cache, every setting."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1145
+msgctxt "SettingsPage"
+msgid "Theme, text size and layout. Changes apply at once."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/settings.slint:1159
+msgctxt "SettingsPage"
+msgid "Settings section"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:47
+#: crates/voelin-ui/ui/screens/streams.slint:47
+msgctxt "StreamCard"
+msgid "{} is streaming"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:47
+#: crates/voelin-ui/ui/screens/streams.slint:47
+msgctxt "StreamCard"
+msgid "Untitled stream"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:53
+msgctxt "StreamCard"
+msgid "Started before you joined; looking it up…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:53
+msgctxt "StreamCard"
+msgid "In {}; looking it up…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:54
+msgctxt "StreamCard"
+msgid "your stream"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:55
+msgctxt "StreamCard"
+msgid "by {} · in {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:56
+msgctxt "StreamCard"
+msgid "by {} · with sound"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:56
+msgctxt "StreamCard"
+msgid "by {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:70
+msgctxt "StreamCard"
+msgid "Watch"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:71
+msgctxt "StreamCard"
+msgid "Watch {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:78
+msgctxt "StreamCard"
+msgid "Show"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:86
+msgctxt "StreamCard"
+msgid "Leave"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:103
+msgctxt "StreamsPanel"
+msgid "In voice — {} ({})"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:103
+msgctxt "StreamsPanel"
+msgid "Members"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:114
+msgctxt "StreamsPanel"
+msgid "Open the voice channel"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:121
+msgctxt "StreamsPanel"
+msgid "Join a channel with voice to see who is there."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:146
+msgctxt "StreamsPanel"
+msgid "Streams"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:153
+msgctxt "StreamsPanel"
+msgid "YOU ARE LIVE"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:157
+msgctxt "StreamsPanel"
+msgid "No streams on this server."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:166
+msgctxt "StreamsPanel"
+msgid "Viewers ({})"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:166
+msgctxt "StreamsPanel"
+msgid "Manage"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:173
+msgctxt "StreamsPanel"
+msgid "{} wants to watch"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:182
+msgctxt "StreamsPanel"
+msgid "Accept"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:187
+msgctxt "StreamsPanel"
+msgid "Deny"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:215
+msgctxt "StreamPlayer"
+msgid "Stream picture"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:283
+msgctxt "StreamPlayer"
+msgid "{} watching"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:303
+msgctxt "StreamPlayer"
+msgid "Quality"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:310
+msgctxt "StreamPlayer"
+msgid "{}p"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:329
+msgctxt "StreamPlayer"
+msgid "Mute"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:329
+msgctxt "StreamPlayer"
+msgid "Unmute"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:343
+msgctxt "StreamPlayer"
+msgid "Stream volume"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:358
+msgctxt "StreamPlayer"
+msgid "LIVE"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:383
+msgctxt "StreamPlayer"
+msgid "Back to the chat (keeps watching)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:390
+msgctxt "StreamPlayer"
+msgid "Back to the window"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:390
+msgctxt "StreamPlayer"
+msgid "Pop out"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:398
+msgctxt "StreamPlayer"
+msgid "Exit full screen"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:398
+msgctxt "StreamPlayer"
+msgid "Full screen"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:405
+msgctxt "StreamPlayer"
+msgid "Close"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:405
+msgctxt "StreamPlayer"
+msgid "Leave"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:419
+msgctxt "StreamInfo"
+msgid "Title"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:420
+msgctxt "StreamInfo"
+msgid "Streamer"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:421
+msgctxt "StreamInfo"
+msgid "Picture"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:422
+msgctxt "StreamInfo"
+msgid "Watching for"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:423
+msgctxt "StreamInfo"
+msgid "Viewers"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:423
+msgctxt "StreamInfo"
+msgid "{}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:451
+msgctxt "StreamViewer"
+msgid "Stream viewer"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:462
+msgctxt "StreamViewer"
+msgid "{} in voice"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:469
+msgctxt "StreamViewer"
+msgid "Close"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:469
+msgctxt "StreamViewer"
+msgid "Leave"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:503
+msgctxt "StreamViewer"
+msgid "Streamed in your voice channel, {}. The streamer decides who may watch."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:503
+msgctxt "StreamViewer"
+msgid "Streamed in the {} voice channel. The streamer decides who may watch."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:518
+msgctxt "StreamViewer"
+msgid "{} Chat"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:518
+msgctxt "StreamViewer"
+msgid "Chat"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:523
+msgctxt "StreamViewer"
+msgid "Stream Info"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:538
+msgctxt "StreamViewer"
+msgid "Message {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/streams.slint:538
+msgctxt "StreamViewer"
+msgid "Message"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:146
+msgctxt "SceneRow"
+msgid "Scene menu"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:158
+msgctxt "SceneRow"
+msgid "Go live with this scene"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:159
+msgctxt "SceneRow"
+msgid "Rename"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:160
+msgctxt "SceneRow"
+msgid "Remove"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:181
+#: crates/voelin-ui/ui/screens/studio-parts.slint:181
+msgctxt "ScenesCard"
+msgid "Scenes"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:185
+msgctxt "ScenesCard"
+msgid "Add scene"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:212
+#: crates/voelin-ui/ui/screens/studio-parts.slint:212
+msgctxt "ScenesCard"
+msgid "Add Scene"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:295
+msgctxt "SourceRow"
+msgid "Hide {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:295
+msgctxt "SourceRow"
+msgid "Show {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:304
+msgctxt "SourceRow"
+msgid "Source menu"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:314
+msgctxt "SourceRow"
+msgid "Transform…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:315
+msgctxt "SourceRow"
+msgid "Crop…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:316
+msgctxt "SourceRow"
+msgid "Opacity…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:317
+msgctxt "SourceRow"
+msgid "Unlock"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:317
+msgctxt "SourceRow"
+msgid "Lock"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:318
+msgctxt "SourceRow"
+msgid "Blur background"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:318
+msgctxt "SourceRow"
+msgid "Background effect off"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:319
+msgctxt "SourceRow"
+msgid "Background effect…"
+msgstr ""
+
+#. A phone's front and back camera, or the next webcam.
+#: crates/voelin-ui/ui/screens/studio-parts.slint:321
+msgctxt "SourceRow"
+msgid "Switch camera"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:322
+msgctxt "SourceRow"
+msgid "Bring forward"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:323
+msgctxt "SourceRow"
+msgid "Send backward"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:324
+msgctxt "SourceRow"
+msgid "Rename…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:325
+msgctxt "SourceRow"
+msgid "Remove"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:354
+msgctxt "AddSourceButton"
+msgid "Add source"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:361
+msgctxt "AddSourceButton"
+msgid "Screen"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:362
+msgctxt "AddSourceButton"
+msgid "Window"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:363
+msgctxt "AddSourceButton"
+msgid "Camera"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:364
+msgctxt "AddSourceButton"
+msgid "Image"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:365
+msgctxt "AddSourceButton"
+msgid "Text"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:366
+msgctxt "AddSourceButton"
+msgid "Colour"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:393
+#: crates/voelin-ui/ui/screens/studio-parts.slint:393
+msgctxt "SourcesCard"
+msgid "Sources"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:400
+msgctxt "SourcesCard"
+msgid "Add a scene first."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:400
+msgctxt "SourcesCard"
+msgid ""
+"Nothing in this scene yet: add a screen, a window, a camera, an image, text "
+"or a colour."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:465
+msgctxt "StudioPreview"
+msgid "Stream preview"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:494
+msgctxt "StudioPreview"
+msgid "Waiting for the first picture…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:494
+msgctxt "StudioPreview"
+msgid "Starting the studio…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:531
+msgctxt "StudioPreview"
+msgid "STARTING"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:542
+msgctxt "StudioPreview"
+msgid "REC {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:546
+msgctxt "StudioPreview"
+msgid "PREVIEW"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:561
+msgctxt "StudioPreview"
+msgid "{} watching"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:567
+msgctxt "StudioPreview"
+msgid "{} joined the stream"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:598
+msgctxt "StudioPreview"
+msgid "{} FPS"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:669
+msgctxt "StudioHeader"
+msgid "Stream Studio"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:676
+msgctxt "StudioHeader"
+msgid "Streaming to {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:676
+msgctxt "StudioHeader"
+msgid "Goes live to {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:726
+msgctxt "StudioHeader"
+msgid "Back into the main window"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:726
+msgctxt "StudioHeader"
+msgid "Open in its own window"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:797
+msgctxt "MixerRow"
+msgid "muted"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:797
+msgctxt "MixerRow"
+msgid "{} dB"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:815
+msgctxt "MixerRow"
+msgid "{} level"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:825
+msgctxt "MixerRow"
+msgid "{} gain"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:833
+msgctxt "MixerRow"
+msgid "Unmute {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:833
+msgctxt "MixerRow"
+msgid "Mute {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:843
+msgctxt "MixerRow"
+msgid "{} menu"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:853
+msgctxt "MixerRow"
+msgid "Unmute"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:853
+msgctxt "MixerRow"
+msgid "Mute"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:854
+msgctxt "MixerRow"
+msgid "Reset to 0 dB"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:855
+msgctxt "MixerRow"
+msgid "Remove"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:877
+msgctxt "MixerCard"
+msgid "Audio Mixer"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:881
+msgctxt "MixerCard"
+msgid "Add an audio source"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:888
+msgctxt "MixerCard"
+msgid "Stream audio settings"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:896
+msgctxt "MixerCard"
+msgid "No audio: add your microphone, the desktop or an application."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:903
+msgctxt "MixerCard"
+msgid "Audio sources"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1008
+msgctxt "StudioChat"
+msgid "Stream Chat"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1012
+msgctxt "StudioChat"
+msgid "Open the channel chat"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1027
+msgctxt "StudioChat"
+msgid "Stream chat"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1034
+msgctxt "StudioChat"
+msgid "Join a voice channel on a TeamSpeak 6 server: its chat shows here."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1058
+msgctxt "StudioChat"
+msgid "Message goes to {}…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1058
+msgctxt "StudioChat"
+msgid "No chat yet"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1059
+msgctxt "StudioChat"
+msgid "Message to the stream chat"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1069
+msgctxt "StudioChat"
+msgid "Send"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1099
+msgctxt "DestinationSelect"
+msgid "Destination"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1121
+msgctxt "DestinationSelect"
+msgid "No TeamSpeak 6 voice connection"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1266
+msgctxt "LayerRow"
+msgid "Layer size, or a scale like 0.5×"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1273
+msgctxt "LayerRow"
+msgid "Layer frame rate"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1274
+msgctxt "LayerRow"
+msgid "fps"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1282
+msgctxt "LayerRow"
+msgid "Layer bitrate in kbit/s"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1305
+msgctxt "StreamSettings"
+msgid "Stream Settings"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1311
+msgctxt "StreamSettings"
+msgid "Destination"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1318
+msgctxt "StreamSettings"
+msgid "Quality"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1322
+msgctxt "StreamSettings"
+msgid "Output quality"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1342
+msgctxt "StreamSettings"
+msgid "Stream Title"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1345
+msgctxt "StreamSettings"
+msgid "What are you streaming?"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1346
+msgctxt "StreamSettings"
+msgid "Stream title"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1352
+msgctxt "StreamSettings"
+msgid "Game"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1355
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1355
+msgctxt "StreamSettings"
+msgid "Game or category"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1362
+msgctxt "StreamSettings"
+msgid "Go Live Message (optional)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1365
+msgctxt "StreamSettings"
+msgid "Sent to the channel chat when you go live"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1372
+msgctxt "StreamSettings"
+msgid "Show Viewer Count"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1377
+msgctxt "StreamSettings"
+msgid "Show Chat Overlay"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1382
+msgctxt "StreamSettings"
+msgid "Show Now Playing"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1387
+msgctxt "StreamSettings"
+msgid "Enable Stream Audio"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1398
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1398
+msgctxt "StreamSettings"
+msgid "Advanced Settings"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1431
+msgctxt "StreamSettings"
+msgid "Output (width × height, FPS)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1437
+msgctxt "StreamSettings"
+msgid "Output width"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1448
+msgctxt "StreamSettings"
+msgid "Output height"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1454
+msgctxt "StreamSettings"
+msgid "Output frame rate"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1489
+msgctxt "StreamSettings"
+msgid "Bitrate (kbit/s)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1489
+msgctxt "StreamSettings"
+msgid "Simulcast layers (size or scale, FPS, kbit/s)"
+msgstr ""
+
+#. Empty: automatic, from the output's size and frame rate.
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1494
+msgctxt "StreamSettings"
+msgid "Auto (up to 60 Mbit/s)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1495
+msgctxt "StreamSettings"
+msgid "Bitrate in kbit/s"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1505
+msgctxt "StreamSettings"
+msgid "Add simulcast layers"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1505
+msgctxt "StreamSettings"
+msgid "Add a layer"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1521
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1521
+msgctxt "RecordButton"
+msgid "Record Clip"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1522
+msgctxt "RecordButton"
+msgid "Saves the last {} seconds"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1522
+msgctxt "RecordButton"
+msgid "The replay buffer is off"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1550
+msgctxt "RecordButton"
+msgid "Recording {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1568
+msgctxt "RecordButton"
+msgid "Recording options"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1584
+msgctxt "RecordButton"
+msgid "Save the last {} seconds"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1584
+msgctxt "RecordButton"
+msgid "Save clip (replay buffer off)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1585
+msgctxt "RecordButton"
+msgid "Stop recording"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1585
+msgctxt "RecordButton"
+msgid "Start recording"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1586
+msgctxt "RecordButton"
+msgid "Replay length…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1587
+msgctxt "RecordButton"
+msgid "Open the recordings folder"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1612
+msgctxt "StudioActions"
+msgid "Share Window"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1619
+msgctxt "StudioActions"
+msgid "Share Screen"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1645
+msgctxt "StudioActions"
+msgid "Live"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1645
+msgctxt "StudioActions"
+msgid "Starting…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1645
+msgctxt "StudioActions"
+msgid "Go Live"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1657
+msgctxt "StudioActions"
+msgid "End Stream"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1670
+msgctxt "ViewerRequests"
+msgid "{} wants to watch"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1679
+msgctxt "ViewerRequests"
+msgid "Accept"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1684
+msgctxt "ViewerRequests"
+msgid "Deny"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1715
+msgctxt "SourceDialog"
+msgid "Add text"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1715
+msgctxt "SourceDialog"
+msgid "Add a colour"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1715
+msgctxt "SourceDialog"
+msgid "Add an image"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1716
+msgctxt "SourceDialog"
+msgid "Added to the live scene."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1716
+msgctxt "SourceDialog"
+msgid "Position, size and crop are in output pixels."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1728
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1728
+msgctxt "SourceDialog"
+msgid "Name"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1735
+msgctxt "SourceDialog"
+msgid "Text (a new line with \\n)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1738
+msgctxt "SourceDialog"
+msgid "Text"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1744
+msgctxt "SourceDialog"
+msgid "Size (px)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1748
+msgctxt "SourceDialog"
+msgid "Colour (#rrggbb or #rrggbbaa)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1753
+msgctxt "SourceDialog"
+msgid "Image file (PNG or JPEG)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1757
+msgctxt "SourceDialog"
+msgid "Image file"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1762
+msgctxt "SourceDialog"
+msgid "Mirror"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1763
+msgctxt "SourceDialog"
+msgid "As in a mirror (front cameras)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1767
+msgctxt "SourceDialog"
+msgid "Transform"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1782
+msgctxt "SourceDialog"
+msgid "Width"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1784
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1784
+msgctxt "SourceDialog"
+msgid "own"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1787
+msgctxt "SourceDialog"
+msgid "Height"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1792
+msgctxt "SourceDialog"
+msgid "Scale"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1797
+msgctxt "SourceDialog"
+msgid "Fit inside"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1797
+msgctxt "SourceDialog"
+msgid "Fill (crop)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1797
+msgctxt "SourceDialog"
+msgid "Stretch"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1799
+msgctxt "SourceDialog"
+msgid "How it fills its box"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1803
+msgctxt "SourceDialog"
+msgid "Crop (source pixels)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1810
+msgctxt "SourceDialog"
+msgid "Left"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1814
+msgctxt "SourceDialog"
+msgid "Top"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1818
+msgctxt "SourceDialog"
+msgid "Right"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1822
+msgctxt "SourceDialog"
+msgid "Bottom"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1829
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1829
+msgctxt "SourceDialog"
+msgid "Opacity"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1842
+msgctxt "SourceDialog"
+msgid "{}%"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1851
+msgctxt "SourceDialog"
+msgid "Visible"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1855
+msgctxt "SourceDialog"
+msgid "Locked"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1862
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1862
+msgctxt "SourceDialog"
+msgid "Background effect"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1867
+msgctxt "SourceDialog"
+msgid "Off"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1867
+msgctxt "SourceDialog"
+msgid "Blur"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1867
+msgctxt "SourceDialog"
+msgid "Image"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1867
+msgctxt "SourceDialog"
+msgid "Colour"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1873
+msgctxt "SourceDialog"
+msgid "Blur strength (% of the picture's height)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1877
+msgctxt "SourceDialog"
+msgid "Background image file"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1881
+msgctxt "SourceDialog"
+msgid "Background colour (#rrggbb)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1885
+msgctxt "SourceDialog"
+msgid ""
+"The subject is found by a simple oval for now: what is outside it is "
+"replaced."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1897
+msgctxt "SourceDialog"
+msgid "Cancel"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1902
+msgctxt "SourceDialog"
+msgid "Add"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1902
+msgctxt "SourceDialog"
+msgid "Apply"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1920
+msgctxt "PickDialog"
+msgid "Share a screen"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1920
+msgctxt "PickDialog"
+msgid "Share a window"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1920
+msgctxt "PickDialog"
+msgid "Add a camera"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1920
+msgctxt "PickDialog"
+msgid "Audio sources"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1921
+msgctxt "PickDialog"
+msgid "Mixed into the stream's audio. Pick as many as you like."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1921
+msgctxt "PickDialog"
+msgid "Added to the live scene."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:1928
+msgctxt "PickDialog"
+msgid "Nothing found."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2015
+msgctxt "PickDialog"
+msgid "Done"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2024
+msgctxt "SceneDialog"
+msgid "Rename scene"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2031
+msgctxt "SceneDialog"
+msgid "Scene name"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2041
+msgctxt "SceneDialog"
+msgid "Cancel"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2046
+msgctxt "SceneDialog"
+msgid "Rename"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2059
+msgctxt "StudioSettingsDialog"
+msgid "Studio Settings"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2060
+msgctxt "StudioSettingsDialog"
+msgid ""
+"Clips, recordings and the preview. Stream quality is in the stream settings."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2072
+msgctxt "StudioSettingsDialog"
+msgid "Replay buffer (seconds, 0: off)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2073
+msgctxt "StudioSettingsDialog"
+msgid "Record Clip saves this much of what was streamed or composed."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2078
+msgctxt "StudioSettingsDialog"
+msgid "Replay buffer in seconds"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2082
+msgctxt "StudioSettingsDialog"
+msgid "Replay memory (MB)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2083
+msgctxt "StudioSettingsDialog"
+msgid "Beyond this the oldest part goes to a temporary file."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2088
+msgctxt "StudioSettingsDialog"
+msgid "Replay memory in megabytes"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2092
+msgctxt "StudioSettingsDialog"
+msgid "Recordings and clips folder"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2093
+msgctxt "StudioSettingsDialog"
+msgid "Empty: a Voelin folder in your videos folder."
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2097
+msgctxt "StudioSettingsDialog"
+msgid "Recordings folder"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2103
+msgctxt "StudioSettingsDialog"
+msgid "Preview width (pixels)"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2107
+msgctxt "StudioSettingsDialog"
+msgid "Preview width"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2111
+msgctxt "StudioSettingsDialog"
+msgid "Preview FPS"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2115
+msgctxt "StudioSettingsDialog"
+msgid "Preview frame rate"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2125
+msgctxt "StudioSettingsDialog"
+msgid "Cancel"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio-parts.slint:2130
+msgctxt "StudioSettingsDialog"
+msgid "Save"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:42
+msgctxt "StudioUser"
+msgid "Live"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:42
+msgctxt "StudioUser"
+msgid "Online"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:42
+msgctxt "StudioUser"
+msgid "Offline"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:128
+#: crates/voelin-ui/ui/screens/studio.slint:128
+msgctxt "StudioPage"
+msgid "Studio Settings"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:298
+msgctxt "PhoneAudioRow"
+msgid "muted"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:298
+msgctxt "PhoneAudioRow"
+msgid "{} dB"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:322
+msgctxt "PhoneAudioRow"
+msgid "Gain"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:330
+msgctxt "PhoneAudioRow"
+msgid "Mute"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:356
+msgctxt "MobileStudio"
+msgid "Back"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:369
+msgctxt "MobileStudio"
+msgid "Stream Studio"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:376
+msgctxt "MobileStudio"
+msgid "Live · {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:376
+msgctxt "MobileStudio"
+msgid "Go live to {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:403
+msgctxt "MobileStudio"
+msgid "LIVE PREVIEW"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:468
+msgctxt "MobileStudio"
+msgid "Source"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:469
+msgctxt "MobileStudio"
+msgid "What do you want to share?"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:475
+msgctxt "MobileStudio"
+msgid "Screen / Game"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:476
+msgctxt "MobileStudio"
+msgid "Apps or games"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:482
+msgctxt "MobileStudio"
+msgid "Camera"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:483
+msgctxt "MobileStudio"
+msgid "Front or back"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:489
+msgctxt "MobileStudio"
+msgid "App Window"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:490
+msgctxt "MobileStudio"
+msgid "A single app"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:497
+msgctxt "MobileStudio"
+msgid "Audio"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:499
+msgctxt "MobileStudio"
+msgid "Add a source"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:507
+msgctxt "MobileStudio"
+msgid "Stream Details"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:512
+msgctxt "MobileStudio"
+msgid "What are you streaming?"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:513
+msgctxt "MobileStudio"
+msgid "Stream title"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:521
+msgctxt "MobileStudio"
+msgid "Game"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:527
+msgctxt "MobileStudio"
+msgid "Category"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:528
+msgctxt "MobileStudio"
+msgid "Game or category"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:535
+msgctxt "MobileStudio"
+msgid "Quality"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:542
+msgctxt "MobileStudio"
+msgid "Output quality"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:567
+msgctxt "MobileStudio"
+msgid "Go Live To"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:587
+#: crates/voelin-ui/ui/screens/studio.slint:587
+msgctxt "MobileStudio"
+msgid "End Stream"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:587
+#: crates/voelin-ui/ui/screens/studio.slint:587
+msgctxt "MobileStudio"
+msgid "Go Live"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:610
+msgctxt "MobileStudio"
+msgid "Starting…"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:616
+msgctxt "MobileStudio"
+msgid "Start streaming to {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:631
+msgctxt "MobileStudio"
+msgid "Save a clip"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/studio.slint:647
+msgctxt "MobileStudio"
+msgid "Clip"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/voice.slint:89
+msgctxt "Participant"
+msgid "Speaking"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/voice.slint:89
+msgctxt "Participant"
+msgid "Streaming"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/voice.slint:89
+msgctxt "Participant"
+msgid "Away"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/voice.slint:144
+msgctxt "StreamCard"
+msgid "{} watching"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/voice.slint:183
+msgctxt "StreamCard"
+msgid "Sound"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/voice.slint:189
+msgctxt "StreamCard"
+msgid "Your stream"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/voice.slint:199
+msgctxt "StreamCard"
+msgid "Show Stream"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/voice.slint:199
+msgctxt "StreamCard"
+msgid "Watch Stream"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/voice.slint:245
+msgctxt "VoiceView"
+msgid "Chat only"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/voice.slint:251
+msgctxt "VoiceView"
+msgid "Voice Settings"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/voice.slint:258
+msgctxt "VoiceView"
+msgid "Leave"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/voice.slint:283
+msgctxt "VoiceView"
+msgid "{} in voice  /  {} total"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/voice.slint:284
+msgctxt "VoiceView"
+msgid "{} in voice"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/voice.slint:301
+msgctxt "VoiceView"
+msgid "In voice"
+msgstr ""
+
+#: crates/voelin-ui/ui/screens/voice.slint:322
+msgctxt "VoiceView"
+msgid "Message {}"
+msgstr ""
+
+#. The studio's stream takes the place of a simple share.
+#: crates/voelin-ui/ui/share-menu.slint:31
+msgctxt "ShareMenu"
+msgid "Share screen"
+msgstr ""
+
+#: crates/voelin-ui/ui/share-menu.slint:32
+msgctxt "ShareMenu"
+msgid "Stream Studio"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/common.slint:29
+#: crates/voelin-ui/ui/shells/common.slint:29
+msgctxt "HoldToTalk"
+msgid "Hold to talk"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/common.slint:44
+msgctxt "HoldToTalk"
+msgid "Talking…"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/common.slint:71
+msgctxt "VoiceCard"
+msgid "Voice"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/common.slint:92
+msgctxt "VoiceCard"
+msgid "Voice Connected"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/common.slint:92
+msgctxt "VoiceCard"
+msgid "Connecting…"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/common.slint:106
+msgctxt "VoiceCard"
+msgid "Open the voice channel"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/common.slint:114
+msgctxt "VoiceCard"
+msgid "Disconnect"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/common.slint:132
+msgctxt "VoiceButtons"
+msgid "Microphone off"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/common.slint:132
+msgctxt "VoiceButtons"
+msgid "Microphone on"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/common.slint:141
+msgctxt "VoiceButtons"
+msgid "Sound off"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/common.slint:141
+msgctxt "VoiceButtons"
+msgid "Sound on"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/common.slint:152
+msgctxt "VoiceButtons"
+msgid "Sharing"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/common.slint:152
+msgctxt "VoiceButtons"
+msgid "Live in the Stream Studio"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/common.slint:152
+msgctxt "VoiceButtons"
+msgid "Share or go live"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/common.slint:161
+msgctxt "VoiceButtons"
+msgid "Settings"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/common.slint:173
+msgctxt "UserCard"
+msgid "You"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/common.slint:206
+msgctxt "UserCard"
+msgid "Online"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/common.slint:206
+msgctxt "UserCard"
+msgid "Observing"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/common.slint:206
+msgctxt "UserCard"
+msgid "Offline"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/desktop.slint:80
+msgctxt "ServerRail"
+msgid "Servers"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/desktop.slint:101
+msgctxt "ServerRail"
+msgid "Home"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/desktop.slint:141
+msgctxt "ServerRail"
+msgid "Add server"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/desktop.slint:155
+msgctxt "ServerRail"
+msgid "Settings"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/desktop.slint:208
+msgctxt "TopBar"
+msgid "Search servers, channels, people or settings…"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/desktop.slint:209
+msgctxt "TopBar"
+msgid "Search"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/desktop.slint:219
+msgctxt "TopBar"
+msgid "{} new notifications"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/desktop.slint:219
+msgctxt "TopBar"
+msgid "Notifications"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/desktop.slint:227
+msgctxt "TopBar"
+msgid "Members"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/desktop.slint:243
+msgctxt "TopBar"
+msgid "About {}"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/mobile.slint:82
+msgctxt "PeoplePill"
+msgid "{} in voice"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/mobile.slint:132
+msgctxt "MobileShell"
+msgid "Back"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/mobile.slint:163
+msgctxt "MobileShell"
+msgid "Search"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/mobile.slint:172
+msgctxt "MobileShell"
+msgid "Voice channel"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/mobile.slint:185
+msgctxt "MobileShell"
+msgid "Notifications"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/mobile.slint:203
+#: crates/voelin-ui/ui/shells/mobile.slint:203
+msgctxt "MobileShell"
+msgid "Chats"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/mobile.slint:220
+msgctxt "MobileShell"
+msgid "More"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/mobile.slint:229
+msgctxt "MobileShell"
+msgid "Stream Studio"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/mobile.slint:230
+msgctxt "MobileShell"
+msgid "Voice Settings"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/mobile.slint:231
+#: crates/voelin-ui/ui/shells/mobile.slint:231
+msgctxt "MobileShell"
+msgid "Activity"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/mobile.slint:232
+msgctxt "MobileShell"
+msgid "Leave Voice"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/mobile.slint:260
+msgctxt "MobileShell"
+msgid "Navigation"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/mobile.slint:266
+msgctxt "MobileShell"
+msgid "Home"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/mobile.slint:272
+msgctxt "MobileShell"
+msgid "Servers"
+msgstr ""
+
+#: crates/voelin-ui/ui/shells/mobile.slint:293
+msgctxt "MobileShell"
+msgid "You"
+msgstr ""
+
+#: crates/voelin-ui/ui/studio-bridge.slint:299
+msgctxt "StudioNav"
+msgid "Text"
+msgstr ""
+
+#: crates/voelin-ui/ui/studio-bridge.slint:299
+msgctxt "StudioNav"
+msgid "Colour"
+msgstr ""
+
+#: crates/voelin-ui/ui/studio-bridge.slint:299
+msgctxt "StudioNav"
+msgid "Image"
+msgstr ""
+
+#: crates/voelin-ui/ui/studio-bridge.slint:300
+msgctxt "StudioNav"
+msgid "Your text"
+msgstr ""
+
+#: crates/voelin-ui/ui/studio-window.slint:14
+#: crates/voelin-ui/ui/studio-window.slint:14
+msgctxt "StudioWindow"
+msgid "Stream Studio"
+msgstr ""
+
+#: crates/voelin-ui/ui/studio-window.slint:63
+msgctxt "StudioWindow"
+msgid "Back into the main window"
+msgstr ""
+
+#: crates/voelin-ui/ui/studio-window.slint:93
+msgctxt "StudioWindow"
+msgid "Stream Preview"
+msgstr ""
+
+#: crates/voelin-ui/ui/studio-window.slint:133
+msgctxt "StudioWindow"
+msgid "Studio Settings"
+msgstr ""

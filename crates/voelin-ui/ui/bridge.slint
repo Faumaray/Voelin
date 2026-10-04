@@ -767,6 +767,22 @@ export struct AdvancedForm {
 }
 
 // Who we are (My Account page).
+export struct MytsForm {
+    prompt: bool,
+    uuid: string,
+    myts-id: string,
+    identity-status: int,
+    available: bool,
+    signed_in: bool,
+    email: string,
+    username: string,
+    status: int,
+    persistence-status: int,
+    busy: bool,
+    otp_required: bool,
+    can_forget: bool,
+}
+
 export struct AccountForm {
     nickname: string,
     identity: string,
@@ -1092,6 +1108,13 @@ export global Bridge {
     // Settings pages: a section was shown (its data is loaded then).
     callback settings-section(int);
     in property <AccountForm> account;
+    in property <MytsForm> myts;
+    in property <string> primary-name: myts.signed-in ? (myts.username != "" ? myts.username : myts.email) : nickname != "" ? nickname : app-name;
+    callback myts-dismiss();
+    callback myts-retry();
+    callback myts-portal(int);
+    callback myts-login(string, string, string);
+    callback myts-logout();
     in property <[IdentityItem]> identities;
     in property <[string]> identity-names;
     in property <[BookmarkIdentity]> bookmark-identities;

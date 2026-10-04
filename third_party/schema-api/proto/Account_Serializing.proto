@@ -1,0 +1,84 @@
+syntax = "proto2";
+
+package com.teamspeak.account.proto;
+
+import "myteamspeak_common.proto";
+import "myteamspeak_integration_common.proto";
+import "myteamspeak_avatar_common.proto";
+import "myteamspeak_tschat.proto";
+
+message Account_Session {
+    optional string id = 1;
+}
+
+message Account_Data {
+    optional string email = 1;
+    optional string password = 2;
+    optional string uuid = 3;
+    optional string user_name = 4;
+    optional bytes encryption_password = 5;
+    optional string global_items_uuid = 10;
+    optional string class_bookmark_version_uuid = 11;
+    optional string class_identity_version_uuid = 12;
+    optional string class_add_on_version_uuid = 13;
+    optional string class_config_version_uuid = 14;
+    optional string class_hotkey_profile_version_uuid = 15;
+    optional string class_whisper_list_version_uuid = 16;
+    optional string class_item_folder_version_uuid = 17;
+    optional string class_item_room_category_version_uuid = 18;
+    optional string class_group_chats_version_uuid = 19;
+    optional string class_contact_version_uuid = 20;
+    optional Account_Session session = 50;
+    repeated myteamspeak.proto.Limits limits = 51;
+    optional bytes key = 52;
+    optional bytes backup_ed_key = 53;
+    optional myteamspeak.proto.MyTeamSpeakIdData myteamspeakid_data = 54;
+    
+    repeated IntegrationCache integration_cache = 55;
+    message IntegrationCache {
+        repeated string user_integration_id = 1;
+        optional myteamspeak.proto.integration.IntegrationResponseList integration_cache = 2;
+    }
+    
+    optional myteamspeak.proto.MyTSUserCertificate myteamspeakid_user_certificate = 56;
+    optional myteamspeak.proto.AvatarData avatar_data = 57;
+    optional string push_token = 58;
+    optional Permissions permissions = 59;
+    optional myteamspeak.proto.tschat.MatrixIdentifierToken identifier_token = 61;
+    
+    optional AuthTokenCache auth_token_cache = 62;
+    message AuthTokenCache {
+        optional string auth_token = 1;
+        optional string renewal_token = 2;
+    }
+    
+    optional string firebase_device_token = 63;
+    optional string otp_renewal_token = 64;
+    optional string device_id = 65;
+}
+
+message TS_Sync_Account {
+    optional string passphrase = 1;
+}
+
+message Permissions {
+    repeated string permission = 1;
+}
+
+message MyTSID_Verification_Token {
+    optional bytes verification_sign = 1;
+    optional uint64 sign_timestamp = 2;
+    optional bytes user_pub_key = 3;
+    optional bytes pub_sign = 4;
+    optional bytes pub_sign_cert = 5;
+    optional uint64 ac_time = 6;
+    optional bytes mytsid = 7;
+}
+
+message Auth_Token_Package {
+    optional uint32 version = 1;
+    optional string auth_token = 2;
+    optional string encrypted_encryption_password = 3;
+    optional string encryption_tag = 4;
+    optional string iv = 5;
+}

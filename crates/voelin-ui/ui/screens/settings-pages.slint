@@ -3,6 +3,7 @@
 // (encoding, SRTP, history, cache, logs, every setting); and the rows the
 // sections share.
 
+import { AccountCard } from "account.slint";
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, IdentityItem, LayerItem, AudioSourceItem, ConfigItem, PermItem, SettingItem, EncoderItem } from "../bridge.slint";
@@ -168,6 +169,7 @@ component CopyField inherits Field {
 export component AccountSection inherits VerticalLayout {
     alignment: start;
     spacing: Theme.space-5;
+    AccountCard { }
     Card {
         title: @tr("Identity in use");
         icon: Icons.id-card;
@@ -217,21 +219,6 @@ export component AccountSection inherits VerticalLayout {
         }
         Hint {
             text: @tr("Servers know you by this id: your groups and permissions belong to it. Your nickname is set per server, in the server's bookmark.");
-        }
-    }
-    Card {
-        title: @tr("myTeamSpeak");
-        icon: Icons.info;
-        Hint {
-            text: @tr("{} does not sign in to myTeamSpeak, TeamSpeak's account service: it has no public API, and its terms do not allow using the private one. To use identities synchronised there, sign in once with the official client, then import them under Profiles: they are read from its settings, never written.", Bridge.app-name);
-        }
-        HorizontalLayout {
-            alignment: start;
-            Button {
-                icon: Icons.download;
-                text: @tr("Import identities");
-                clicked => { Nav.open-settings(SettingsSection.profiles); }
-            }
         }
     }
 }

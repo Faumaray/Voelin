@@ -9,6 +9,7 @@ import "assets/fonts/Inter-Bold.ttf";
 import "assets/fonts/Inter-Italic.ttf";
 
 import { Palette } from "std-widgets.slint";
+import { LoginPage } from "screens/account.slint";
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
 import { Bridge } from "bridge.slint";
@@ -112,7 +113,7 @@ export component MainWindow inherits Window {
     keys := FocusScope {
         // Ctrl+K: search.
         capture-key-pressed(event) => {
-            if event.modifiers.control && (event.text == "k" || event.text == "K") && root.chrome {
+            if event.modifiers.control && (event.text == "k" || event.text == "K") && root.chrome && !Bridge.myts.prompt {
                 Nav.open-search("");
                 return accept;
             }
@@ -125,9 +126,11 @@ export component MainWindow inherits Window {
             padding-right: root.safe-area-insets.right;
             padding-bottom: max(root.safe-area-insets.bottom, root.keyboard-inset);
 
-            if !root.chrome: StreamViewer { }
+            if Bridge.myts.prompt: LoginPage { }
 
-            if !Nav.narrow && root.chrome: DesktopShell {
+            if !Bridge.myts.prompt && !root.chrome: StreamViewer { }
+
+            if !Bridge.myts.prompt && !Nav.narrow && root.chrome: DesktopShell {
                 context: Nav.page == Page.settings ? @tr("Settings") : Nav.page == Page.studio ? @tr("Stream Studio") : "";
                 if Nav.page == Page.home: Sidebar {
                     HomeNav { }
@@ -213,7 +216,7 @@ export component MainWindow inherits Window {
                 }
             }
 
-            if Nav.narrow && root.chrome: MobileShell {
+            if !Bridge.myts.prompt && Nav.narrow && root.chrome: MobileShell {
                 property <bool> channel-chat: Nav.page == Page.server && !Nav.phone-voice
                     && Nav.mobile-tab == MobileTab.chat && !Bridge.viewer-open
                     && Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length
@@ -288,11 +291,12 @@ export component MainWindow inherits Window {
         x: (parent.width - self.width) / 2;
         y: parent.height - self.height - (Nav.narrow ? 140px : 96px);
         text: Bridge.status-text;
+        visible: self.shown && !Bridge.myts.prompt;
         widest: min(560px, parent.width - 32px);
     }
 
     // The member card of the members panel, over everything.
-    if Bridge.member-card.open: Rectangle {
+    if !Bridge.myts.prompt && (Bridge.member-card.open): Rectangle {
         TouchArea {
             clicked => { Bridge.open-member(-1); }
         }
@@ -302,7 +306,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    if Nav.emoji-open: Rectangle {
+    if !Bridge.myts.prompt && (Nav.emoji-open): Rectangle {
         // Clicks outside the picker close it.
         TouchArea {
             clicked => { Nav.emoji-open = false; }
@@ -328,7 +332,7 @@ export component MainWindow inherits Window {
     }
 
     // The bell's panel, under the bell (the phone: the whole width).
-    if Nav.notifications-open: Rectangle {
+    if !Bridge.myts.prompt && (Nav.notifications-open): Rectangle {
         TouchArea {
             clicked => { Nav.notifications-open = false; }
         }
@@ -340,39 +344,39 @@ export component MainWindow inherits Window {
         }
     }
 
-    if Nav.search-open: SearchPalette { }
+    if !Bridge.myts.prompt && (Nav.search-open): SearchPalette { }
 
-    if Nav.lightbox-open: Lightbox { }
+    if !Bridge.myts.prompt && (Nav.lightbox-open): Lightbox { }
 
-    if Nav.event-form-open: EventDialog {
+    if !Bridge.myts.prompt && (Nav.event-form-open): EventDialog {
         form <=> Nav.event-form;
         done => { Nav.event-form-open = false; }
     }
 
-    if Nav.offline-form-open: OfflineDialog {
+    if !Bridge.myts.prompt && (Nav.offline-form-open): OfflineDialog {
         done => { Nav.offline-form-open = false; }
     }
 
-    if Nav.topic-form-open: TopicDialog {
+    if !Bridge.myts.prompt && (Nav.topic-form-open): TopicDialog {
         done => { Nav.topic-form-open = false; }
     }
 
-    if Nav.bookmark-open: BookmarkDialog {
+    if !Bridge.myts.prompt && (Nav.bookmark-open): BookmarkDialog {
         form <=> Nav.bookmark-form;
         join: Nav.join-open;
         done => { Nav.bookmark-open = false; }
     }
 
-    if Nav.share-open: ShareDialog {
+    if !Bridge.myts.prompt && (Nav.share-open): ShareDialog {
         form <=> Nav.share-form;
         done => { Nav.share-open = false; }
     }
 
-    if Nav.client-open: ClientAudioDialog {
+    if !Bridge.myts.prompt && (Nav.client-open): ClientAudioDialog {
         done => { Nav.client-open = false; }
     }
 
-    if Nav.about-open: AboutDialog {
+    if !Bridge.myts.prompt && (Nav.about-open): AboutDialog {
         done => { Nav.about-open = false; }
     }
 }

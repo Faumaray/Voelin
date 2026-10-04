@@ -8,11 +8,12 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
 use futures::prelude::*;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::AbortHandle;
 use tokio::time::{Instant, timeout};
 use tracing::{debug, info, warn};
@@ -39,7 +40,7 @@ pub struct VoiceOptions {
 	pub address: String,
 	pub nickname: String,
 	pub identity: Option<Identity>,
-	/// Signed client version; `None` for the library default.
+	/// Signed compatibility version; `None` selects the native platform's tuple.
 	pub client_version: Option<Version>,
 	pub server_password: Option<String>,
 	/// Channel path to join, e.g. `Lobby/Sub`.
@@ -68,6 +69,7 @@ impl VoiceOptions {
 /// Where a voice connection reports answers the session does not need to see.
 #[derive(Clone)]
 pub(crate) struct VoiceLink {
+	pub myts_identity: watch::Receiver<Option<Arc<tsproto::myts::Identity>>>,
 	pub session: SessionId,
 	pub events: broadcast::Sender<Event>,
 	pub settings: SharedSettings,
@@ -224,6 +226,8 @@ fn now_ms() -> i64 {
 }
 
 enum Input {
+	MytsIdentityChanged,
+	AccountSourceClosed,
 	Item(Option<Result<StreamItem, tsclientlib::Error>>),
 	Cmd(Option<VoiceCmd>),
 	Tick,
@@ -231,6 +235,7 @@ enum Input {
 
 /// A command waiting for the server's answer.
 enum Pending {
+	MytsIdentity(Instant),
 	Stream(Request),
 	FileList {
 		request: RequestId,
@@ -343,12 +348,16 @@ async fn run_inner(
 	commands: &mut mpsc::UnboundedReceiver<VoiceCmd>,
 	events: &mpsc::UnboundedSender<VoiceEvent>,
 ) -> anyhow::Result<()> {
-	let mut builder = Connection::build(options.address.clone()).name(options.nickname.clone());
+	let version = match &options.client_version {
+		Some(version) => version.clone(),
+		None => crate::versions::native_version()?,
+	};
+	let mut builder = Connection::build(options.address.clone())
+		.name(options.nickname.clone())
+		.version(version)
+		.metadata(crate::versions::client_metadata());
 	if let Some(identity) = &options.identity {
 		builder = builder.identity(identity.clone());
-	}
-	if let Some(version) = &options.client_version {
-		builder = builder.version(version.clone());
 	}
 	if let Some(pw) = &options.server_password {
 		builder = builder.password(pw.clone());
@@ -356,22 +365,38 @@ async fn run_inner(
 	if let Some(channel) = &options.channel {
 		builder = builder.channel(channel.clone());
 	}
-	let mut con = builder.connect()?;
-
-	// Wait for the initial state.
-	let connected = timeout(Duration::from_secs(30), async {
-		con.events()
-			.try_filter(|e| future::ready(matches!(e, StreamItem::BookEvents(_))))
-			.next()
-			.await
+	let mut identity = link.myts_identity.clone();
+	// A changed account invalidates an in-flight handshake. Drop that connection
+	// and take a fresh snapshot before publishing any connected state.
+	let mut con = timeout(Duration::from_secs(30), async {
+		loop {
+			let snapshot = identity.borrow_and_update().as_deref().cloned();
+			let mut con = builder.clone().myts_identity(snapshot).connect()?;
+			let connected = tokio::select! {
+				biased;
+				changed = identity.changed() => {
+					changed.map_err(|_| anyhow::anyhow!("account source closed"))?;
+					continue;
+				}
+				connected = async {
+					con.events()
+						.try_filter(|e| future::ready(matches!(e, StreamItem::BookEvents(_))))
+						.next().await
+				} => connected,
+			};
+			match connected {
+				Some(Ok(_)) => {}
+				Some(Err(e)) => return Err(anyhow::Error::from(e)),
+				None => anyhow::bail!("connection closed"),
+			}
+			if identity.has_changed().unwrap_or(true) {
+				continue;
+			}
+			return Ok(con);
+		}
 	})
 	.await
-	.map_err(|_| anyhow::anyhow!("timed out while connecting"))?;
-	match connected {
-		Some(Ok(_)) => {}
-		Some(Err(e)) => return Err(e.into()),
-		None => anyhow::bail!("connection closed"),
-	}
+	.map_err(|_| anyhow::anyhow!("timed out while connecting"))??;
 	let server_uid = {
 		let state = con.get_state()?;
 		let flavor = ServerFlavor::from_version_string(&state.server.version);
@@ -409,15 +434,25 @@ async fn run_inner(
 
 	let mut tick = tokio::time::interval(Duration::from_millis(250));
 	let result = loop {
-		let input = {
-			let mut stream = voice.con.events();
-			tokio::select! {
-				item = stream.next() => Input::Item(item),
-				cmd = commands.recv() => Input::Cmd(cmd),
-				_ = tick.tick() => Input::Tick,
-			}
-		};
+		// Check on every turn so busy command/audio queues cannot delay expiry.
+		if voice.pending.values().any(|pending| {
+			matches!(pending, Pending::MytsIdentity(started)
+				if started.elapsed() >= Duration::from_secs(10))
+		}) {
+			break Err(anyhow::anyhow!("myTeamSpeak account update timed out"));
+		}
+		let input = next_input(&mut voice.con.events(), commands, &mut tick, &mut identity).await;
 		match input {
+			Input::AccountSourceClosed => break Err(anyhow::anyhow!("account source closed")),
+			Input::MytsIdentityChanged => {
+				let snapshot = identity.borrow_and_update().as_deref().cloned();
+				match voice.con.update_myts_identity(snapshot) {
+					Ok(handle) => {
+						voice.pending.insert(handle, Pending::MytsIdentity(Instant::now()));
+					}
+					Err(e) => break Err(anyhow::anyhow!("myTeamSpeak account update: {e}")),
+				}
+			}
 			Input::Item(None) => break Err(anyhow::anyhow!("connection closed")),
 			Input::Item(Some(Err(e))) => break Err(e.into()),
 			Input::Item(Some(Ok(item))) => {
@@ -438,10 +473,52 @@ async fn run_inner(
 	for (_, job) in voice.jobs.drain() {
 		job.report()(TransferState::Failed("disconnected".into()));
 	}
+	let disconnect = shutdown_connection(voice.con).await;
 	result?;
-	voice.con.disconnect(DisconnectOptions::new())?;
-	let _ =
-		timeout(Duration::from_secs(3), voice.con.events().for_each(|_| future::ready(()))).await;
+	disconnect?;
+	Ok(())
+}
+
+async fn next_input(
+	stream: &mut (impl Stream<Item = Result<StreamItem, tsclientlib::Error>> + Unpin),
+	commands: &mut mpsc::UnboundedReceiver<VoiceCmd>,
+	tick: &mut tokio::time::Interval,
+	identity: &mut watch::Receiver<Option<Arc<tsproto::myts::Identity>>>,
+) -> Input {
+	tokio::select! {
+		biased;
+		changed = identity.changed() => if changed.is_ok() {
+			Input::MytsIdentityChanged
+		} else {
+			Input::AccountSourceClosed
+		},
+		input = async {
+			// Keep account changes first without starving network or timers when
+			// the audio command queue remains ready.
+			tokio::select! {
+				cmd = commands.recv() => Input::Cmd(cmd),
+				_ = tick.tick() => Input::Tick,
+				item = stream.next() => Input::Item(item),
+			}
+		} => input,
+	}
+}
+
+async fn shutdown_connection(mut con: Connection) -> Result<(), tsclientlib::Error> {
+	// disconnect() also returns Ok while Connecting. Never poll that stale
+	// handshake: dropping it is the cancellation boundary for logout.
+	if con.get_state().is_err() {
+		return Ok(());
+	}
+	con.disconnect(DisconnectOptions::new())?;
+	let _ = timeout(Duration::from_secs(3), async {
+		while con.get_state().is_ok() {
+			if con.events().next().await.is_none() {
+				break;
+			}
+		}
+	})
+	.await;
 	Ok(())
 }
 
@@ -496,7 +573,13 @@ impl Voice {
 			StreamItem::MessageEvent(msg) => self.message_event(&msg),
 			StreamItem::MessageResult(handle, result) => {
 				if let Some(pending) = self.pending.remove(&handle) {
-					self.answered(pending, result.map_err(|e| e.error));
+					if matches!(pending, Pending::MytsIdentity(_)) {
+						result.map_err(|e| {
+							anyhow::anyhow!("myTeamSpeak account update: {}", e.error)
+						})?;
+					} else {
+						self.answered(pending, result.map_err(|e| e.error));
+					}
 				}
 			}
 			StreamItem::FileDownload(handle, download) => {
@@ -714,7 +797,7 @@ impl Voice {
 				};
 				self.link.emit(Event::OfflineMessage { session, request, result });
 			}
-			Pending::Quiet => {}
+			Pending::Quiet | Pending::MytsIdentity(_) => {}
 			Pending::Report(what) => {
 				if let Err(e) = result {
 					let _ = self.events.send(VoiceEvent::Error(format!("{what}: {e}")));
@@ -1019,5 +1102,99 @@ mod image_download_tests {
 		assert_eq!(image_download_time(100 << 10), Duration::from_secs(33));
 		// The largest picture, at the slowest rate allowed.
 		assert_eq!(image_download_time(cache::MAX_PICTURE_BYTES), Duration::from_secs(30 + 2048));
+	}
+}
+
+#[cfg(test)]
+mod account_tests {
+	use super::*;
+
+	#[tokio::test(start_paused = true)]
+	async fn account_priority_preserves_ready_network_and_timer_progress() {
+		let (account, mut identity) = watch::channel(None);
+		let (commands, mut receiver) = mpsc::unbounded_channel();
+		for _ in 0..512 {
+			commands.send(VoiceCmd::SetInputMuted(false)).unwrap();
+		}
+		let mut stream = futures::stream::poll_fn(|_| {
+			std::task::Poll::Ready(Some(Err(tsclientlib::Error::NotConnected)))
+		});
+		let mut tick = tokio::time::interval(Duration::from_millis(1));
+		account.send_replace(None);
+		assert!(matches!(
+			next_input(&mut stream, &mut receiver, &mut tick, &mut identity).await,
+			Input::MytsIdentityChanged
+		));
+		identity.borrow_and_update();
+		let (mut network, mut timers, mut audio) = (0, 0, 0);
+		for _ in 0..512 {
+			tokio::time::advance(Duration::from_millis(1)).await;
+			match next_input(&mut stream, &mut receiver, &mut tick, &mut identity).await {
+				Input::Item(_) => network += 1,
+				Input::Tick => timers += 1,
+				Input::Cmd(_) => audio += 1,
+				_ => panic!("unexpected account change"),
+			}
+		}
+		assert!(network > 0 && timers > 0 && audio > 0);
+	}
+
+	#[tokio::test]
+	async fn shutdown_never_polls_a_connecting_connection() {
+		let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let mut con =
+			Connection::build(server.local_addr().unwrap().to_string()).connect().unwrap();
+		assert!(matches!(con.update_myts_identity(None), Err(tsclientlib::Error::NotConnected)));
+		// tsclientlib returns Ok here despite retaining its Connecting future.
+		assert!(con.disconnect(DisconnectOptions::new()).is_ok());
+		timeout(Duration::from_millis(100), shutdown_connection(con)).await.unwrap().unwrap();
+		let mut packet = [0; 2048];
+		assert!(matches!(server.try_recv_from(&mut packet), Err(error)
+			if error.kind() == std::io::ErrorKind::WouldBlock));
+	}
+
+	#[tokio::test]
+	async fn account_change_cancels_pending_handshake() {
+		// A silent UDP peer keeps the handshake in flight without an external server.
+		let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let (account, identity) = watch::channel(None);
+		let (events, _) = broadcast::channel(8);
+		let link = VoiceLink {
+			session: 1,
+			events,
+			settings: SharedSettings::new(crate::settings::Settings::default()),
+			myts_identity: identity,
+		};
+		let (_commands, commands) = mpsc::unbounded_channel();
+		let (events, mut received) = mpsc::unbounded_channel();
+		let task = tokio::spawn(run(
+			VoiceOptions::new(server.local_addr().unwrap().to_string(), "account-test"),
+			link,
+			commands,
+			events,
+		));
+		let mut packet = [0; 2048];
+		let (_, first) =
+			timeout(Duration::from_secs(5), server.recv_from(&mut packet)).await.unwrap().unwrap();
+		// A logout/clear notification must cancel the old socket and restart.
+		account.send_replace(None);
+		let second = timeout(Duration::from_secs(5), async {
+			loop {
+				let (_, peer) = server.recv_from(&mut packet).await.unwrap();
+				if peer != first {
+					break peer;
+				}
+			}
+		})
+		.await
+		.unwrap();
+		assert_ne!(first, second);
+		// Losing the account authority fails closed immediately, not after connect timeout.
+		drop(account);
+		timeout(Duration::from_secs(2), task).await.unwrap().unwrap();
+		assert!(
+			matches!(received.recv().await, Some(VoiceEvent::Disconnected(Some(reason))) if reason == "account source closed")
+		);
+		assert!(received.try_recv().is_err());
 	}
 }

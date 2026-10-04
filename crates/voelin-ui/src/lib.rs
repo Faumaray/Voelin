@@ -15,6 +15,8 @@ mod images;
 mod inbox;
 mod members;
 mod messages;
+#[cfg(not(target_os = "android"))]
+mod myts;
 mod previews;
 mod servers;
 mod settings;

@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package com.teamspeak.myteamspeak.proto.integration;
+
+import "myteamspeak_integration_common.proto";
+
+option java_generic_services = true;
+option cc_generic_services = true;
+option optimize_for = SPEED;
+
+service IntegrationUserService {
+    rpc getIntegrationUserStatus(RequestIntegrationUserStatus) returns (IntegrationStatusUserResponse);
+    rpc requestBindIntegration(RequestBindData) returns (RequestBindResponse);
+    rpc requestUnbindIntegration(RequestUnbindData) returns (RequestBindResponse);
+    rpc getUserIntegrationSubscriptionInfo(UserIntegrationSubscriptionInfoRequest) returns (UserIntegrationSubscriptionInfoResponse);
+}
+
+message RequestIntegrationUserStatus {
+    string session = 1;
+}
+
+message IntegrationUserDataEntry {
+    IntegrationBindingStatus binding_status = 1;
+    string integration_text = 4;
+    IntegrationType type = 5;
+    bytes integration_id = 6;
+}
+
+message IntegrationUserData {
+    repeated IntegrationUserDataEntry integrations = 1;
+}
+
+message IntegrationStatusUserResponse {
+    IntegrationError error = 1;
+    IntegrationUserData data = 2;
+}
+
+message RequestBindData {
+    string session = 1;
+    RequestBind data = 2;
+}
+
+message RequestBind {
+    bytes integration_id = 1;
+    IntegrationType type = 2;
+    bytes virtualserver_key = 3;
+    bytes signature = 4;
+    uint64 timestamp = 5;
+    string virtualserver_id = 6;
+}
+
+message RequestUnbindData {
+    string session = 1;
+    RequestUnbind data = 2;
+}
+
+message RequestUnbind {
+    bytes integration_id = 1;
+    bytes signature = 2;
+    uint64 timestamp = 3;
+    string virtualserver_id = 4;
+}
+
+message RequestBindResponse {
+    IntegrationError error = 1;
+}
+
+message UserIntegrationSubscriptionInfoRequest {
+    string session_id = 1;
+    UserIntegrationSubscriptionInfoRequestData data = 2;
+}
+
+message UserIntegrationSubscriptionInfoResponse {
+    IntegrationError error = 1;
+    uint32 seconds_to_wait = 2;
+    IntegrationResponseList integration_response = 3;
+}

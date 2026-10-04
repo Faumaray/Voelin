@@ -57,6 +57,7 @@ tsproto-packets = { path = "../proto/tsproto-packets" }
 tsproto-types = { path = "../proto/tsproto-types" }
 
 [dev-dependencies]
+voelin-myts = { path = "../voelin-myts" }
 # `process`: the browser interop test drives Chromium through Node.js.
 tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "test-util"] }
 

@@ -1,0 +1,163 @@
+syntax = "proto3";
+
+package com.teamspeak.myteamspeak.proto;
+
+import "myteamspeak_avatar_common.proto";
+import "synchronization_common.proto";
+
+option java_generic_services = true;
+option cc_generic_services = true;
+option optimize_for = SPEED;
+
+message Limits {
+    uint32 limitID = 1;
+    int32 value = 2;
+}
+
+message LoginData {
+    string email = 1;
+    string password = 2;
+    bool skipSession = 3;
+    LoginOrigin origin = 4;
+    synchronization.Sync_Version sync_version = 5;
+    string otp = 6;
+    string device_id = 7;
+    string otp_renewal_token = 8;
+    string device_name = 9;
+}
+
+message MyTeamSpeakIdData {
+    bytes user_public_key = 1;
+    
+    UserPrivateKey user_private_key = 2;
+    message UserPrivateKey {
+        bytes encrypted_user_private_key = 1;
+        bytes decrypted_user_private_key = 2;
+    }
+    
+    uint64 account_creation_time = 3;
+    bytes my_teamspeak_id = 4;
+    bytes public_signature = 5;
+}
+
+message MyTSUserCertificate {
+    bytes cert = 1;
+}
+
+message LoginSession {
+    bytes key = 1;
+    string session = 2;
+    string uuid = 4;
+    repeated Limits limits = 3;
+    int64 purge = 6;
+    AddonDevStatus addon_dev = 7;
+    string username = 8;
+    ErrorCommon error = 5;
+    MyTeamSpeakIdData myts_id_data = 9;
+    MyTSUserCertificate mytsid_user_cert = 10;
+    AvatarData user_avatar = 11;
+    string push_token = 12;
+    Permissions permission = 13;
+    UserData user_data = 14;
+    
+    AlternativeLoginInformation alternative_login_info = 16;
+    message AlternativeLoginInformation {
+        string renewal_token = 1;
+        string otp_renewal_token = 2;
+        string device_id = 3;
+    }
+}
+
+message Session {
+    string session = 1;
+}
+
+message EncryptionKey {
+    LoginData LoginData = 1;
+    bytes key = 2;
+}
+
+message EncryptionKeyResult {
+    bool success = 1;
+    ErrorCommon errorcode = 2;
+    string error = 3;
+}
+
+message LoginStatus {
+    ErrorCommon error = 1;
+    string uuid = 2;
+}
+
+message Permissions {
+    repeated string permission = 1;
+}
+
+message UserData {
+    string description = 1;
+}
+
+message AuthTokenRequest {
+    string email = 1;
+    string password = 2;
+}
+
+message AuthTokenReply {
+    string auth_token = 1;
+    ErrorCommon error = 3;
+}
+
+message AuthTokenLogin {
+    string auth_token = 1;
+    string device_description = 2;
+}
+
+message RenewalTokenLogin {
+    string renewal_token = 1;
+    string auth_token = 2;
+}
+
+message AuthToken {
+    string id = 1;
+    string mytsid = 2;
+}
+
+message RenewalToken {
+    string token = 1;
+    AuthToken auth_token = 2;
+}
+
+enum AddonDevStatus {
+    UNKNOWN_ADDONDEVSTATUS = 0;
+    REQUESTED = 1;
+    CONFIRMATION_PENDING = 2;
+    CONFIRMED = 5;
+    APPROVED = 3;
+    REJECTED = 4;
+    BANNED = 6;
+}
+
+enum LoginOrigin {
+    CLIENT = 0;
+    WEBSITE = 1;
+}
+
+enum ErrorCommon {
+    UNKNOWN_ERRORCOMMON = 0;
+    ERROR_FE_UNKNOWN_METHOD = 100;
+    ERROR_FE_UNKNOWN_DATA = 101;
+    ERROR_SESSION_OK = 102;
+    ERROR_SESSION_EXPIRED = 103;
+    ERROR_SESSION_SERVER_OFFLINE = 104;
+    ERROR_LOGIN_OK = 200;
+    ERROR_LOGIN_OFFLINE = 201;
+    ERROR_LOGIN_FAILED = 202;
+    ERROR_LOGIN_EMAIL_PENDING = 203;
+    ERROR_SESSION_DELETED_OK = 204;
+    ERROR_PUSH_TOKEN_CREATION = 205;
+    ERROR_AUTH_TOKEN_INVALID = 206;
+    ERRIR_RENEWAL_TOKEN_INVALID = 207;
+    ERROR_AUTH_REQUIRES_OTP = 208;
+    ERROR_2FA_OTP_INVALID = 209;
+    ERROR_2FA_OTP_SECRET_MISSING = 210;
+    ERROR_2FA_DEVICE_ID_MISSING = 211;
+}

@@ -97,6 +97,9 @@ fn default_secrets() -> Box<dyn Secrets> {
 #[cfg(not(target_os = "android"))]
 impl Secrets for FallbackSecrets {
 	fn get(&self, key: &str) -> voelin_store::Result<Option<String>> {
+		if key.starts_with("myts/") {
+			return self.keyring.get(key);
+		}
 		match self.memory.get(key)? {
 			Some(v) => Ok(Some(v)),
 			None => Ok(self.keyring.get(key).unwrap_or(None)),
@@ -104,6 +107,9 @@ impl Secrets for FallbackSecrets {
 	}
 
 	fn set(&self, key: &str, value: &str) -> voelin_store::Result<()> {
+		if key.starts_with("myts/") {
+			return self.keyring.set(key, value);
+		}
 		if let Err(error) = self.keyring.set(key, value) {
 			warn!(%error, "keyring unavailable, keeping the secret for this session only");
 			return self.memory.set(key, value);
@@ -112,6 +118,9 @@ impl Secrets for FallbackSecrets {
 	}
 
 	fn delete(&self, key: &str) -> voelin_store::Result<()> {
+		if key.starts_with("myts/") {
+			return self.keyring.delete(key);
+		}
 		let _ = self.keyring.delete(key);
 		self.memory.delete(key)
 	}
@@ -407,6 +416,10 @@ impl Models {
 }
 
 pub(crate) struct App {
+	#[cfg(not(target_os = "android"))]
+	pub runtime: tokio::runtime::Handle,
+	#[cfg(not(target_os = "android"))]
+	pub myts: crate::myts::Account,
 	pub ui: slint::Weak<MainWindow>,
 	pub store: Store,
 	pub secrets: Box<dyn Secrets>,
@@ -646,6 +659,10 @@ pub fn run(options: RunOptions) -> Result<()> {
 	let mut video = Video::new(&dir, settings.openh264);
 	video.set_decoder_preference(decoder_preference(&prefs));
 	let app = App {
+		#[cfg(not(target_os = "android"))]
+		runtime: runtime.clone(),
+		#[cfg(not(target_os = "android"))]
+		myts: Default::default(),
 		ui: ui.as_weak(),
 		store,
 		secrets: options.secrets.unwrap_or_else(default_secrets),
@@ -701,6 +718,8 @@ pub fn run(options: RunOptions) -> Result<()> {
 		app.refresh_home();
 		app.refresh_notices();
 		app.refresh_pages();
+		#[cfg(not(target_os = "android"))]
+		app.start_myts();
 		if app.demo {
 			app.start_demo();
 		}
@@ -760,16 +779,22 @@ pub fn run(options: RunOptions) -> Result<()> {
 
 /// Open a file or folder with the desktop's default application.
 pub(crate) fn open_path(path: &Path) -> std::io::Result<()> {
+	let mut child = desktop_opener(path.as_os_str()).spawn()?;
+	// Reap it without blocking the UI.
+	std::thread::spawn(move || child.wait());
+	Ok(())
+}
+
+/// Build an argument-based desktop opener; never pass a target through a shell.
+pub(crate) fn desktop_opener(target: &std::ffi::OsStr) -> std::process::Command {
 	#[cfg(windows)]
 	let mut command = std::process::Command::new("explorer");
 	#[cfg(target_os = "macos")]
 	let mut command = std::process::Command::new("open");
 	#[cfg(not(any(windows, target_os = "macos")))]
 	let mut command = std::process::Command::new("xdg-open");
-	let mut child = command.arg(path).spawn()?;
-	// Reap it without blocking the UI.
-	std::thread::spawn(move || child.wait());
-	Ok(())
+	command.arg(target);
+	command
 }
 
 pub(crate) fn model<T: Clone + 'static>(items: Vec<T>) -> ModelRc<T> {

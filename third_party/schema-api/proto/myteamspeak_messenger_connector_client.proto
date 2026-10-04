@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package com.teamspeak.myteamspeak.proto.messengerconnector;
+
+import "google/protobuf/any.proto";
+
+option java_generic_services = true;
+option cc_generic_services = true;
+option java_multiple_files = true;
+option optimize_for = SPEED;
+
+service MessengerConnectorClientService {
+    rpc requestCreateMessengerAccount(RequestCreateMessengerAccountRequest) returns (RequestCreateMessengerAccountReply);
+}
+
+message RequestCreateMessengerAccountRequest {
+    string session = 1;
+}
+
+message RequestCreateMessengerAccountReply {
+    MessengerConnectorReturnCodesClient return_code = 1;
+}
+
+message InformContactsAvatarHasChangedRequest {
+    string client_id = 1;
+}
+
+message UsernameHasChangedRequest {
+    string client_id = 1;
+    string username = 2;
+}
+
+message GenericMessageWrapper {
+    google.protobuf.Any message = 1;
+}
+
+enum MessengerConnectorReturnCodesClient {
+    ERROR_MESSENGER_CLIENT_CODE_INVALID = 0;
+    SUCCESS_ACCOUNT_CREATED = 1;
+    ERROR_ACCOUNT_CREATION_FAILED = 100;
+    ERROR_ACCOUNT_ALREADY_EXISTS = 101;
+}
