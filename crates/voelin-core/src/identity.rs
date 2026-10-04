@@ -31,7 +31,7 @@ use std::{fs, str};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use tsclientlib::Identity;
 use voelin_gateway_proto::UniqueIds;
-use voelin_store::Store;
+use voelin_store::{IdentityOrigin, Store};
 
 /// Name given to an identity whose source kept none.
 pub const DEFAULT_NICKNAME: &str = "imported";
@@ -168,29 +168,65 @@ pub fn import(store: &Store, found: &[Found]) -> Result<Vec<Imported>, IdentityE
 			if !known.insert(f.uid()) {
 				return Ok(Imported::Duplicate);
 			}
-			Ok(Imported::Added(store.add_identity(&f.nickname, &f.identity)?))
+			Ok(Imported::Added(store.add_identity(
+				&f.nickname,
+				&f.identity,
+				IdentityOrigin::Imported,
+			)?))
 		})
 		.collect()
+}
+
+/// What [`import_new`] did.
+#[derive(Debug, Default)]
+pub struct LaunchImport {
+	/// The identities added, the official clients' defaults first.
+	pub added: Vec<Found>,
+	/// The identity that became our default.
+	pub default: Option<Found>,
+	/// That took the place of the identity the app had created on its own
+	/// ([`IdentityOrigin::Created`]), which is kept.
+	pub replaced: bool,
 }
 
 /// Store the identities in the official clients' files at `paths` (usually
 /// [`discover`]) that the store does not have yet, as the app does when it
 /// starts. Files that cannot be read or hold no identity are skipped; none is
-/// written. The identities the clients use by default go in first, so on a
-/// store without identities the official client's default becomes ours (the
-/// first identity) and servers see the same unique id. Returns what was
-/// added.
-pub fn import_new(store: &Store, paths: &[PathBuf]) -> Result<Vec<Found>, IdentityError> {
+/// written.
+///
+/// Servers should see the user as on the official client: while our
+/// default is an identity nobody chose, the one the app created on its own
+/// ([`IdentityOrigin::Created`]), or there is none, the identity the official
+/// client uses by default becomes ours (the TeamSpeak 6 client's before the
+/// TeamSpeak 3 client's), once: an identity the user picked as the default
+/// is [`IdentityOrigin::User`] and stays.
+pub fn import_new(store: &Store, paths: &[PathBuf]) -> Result<LaunchImport, IdentityError> {
+	let before = store.default_identity()?;
 	let mut found: Vec<Found> = paths.iter().filter_map(|path| read(path).ok()).flatten().collect();
 	// Stable: TeamSpeak 6's default before TeamSpeak 3's, as `locations` lists them.
 	found.sort_by_key(|f| !f.selected);
 	let outcomes = import(store, &found)?;
-	Ok(found
+	if before.as_ref().is_none_or(|b| b.origin == IdentityOrigin::Created)
+		&& let Some(official) = found.iter().find(|f| f.selected)
+	{
+		let uid = official.uid();
+		if let Some(entry) = store.identities()?.into_iter().find(|e| e.uid == uid) {
+			store.set_default_identity(entry.id, false)?;
+		}
+	}
+	let after = store.default_identity()?;
+	let mut report = LaunchImport::default();
+	if let Some(after) = after.filter(|a| before.as_ref().is_none_or(|b| b.id != a.id)) {
+		report.default = found.iter().find(|f| f.uid() == after.uid).cloned();
+		report.replaced = before.is_some() && report.default.is_some();
+	}
+	report.added = found
 		.into_iter()
 		.zip(outcomes)
 		.filter(|(_, outcome)| matches!(outcome, Imported::Added(_)))
 		.map(|(f, _)| f)
-		.collect())
+		.collect();
+	Ok(report)
 }
 
 /// The TeamSpeak 3 `.ini` export of an identity, which the official client
@@ -636,6 +672,14 @@ mod tests {
 		}
 	}
 
+	fn nicknames(found: &[Found]) -> Vec<&str> {
+		found.iter().map(|f| f.nickname.as_str()).collect()
+	}
+
+	fn default_uid(store: &Store) -> String {
+		store.default_identity().unwrap().unwrap().uid
+	}
+
 	#[test]
 	fn launch_import_makes_the_clients_default_ours_and_adds_only_new_ones() {
 		let dir = temp_dir("launch");
@@ -647,21 +691,71 @@ mod tests {
 		let missing = dir.join("missing.db");
 		let store = Store::open_in_memory().unwrap();
 
-		let added = import_new(&store, &[ts6.clone(), missing.clone()]).unwrap();
-		let nicknames: Vec<_> = added.iter().map(|f| f.nickname.as_str()).collect();
-		assert_eq!(nicknames, ["Main", "Spare"]);
-		// The first identity is the app's default: the client's default.
-		assert_eq!(store.identities().unwrap()[0].uid, main.key().to_pub().get_uid());
+		let report = import_new(&store, &[ts6.clone(), missing.clone()]).unwrap();
+		assert_eq!(nicknames(&report.added), ["Main", "Spare"]);
+		// Without an identity of its own the app takes the client's default.
+		assert_eq!(report.default.unwrap().nickname, "Main");
+		assert!(!report.replaced);
+		assert_eq!(default_uid(&store), main.key().to_pub().get_uid());
 
-		// The next start finds only what is new.
+		// The next start finds only what is new, and an imported default
+		// stays even when another client has a different one.
 		client_database(&ts3, &[(&old, "Old", true), (&main, "Main", true)]);
-		let added = import_new(&store, &[ts6, ts3, missing]).unwrap();
-		let nicknames: Vec<_> = added.iter().map(|f| f.nickname.as_str()).collect();
-		assert_eq!(nicknames, ["Old"]);
-		let stored = store.identities().unwrap();
-		assert_eq!(stored.len(), 3);
-		// A store that has identities keeps its default.
-		assert_eq!(stored[0].uid, main.key().to_pub().get_uid());
+		let report = import_new(&store, &[ts6, ts3, missing]).unwrap();
+		assert_eq!(nicknames(&report.added), ["Old"]);
+		assert!(report.default.is_none() && !report.replaced);
+		assert_eq!(store.identities().unwrap().len(), 3);
+		assert_eq!(default_uid(&store), main.key().to_pub().get_uid());
+		fs::remove_dir_all(dir).unwrap();
+	}
+
+	/// The identity the app made on its first start gives way to the
+	/// official client's default once; the user's later choice stays.
+	#[test]
+	fn the_created_identity_gives_way_once() {
+		let dir = temp_dir("replace");
+		let ts6 = dir.join("ts6.db");
+		let (made, main) = (synthetic(), synthetic());
+		let store = Store::open_in_memory().unwrap();
+		let made_id = store.add_identity("Default", &made, IdentityOrigin::Created).unwrap();
+		// The official client is not there yet: nothing changes.
+		let report = import_new(&store, std::slice::from_ref(&ts6)).unwrap();
+		assert!(report.added.is_empty() && report.default.is_none());
+		assert_eq!(default_uid(&store), made.key().to_pub().get_uid());
+
+		client_database(&ts6, &[(&main, "Main", true)]);
+		let report = import_new(&store, std::slice::from_ref(&ts6)).unwrap();
+		assert_eq!(report.default.unwrap().nickname, "Main");
+		assert!(report.replaced);
+		assert_eq!(default_uid(&store), main.key().to_pub().get_uid());
+		// The one the app made is kept.
+		assert_eq!(store.identities().unwrap().len(), 2);
+
+		// The user goes back to it: later starts leave that alone.
+		store.set_default_identity(made_id, true).unwrap();
+		for _ in 0..2 {
+			let report = import_new(&store, std::slice::from_ref(&ts6)).unwrap();
+			assert!(report.added.is_empty() && report.default.is_none() && !report.replaced);
+			assert_eq!(default_uid(&store), made.key().to_pub().get_uid());
+		}
+		fs::remove_dir_all(dir).unwrap();
+	}
+
+	/// An identity imported earlier (by `voelinctl identity import`, which
+	/// does not choose a default) still takes the created one's place.
+	#[test]
+	fn an_earlier_import_still_replaces_the_created_identity() {
+		let dir = temp_dir("earlier");
+		let ts6 = dir.join("ts6.db");
+		let (made, main) = (synthetic(), synthetic());
+		client_database(&ts6, &[(&main, "Main", true)]);
+		let store = Store::open_in_memory().unwrap();
+		store.add_identity("Default", &made, IdentityOrigin::Created).unwrap();
+		import(&store, &read(&ts6).unwrap()).unwrap();
+		assert_eq!(default_uid(&store), made.key().to_pub().get_uid());
+		let report = import_new(&store, &[ts6]).unwrap();
+		assert!(report.added.is_empty() && report.replaced);
+		assert_eq!(default_uid(&store), main.key().to_pub().get_uid());
 		fs::remove_dir_all(dir).unwrap();
 	}
 

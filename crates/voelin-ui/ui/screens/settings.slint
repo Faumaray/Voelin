@@ -4,7 +4,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge } from "../bridge.slint";
 import { Nav, SettingsSection } from "../nav.slint";
-import { Icon, Button, ButtonKind, TextField, Field, Select, Toggle, ToggleRow, Slider, SegmentedTabs, Card, Meter, NavItem, Divider, ScrollView } from "../components/index.slint";
+import { Icon, Button, ButtonKind, TextField, Field, Select, Toggle, ToggleRow, Slider, SegmentedTabs, Card, Meter, NavItem, Divider, ScrollView, Avatar, Chip } from "../components/index.slint";
 
 // A label, a control (@children) and a value at the right.
 component SliderRow inherits HorizontalLayout {
@@ -88,6 +88,13 @@ export component SettingsNav inherits VerticalLayout {
         subtitle: @tr("Theme, text size, layout");
         selected: Nav.settings-section == SettingsSection.appearance;
         clicked => { Nav.open-settings(SettingsSection.appearance); }
+    }
+    NavItem {
+        icon: Icons.user;
+        text: @tr("Identities");
+        subtitle: @tr("Who servers see you as");
+        selected: Nav.settings-section == SettingsSection.identities;
+        clicked => { Nav.open-settings(SettingsSection.identities); }
     }
     Divider { }
     NavItem {
@@ -450,6 +457,77 @@ component AppearanceSection inherits VerticalLayout {
     }
 }
 
+// The identities (key pairs; servers know us by their unique ids) and which
+// one is used.
+component IdentitiesSection inherits VerticalLayout {
+    alignment: start;
+    spacing: Theme.space-5;
+    Card {
+        title: @tr("Your identities");
+        icon: Icons.user;
+        for identity in Bridge.identities: HorizontalLayout {
+            spacing: Theme.space-4;
+            Avatar {
+                initials: identity.initials;
+                tint: identity.tint;
+                label: identity.name;
+                y: (parent.height - self.height) / 2;
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                Text {
+                    text: identity.name;
+                    color: Theme.text;
+                    font-weight: Theme.weight-semibold;
+                    overflow: elide;
+                }
+                Text {
+                    text: identity.detail;
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                    overflow: elide;
+                }
+                Text {
+                    text: identity.uid;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    overflow: elide;
+                }
+            }
+            if identity.is-default: Chip {
+                text: @tr("Default");
+                icon: Icons.check;
+                tint: Theme.accent-text;
+                fill: Theme.accent-soft;
+                y: (parent.height - self.height) / 2;
+            }
+            if !identity.is-default: Button {
+                small: true;
+                text: @tr("Use as default");
+                y: (parent.height - self.height) / 2;
+                clicked => { Bridge.use-identity(identity.id); }
+            }
+        }
+        Hint {
+            text: @tr("Servers know you by the default identity's unique id, from the next connection on. An identity is a key: whoever has a copy can be you on every server.");
+        }
+    }
+    Card {
+        title: @tr("TeamSpeak");
+        icon: Icons.download;
+        ToggleRow {
+            text: @tr("Import identities from TeamSpeak on start");
+            description: @tr("Reads the official clients' identities, never changes them");
+            checked <=> Bridge.identity-import;
+            toggled => { Bridge.set-identity-import(Bridge.identity-import); }
+        }
+        Hint {
+            text: @tr("While you use the identity Voelin made for you, the one TeamSpeak uses becomes your default, once.");
+        }
+    }
+}
+
 // The page of the selected section.
 export component SettingsPage inherits Rectangle {
     // Show the section navigation above the content (narrow windows).
@@ -457,15 +535,18 @@ export component SettingsPage inherits Rectangle {
     property <image> section-icon: Nav.settings-section == SettingsSection.voice ? Icons.mic
         : Nav.settings-section == SettingsSection.keybinds ? Icons.keyboard
         : Nav.settings-section == SettingsSection.streaming ? Icons.radio
-        : Nav.settings-section == SettingsSection.privacy ? Icons.shield : Icons.palette;
+        : Nav.settings-section == SettingsSection.privacy ? Icons.shield
+        : Nav.settings-section == SettingsSection.identities ? Icons.user : Icons.palette;
     property <string> section-title: Nav.settings-section == SettingsSection.voice ? @tr("Voice & Video")
         : Nav.settings-section == SettingsSection.keybinds ? @tr("Keybinds")
         : Nav.settings-section == SettingsSection.streaming ? @tr("Streaming")
-        : Nav.settings-section == SettingsSection.privacy ? @tr("Privacy & Safety") : @tr("Appearance");
+        : Nav.settings-section == SettingsSection.privacy ? @tr("Privacy & Safety")
+        : Nav.settings-section == SettingsSection.identities ? @tr("Identities") : @tr("Appearance");
     property <string> section-subtitle: Nav.settings-section == SettingsSection.voice ? @tr("Set up your microphone, speakers and voice processing.")
         : Nav.settings-section == SettingsSection.keybinds ? @tr("Talk with a key, even while other windows have focus.")
         : Nav.settings-section == SettingsSection.streaming ? @tr("Codecs for watching streams.")
-        : Nav.settings-section == SettingsSection.privacy ? @tr("What the app keeps on this device.") : @tr("Theme, text size and layout. Changes apply at once.");
+        : Nav.settings-section == SettingsSection.privacy ? @tr("What the app keeps on this device.")
+        : Nav.settings-section == SettingsSection.identities ? @tr("Who servers see you as.") : @tr("Theme, text size and layout. Changes apply at once.");
     accessible-role: AccessibleRole.groupbox;
     accessible-label: section-title;
     sv := ScrollView {
@@ -475,11 +556,11 @@ export component SettingsPage inherits Rectangle {
             spacing: Theme.space-5;
             alignment: start;
             if root.compact: SegmentedTabs {
-                model: [@tr("Voice"), @tr("Keys"), @tr("Streams"), @tr("Privacy"), @tr("Look")];
-                current-index: Nav.settings-section == SettingsSection.voice ? 0 : Nav.settings-section == SettingsSection.keybinds ? 1 : Nav.settings-section == SettingsSection.streaming ? 2 : Nav.settings-section == SettingsSection.privacy ? 3 : 4;
+                model: [@tr("Voice"), @tr("Keys"), @tr("Streams"), @tr("Privacy"), @tr("Look"), @tr("ID")];
+                current-index: Nav.settings-section == SettingsSection.voice ? 0 : Nav.settings-section == SettingsSection.keybinds ? 1 : Nav.settings-section == SettingsSection.streaming ? 2 : Nav.settings-section == SettingsSection.privacy ? 3 : Nav.settings-section == SettingsSection.identities ? 5 : 4;
                 label: @tr("Settings sections");
                 selected(i) => {
-                    Nav.open-settings(i == 0 ? SettingsSection.voice : i == 1 ? SettingsSection.keybinds : i == 2 ? SettingsSection.streaming : i == 3 ? SettingsSection.privacy : SettingsSection.appearance);
+                    Nav.open-settings(i == 0 ? SettingsSection.voice : i == 1 ? SettingsSection.keybinds : i == 2 ? SettingsSection.streaming : i == 3 ? SettingsSection.privacy : i == 5 ? SettingsSection.identities : SettingsSection.appearance);
                 }
             }
             HorizontalLayout {
@@ -510,6 +591,7 @@ export component SettingsPage inherits Rectangle {
             if Nav.settings-section == SettingsSection.streaming: StreamingSection { }
             if Nav.settings-section == SettingsSection.privacy: PrivacySection { }
             if Nav.settings-section == SettingsSection.appearance: AppearanceSection { }
+            if Nav.settings-section == SettingsSection.identities: IdentitiesSection { }
         }
     }
 }

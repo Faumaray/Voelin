@@ -25,8 +25,14 @@ fn open_store(path: Option<PathBuf>) -> Result<Store> {
 
 /// Identities in the client database, with the id `export` takes.
 pub fn list(store: Option<PathBuf>) -> Result<()> {
-	for entry in open_store(store)?.identities()? {
-		println!("{:>3}  {:<20} {}  level {}", entry.id, entry.name, entry.uid, entry.level);
+	let store = open_store(store)?;
+	let default = store.default_identity()?.map(|entry| entry.id);
+	for entry in store.identities()? {
+		let mark = if Some(entry.id) == default { "  default" } else { "" };
+		println!(
+			"{:>3}  {:<20} {}  level {:<3} {:?}{mark}",
+			entry.id, entry.name, entry.uid, entry.level, entry.origin
+		);
 	}
 	Ok(())
 }

@@ -12,7 +12,7 @@
 //! - `VOELIN_DEMO_STREAM=1`: a local test stream in the viewer.
 //! - `VOELIN_OPEN=<what>[,<what>...]`: open screens on start: `home`,
 //!   `server`, `settings[:<section>]` (voice, keybinds, streaming, privacy,
-//!   appearance, or 0-4), `about`, `share`, `bookmark` (add a server;
+//!   appearance, identities, or 0-5), `about`, `share`, `bookmark` (add a server;
 //!   `bookmark:edit` the current one, Advanced open),
 //!   `emoji` (the picker), `client` (the volume dialog of the first other
 //!   client once connected), `panel` / `no-panel` (the members panel),
@@ -108,6 +108,7 @@ fn section(name: &str) -> SettingsSection {
 		"2" | "streaming" => SettingsSection::Streaming,
 		"3" | "privacy" => SettingsSection::Privacy,
 		"4" | "appearance" => SettingsSection::Appearance,
+		"5" | "identities" => SettingsSection::Identities,
 		_ => SettingsSection::Voice,
 	}
 }
