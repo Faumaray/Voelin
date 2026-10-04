@@ -244,6 +244,13 @@ pub enum Command {
 		session: SessionId,
 		stream_id: String,
 	},
+	/// The video of a watched stream arrives, but none of it decodes: watch
+	/// it in another codec the streamer offered, if there is one (a new
+	/// connection without this one). [`media::Viewer`] sends it.
+	StreamUndecodable {
+		session: SessionId,
+		stream_id: String,
+	},
 	/// Watch simulcast layer `layer` of a stream (`None`: as the bandwidth
 	/// allows). Only for a stream whose [`Event::WatchLayers`] listed
 	/// layers; otherwise an [`Event::Error`].
@@ -962,6 +969,7 @@ fn command_session(command: &Command) -> SessionId {
 		| Command::WatchStream { session, .. }
 		| Command::LeaveStream { session, .. }
 		| Command::RequestStreamKeyframe { session, .. }
+		| Command::StreamUndecodable { session, .. }
 		| Command::SetWatchLayer { session, .. }
 		| Command::SetStreamVolume { session, .. }
 		| Command::SetClientVolume { session, .. }

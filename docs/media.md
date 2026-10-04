@@ -155,16 +155,20 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   retime, the portal renegotiates the rate with the compositor).
 - One encoder per codec viewers chose: the offer lists several codecs (see
   `peer_config` below), the streamer's peer reports the codec each answer
-  chose (`PeerEvent::VideoCodec`), and the session sends a video frame only
-  to viewers of its codec (`StreamerSession::write_frame_in`) and tells the
-  encoders which codecs are wanted (`LayerFeedback::set_codecs`,
-  `MediaSink::video_codecs`). Each layer's encoder thread keeps the stream
-  codec's encoder and makes one more per other wanted codec when a viewer
-  needs it (with the streamer's current `Codecs` and preference), drops it
-  when none does, and skips the stream codec while nobody takes it; frames
-  go out through `MediaSink::send_video(frame, codec)`. Sinks that do not
-  tell codecs apart (`EncodedSource`, a `FrameSource`) get the stream codec
-  only, so their offers must list it alone (`voelinctl stream start` does).
+  chose, H.264 with its profile (`PeerEvent::VideoCodec(VideoFormat)`), and
+  the session sends a video frame only to viewers of its format
+  (`StreamerSession::write_frame_in`) and tells the encoders which formats
+  are wanted (`LayerFeedback::set_codecs`, `MediaSink::video_codecs`).
+  Each layer's encoder thread keeps the stream codec's encoder and makes
+  one more per other wanted format when a viewer needs it (with the
+  streamer's current `Codecs` and preference; for H.264 Constrained
+  Baseline with `EncoderConfig::h264_profile` set), drops it when none
+  does, and skips the stream codec while nobody takes it; frames go out
+  through `MediaSink::send_video(frame, format)`. So an H.264 stream runs a
+  second H.264 encoder only while a viewer took the Baseline entry of the
+  offer. Sinks that do not tell formats apart (`EncodedSource`, a
+  `FrameSource`) get the stream codec only, so their offers must list it
+  alone, H.264 in Constrained High only (`voelinctl stream start` does).
   A studio's outputs count as viewers too: the stream codec always runs
   for its recordings and replay buffer, and an output that needs a codec of
   its own (RTMP: H.264) gets an encoder of the layer it takes
@@ -198,13 +202,18 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   decodes H.264 only with an OpenH264 library it downloads at start-up; when
   that fails it still answers H.264 and shows nothing (see
   `docs/protocol-notes/ts6-streaming.md`), so H.264 never comes before a
-  codec it always decodes. H.264 is offered as one variant, Constrained High
-  (packetization mode 1) at the level the stream needs
-  (`PeerConfig::set_h264_format(profile, width, height, fps, bitrate)`:
-  macroblocks per second and per frame, and bitrate, per H.264 Table A-1;
-  never below 3.1, the level offered before); str0m's other H.264 variants
-  are only accepted, never offered, so a viewer cannot answer a profile we
-  do not send.
+  codec it always decodes. H.264 is offered in two variants, best first:
+  Constrained High (payload type 112), then Constrained Baseline (108) for
+  peers that list no High profile (headless Chromium 152's libwebrtc lists
+  only Baseline, Constrained Baseline and Main), both packetization mode 1
+  at the level the stream needs (`PeerConfig::h264_profile_level_ids`,
+  `set_h264_format(width, height, fps, bitrate)`: macroblocks per second
+  and per frame, and bitrate, per H.264 Table A-1; never below 3.1, the
+  level offered before). A viewer that takes both answers High (the
+  streamer writes the first of its own order the answer lists); one that
+  takes only Baseline gets frames from an encoder in Constrained Baseline
+  (above). str0m's other H.264 variants are only accepted, never offered,
+  so a viewer cannot answer a profile we do not send.
 - `VideoPipeline` decodes on its own thread, with the first decoder of the
   stream codec's ladder that opens (`Codecs::decoders_for`, see
   [FFmpeg decoders](#ffmpeg-decoders-loaded-at-runtime)). It starts at a
@@ -233,8 +242,15 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   which runs in the app, not sent as engine events: the engine never sees
   the decoded pictures.
 - `Viewer` feeds a `VideoPipeline` from the engine and sends
-  `RequestStreamKeyframe`; `LocalPreview` runs capture → encoder → decoder
-  without a server (the desktop app's `VOELIN_DEMO_STREAM`).
+  `RequestStreamKeyframe`. When video of one codec keeps coming (10 s, at
+  least 60 frames: time for every decoder of the ladder to fail) and not a
+  single picture decodes, it sends `Command::StreamUndecodable` once: the
+  stream session asks for a new connection without that codec, if the
+  streamer offered another we take (the negotiation ladder in
+  [architecture.md](architecture.md#negotiation-best-first-then-fall-back)).
+  A codec that decoded once is never reported. `LocalPreview` runs capture
+  → encoder → decoder without a server (the desktop app's
+  `VOELIN_DEMO_STREAM`).
 - Viewer counts come from the server: `StreamInfo::viewers` in
   `Event::StreamsChanged` is TeamSpeak 6's own count (`viewer` of
   `notifystreaminfo`), counted up from `notifystreamclientjoined` and
@@ -1258,7 +1274,9 @@ has not run on Windows yet.
 | AMF never loaded on Linux by default; AMF opens serialised | `ffmpeg::encoder::tests::amf_is_opt_in_on_linux`, `tests/ffmpeg.rs` `probe_reports_every_backend` (no `libamfrt` in `/proc/self/maps`), `amf_encoders_open_in_parallel` (`--ignored`, with `VOELIN_FFMPEG_AMF=1`) | tested: the probe crash (SIGSEGV in `libamfrt64`, 10 of 420 concurrent probes under Xvfb) reproduced, then none in 600 with serialised opens |
 | Encoder preference (auto, software, named, hardware off), report ranks | `codec::tests::encoder_preference` | tested |
 | An encoder per codec viewers chose (made, dropped, stream codec skipped, preference change) | `voelin-core` `media::tests::an_encoder_per_codec_viewers_chose` | tested |
-| Answer's codec reported to the streamer, H.264 level in the offer, HEVC offered | `voelin-stream` `peer::tests::streamer_learns_the_answered_codec`, `h264::tests` | tested (str0m on loopback) |
+| An encoder per H.264 profile viewers chose: Constrained High and Baseline side by side (SPS `profile_idc` 100 and 66), High dropped when only Baseline viewers are left | `voelin-core` `media::tests::an_encoder_per_h264_profile_viewers_chose` | tested (FFmpeg's H.264 encoders here) |
+| Answer's codec reported to the streamer, H.264 levels and both profiles in the offer, a Baseline-only viewer answering the fallback entry, HEVC offered | `voelin-stream` `peer::tests::streamer_learns_the_answered_codec`, `a_baseline_only_viewer_gets_the_fallback_profile`, `h264::tests` | tested (str0m on loopback) |
+| The H.264 ladder against libwebrtc: headless Chromium 152 answers the Constrained Baseline entry and decodes frames from an encoder in that profile | `voelin-core/tests/browser_codecs.rs` `real_encoders_decode_in_browser` (`VOELIN_INTEROP=1`) | tested: `h264_vaapi` (from memory and from DMA-BUFs) and `libx264`, 90 of 90 frames at 1280x720, SPS profile 66 |
 | x264 / SVT-AV1 / libaom in the streamer pipeline | `voelinctl stream bench --encoder ...` | 720p30: x264 8.7 ms per frame, SVT-AV1 1.3 ms, libaom 37 ms; 1.1 allocations per encoded frame |
 | Hardware encoders VA-API and AMF (H.264, HEVC, AV1) in the streamer pipeline | `voelinctl stream bench` on a Radeon RX 7900 GRE, 1080p60 / 1440p60 / simulcast | tested: full frame rate, 0.20-0.52 cores against 1.16-2.55 for software, 1.02 allocations per encoded frame, every backend within 2 % of the target bitrate once `av1_vaapi` got a two-second buffer (it overshot by 3.5-8 %; see the tables above) |
 | Hardware encoders → our decoders: `h264_vaapi` / `h264_amf` → OpenH264, `av1_vaapi` / `av1_amf` → dav1d (PSNR > 28 dB, decoded size, keyframes at start and on request, timestamps, bitrate change) at 320x240 and 1920x1080 | `tests/ffmpeg.rs` `hardware_encoders_roundtrip` (`VOELIN_OPENH264_LIB`, `--features av1`) | tested on the Radeon RX 7900 GRE: it found the AV1 encoder padding 1080 rows to 1082 (and other sizes to 64x16), now cropped (see above). HEVC is decoded by FFmpeg's decoders in `tests/ffmpeg_decoders.rs` |

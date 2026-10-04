@@ -463,6 +463,9 @@ impl Session {
 			Command::RequestStreamKeyframe { stream_id, .. } => {
 				self.stream_input(StreamInput::RequestKeyframe { stream_id });
 			}
+			Command::StreamUndecodable { stream_id, .. } => {
+				self.stream_input(StreamInput::Undecodable { stream_id });
+			}
 			Command::SetWatchLayer { stream_id, layer, .. } => {
 				self.stream_input(StreamInput::WatchLayer { stream_id, layer });
 			}
