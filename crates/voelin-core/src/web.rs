@@ -17,10 +17,14 @@ use std::time::Duration;
 
 use crate::cache::{self, Cache, Fetch, Waiter};
 
-/// Larger pictures are refused; banners are rarely above a few hundred KiB.
-pub(crate) const MAX_BYTES: u64 = 4 << 20;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Allow larger GIF/PNG banners while bounding each buffered response.
+pub(crate) const MAX_BYTES: u64 = 16 << 20;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
 const TIMEOUT: Duration = Duration::from_secs(30);
+/// Fetch independent URLs in parallel without letting a large channel tree
+/// open unbounded connections or buffer unbounded image data.
+static DOWNLOADS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 /// The host banner is reloaded at most this often, whatever the server
 /// asks (TeamSpeak 3 and 6 servers refuse intervals below a minute).
 pub(crate) const MIN_RELOAD: Duration = Duration::from_secs(60);
@@ -28,6 +32,7 @@ pub(crate) const MIN_RELOAD: Duration = Duration::from_secs(60);
 static CLIENT: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(|| {
 	reqwest::Client::builder()
 		.connect_timeout(CONNECT_TIMEOUT)
+		.read_timeout(READ_TIMEOUT)
 		.timeout(TIMEOUT)
 		.user_agent(concat!("Voelin/", env!("CARGO_PKG_VERSION")))
 		.build()
@@ -45,6 +50,7 @@ pub(crate) fn fetch(cache: Cache, url: &str, fresh: bool, max_cache_bytes: u64, 
 	let Fetch::Download(temp) = cache.fetch(&key, fresh, waiter) else { return };
 	let url = url.to_owned();
 	tokio::spawn(async move {
+		let _permit = DOWNLOADS.acquire().await.expect("download semaphore stays open");
 		let result = download(&url, &temp, MAX_BYTES).await;
 		cache.finish(&key, &temp, result, max_cache_bytes);
 	});
@@ -83,9 +89,11 @@ async fn download(url: &str, to: &Path, max_bytes: u64) -> Result<(), String> {
 /// Whether `data` is a picture the UI decodes, told by its content as the
 /// UI tells it (SVG by its start, without leading blanks).
 fn is_picture(data: &[u8]) -> bool {
-	const STARTS: [&[u8]; 6] =
-		[b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"<?xml", b"<svg"];
+	const STARTS: [&[u8]; 4] = [b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a"];
+	let xml = data.strip_prefix(b"\xef\xbb\xbf").unwrap_or(data).trim_ascii_start();
 	STARTS.iter().any(|s| data.starts_with(s))
+		|| xml.starts_with(b"<?xml")
+		|| xml.starts_with(b"<svg")
 		|| (data.len() >= 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP")
 }
 
@@ -126,6 +134,7 @@ mod tests {
 						"/svg" => {
 							("200 OK", true, b"<svg xmlns='http://www.w3.org/2000/svg'/>".to_vec())
 						}
+						"/large-banner" => ("200 OK", true, [PNG, &vec![0; 5 << 20]].concat()),
 						// Too big, as announced or as it comes.
 						"/big" => ("200 OK", true, [PNG, &[0; 4000]].concat()),
 						"/big-unannounced" => ("200 OK", false, [PNG, &[0; 4000]].concat()),
@@ -201,6 +210,82 @@ mod tests {
 		std::fs::remove_dir_all(dir).unwrap();
 	}
 
+	#[tokio::test]
+	async fn banners_above_the_old_four_megabyte_limit_are_downloaded() {
+		let base = server().await;
+		let dir = temp_dir("large-banner");
+		let path = dir.join("large");
+		download(&format!("{base}/large-banner"), &path, MAX_BYTES).await.unwrap();
+		assert!(std::fs::metadata(&path).unwrap().len() > 4 << 20);
+		std::fs::remove_dir_all(dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn distinct_banners_download_concurrently_and_duplicates_share_a_request() {
+		use std::sync::Arc;
+		use tokio::sync::{Semaphore, mpsc as async_mpsc};
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let base = format!("http://{}", listener.local_addr().unwrap());
+		let (requests, mut received) = async_mpsc::unbounded_channel();
+		let release = Arc::new(Semaphore::new(0));
+		let gate = release.clone();
+		let server = tokio::spawn(async move {
+			while let Ok((mut socket, _)) = listener.accept().await {
+				let (requests, gate) = (requests.clone(), gate.clone());
+				tokio::spawn(async move {
+					let mut request = Vec::new();
+					let mut buf = [0; 1024];
+					while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+						let n = socket.read(&mut buf).await.unwrap();
+						assert!(n > 0);
+						request.extend_from_slice(&buf[..n]);
+					}
+					requests.send(()).unwrap();
+					let permit = gate.acquire().await.unwrap();
+					permit.forget();
+					let head = format!(
+						"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+						PNG.len()
+					);
+					socket.write_all(head.as_bytes()).await.unwrap();
+					socket.write_all(PNG).await.unwrap();
+				});
+			}
+		});
+		let dir = temp_dir("parallel");
+		let cache = Cache::new(&dir);
+		let (completed, mut results) = async_mpsc::unbounded_channel();
+		for path in ["one", "two", "three", "one"] {
+			let completed = completed.clone();
+			fetch(
+				cache.clone(),
+				&format!("{base}/{path}"),
+				false,
+				0,
+				Box::new(move |r| {
+					completed.send(r).unwrap();
+				}),
+			);
+		}
+		// All three requests arrive before any response is released: no
+		// slow banner can serialize the other downloads.
+		for _ in 0..3 {
+			tokio::time::timeout(Duration::from_secs(5), received.recv()).await.unwrap().unwrap();
+		}
+		release.add_permits(3);
+		for _ in 0..4 {
+			let path = tokio::time::timeout(Duration::from_secs(5), results.recv())
+				.await
+				.unwrap()
+				.unwrap()
+				.unwrap();
+			assert_eq!(std::fs::read(path).unwrap(), PNG);
+		}
+		assert!(received.try_recv().is_err(), "duplicate URL opened another connection");
+		server.abort();
+		std::fs::remove_dir_all(dir).unwrap();
+	}
+
 	#[test]
 	fn pictures_by_content() {
 		assert!(is_picture(PNG));
@@ -208,6 +293,8 @@ mod tests {
 		assert!(is_picture(b"GIF89a\x01\0\x01\0"));
 		assert!(is_picture(b"RIFF\x24\0\0\0WEBPVP8 "));
 		assert!(is_picture(b"<?xml version=\"1.0\"?><svg/>"));
+		assert!(is_picture(b"\xef\xbb\xbf\n <svg/>"));
+		assert!(is_picture(b" \r\n<svg/>"));
 		assert!(!is_picture(b"<!DOCTYPE html>"));
 		assert!(!is_picture(b"RIFF\x24\0\0\0WAVEfmt "));
 		assert!(!is_picture(b""));

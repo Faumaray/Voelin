@@ -126,7 +126,7 @@ async fn ts3_engine() {
 /// A 1×1 PNG.
 const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
-/// An HTTP server on 127.0.0.1 that answers every request with `body`;
+/// An HTTP server that fails each URL once with 503, then returns `body`;
 /// returns its address. The engine fetches banners itself (the server only
 /// passes their addresses on), so it reaches this one.
 async fn serve(body: Vec<u8>) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
@@ -135,10 +135,12 @@ async fn serve(body: Vec<u8>) -> (String, std::sync::Arc<std::sync::atomic::Atom
 	let addr = listener.local_addr().unwrap();
 	let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 	let count = requests.clone();
+	let seen = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 	tokio::spawn(async move {
 		while let Ok((mut socket, _)) = listener.accept().await {
 			let body = body.clone();
 			let count = count.clone();
+			let seen = seen.clone();
 			tokio::spawn(async move {
 				let mut request = Vec::new();
 				let mut buf = [0u8; 1024];
@@ -149,6 +151,13 @@ async fn serve(body: Vec<u8>) -> (String, std::sync::Arc<std::sync::atomic::Atom
 					}
 				}
 				count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+				let target =
+					String::from_utf8_lossy(&request).split_whitespace().nth(1).unwrap().to_owned();
+				let first = seen.lock().unwrap().insert(target);
+				if first {
+					let _ = socket.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+					return;
+				}
 				let head = format!(
 					"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
 					body.len()
@@ -270,6 +279,11 @@ async fn ts6_banners() {
 			})
 			.await;
 
+			assert_eq!(
+				requests.load(Ordering::SeqCst),
+				4,
+				"both initial URLs must retry once after their 503 response"
+			);
 			let replacement = format!("{base}/replacement.png");
 			admin
 				.send(
@@ -338,6 +352,93 @@ async fn ts6_banners() {
 	let _ = std::fs::remove_dir_all(dir);
 	deleted.unwrap();
 	restored.unwrap();
+	if let Err(error) = result {
+		std::panic::resume_unwind(error.into_panic());
+	}
+}
+
+/// Upload through one independent identity/cache and download through another.
+/// This proves the server file path and initial avatar metadata, rather than
+/// accepting the uploader's local cache insertion as a successful download.
+#[tokio::test(flavor = "multi_thread")]
+async fn ts6_avatars() {
+	use base64::Engine as _;
+	if !live() {
+		return;
+	}
+	let voice_addr =
+		std::env::var("VOELIN_BANNER_VOICE_ADDR").unwrap_or_else(|_| "127.0.0.1:9988".into());
+	let dir = std::env::temp_dir().join(format!("voelin-live-avatars-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let image = dir.join("upload.png");
+	let png = base64::prelude::BASE64_STANDARD.decode(PNG).unwrap();
+	std::fs::write(&image, &png).unwrap();
+	let uploader = Engine::start();
+	let reader = Engine::start();
+	uploader.send(Command::AttachCache(dir.join("uploader")));
+	reader.send(Command::AttachCache(dir.join("reader")));
+	let check = {
+		let (uploader, reader, dir) = (uploader.clone(), reader.clone(), dir.clone());
+		tokio::spawn(async move {
+			let nickname = format!("avatar-owner-{}", std::process::id());
+			let mut owner_events = uploader.subscribe();
+			uploader.send(Command::ConnectVoice {
+				session: 1,
+				options: Box::new(VoiceOptions::new(&voice_addr, &nickname)),
+			});
+			let presence = wait_for(&mut owner_events, "avatar owner presence", |event| {
+				matches!(event, Event::Presence { presence, .. } if presence.clients.values().any(|client| client.nickname == nickname && client.uid.is_some()))
+			}).await;
+			let Event::Presence { presence, .. } = presence else { unreachable!() };
+			let uid = presence
+				.clients
+				.values()
+				.find(|client| client.nickname == nickname)
+				.unwrap()
+				.uid
+				.clone()
+				.unwrap();
+			uploader.send(Command::SetAvatar { session: 1, request: 1, image: Some(image) });
+			let done = wait_for(&mut owner_events, "avatar upload", |event| {
+				matches!(event, Event::RequestDone { request: 1, .. })
+			})
+			.await;
+			assert!(matches!(done, Event::RequestDone { result: Ok(()), .. }), "{done:?}");
+			let mut reader_events = reader.subscribe();
+			reader.send(Command::ConnectVoice {
+				session: 1,
+				options: Box::new(VoiceOptions::new(
+					&voice_addr,
+					format!("avatar-reader-{}", std::process::id()),
+				)),
+			});
+			let downloaded = wait_for(
+				&mut reader_events,
+				"avatar downloaded by independent client",
+				|event| matches!(event, Event::AvatarReady { client_uid, .. } if *client_uid == uid),
+			)
+			.await;
+			let Event::AvatarReady { path, hash, .. } = downloaded else { unreachable!() };
+			assert!(path.starts_with(dir.join("reader")));
+			assert_eq!(std::fs::read(path).unwrap(), png);
+			assert_eq!(hash, format!("{:x}", md5::compute(&png)));
+		})
+	};
+	let result = check.await;
+	// The identity was generated for this test; remove its server-side file too.
+	let mut cleanup = uploader.subscribe();
+	uploader.send(Command::SetAvatar { session: 1, request: 2, image: None });
+	let _ = tokio::time::timeout(Duration::from_secs(5), async {
+		while let Ok(event) = cleanup.recv().await {
+			if matches!(event, Event::RequestDone { request: 2, .. }) {
+				break;
+			}
+		}
+	})
+	.await;
+	uploader.send(Command::CloseSession { session: 1 });
+	reader.send(Command::CloseSession { session: 1 });
+	let _ = std::fs::remove_dir_all(dir);
 	if let Err(error) = result {
 		std::panic::resume_unwind(error.into_panic());
 	}

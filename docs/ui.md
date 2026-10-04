@@ -425,16 +425,25 @@ the window's size so the pointer is not over the window, and passes
 ## Server and channel pictures
 
 The server card shows the host banner. TeamSpeak 6 channel banners appear
-behind their tree rows, the desktop chat and voice headers, and the phone's
-chat and voice headers. The server's sizing mode is preserved: 0 centres
-the original picture, 1 stretches it, and 2 fits it while keeping its aspect
-ratio. A theme-coloured wash keeps the text readable over bright pictures.
+above their tree rows, the desktop chat and voice headers, and the phone's
+chat and voice headers. Artwork has a separate area from titles and controls,
+so bright pictures remain visible without reducing text contrast. Areas follow
+the picture's aspect ratio, capped at 180 pixels for the host, 112 for tree
+rows, 160 for desktop headers and 120 for phone headers. The server's sizing
+mode is preserved: 0 centres the original picture (clipped to the bounded
+area), 1 stretches it, and 2 fits it while keeping its aspect ratio.
 Missing or refused pictures leave the normal background in place.
 
 The engine downloads HTTP(S) banners only while `cache.fetch_images` is
-enabled. Downloads have a 4 MiB limit, a 10-second connection timeout and
-a 30-second overall timeout. Failed downloads can retry on a later
-presence update. A host banner's reload interval is at least 60 seconds;
+enabled. Up to eight distinct banners download concurrently; duplicate URLs
+share a request. Downloads have a 16 MiB limit, a 5-second connection
+timeout, a 10-second read timeout and a 30-second overall timeout. Failed
+avatars, icons and banners receive up to three automatic retries after
+1, 4 and 16 seconds,
+without waiting for a presence update. Avatar/icon negotiation expires after
+15 seconds and their image download after 30 seconds. User file transfers
+retain their existing timing. Replaced images and closed sessions discard
+obsolete results. A host banner's reload interval is at least 60 seconds;
 failed refreshes preserve the previous cached picture. Closing the session
 stops its reload timer. `PictureReady` invalidates the decoded image before
 refreshing the visible models, including when the URL and cache path stay
@@ -448,8 +457,11 @@ Avatars and server, channel, client and group icons use the same image cache.
 
 The focused checks are the `voelin-core`, `voelin-model`, `voelin-observer`
 and `voelin-ui` library tests. The live `ts6_banners` test checks disabled
-fetching, initial downloads, all three modes, channel URL replacement and
-removal, and a fresh host download after the 60-second interval. It uses
+fetching, recovery from HTTP 503 without another presence update, all three
+modes, channel URL replacement and removal, and a fresh host download after
+the 60-second interval. `ts6_avatars` uploads an avatar with one client and
+verifies its bytes and MD5 after another client downloads it into an independent
+cache. Both use
 the development TS6 server by default; a private fixture can override its
 endpoints without changing the other live tests:
 
@@ -460,7 +472,7 @@ VOELIN_BANNER_QUERY_ADDR=127.0.0.1:20022 \
 cargo test --locked -p voelin-core --test live ts6_banners -- --exact
 ```
 
-The 2026-10-04 check passed 168 focused library tests and the live scenario
+The 2026-10-04 check passed 176 focused library tests and both live scenarios
 against a private TS6 6.0.0-beta13.1 instance, including its real reload
 interval. These screenshots use sample data on Xvfb with Slint's software
 renderer; the phone layouts are desktop renders, not Android device tests.

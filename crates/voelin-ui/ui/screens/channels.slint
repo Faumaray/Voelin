@@ -5,30 +5,24 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, TreeItem } from "../bridge.slint";
 import { Nav } from "../nav.slint";
-import { Icon, Button, ButtonKind, IconButton, Avatar, LiveBadge, Chip, SectionHeader, SpeakingBars, PopupMenu, MenuEntry, ListView, BannerPicture } from "../components/index.slint";
+import { Icon, Button, ButtonKind, IconButton, Avatar, LiveBadge, Chip, SectionHeader, SpeakingBars, PopupMenu, MenuEntry, ListView, BannerPicture, BannerLayout } from "../components/index.slint";
 
 // The banner at the top of the sidebar: server name, counts, a menu.
 export component ServerHeader inherits Rectangle {
-    height: 132px;
+    property <length> artwork-height: Bridge.server-banner.width > 0
+        ? BannerLayout.artwork-height(Bridge.server-banner, root.width, Bridge.server-banner-mode, 180px) : 64px;
+    height: root.artwork-height + 76px;
     border-radius: Theme.radius-lg;
     clip: true;
     background: Theme.surface-2;
     accessible-role: AccessibleRole.groupbox;
     accessible-label: Bridge.server-title;
-    // The server's host banner, fading into the card.
-    if Bridge.server-banner.width > 0: Rectangle {
-        height: 72px;
+    // Keep the full host artwork separate from the server title and actions.
+    if Bridge.server-banner.width > 0: BannerPicture {
         y: 0;
-        BannerPicture {
-            source: Bridge.server-banner;
-            mode: Bridge.server-banner-mode;
-            scrim: 0;
-        }
-        Rectangle {
-            y: parent.height - 30px;
-            height: 30px;
-            background: @linear-gradient(180deg, transparent 0%, Theme.surface-2 100%);
-        }
+        height: root.artwork-height;
+        source: Bridge.server-banner;
+        mode: Bridge.server-banner-mode;
     }
     // Without one, a painted banner: a night sky gradient with a horizon
     // glow.
@@ -55,7 +49,7 @@ export component ServerHeader inherits Rectangle {
     }
     VerticalLayout {
         padding: Theme.space-4;
-        padding-top: 64px;
+        padding-top: root.artwork-height + Theme.space-2;
         spacing: 2px;
         HorizontalLayout {
             spacing: Theme.space-2;
@@ -152,7 +146,10 @@ component TreeRow inherits Rectangle {
     in property <TreeItem> item;
     callback client-clicked(int);
     property <length> indent: item.depth * 14px;
-    height: item.is-channel ? 34px * Theme.font-scale : 30px * Theme.font-scale;
+    property <length> artwork-height: item.is-channel
+        ? BannerLayout.artwork-height(item.banner, max(0px, root.width - root.indent), item.banner-mode, 112px) : 0px;
+    height: (item.is-channel ? 34px * Theme.font-scale : 30px * Theme.font-scale) + root.artwork-height;
+    clip: true;
     border-radius: Theme.radius-md;
     background: item.is-channel && item.own ? Theme.accent-soft : area.has-hover ? Theme.surface-3 : transparent;
     border-width: item.is-channel && item.own ? 1px : 0px;
@@ -167,13 +164,14 @@ component TreeRow inherits Rectangle {
             client-clicked(item.id);
         }
     }
-    // The channel's banner behind its row, washed so the name stays
-    // readable (the own channel's tint over it).
+    // Artwork above the title stays visible without reducing text contrast.
     if item.is-channel && item.banner.width > 0: BannerPicture {
-        border-radius: root.border-radius;
+        x: root.indent;
+        width: max(0px, root.width - root.indent);
+        y: 0;
+        height: root.artwork-height;
         source: item.banner;
         mode: item.banner-mode;
-        scrim-color: item.own ? Theme.accent-soft : area.has-hover ? Theme.surface-3 : Theme.surface;
     }
     area := TouchArea {
         mouse-cursor: MouseCursor.pointer;
@@ -191,6 +189,8 @@ component TreeRow inherits Rectangle {
         }
     }
     if item.is-channel: HorizontalLayout {
+        y: root.artwork-height;
+        height: 34px * Theme.font-scale;
         padding-left: Theme.space-2 + root.indent;
         padding-right: Theme.space-3;
         spacing: Theme.space-2;

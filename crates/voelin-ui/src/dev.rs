@@ -385,7 +385,7 @@ fn demo_ui(app: &mut App) {
 	p.server.welcome_message =
 		"Welcome to [b]Nightfall Guild[/b]! Raids on Tuesdays and Fridays, all levels welcome."
 			.into();
-	// The host banner, a server icon, banners behind two channels and an icon
+	// The host banner, a server icon, banners above three channels and an icon
 	// on another; the pictures arrive below (`demo_pictures`).
 	p.server.banner_gfx_url = DEMO_HOST_BANNER.into();
 	p.server.banner_mode = BannerMode::KeepAspect;
@@ -400,6 +400,8 @@ fn demo_ui(app: &mut App) {
 	raid.banner_mode = BannerMode::KeepAspect;
 	let mut music = channel(5, 0, 3, "Music");
 	music.icon = DEMO_MUSIC_ICON;
+	music.banner_gfx_url = Some(DEMO_MUSIC_BANNER.into());
+	music.banner_mode = BannerMode::NoAdjust;
 	let mut locked = channel(7, 0, 6, "Officers");
 	locked.has_password = true;
 	for c in [
@@ -1001,6 +1003,7 @@ fn demo_social(app: &mut App) {
 /// Addresses and icon ids of the sample server's pictures.
 const DEMO_HOST_BANNER: &str = "https://nightfall.example/banner.png";
 const DEMO_CHILL_BANNER: &str = "https://nightfall.example/chill.png";
+const DEMO_MUSIC_BANNER: &str = "https://nightfall.example/music.png";
 const DEMO_RAID_BANNER: &str = "https://nightfall.example/raid.png";
 const DEMO_SERVER_ICON: u32 = 3_120_211_001;
 const DEMO_ADMIN_ICON: u32 = 3_120_211_002;
@@ -1027,9 +1030,10 @@ fn demo_pictures(app: &mut App) {
 		}),
 	}];
 	for (url, picture) in [
-		(DEMO_HOST_BANNER, demo_picture(560, 144, 3)),
+		(DEMO_HOST_BANNER, demo_picture(256, 256, 3)),
 		(DEMO_CHILL_BANNER, demo_picture(900, 120, 11)),
-		(DEMO_RAID_BANNER, demo_picture(640, 160, 5)),
+		(DEMO_RAID_BANNER, demo_picture(240, 240, 5)),
+		(DEMO_MUSIC_BANNER, demo_picture(180, 36, 7)),
 	] {
 		let path = save(url.rsplit('/').next().unwrap_or(url), picture);
 		events.push(Event::PictureReady { session, url: url.into(), path });

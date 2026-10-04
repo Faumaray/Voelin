@@ -1,18 +1,21 @@
 import { Theme } from "../theme.slint";
 
-// A server's banner picture (the host banner, a TeamSpeak 6 channel banner)
-// filling its area, behind other content. `mode` as the server sets it:
-// 0 as it is (centred), 1 stretched, 2 scaled to fit keeping its aspect
-// ratio. A wash of `scrim-color` at `scrim` opacity over it keeps text on
-// top readable.
+// Native artwork keeps its pixel size; resized artwork gets an aspect-aware
+// area. Bound unusually tall pictures so navigation remains usable.
+export global BannerLayout {
+    public pure function artwork-height(source: image, width: length, mode: int, limit: length) -> length {
+        return source.width <= 0 ? 0px : min(limit, max(32px,
+            mode == 0 ? source.height * 1px : width * source.height / source.width));
+    }
+}
+
+// Artwork has its own area: titles and controls use the solid surface below.
+// Wire modes: 0 native (centred), 1 stretched, 2 aspect-preserving fit.
 export component BannerPicture inherits Rectangle {
     in property <image> source;
     in property <int> mode;
-    in property <color> scrim-color: Theme.surface;
-    // Keep small text readable over even a solid white/black banner in
-    // both themes. Text-free artwork can explicitly turn this off.
-    in property <float> scrim: 0.9;
     clip: true;
+    background: Theme.surface-2;
     accessible-role: AccessibleRole.none;
     Image {
         width: 100%;
@@ -22,8 +25,5 @@ export component BannerPicture inherits Rectangle {
         horizontal-alignment: center;
         vertical-alignment: center;
         accessible-role: AccessibleRole.none;
-    }
-    if root.scrim > 0: Rectangle {
-        background: root.scrim-color.transparentize(1 - root.scrim);
     }
 }

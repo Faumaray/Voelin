@@ -9,6 +9,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use tokio::sync::{broadcast, mpsc, watch};
 use tracing::debug;
@@ -111,8 +114,23 @@ enum SourceEvent {
 	AvatarUploaded(u64, RequestId, Result<String, String>),
 	/// Time to fetch the host banner again (`banner_gfx_interval_s`).
 	ReloadBanner(String),
-	/// A failed picture can be tried again on the next presence update.
-	PictureFailed(String),
+	/// Image completion is checked against the current connection and presence.
+	ImageFinished(bool, u64, ImageRequest, Result<PathBuf, String>),
+}
+
+/// Identity of a wanted image, independent of its transport.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum ImageRequest {
+	Avatar { uid: String, hash: String },
+	Icon(u32),
+	Picture(String),
+}
+
+/// At most three retries (after 1, 4 and 16 seconds) per image version.
+/// Keeping exhausted entries prevents presence traffic from causing a retry storm.
+struct ImageRetry {
+	failures: u8,
+	due: Option<Instant>,
 }
 
 /// Our live stream, for the gateway's directory.
@@ -175,6 +193,9 @@ struct Session {
 	icons: HashSet<u32>,
 	/// Pictures on the web (banners) reported or being fetched, by address.
 	pictures: HashSet<String>,
+	image_epoch: u64,
+	images_enabled: bool,
+	image_retries: HashMap<ImageRequest, ImageRetry>,
 	/// The host banner's address and reload interval (seconds) while it has
 	/// one, and the timer that asks for the reloads.
 	banner_reload: Option<(String, u64, tokio::task::AbortHandle)>,
@@ -205,6 +226,9 @@ impl Session {
 			avatars: HashMap::new(),
 			icons: HashSet::new(),
 			pictures: HashSet::new(),
+			image_epoch: 0,
+			images_enabled: settings.current().get(&CACHE_FETCH_IMAGES),
+			image_retries: HashMap::new(),
 			banner_reload: None,
 			contact_audio: HashMap::new(),
 			stream_friends: BTreeSet::new(),
@@ -262,6 +286,8 @@ impl Session {
 	async fn run(mut self, mut commands: mpsc::UnboundedReceiver<Command>) {
 		let mut sources = self.sources_rx.take().expect("receiver");
 		let mut contacts = self.contacts_rx.take().expect("contacts");
+		let mut image_tick = tokio::time::interval(Duration::from_secs(1));
+		image_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 		loop {
 			tokio::select! {
 				cmd = commands.recv() => match cmd {
@@ -270,6 +296,7 @@ impl Session {
 				},
 				Some(event) = sources.recv() => self.source_event(event),
 				Ok(()) = contacts.changed() => self.contacts_changed(),
+				_ = image_tick.tick() => self.retry_images(Instant::now()),
 			}
 		}
 		self.stop_all();
@@ -602,7 +629,7 @@ impl Session {
 					.and_then(|p| p.client_by_uid(&client_uid))
 					.and_then(|c| c.avatar.clone());
 				if let Some(hash) = hash {
-					self.fetch_avatar(&client_uid, &hash);
+					self.fetch_avatar(&client_uid, &hash, true);
 				}
 			}
 			Command::ListOfflineMessages { request, .. } => {
@@ -751,6 +778,8 @@ impl Session {
 	/// Forget what was reported about avatars and icons (a new connection
 	/// reports them again).
 	fn forget_images(&mut self) {
+		self.image_epoch += 1;
+		self.image_retries.clear();
 		self.avatars.clear();
 		self.icons.clear();
 		self.pictures.clear();
@@ -769,7 +798,7 @@ impl Session {
 		for c in p.clients.values() {
 			let (Some(uid), Some(hash)) = (&c.uid, &c.avatar) else { continue };
 			if self.avatars.get(uid) != Some(hash) {
-				self.fetch_avatar(uid, hash);
+				self.fetch_avatar(uid, hash, false);
 			}
 			avatars.insert(uid.clone(), hash.clone());
 		}
@@ -781,6 +810,7 @@ impl Session {
 			.chain(p.clients.values().map(|c| c.icon))
 			.filter(|id| *id >= files::FIRST_DOWNLOADABLE_ICON)
 			.collect::<BTreeSet<u32>>();
+		self.icons.retain(|id| icons.contains(id));
 		for id in icons {
 			if self.icons.insert(id) {
 				self.fetch_icon(id);
@@ -788,28 +818,141 @@ impl Session {
 		}
 	}
 
-	fn fetch_avatar(&self, uid: &str, hash: &str) {
+	fn image_waiter(&self, request: ImageRequest, requested: bool) -> Waiter {
+		let epoch = if requested {
+			self.voice.as_ref().map_or(0, |(generation, _)| *generation)
+		} else {
+			self.image_epoch
+		};
+		let sources = self.sources_tx.clone();
+		Box::new(move |result| {
+			let _ = sources.send(SourceEvent::ImageFinished(requested, epoch, request, result));
+		})
+	}
+
+	fn fetch_avatar(&self, uid: &str, hash: &str, requested: bool) {
 		let Some(key) = cache::avatar_key(hash) else { return };
-		let (session, events) = (self.id, self.events.clone());
-		let (client_uid, hash) = (uid.to_owned(), hash.to_owned());
-		let waiter: Waiter = Box::new(move |result| match result {
-			Ok(path) => {
-				let _ = events.send(Event::AvatarReady { session, client_uid, path, hash });
-			}
-			Err(e) => debug!(%client_uid, "no avatar: {e}"),
-		});
+		let waiter = self
+			.image_waiter(ImageRequest::Avatar { uid: uid.into(), hash: hash.into() }, requested);
 		self.fetch_image(key, files::avatar_path(uid), waiter);
 	}
 
 	fn fetch_icon(&self, icon: u32) {
-		let (session, events) = (self.id, self.events.clone());
-		let waiter: Waiter = Box::new(move |result| match result {
-			Ok(path) => {
-				let _ = events.send(Event::IconReady { session, icon, path });
-			}
-			Err(e) => debug!(icon, "no icon: {e}"),
-		});
+		let waiter = self.image_waiter(ImageRequest::Icon(icon), false);
 		self.fetch_image(cache::icon_key(icon), Some(files::icon_path(icon)), waiter);
+	}
+
+	fn wants_image(&self, request: &ImageRequest) -> bool {
+		match request {
+			ImageRequest::Avatar { uid, hash } => {
+				self.voice.is_some() && self.avatars.get(uid) == Some(hash)
+			}
+			ImageRequest::Icon(id) => self.voice.is_some() && self.icons.contains(id),
+			ImageRequest::Picture(url) => self.pictures.contains(url),
+		}
+	}
+
+	fn image_finished(
+		&mut self,
+		requested: bool,
+		epoch: u64,
+		request: ImageRequest,
+		result: Result<PathBuf, String>,
+	) {
+		let wanted = if requested {
+			matches!(&request, ImageRequest::Avatar { uid, hash }
+				if self.voice.is_some() && self.voice_presence.as_ref()
+					.and_then(|p| p.client_by_uid(uid)).and_then(|c| c.avatar.as_ref()) == Some(hash))
+		} else {
+			self.wants_image(&request)
+		};
+		let current = if requested {
+			self.is_current(Source::Voice, epoch)
+		} else {
+			epoch == self.image_epoch
+		};
+		if !current || !wanted {
+			return;
+		}
+		match result {
+			Ok(path) => {
+				self.image_retries.remove(&request);
+				if !requested && !self.settings.current().get(&CACHE_FETCH_IMAGES) {
+					return;
+				}
+				let session = self.id;
+				self.emit(match request {
+					ImageRequest::Avatar { uid: client_uid, hash } => {
+						Event::AvatarReady { session, client_uid, hash, path }
+					}
+					ImageRequest::Icon(icon) => Event::IconReady { session, icon, path },
+					ImageRequest::Picture(url) => Event::PictureReady { session, url, path },
+				});
+			}
+			Err(error) => {
+				debug!(?request, %error, "image download failed");
+				let retry = self
+					.image_retries
+					.entry(request)
+					.or_insert(ImageRetry { failures: 0, due: None });
+				retry.failures = retry.failures.saturating_add(1);
+				retry.due = match retry.failures {
+					1..=3 => {
+						Some(Instant::now() + Duration::from_secs(1 << (2 * (retry.failures - 1))))
+					}
+					_ => None,
+				};
+			}
+		}
+	}
+
+	fn retry_images(&mut self, now: Instant) {
+		let enabled = self.settings.current().get(&CACHE_FETCH_IMAGES);
+		if enabled != self.images_enabled {
+			self.images_enabled = enabled;
+			self.image_epoch += 1;
+			self.avatars.clear();
+			self.icons.clear();
+			self.pictures.clear();
+			self.image_retries.clear();
+			if let Some((.., timer)) = self.banner_reload.take() {
+				timer.abort();
+			}
+			if enabled {
+				if let Some(presence) = self.voice_presence.clone() {
+					self.fetch_images(&presence);
+				}
+				self.publish_presence();
+			}
+		}
+
+		let obsolete: Vec<_> =
+			self.image_retries.keys().filter(|r| !self.wants_image(r)).cloned().collect();
+		for request in obsolete {
+			self.image_retries.remove(&request);
+		}
+		if !self.settings.current().get(&CACHE_FETCH_IMAGES) {
+			return;
+		}
+		let ready: Vec<_> = self
+			.image_retries
+			.iter_mut()
+			.filter_map(|(request, retry)| {
+				if retry.due.is_some_and(|due| due <= now) {
+					retry.due = None;
+					Some(request.clone())
+				} else {
+					None
+				}
+			})
+			.collect();
+		for request in ready {
+			match request {
+				ImageRequest::Avatar { uid, hash } => self.fetch_avatar(&uid, &hash, false),
+				ImageRequest::Icon(icon) => self.fetch_icon(icon),
+				ImageRequest::Picture(url) => self.fetch_picture(&url, true),
+			}
+		}
 	}
 
 	/// Fetch the banners of the presence shown (any source) that are new,
@@ -844,9 +987,13 @@ impl Session {
 		if !enabled {
 			return;
 		}
-		let urls = std::iter::once(&p.server.banner_gfx_url)
-			.chain(p.channels.values().filter_map(|c| c.banner_gfx_url.as_ref()));
-		for url in urls.filter(|u| cache::picture_key(u).is_some()) {
+		let urls: HashSet<_> = std::iter::once(&p.server.banner_gfx_url)
+			.chain(p.channels.values().filter_map(|c| c.banner_gfx_url.as_ref()))
+			.filter(|u| cache::picture_key(u).is_some())
+			.cloned()
+			.collect();
+		self.pictures.retain(|url| urls.contains(url));
+		for url in &urls {
 			if self.pictures.insert(url.clone()) {
 				self.fetch_picture(url, false);
 			}
@@ -855,17 +1002,7 @@ impl Session {
 
 	/// Get the picture at `url` into the cache (again with `fresh`).
 	fn fetch_picture(&self, url: &str, fresh: bool) {
-		let (session, events, address) = (self.id, self.events.clone(), url.to_owned());
-		let sources = self.sources_tx.clone();
-		let waiter: Waiter = Box::new(move |result| match result {
-			Ok(path) => {
-				let _ = events.send(Event::PictureReady { session, url: address, path });
-			}
-			Err(e) => {
-				debug!(url = %address, "no picture: {e}");
-				let _ = sources.send(SourceEvent::PictureFailed(address));
-			}
-		});
+		let waiter = self.image_waiter(ImageRequest::Picture(url.into()), false);
 		web::fetch(self.cache.current(), url, fresh, max_cache_bytes(&self.settings), waiter);
 	}
 
@@ -874,7 +1011,7 @@ impl Session {
 		let cache = self.cache.current();
 		let Fetch::Download(temp) = cache.fetch(&key, false, waiter) else { return };
 		let settings = self.settings.clone();
-		let (Some(path), Some(_)) = (path, &self.voice) else {
+		let (Some(path), Some((_, voice))) = (path, &self.voice) else {
 			cache.finish(&key, &temp, Err(NO_VOICE.into()), max_cache_bytes(&settings));
 			return;
 		};
@@ -892,7 +1029,10 @@ impl Session {
 		});
 		let sink = Sink::File { part: temp.clone(), dest: temp, append: false };
 		let file = Remote { channel: 0, password: None, path };
-		self.voice_cmd(VoiceCmd::Download { transfer: None, file, sink, report });
+		let failed = report.clone();
+		if voice.send(VoiceCmd::Download { transfer: None, file, sink, report }).is_err() {
+			failed(TransferState::Failed(NO_VOICE.into()));
+		}
 	}
 
 	// Contacts
@@ -1297,6 +1437,7 @@ impl Session {
 	}
 
 	fn stop_all(&mut self) {
+		self.forget_images();
 		if let Some((.., timer)) = self.banner_reload.take() {
 			timer.abort();
 		}
@@ -1375,8 +1516,8 @@ impl Session {
 					self.emit(Event::RequestDone { session: self.id, request, result });
 				}
 			},
-			SourceEvent::PictureFailed(url) => {
-				self.pictures.remove(&url);
+			SourceEvent::ImageFinished(requested, epoch, request, result) => {
+				self.image_finished(requested, epoch, request, result);
 			}
 			SourceEvent::ReloadBanner(address) => {
 				if let Some((url, ..)) = &self.banner_reload
@@ -1727,35 +1868,203 @@ mod banner_tests {
 	}
 
 	#[tokio::test]
-	async fn failed_picture_is_retried_on_next_presence() {
+	async fn failed_picture_retries_without_presence_update() {
 		let (mut session, mut events) = session("retry");
 		let mut presence = Presence::default();
 		presence.server.banner_gfx_url = "https://example.com/banner.png".into();
 		let url = &presence.server.banner_gfx_url;
 		let key = cache::picture_key(url).unwrap();
+		let request = ImageRequest::Picture(url.clone());
 		let cache = session.cache.current();
 		// Own the download so this exercises session completion without network I/O.
 		let Fetch::Download(temp) = cache.fetch(&key, false, Box::new(|_| {})) else {
 			panic!("first download");
 		};
 		session.fetch_pictures(&presence);
-		assert!(session.pictures.contains(url));
 		cache.finish(&key, &temp, Err("temporary failure".into()), 0);
 		let failure = session.sources_rx.as_mut().unwrap().recv().await.unwrap();
 		session.source_event(failure);
-		assert!(!session.pictures.contains(url));
+		let due = session.image_retries[&request].due.unwrap();
+		session.retry_images(due - Duration::from_millis(1));
+		assert_eq!(session.image_retries[&request].due, Some(due));
 
 		let Fetch::Download(temp) = cache.fetch(&key, false, Box::new(|_| {})) else {
 			panic!("retry download");
 		};
-		session.fetch_pictures(&presence);
+		session.retry_images(due);
+		assert!(session.image_retries[&request].due.is_none());
 		std::fs::create_dir_all(temp.parent().unwrap()).unwrap();
 		std::fs::write(&temp, b"picture").unwrap();
 		cache.finish(&key, &temp, Ok(()), 0);
+		let success = session.sources_rx.as_mut().unwrap().recv().await.unwrap();
+		session.source_event(success);
 		assert!(
 			matches!(events.try_recv(), Ok(Event::PictureReady { url: ready, .. }) if ready == *url)
 		);
-		assert!(session.pictures.contains(url));
+		assert!(!session.image_retries.contains_key(&request));
+		std::fs::remove_dir_all(cache.dir()).unwrap();
+	}
+
+	#[tokio::test]
+	async fn avatar_and_icon_failures_retry_and_report_success() {
+		let (mut session, mut events) = session("avatar-icon");
+		let (tx, mut commands) = mpsc::unbounded_channel();
+		session.voice = Some((1, tx));
+		let uid = "Af4=";
+		let hash = "0123456789abcdef0123456789abcdef";
+		session.avatars.insert(uid.into(), hash.into());
+		session.icons.insert(1234);
+		for request in
+			[ImageRequest::Avatar { uid: uid.into(), hash: hash.into() }, ImageRequest::Icon(1234)]
+		{
+			session.image_finished(
+				false,
+				session.image_epoch,
+				request.clone(),
+				Err("temporarily unavailable".into()),
+			);
+			session.retry_images(session.image_retries[&request].due.unwrap());
+			let VoiceCmd::Download { file, sink: Sink::File { part, .. }, report, .. } =
+				commands.try_recv().unwrap()
+			else {
+				panic!("expected an image download");
+			};
+			assert_eq!(
+				file.path,
+				if matches!(request, ImageRequest::Icon(_)) {
+					"/icon_1234"
+				} else {
+					"/avatar_abpo"
+				}
+			);
+			std::fs::create_dir_all(part.parent().unwrap()).unwrap();
+			std::fs::write(&part, b"image").unwrap();
+			report(TransferState::Done { size: 5, path: Some(part), data: None });
+			let completion = session.sources_rx.as_mut().unwrap().recv().await.unwrap();
+			session.source_event(completion);
+			assert!(!session.image_retries.contains_key(&request));
+		}
+		assert!(matches!(events.try_recv(), Ok(Event::AvatarReady { .. })));
+		assert!(matches!(events.try_recv(), Ok(Event::IconReady { icon: 1234, .. })));
+		std::fs::remove_dir_all(session.cache.current().dir()).unwrap();
+	}
+
+	#[tokio::test]
+	async fn retries_are_bounded_and_obey_policy_presence_and_epoch() {
+		let (mut session, mut events) = session("retry-guards");
+		let url = "https://example.com/banner.png";
+		let request = ImageRequest::Picture(url.into());
+		session.pictures.insert(url.into());
+		for failure in 1..=4 {
+			session.image_finished(
+				false,
+				session.image_epoch,
+				request.clone(),
+				Err("unavailable".into()),
+			);
+			let retry = &session.image_retries[&request];
+			assert_eq!(retry.failures, failure);
+			assert_eq!(retry.due.is_some(), failure <= 3);
+		}
+		assert!(events.try_recv().is_err());
+		// Disabling fetch invalidates pending retries and completions.
+		session.image_retries.get_mut(&request).unwrap().due = Some(Instant::now());
+		session.settings.current().set(&CACHE_FETCH_IMAGES, false).unwrap();
+		session.retry_images(Instant::now());
+		assert!(session.image_retries.is_empty());
+		// Replaced URLs must neither retry nor publish delayed successes.
+		session.pictures.clear();
+		session.settings.current().set(&CACHE_FETCH_IMAGES, true).unwrap();
+		session.retry_images(Instant::now());
+		assert!(session.image_retries.is_empty());
+		session.image_finished(false, session.image_epoch, request.clone(), Ok("obsolete".into()));
+		while let Ok(event) = events.try_recv() {
+			assert!(!matches!(event, Event::PictureReady { .. }));
+		}
+		let old_epoch = session.image_epoch;
+		session.forget_images();
+		session.pictures.insert(url.into());
+		session.image_finished(false, old_epoch, request.clone(), Err("old connection".into()));
+		session.image_finished(false, old_epoch, request, Ok("old connection".into()));
+		assert!(session.image_retries.is_empty());
+		assert!(events.try_recv().is_err());
+	}
+
+	#[tokio::test]
+	async fn explicit_avatar_request_works_with_automatic_fetching_disabled() {
+		let (mut session, mut events) = session("explicit-avatar");
+		session.settings.current().set(&CACHE_FETCH_IMAGES, false).unwrap();
+		session.retry_images(Instant::now());
+		let uid = "Af4=";
+		let hash = "0123456789abcdef0123456789abcdef";
+		let mut presence = Presence::default();
+		presence.clients.insert(
+			1,
+			voelin_model::ClientInfo {
+				id: 1,
+				uid: Some(uid.into()),
+				avatar: Some(hash.into()),
+				..Default::default()
+			},
+		);
+		session.voice_presence = Some(presence);
+		let (tx, _rx) = mpsc::unbounded_channel();
+		session.voice = Some((1, tx));
+		let cache = session.cache.current();
+		let key = cache::avatar_key(hash).unwrap();
+		let Fetch::Download(temp) = cache.fetch(&key, false, Box::new(|_| {})) else {
+			panic!("first download");
+		};
+		std::fs::create_dir_all(temp.parent().unwrap()).unwrap();
+		std::fs::write(&temp, b"avatar").unwrap();
+		cache.finish(&key, &temp, Ok(()), 0);
+		session.command(Command::FetchAvatar { session: 1, client_uid: uid.into() });
+		let completion = session.sources_rx.as_mut().unwrap().recv().await.unwrap();
+		session.source_event(completion);
+		assert!(
+			matches!(events.try_recv(), Ok(Event::AvatarReady { client_uid, .. }) if client_uid == uid)
+		);
+		// A policy change must invalidate automatic completions, not this explicit request.
+		session.command(Command::FetchAvatar { session: 1, client_uid: uid.into() });
+		let completion = session.sources_rx.as_mut().unwrap().recv().await.unwrap();
+		session.settings.current().set(&CACHE_FETCH_IMAGES, true).unwrap();
+		session.retry_images(Instant::now());
+		while events.try_recv().is_ok() {}
+		session.source_event(completion);
+		assert!(
+			matches!(events.try_recv(), Ok(Event::AvatarReady { client_uid, .. }) if client_uid == uid)
+		);
+		std::fs::remove_dir_all(cache.dir()).unwrap();
+	}
+
+	#[tokio::test]
+	async fn enabling_images_replays_current_presence_without_server_updates() {
+		let (mut session, mut events) = session("policy-enable");
+		let url = "https://example.com/banner.png";
+		let cache = session.cache.current();
+		let key = cache::picture_key(url).unwrap();
+		let Fetch::Download(temp) = cache.fetch(&key, false, Box::new(|_| {})) else {
+			panic!("first download");
+		};
+		std::fs::create_dir_all(temp.parent().unwrap()).unwrap();
+		std::fs::write(&temp, b"cached image").unwrap();
+		cache.finish(&key, &temp, Ok(()), 0);
+		let mut presence = Presence::default();
+		presence.server.banner_gfx_url = url.into();
+		session.gateway_presence = Some(presence);
+		session.settings.current().set(&CACHE_FETCH_IMAGES, false).unwrap();
+		session.retry_images(Instant::now());
+		session.settings.current().set(&CACHE_FETCH_IMAGES, true).unwrap();
+		session.retry_images(Instant::now());
+		let completion = session.sources_rx.as_mut().unwrap().recv().await.unwrap();
+		session.source_event(completion);
+		let mut ready = false;
+		while let Ok(event) = events.try_recv() {
+			if matches!(event, Event::PictureReady { url: address, .. } if address == url) {
+				ready = true;
+			}
+		}
+		assert!(ready);
 		std::fs::remove_dir_all(cache.dir()).unwrap();
 	}
 

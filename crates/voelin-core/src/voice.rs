@@ -255,8 +255,19 @@ enum Pending {
 
 /// A transfer the server has not opened yet.
 enum Job {
-	Download { transfer: Option<TransferId>, offset: u64, sink: Sink, report: Report },
-	Upload { transfer: Option<TransferId>, from: PathBuf, size: u64, report: Report },
+	Download {
+		transfer: Option<TransferId>,
+		offset: u64,
+		sink: Sink,
+		report: Report,
+		started: Instant,
+	},
+	Upload {
+		transfer: Option<TransferId>,
+		from: PathBuf,
+		size: u64,
+		report: Report,
+	},
 }
 
 impl Job {
@@ -271,6 +282,18 @@ impl Job {
 			Job::Download { transfer, .. } | Job::Upload { transfer, .. } => *transfer,
 		}
 	}
+}
+
+/// Bound background image handshakes without imposing a deadline on user transfers.
+fn expire_image_jobs(jobs: &mut HashMap<FiletransferHandle, Job>, now: Instant) {
+	jobs.retain(|_, job| {
+		if matches!(job, Job::Download { transfer: None, started, .. } if now.duration_since(*started) >= Duration::from_secs(15)) {
+			job.report()(TransferState::Failed("image transfer negotiation timed out".into()));
+			false
+		} else {
+			true
+		}
+	});
 }
 
 /// A user's transfer, for cancelling.
@@ -427,6 +450,7 @@ impl Voice {
 	}
 
 	fn tick(&mut self) {
+		expire_image_jobs(&mut self.jobs, Instant::now());
 		let events = &self.events;
 		self.talking.retain(|client, last| {
 			let active = last.elapsed() < Duration::from_millis(400);
@@ -468,18 +492,27 @@ impl Voice {
 				}
 			}
 			StreamItem::FileDownload(handle, download) => {
-				if let Some(Job::Download { transfer, offset, sink, report }) =
+				if let Some(Job::Download { transfer, offset, sink, report, .. }) =
 					self.jobs.remove(&handle)
 				{
 					let part = sink.part().map(ToOwned::to_owned);
-					let task = tokio::spawn(files::download(
-						download.stream,
-						download.size,
-						offset,
-						sink,
-						self.progress_every(),
-						report.clone(),
-					));
+					let progress = self.progress_every();
+					let task_report = report.clone();
+					let task = tokio::spawn(async move {
+						let receive = files::download(
+							download.stream,
+							download.size,
+							offset,
+							sink,
+							progress,
+							task_report.clone(),
+						);
+						if transfer.is_some() {
+							receive.await;
+						} else if timeout(Duration::from_secs(30), receive).await.is_err() {
+							task_report(TransferState::Failed("image download timed out".into()));
+						}
+					});
 					self.running(transfer, task.abort_handle(), part, report);
 				}
 			}
@@ -760,7 +793,10 @@ impl Voice {
 					}
 				};
 				report(TransferState::Requested);
-				self.jobs.insert(handle, Job::Download { transfer, offset, sink, report });
+				self.jobs.insert(
+					handle,
+					Job::Download { transfer, offset, sink, report, started: Instant::now() },
+				);
 				if let Some(id) = transfer {
 					self.transfers.insert(id, Slot::Waiting(handle));
 				}
@@ -921,5 +957,43 @@ fn transfer_error(error: &tsclientlib::Error) -> String {
 			"file not found".into()
 		}
 		e => e.to_string(),
+	}
+}
+
+#[cfg(test)]
+mod image_download_tests {
+	use super::*;
+	use std::sync::{Arc, Mutex};
+
+	#[test]
+	fn stalled_image_handshake_expires_but_user_transfer_does_not() {
+		let started = Instant::now();
+		let reports = Arc::new(Mutex::new(Vec::new()));
+		let sink = reports.clone();
+		let report: Report = Arc::new(move |state| sink.lock().unwrap().push(state));
+		let mut jobs = HashMap::new();
+		for (id, transfer) in [(1, None), (2, Some(77))] {
+			jobs.insert(
+				FiletransferHandle(id),
+				Job::Download {
+					transfer,
+					offset: 0,
+					sink: Sink::Memory,
+					report: report.clone(),
+					started,
+				},
+			);
+		}
+		expire_image_jobs(&mut jobs, started + Duration::from_secs(14));
+		assert_eq!(jobs.len(), 2);
+		assert!(reports.lock().unwrap().is_empty());
+		expire_image_jobs(&mut jobs, started + Duration::from_secs(15));
+		assert_eq!(jobs.len(), 1);
+		assert!(jobs.contains_key(&FiletransferHandle(2)));
+		assert!(
+			matches!(&reports.lock().unwrap()[..], [TransferState::Failed(error)] if error.contains("timed out"))
+		);
+		expire_image_jobs(&mut jobs, started + Duration::from_secs(60));
+		assert_eq!(reports.lock().unwrap().len(), 1);
 	}
 }

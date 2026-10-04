@@ -6,7 +6,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge } from "../bridge.slint";
 import { Nav, Page, MobileTab, SettingsSection } from "../nav.slint";
-import { Icon, IconButton, CountBadge, PopupMenu, MenuEntry, BannerPicture } from "../components/index.slint";
+import { Icon, IconButton, CountBadge, PopupMenu, MenuEntry, BannerPicture, BannerLayout } from "../components/index.slint";
 import { PhoneVoice } from "../screens/mobile-voice.slint";
 
 // One entry of the bottom navigation.
@@ -121,14 +121,15 @@ export component MobileShell inherits Rectangle {
     callback go-back();
     background: Theme.backdrop;
     VerticalLayout {
+        if root.banner.width > 0: BannerPicture {
+            height: BannerLayout.artwork-height(root.banner, self.width, root.banner-mode, 120px);
+            source: root.banner;
+            mode: root.banner-mode;
+        }
         // Top bar.
         Rectangle {
             height: 60px;
             accessible-role: AccessibleRole.banner;
-            if root.banner.width > 0: BannerPicture {
-                source: root.banner;
-                mode: root.banner-mode;
-            }
             HorizontalLayout {
                 padding-left: Theme.space-4;
                 padding-right: Theme.space-3;

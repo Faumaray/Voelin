@@ -6,23 +6,15 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, ChatLine, ReactionItem, FileItem, Images } from "../bridge.slint";
 import { Nav } from "../nav.slint";
-import { Icon, IconButton, Avatar, Chip, TabItem, TextField, RichText, Banner, Button, ButtonKind, Spinner, Tooltip, ListView, BannerPicture } from "../components/index.slint";
+import { Icon, IconButton, Avatar, Chip, TabItem, TextField, RichText, Banner, Button, ButtonKind, Spinner, Tooltip, ListView, BannerPicture, BannerLayout } from "../components/index.slint";
 
-// The header of the main area: an icon, a title and a description, and
-// actions (@children) at the right; a channel's banner picture behind them
-// (`banner`, `banner-mode` as TreeItem's).
+// The title, description and actions below a separate channel artwork area.
 export component PageHeader inherits Rectangle {
     in property <image> icon: Icons.hash;
     in property <string> title;
     in property <string> description;
-    in property <image> banner;
-    in property <int> banner-mode;
     min-height: 60px;
     border-width: 0px;
-    if root.banner.width > 0: BannerPicture {
-        source: root.banner;
-        mode: root.banner-mode;
-    }
     HorizontalLayout {
         padding-left: Theme.space-6;
         padding-right: Theme.space-4;
@@ -51,7 +43,7 @@ export component PageHeader inherits Rectangle {
         Text {
             text: root.description;
             font-size: Theme.font-sm;
-            color: root.banner.width > 0 ? Theme.text-secondary : Theme.text-muted;
+            color: Theme.text-muted;
             vertical-alignment: center;
             horizontal-stretch: 1;
             overflow: elide;
@@ -593,12 +585,15 @@ export component ChatView inherits VerticalLayout {
     property <image> tab-banner: Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length ? Bridge.tabs[Bridge.current-tab].banner : @image-url("");
     property <int> tab-banner-mode: Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length ? Bridge.tabs[Bridge.current-tab].banner-mode : 0;
 
+    if root.header && root.tab-banner.width > 0: BannerPicture {
+        height: BannerLayout.artwork-height(root.tab-banner, self.width, root.tab-banner-mode, 160px);
+        source: root.tab-banner;
+        mode: root.tab-banner-mode;
+    }
     if root.header: PageHeader {
         icon: root.tab-kind == 1 ? Icons.hash : root.tab-kind == 2 ? Icons.at-sign : Icons.message-square;
         title: root.tab-name;
         description: root.tab-topic != "" ? root.tab-topic : Bridge.server-title;
-        banner: root.tab-banner;
-        banner-mode: root.tab-banner-mode;
         // Only when the chat does not come through our voice connection
         // (an invisible observer or a relay).
         if Bridge.presence-source != "" && !Bridge.voice-connected: Chip {

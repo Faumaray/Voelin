@@ -5,7 +5,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, StreamItem, MemberItem } from "../bridge.slint";
 import { Nav } from "../nav.slint";
-import { Icon, Button, ButtonKind, IconButton, Avatar, Status, LiveBadge, Chip, Select, SectionHeader, SpeakingBars, Slider, Spinner, TextField, TabItem, ListView, ScrollView } from "../components/index.slint";
+import { Icon, Button, ButtonKind, IconButton, Avatar, Status, LiveBadge, Chip, Select, SectionHeader, SpeakingBars, Slider, Spinner, TextField, TabItem, ListView, ScrollView, BannerPicture, BannerLayout } from "../components/index.slint";
 import { MemberRow, GroupHeader } from "members.slint";
 import { PageHeader, MessageList, Composer } from "chat.slint";
 
@@ -453,12 +453,15 @@ export component StreamViewer inherits Rectangle {
         compact: true;
     }
     if !root.alone: VerticalLayout {
+        if Bridge.own-channel-banner.width > 0: BannerPicture {
+            height: BannerLayout.artwork-height(Bridge.own-channel-banner, self.width, Bridge.own-channel-banner-mode, 160px);
+            source: Bridge.own-channel-banner;
+            mode: Bridge.own-channel-banner-mode;
+        }
         PageHeader {
             icon: Icons.volume-2;
             title: Bridge.own-channel != "" ? Bridge.own-channel : Bridge.viewer-title;
             description: Bridge.own-channel-topic;
-            banner: Bridge.own-channel-banner;
-            banner-mode: Bridge.own-channel-banner-mode;
             if Bridge.members.length > 0: Button {
                 icon: Icons.users;
                 text: @tr("{} in voice", Bridge.members.length);

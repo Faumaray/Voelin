@@ -136,6 +136,7 @@ pub fn forget(path: &std::path::Path) {
 /// raster dimensions before Slint allocates pixels on the UI thread. SVGs
 /// keep Slint's native vector loader and are rasterized at the displayed size.
 fn decode(bytes: &[u8]) -> Option<(Image, usize)> {
+	let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
 	let reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?;
 	let cost = if reader.format().is_some() {
 		let (width, height) = reader.into_dimensions().ok()?;
@@ -157,7 +158,7 @@ fn decode(bytes: &[u8]) -> Option<(Image, usize)> {
 		}
 		// Intrinsic SVG dimensions describe coordinates, not an allocated
 		// pixel buffer. Use the same vector cost as the emoji cache.
-		svg_cost(bytes.len())
+		return Image::load_from_svg_data(start).ok().map(|image| (image, svg_cost(bytes.len())));
 	};
 	Image::load_from_data(bytes, None).ok().map(|image| (image, cost))
 }
@@ -234,6 +235,12 @@ mod tests {
 		encoder.write_header().unwrap().write_image_data(&[200; 32]).unwrap();
 		assert_eq!(picture("test:4x2", &png).size().width, 4);
 		assert_eq!(picture("test:junk", b"not a picture").size().width, 0);
+	}
+
+	#[test]
+	fn svg_with_bom_and_whitespace_decodes() {
+		let svg = b"\xef\xbb\xbf \n<svg xmlns='http://www.w3.org/2000/svg' width='32' height='16'><rect width='32' height='16'/></svg>";
+		assert_eq!(picture("test:svg-bom", svg).size().width, 32);
 	}
 
 	#[test]
