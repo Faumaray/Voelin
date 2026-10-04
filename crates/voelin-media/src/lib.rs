@@ -44,9 +44,9 @@ pub mod workers;
 
 pub use capture::{AudioCapture, CaptureOptions, CaptureSource, ScreenCapture, SourceId};
 pub use codec::{
-	BackendChoice, Codec, Codecs, ContentHint, EncodedChunk, EncodedFrame, EncoderBackend,
-	EncoderConfig, EncoderInfo, EncoderPreference, EncoderReport, H264Profile, VideoDecoder,
-	VideoEncoder,
+	BackendChoice, Codec, Codecs, ContentHint, DecoderBackend, DecoderInfo, DecoderPreference,
+	EncodedChunk, EncodedFrame, EncoderBackend, EncoderConfig, EncoderInfo, EncoderPreference,
+	EncoderReport, H264Profile, VideoDecoder, VideoEncoder,
 };
 pub use frame::{
 	AudioBuffer, FrameData, FrameRef, GpuFrame, PixelFormat, PixelsRef, Plane, PlaneRef, VideoFrame,

@@ -22,6 +22,11 @@ pub(super) fn wire(ui: &MainWindow) {
 	bridge.on_watch_stream(|id| {
 		with_app(|app| app.watch_stream(id.to_string()));
 	});
+	bridge.on_watch_client(|client| {
+		if let Ok(client) = u16::try_from(client) {
+			with_app(|app| app.watch_client(client));
+		}
+	});
 	bridge.on_show_viewer(|| {
 		with_app(|app| app.show_viewer(true));
 	});

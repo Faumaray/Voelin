@@ -226,9 +226,26 @@ component TreeRow inherits Rectangle {
             alignment: center;
             SpeakingBars { }
         }
+        // A click on someone's LIVE mark watches their stream.
         if item.streaming: VerticalLayout {
             alignment: center;
-            LiveBadge { }
+            LiveBadge {
+                accessible-role: AccessibleRole.button;
+                accessible-label: item.myself ? @tr("Your stream") : @tr("Watch {}'s stream", item.name);
+                accessible-action-default => {
+                    if !item.myself {
+                        Bridge.watch-client(item.id);
+                    }
+                }
+                TouchArea {
+                    mouse-cursor: item.myself ? MouseCursor.default : MouseCursor.pointer;
+                    clicked => {
+                        if !item.myself {
+                            Bridge.watch-client(item.id);
+                        }
+                    }
+                }
+            }
         }
         if item.local-muted: Icon {
             source: Icons.volume-x;

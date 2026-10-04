@@ -70,6 +70,7 @@ impl App {
 					volume: playback.volume * 100.0,
 					muted: playback.muted,
 					known: uid.is_some(),
+					streaming: client.streaming == Some(true),
 				})
 			})
 			.unwrap_or_default();
@@ -90,6 +91,10 @@ impl App {
 					self.open_chat(ChatTarget::Private(uid), true);
 					self.open_member(-1);
 				}
+			}
+			"watch" => {
+				self.open_member(-1);
+				self.watch_client(client_id);
 			}
 			"poke" => {
 				self.command(|session| Command::Poke {
