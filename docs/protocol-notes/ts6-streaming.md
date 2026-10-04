@@ -337,6 +337,33 @@ with a new peer, so the connection broke and nothing was shown. Now
 against Chromium: `browser_renegotiates_with_rust` (VP8, then a re-offer of
 VP9 on the same connection; VP9 frames arrive).
 
+### What Voelin accepts from official streamers (2026-10-03)
+
+The re-offer above came from our answer lacking AV1, and the H.264 the
+official client then sent decoded badly: its encoder (AMF on the user's
+AMD GPU, 2560x1440 at 60 fps, 6-9 Mbit/s) uses B-frames and a lookahead
+(its log prints QP for "IDR / P / B-frames") although the negotiated
+profile is Constrained High, and asked for a keyframe only twice in the
+session. Voelin decoded H.264 with Cisco's OpenH264 2.6.0, which does not
+decode B-frames: in a 1440p60 test stream with B-frames it gave 8 pictures
+of 600, every B-frame an error, and the viewer then waited for keyframes.
+
+A Voelin viewer now decodes with FFmpeg first ([media.md](../media.md#ffmpeg-decoders-loaded-at-runtime)):
+hardware (VA-API on Linux, D3D11VA / DXVA2 on Windows, VideoToolbox on
+macOS, NVDEC), then FFmpeg's software decoders, then the built-in libvpx,
+OpenH264 and dav1d. It accepts AV1, HEVC, VP9, H.264 and VP8 wherever one
+of them works (any FFmpeg build has software HEVC, VP9, H.264 and VP8;
+AV1 needs dav1d or libaom in it, or a GPU), and answers in the offer's
+order, so an official client that offers AV1 first gets AV1 back and no
+longer re-aligns. H.264 no longer depends on OpenH264, and B-frames
+decode: the same 1440p60 stream plays at 59.9 fps through VA-API, 58.9
+fps with a frame lost every second (FFmpeg's H.264 decoder conceals the
+loss while a keyframe is asked for, every half second until one comes),
+against 0.8 fps with OpenH264. Headless Chromium 152's AV1, VP9 and H.264
+streams decode in the pipeline at their size (`browser_codecs.rs`
+`browser_streams_decode_in_the_pipeline`). Watching the official client
+itself with these decoders is still to be confirmed.
+
 ## Open questions
 
 - [x] Viewer side: `joinstreamrequest id clid msg is_remove` (see above).

@@ -7,11 +7,16 @@
 //! - [`h264`] (feature `openh264`): H.264 with Cisco's prebuilt OpenH264,
 //!   loaded at runtime
 //! - [`av1`] (feature `av1`): AV1 decoding with the system libdav1d
-//! - [`hw`]: encoder factories found at runtime: FFmpeg's hardware and
-//!   software encoders ([`crate::ffmpeg`], feature `ffmpeg`) and, on Android,
-//!   MediaCodec
+//! - [`hw`]: encoder and decoder factories found at runtime: FFmpeg's
+//!   hardware and software encoders and decoders ([`crate::ffmpeg`], feature
+//!   `ffmpeg`) and, on Android, MediaCodec encoders
 //! - `mediacodec` (Android): the device's MediaCodec encoders and decoders
 //!   (hardware, or Google's software VP8 / VP9 / H.264)
+//!
+//! A viewer decodes each codec with the best decoder that works here and
+//! falls back to the next one ([`Codecs::decoders_for`]): hardware (FFmpeg's
+//! hwaccels, MediaCodec), then FFmpeg's software decoders, then the built-in
+//! libvpx, OpenH264 and dav1d.
 
 use std::fmt;
 use std::str::FromStr;
@@ -110,8 +115,12 @@ impl TryFrom<str0m::format::Codec> for Codec {
 	}
 }
 
-/// Order in which a viewer accepts codecs: VP9 > VP8 > AV1 > H.264.
-pub const VIEWER_PREFERENCE: [Codec; 4] = [Codec::Vp9, Codec::Vp8, Codec::Av1, Codec::H264];
+/// Order in which a viewer accepts codecs, best first: AV1 > HEVC > VP9 >
+/// H.264 > VP8 (the best compression first, the codec every client has
+/// last). Answers follow the offer's order, so this ranks what a viewer
+/// asks for when it chooses, and what [`Codecs::decoders`] lists.
+pub const VIEWER_PREFERENCE: [Codec; 5] =
+	[Codec::Av1, Codec::H265, Codec::Vp9, Codec::H264, Codec::Vp8];
 
 /// What the encoder should optimise for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -293,6 +302,23 @@ pub trait VideoDecoder: Send {
 	/// Decode one complete frame (a depacketized RTP frame). Returns the
 	/// picture if one is ready; its timestamp is zero.
 	fn decode(&mut self, data: &[u8]) -> Result<Option<VideoFrame>>;
+
+	/// Like [`decode`](Self::decode), into `out`: `true` if a picture is
+	/// there, else `out` is unchanged. Decoders that can reuse `out`'s
+	/// buffers do (FFmpeg's), so a caller that keeps passing the same frame
+	/// gets its pictures without allocations.
+	fn decode_into(&mut self, data: &[u8], out: &mut VideoFrame) -> Result<bool> {
+		let picture = self.decode(data)?;
+		Ok(picture.map(|p| *out = p).is_some())
+	}
+
+	/// Whether frames after a lost one still decode to a picture (what is
+	/// missing concealed until the next keyframe), so that a viewer keeps
+	/// decoding instead of waiting for a keyframe: FFmpeg's H.264 and HEVC
+	/// decoders. The others fail, or show garbage, on a missing reference.
+	fn conceals_errors(&self) -> bool {
+		false
+	}
 }
 
 /// Implementations behind [`VideoEncoder`].
@@ -324,6 +350,45 @@ impl fmt::Display for EncoderBackend {
 		f.write_str(self.name())
 	}
 }
+
+/// Implementations behind [`VideoDecoder`], as [`Codecs::decoders_for`]
+/// orders them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DecoderBackend {
+	/// An OS / GPU decoder of its own API (Android's `mediacodec`), or one
+	/// an application adds ([`Codecs::with_decoder`]).
+	Hardware(&'static str),
+	/// An FFmpeg decoder by its name in `ffmpeg::DECODERS`: in hardware
+	/// (`h264_vaapi`, FFmpeg's names of its hwaccels) or in software
+	/// (`h264`, `libdav1d`).
+	Ffmpeg(&'static str),
+	Libvpx,
+	OpenH264,
+	Dav1d,
+}
+
+impl DecoderBackend {
+	/// The name in settings (`stream.decoder_backend`) and logs.
+	pub fn name(self) -> &'static str {
+		match self {
+			DecoderBackend::Hardware(name) | DecoderBackend::Ffmpeg(name) => name,
+			DecoderBackend::Libvpx => "libvpx",
+			DecoderBackend::OpenH264 => "openh264",
+			DecoderBackend::Dav1d => "dav1d",
+		}
+	}
+}
+
+impl fmt::Display for DecoderBackend {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.write_str(self.name())
+	}
+}
+
+/// Which decoders to use (settings `stream.hardware_decoding` and
+/// `stream.decoder_backend`): the choices of the encoders, `hardware` for
+/// GPU decoders and `backend` naming a [`DecoderBackend::name`].
+pub type DecoderPreference = EncoderPreference;
 
 /// Which encoders to use (settings `stream.hardware_acceleration` and
 /// `stream.encoder_backend`).
@@ -391,8 +456,12 @@ pub struct EncoderInfo {
 	pub rank: Option<usize>,
 }
 
-/// Every encoder backend this build knows, what works here and why the
-/// rest does not (for the UI and `voelinctl stream encoders`).
+/// One decoder backend in [`Codecs::report`]: as [`EncoderInfo`], its
+/// `rank` the position in its codec's ladder ([`Codecs::decoders_for`]).
+pub type DecoderInfo = EncoderInfo;
+
+/// Every encoder and decoder backend this build knows, what works here and
+/// why the rest does not (for the UI and `voelinctl stream encoders`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EncoderReport {
 	/// The FFmpeg libraries in use (release, version, path), or why none.
@@ -401,6 +470,7 @@ pub struct EncoderReport {
 	/// or why not.
 	pub zero_copy: std::result::Result<(), String>,
 	pub encoders: Vec<EncoderInfo>,
+	pub decoders: Vec<DecoderInfo>,
 }
 
 fn unavailable(codec: Codec, reason: impl Into<String>) -> Error {
@@ -431,7 +501,9 @@ impl Candidate {
 
 /// The codecs this build and machine can use, and factories for them.
 ///
-/// Viewer order ([`Codecs::decoders`]): VP9 > VP8 > AV1 > H.264. Streamer
+/// Viewer order ([`Codecs::decoders`]): AV1 > HEVC > VP9 > H.264 > VP8, each
+/// codec with its ladder of decoders ([`Codecs::decoders_for`]) under the
+/// [`DecoderPreference`]. Streamer
 /// order ([`Codecs::encoders`]) under the default [`EncoderPreference`]:
 /// hardware (H.264, AV1, VP9, VP8, HEVC; FFmpeg's or MediaCodec) > VP8
 /// (libvpx) > H.264 (x264 and OpenH264 through FFmpeg, then Cisco's
@@ -440,9 +512,11 @@ impl Candidate {
 #[derive(Clone)]
 pub struct Codecs {
 	factories: Vec<Arc<dyn hw::EncoderFactory>>,
+	decoder_factories: Vec<Arc<dyn hw::DecoderFactory>>,
 	#[cfg(feature = "openh264")]
 	openh264: Option<h264::OpenH264>,
 	preference: EncoderPreference,
+	decoder_preference: DecoderPreference,
 }
 
 impl Default for Codecs {
@@ -457,32 +531,65 @@ impl fmt::Debug for Codecs {
 			.field("decoders", &self.decoders())
 			.field("encoders", &self.encoders())
 			.field("preference", &self.preference)
+			.field("decoder_preference", &self.decoder_preference)
 			.finish()
 	}
 }
 
 impl Codecs {
 	/// Software codecs compiled in, plus the encoders [`hw::probe`] finds
-	/// (FFmpeg's that passed their self-test, MediaCodec). H.264 through
-	/// Cisco's library needs [`Codecs::with_openh264`].
+	/// (FFmpeg's that passed their self-test, MediaCodec) and the decoders
+	/// [`hw::probe_decoders`] finds (FFmpeg's), both probed at once. H.264
+	/// through Cisco's library needs [`Codecs::with_openh264`].
 	pub fn new() -> Self {
+		let (factories, decoder_factories) = std::thread::scope(|scope| {
+			let decoders = scope.spawn(hw::probe_decoders);
+			(hw::probe(), decoders.join().unwrap_or_default())
+		});
 		Self {
-			factories: hw::probe().into_iter().map(Arc::from).collect(),
+			factories: factories.into_iter().map(Arc::from).collect(),
+			decoder_factories: decoder_factories.into_iter().map(Arc::from).collect(),
 			#[cfg(feature = "openh264")]
 			openh264: None,
 			preference: EncoderPreference::default(),
+			decoder_preference: DecoderPreference::default(),
 		}
 	}
 
 	/// Only the codecs compiled into this crate (libvpx, OpenH264 once
-	/// loaded, dav1d): no FFmpeg or MediaCodec, nothing probed.
+	/// loaded, dav1d): no FFmpeg or MediaCodec encoders, no FFmpeg decoders,
+	/// nothing probed.
 	pub fn builtin() -> Self {
 		Self {
 			factories: Vec::new(),
+			decoder_factories: Vec::new(),
 			#[cfg(feature = "openh264")]
 			openh264: None,
 			preference: EncoderPreference::default(),
+			decoder_preference: DecoderPreference::default(),
 		}
+	}
+
+	/// Decode `factory`'s codec with it first (a decoder of the embedding
+	/// application, or a test's).
+	pub fn with_decoder(mut self, factory: Arc<dyn hw::DecoderFactory>) -> Self {
+		self.decoder_factories.insert(0, factory);
+		self
+	}
+
+	/// Use `preference` for [`decoders_for`](Self::decoders_for) and
+	/// [`new_decoder`](Self::new_decoder).
+	pub fn with_decoder_preference(mut self, preference: DecoderPreference) -> Self {
+		self.decoder_preference = preference;
+		self
+	}
+
+	pub fn set_decoder_preference(&mut self, preference: DecoderPreference) {
+		self.decoder_preference = preference;
+	}
+
+	pub fn decoder_preference(&self) -> &DecoderPreference {
+		&self.decoder_preference
 	}
 
 	/// Enable H.264 through a loaded OpenH264 library.
@@ -526,32 +633,74 @@ impl Codecs {
 
 	/// Whether `codec` can be decoded, or why not.
 	pub fn check_decoder(&self, codec: Codec) -> Result<()> {
-		#[cfg(target_os = "android")]
-		if mediacodec::check_decoder(codec).is_ok() {
+		if !self.decoders_for(codec).is_empty() {
 			return Ok(());
 		}
-		match codec {
-			Codec::Vp8 | Codec::Vp9 => {
-				#[cfg(feature = "vpx")]
-				return vpx::check(codec, false);
-				#[cfg(not(feature = "vpx"))]
-				return Err(unavailable(codec, "built without the `vpx` feature"));
-			}
-			Codec::H264 if self.has_openh264() => Ok(()),
-			Codec::H264 => Err(unavailable(codec, "the OpenH264 library is not loaded")),
-			Codec::Av1 => {
-				#[cfg(feature = "av1")]
-				return Ok(());
-				#[cfg(not(feature = "av1"))]
-				return Err(unavailable(codec, "built without the `av1` feature"));
-			}
-			Codec::H265 => Err(unavailable(codec, "no HEVC decoder")),
+		if !self.decoder_candidates(codec).is_empty() {
+			let choice = &self.decoder_preference;
+			return Err(unavailable(codec, format!("its decoders are not used ({choice:?})")));
 		}
+		let builtin = match codec {
+			Codec::Vp8 | Codec::Vp9 if cfg!(feature = "vpx") => "libvpx has no decoder for it",
+			Codec::Vp8 | Codec::Vp9 => "built without the `vpx` feature",
+			Codec::H264 => "the OpenH264 library is not loaded",
+			Codec::Av1 => "built without the `av1` feature (dav1d)",
+			Codec::H265 => "nothing built in decodes it",
+		};
+		Err(unavailable(codec, format!("no FFmpeg decoder works here, and {builtin}")))
 	}
 
-	/// Decodable codecs in the viewer's order of preference.
+	/// Decodable codecs in the viewer's order of preference
+	/// ([`VIEWER_PREFERENCE`]): those with at least one decoder.
 	pub fn decoders(&self) -> Vec<Codec> {
-		VIEWER_PREFERENCE.into_iter().filter(|&c| self.check_decoder(c).is_ok()).collect()
+		VIEWER_PREFERENCE.into_iter().filter(|&c| !self.decoders_for(c).is_empty()).collect()
+	}
+
+	/// Every decoder of `codec` here and whether it is a GPU one: the
+	/// platform's (MediaCodec), the factories (an application's, then
+	/// FFmpeg's hardware and software decoders), then the built-in ones.
+	fn decoder_candidates(&self, codec: Codec) -> Vec<(DecoderBackend, bool)> {
+		let mut list = Vec::new();
+		// The device's codecs (hardware, or Google's software ones): Android
+		// has no others, so hardware decoding off does not leave them out.
+		#[cfg(target_os = "android")]
+		if mediacodec::check_decoder(codec).is_ok() {
+			list.push((DecoderBackend::Hardware("mediacodec"), false));
+		}
+		for f in self.decoder_factories.iter().filter(|f| f.codec() == codec) {
+			list.push((f.backend(), f.is_hardware()));
+		}
+		match codec {
+			#[cfg(feature = "vpx")]
+			Codec::Vp8 | Codec::Vp9 if vpx::check(codec, false).is_ok() => {
+				list.push((DecoderBackend::Libvpx, false));
+			}
+			Codec::H264 if self.has_openh264() => list.push((DecoderBackend::OpenH264, false)),
+			#[cfg(feature = "av1")]
+			Codec::Av1 => list.push((DecoderBackend::Dav1d, false)),
+			_ => {}
+		}
+		list
+	}
+
+	/// The decoders of `codec` in the order a viewer tries them, its ladder:
+	/// hardware first (unless the [`DecoderPreference`] turns it off), then
+	/// FFmpeg's software decoders, then the built-in libvpx, OpenH264 and
+	/// dav1d; a backend named in the preference before all of them.
+	pub fn decoders_for(&self, codec: Codec) -> Vec<DecoderBackend> {
+		let all = self.decoder_candidates(codec);
+		let preference = &self.decoder_preference;
+		let automatic = |c: &&(DecoderBackend, bool)| preference.hardware || !c.1;
+		let chosen: Vec<&(DecoderBackend, bool)> = match &preference.backend {
+			BackendChoice::Auto => all.iter().filter(automatic).collect(),
+			BackendChoice::Software => all.iter().filter(|c| !c.1).collect(),
+			BackendChoice::Named(name) => {
+				let named = all.iter().filter(|c| c.0.name() == name);
+				let rest = all.iter().filter(|c| c.0.name() != name).filter(automatic);
+				named.chain(rest).collect()
+			}
+		};
+		chosen.into_iter().map(|c| c.0).collect()
 	}
 
 	/// Every usable encoder in the base order, before the preference.
@@ -619,24 +768,51 @@ impl Codecs {
 		codecs
 	}
 
+	/// A decoder for `codec`: the first of its ladder
+	/// ([`decoders_for`](Self::decoders_for)) that opens.
 	pub fn new_decoder(&self, codec: Codec) -> Result<Box<dyn VideoDecoder>> {
+		self.check_decoder(codec)?;
+		let mut last_error = None;
+		for backend in self.decoders_for(codec) {
+			match self.new_decoder_with(codec, backend) {
+				Ok(decoder) => return Ok(decoder),
+				Err(e) => {
+					tracing::warn!(%codec, %backend, "decoder failed to open: {e}");
+					last_error = Some(e);
+				}
+			}
+		}
+		Err(last_error.unwrap_or_else(|| unavailable(codec, "no decoder in this build")))
+	}
+
+	/// A decoder from a specific backend.
+	pub fn new_decoder_with(
+		&self,
+		codec: Codec,
+		backend: DecoderBackend,
+	) -> Result<Box<dyn VideoDecoder>> {
 		#[cfg(target_os = "android")]
-		if mediacodec::check_decoder(codec).is_ok() {
+		if backend == DecoderBackend::Hardware("mediacodec") {
 			return Ok(Box::new(mediacodec::MediaCodecDecoder::new(codec)?));
 		}
-		self.check_decoder(codec)?;
-		match codec {
+		if let Some(factory) =
+			self.decoder_factories.iter().find(|f| f.backend() == backend && f.codec() == codec)
+		{
+			return factory.create();
+		}
+		match backend {
 			#[cfg(feature = "vpx")]
-			Codec::Vp8 | Codec::Vp9 => Ok(Box::new(vpx::VpxDecoder::new(codec)?)),
+			DecoderBackend::Libvpx if matches!(codec, Codec::Vp8 | Codec::Vp9) => {
+				Ok(Box::new(vpx::VpxDecoder::new(codec)?))
+			}
 			#[cfg(feature = "openh264")]
-			Codec::H264 => match &self.openh264 {
+			DecoderBackend::OpenH264 if codec == Codec::H264 => match &self.openh264 {
 				Some(lib) => Ok(Box::new(lib.decoder()?)),
 				None => Err(unavailable(codec, "the OpenH264 library is not loaded")),
 			},
 			#[cfg(feature = "av1")]
-			Codec::Av1 => Ok(Box::new(av1::Dav1dDecoder::new()?)),
-			#[allow(unreachable_patterns)]
-			_ => Err(unavailable(codec, "no decoder in this build")),
+			DecoderBackend::Dav1d if codec == Codec::Av1 => Ok(Box::new(av1::Dav1dDecoder::new()?)),
+			_ => Err(unavailable(codec, format!("no decoder {backend} for it here"))),
 		}
 	}
 
@@ -777,7 +953,65 @@ impl Codecs {
 			Err("built without the `ffmpeg` feature".to_owned()),
 			Err("built without the `ffmpeg` feature".to_owned()),
 		);
-		EncoderReport { ffmpeg, zero_copy, encoders }
+		EncoderReport { ffmpeg, zero_copy, encoders, decoders: self.decoder_report() }
+	}
+
+	/// Every decoder this build knows, with what works here and why the
+	/// rest does not, and each one's place in its codec's ladder.
+	fn decoder_report(&self) -> Vec<DecoderInfo> {
+		let ladders: Vec<(Codec, Vec<DecoderBackend>)> =
+			Codec::ALL.into_iter().map(|c| (c, self.decoders_for(c))).collect();
+		let mut decoders = Vec::new();
+		let mut add = |backend: DecoderBackend, api: &str, codec, hardware, status| {
+			let ladder = ladders.iter().find(|(c, _)| *c == codec).map(|(_, l)| l);
+			decoders.push(DecoderInfo {
+				name: backend.name().to_owned(),
+				api: api.to_owned(),
+				codec,
+				hardware,
+				rank: ladder.and_then(|l| l.iter().position(|b| *b == backend)),
+				status,
+			});
+		};
+		#[cfg(target_os = "android")]
+		for codec in Codec::ALL {
+			if mediacodec::check_decoder(codec).is_ok() {
+				add(DecoderBackend::Hardware("mediacodec"), "MediaCodec", codec, true, Ok(()));
+			}
+		}
+		for f in &self.decoder_factories {
+			if !matches!(f.backend(), DecoderBackend::Ffmpeg(_)) {
+				add(f.backend(), f.api(), f.codec(), f.is_hardware(), Ok(()));
+			}
+		}
+		#[cfg(feature = "ffmpeg")]
+		for status in crate::ffmpeg::decoder::probe() {
+			let spec = status.spec;
+			let backend = DecoderBackend::Ffmpeg(spec.name);
+			add(backend, spec.api, spec.codec, spec.is_hardware(), status.available.clone());
+		}
+		for codec in [Codec::Vp8, Codec::Vp9] {
+			#[cfg(feature = "vpx")]
+			let status = vpx::check(codec, false).map_err(|e| e.to_string());
+			#[cfg(not(feature = "vpx"))]
+			let status = Err("built without the `vpx` feature".to_owned());
+			add(DecoderBackend::Libvpx, "libvpx", codec, false, status);
+		}
+		let status = if self.has_openh264() {
+			Ok(())
+		} else if cfg!(feature = "openh264") {
+			Err("Cisco's OpenH264 library is not loaded".to_owned())
+		} else {
+			Err("built without the `openh264` feature".to_owned())
+		};
+		add(DecoderBackend::OpenH264, "OpenH264 (Cisco)", Codec::H264, false, status);
+		let status = if cfg!(feature = "av1") {
+			Ok(())
+		} else {
+			Err("built without the `av1` feature".to_owned())
+		};
+		add(DecoderBackend::Dav1d, "dav1d", Codec::Av1, false, status);
+		decoders
 	}
 }
 

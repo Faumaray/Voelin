@@ -92,7 +92,7 @@ field carries the body. **Type 1, payload field 17, is an identity:**
 | 4 | bytes | empty in every row seen |
 | 5 | varint | 1 on exactly one identity: the selected one |
 
-Voelin reads field 1 and field 2 and ignores the rest. The other item types
+Voelin reads fields 1, 2 and 5 and ignores the rest. The other item types
 (0, 2, 3, 4, 5 — connection profiles, bookmarks, server lists and such) are
 **not** decoded; they are skipped by their type, not by guessing at their
 contents.
@@ -167,6 +167,18 @@ voelinctl identity export <id> <path> [--store <db>]
 
 `--store` defaults to the desktop app's client database,
 `<data dir>/voelin/client.db`, so the CLI and the app share identities.
+
+**On every start** the app does the same as `import --auto`
+(`voelin_core::identity::import_new`): identities found in the default
+locations that the client database does not have yet are added, the files
+are only read. The identity the official client uses by default (field 5 of
+its payload, below) goes in first, so when Voelin has no identity of its own
+yet, that one becomes Voelin's default (the first identity) and servers see
+the same unique id; otherwise Voelin's default stays. What was imported is
+shown once, in the status line (the toast on desktop), by nickname. The
+runtime setting `identity.import_from_teamspeak` (default on) turns it off,
+e.g. `--set identity.import_from_teamspeak=false`. The sample data of
+`VOELIN_DEMO_UI` never imports.
 
 - **Import** prints what it found as nickname, unique id and security level —
   all three are public, everything else in an identity is the private key —

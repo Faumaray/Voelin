@@ -19,6 +19,11 @@ frame:
 {"v":1,"id":7,"type":"send_chat","data":{"target":{"kind":"channel","id":5},"text":"hi"}}
 ```
 
+Next to it, `GET /.well-known/tsgw` answers `{"url": "…"}`, the URL apps
+should use (`listen.public_url`, else the one the request came in on); apps
+that find no DNS record ask there ([gateway-admin.md](gateway-admin.md#letting-voelin-find-the-gateway),
+`voelin_core::discover`).
+
 The client picks `id` for requests; the answer carries the same `id`.
 Pushes have no `id`. Version 1 only grows: new message types and optional
 fields. Both sides ignore unknown fields. The gateway answers a type it does

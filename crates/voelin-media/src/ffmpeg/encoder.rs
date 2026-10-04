@@ -485,7 +485,7 @@ fn settings(spec: &BackendSpec, config: &EncoderConfig, low_power: bool) -> Vec<
 
 /// The process's VA-API device: `VOELIN_VAAPI_DEVICE`, or the first DRM
 /// render node.
-struct Device(Ptr);
+pub(super) struct Device(pub(super) Ptr);
 
 // SAFETY: an AVBufferRef of an AVHWDeviceContext, never freed; FFmpeg's
 // VA-API device may be used from several threads (libva locks per display).
@@ -507,7 +507,7 @@ pub fn vaapi_device_path() -> Option<String> {
 	nodes.into_iter().next()
 }
 
-fn vaapi_device(ffmpeg: &Ffmpeg) -> std::result::Result<Ptr, String> {
+pub(super) fn vaapi_device(ffmpeg: &Ffmpeg) -> std::result::Result<Ptr, String> {
 	static DEVICE: OnceLock<std::result::Result<Device, String>> = OnceLock::new();
 	DEVICE
 		.get_or_init(|| {
@@ -610,7 +610,7 @@ pub(crate) fn vaapi_pool(
 }
 
 /// FFmpeg's recent messages, appended to an error.
-fn log_suffix(context: &str) -> String {
+pub(super) fn log_suffix(context: &str) -> String {
 	let log = take_log(context);
 	if log.is_empty() { String::new() } else { format!(" ({})", log.join("; ")) }
 }
@@ -1728,7 +1728,7 @@ fn in_build(ffmpeg: &Ffmpeg, name: &str) -> bool {
 
 /// PCI vendor of a GPU, as `/sys/class/drm/*/device/vendor` gives it.
 #[cfg(target_os = "linux")]
-mod vendor {
+pub(super) mod vendor {
 	pub const AMD: u32 = 0x1002;
 	pub const NVIDIA: u32 = 0x10de;
 	pub const INTEL: u32 = 0x8086;
@@ -1738,7 +1738,7 @@ mod vendor {
 /// `/sys/class/drm` says nothing (a container without it, say), which is
 /// taken as "unknown" and skips nothing.
 #[cfg(target_os = "linux")]
-fn drm_vendors() -> &'static [u32] {
+pub(super) fn drm_vendors() -> &'static [u32] {
 	static VENDORS: OnceLock<Vec<u32>> = OnceLock::new();
 	VENDORS.get_or_init(|| {
 		let Ok(entries) = std::fs::read_dir("/sys/class/drm") else { return Vec::new() };

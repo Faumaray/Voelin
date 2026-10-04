@@ -17,7 +17,11 @@ use anyhow::{Context, Result};
 use slint::{ComponentHandle, ModelRc, VecModel};
 use tokio::runtime::Runtime;
 use tracing::warn;
-use voelin_core::settings::{AUDIO, CRASH_REPORTS, Settings};
+use voelin_core::media::decoder_preference;
+use voelin_core::settings::{
+	AUDIO, CRASH_REPORTS, IDENTITY_IMPORT, STREAM_DECODER_BACKEND, STREAM_HARDWARE_DECODING,
+	Settings,
+};
 use voelin_core::stream::StreamInfo;
 use voelin_core::{
 	AudioSettings, Command, Engine, Event, History, HistoryMessage, SessionState, VoiceState,
@@ -527,16 +531,30 @@ pub fn run(options: RunOptions) -> Result<()> {
 		Ok(history) => engine.send(Command::AttachHistory(history)),
 		Err(e) => warn!(%e, "chat history is not stored this time"),
 	}
+	let prefs = open_settings(&dir, &options.setting_overrides);
+	let switches = crate::dev::Switches::from_env();
+	// New identities of the official TeamSpeak clients, on every start (not
+	// with the sample data of VOELIN_DEMO_UI); with none of our own yet, the
+	// client's default identity becomes ours.
+	let had_identity = !store.identities()?.is_empty();
+	let imported = if prefs.get(&IDENTITY_IMPORT) && !switches.demo_ui {
+		voelin_core::identity::import_new(&store, &voelin_core::identity::discover())
+			.unwrap_or_else(|e| {
+				warn!(%e, "could not import TeamSpeak identities");
+				Vec::new()
+			})
+	} else {
+		Vec::new()
+	};
 	let identity = match store.identities()?.first() {
 		Some(entry) => store.identity(entry.id)?,
 		None => {
 			// Creating an identity takes a moment (security level 8).
 			let identity = tsclientlib::Identity::create();
-			store.add_identity("Default", &identity)?;
+			store.add_identity(crate::servers::CREATED_IDENTITY, &identity)?;
 			identity
 		}
 	};
-	let prefs = open_settings(&dir, &options.setting_overrides);
 	engine.send(Command::AttachSettings(prefs.clone()));
 	let mut settings: UiSettings = (*prefs.get_arc(&UI)).clone();
 	settings.crash_reports = prefs.get(&CRASH_REPORTS);
@@ -565,8 +583,8 @@ pub fn run(options: RunOptions) -> Result<()> {
 	if settings.global_ptt {
 		ptt.set(Some(settings.ptt_key.clone()));
 	}
-	let video = Video::new(&dir, settings.openh264);
-	let switches = crate::dev::Switches::from_env();
+	let mut video = Video::new(&dir, settings.openh264);
+	video.set_decoder_preference(decoder_preference(&prefs));
 	let app = App {
 		ui: ui.as_weak(),
 		store,
@@ -617,6 +635,9 @@ pub fn run(options: RunOptions) -> Result<()> {
 		app.refresh_crash_notice();
 		if app.demo {
 			app.start_demo();
+		}
+		if let Some(text) = crate::servers::imported_status(&imported, had_identity) {
+			app.set_status(text);
 		}
 	});
 
@@ -742,6 +763,8 @@ impl App {
 		} else if key == voelin_core::settings::STREAM_AUDIO_SOURCES.name() {
 			// A running share mixes the new sources (streams.rs).
 			self.share_audio_changed();
+		} else if key == STREAM_HARDWARE_DECODING.name() || key == STREAM_DECODER_BACKEND.name() {
+			self.video.set_decoder_preference(decoder_preference(&self.prefs));
 		}
 	}
 
@@ -782,6 +805,7 @@ impl App {
 			}
 			Event::ServerInfo { session, name, flavor, capabilities } => {
 				self.sessions.entry(session as i64).or_default().capabilities = capabilities;
+				self.adopt_server_name(session as i64, &name);
 				if self.current == Some(session as i64) {
 					let kind = match flavor {
 						voelin_model::ServerFlavor::Ts3(v) => format!("TeamSpeak 3 {v}"),
