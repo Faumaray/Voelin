@@ -7,8 +7,11 @@ use voelin_core::identity::Found;
 use voelin_core::{Command, ObserveState, Source, VoiceOptions, VoiceState};
 use voelin_store::{Bookmark, QueryConfig, QueryTransport};
 
-use crate::app::{App, BookmarkForm, Bridge};
+use crate::app::{App, BookmarkForm, Bridge, later};
 use crate::vm;
+
+/// The name of the identity the app creates when it has none.
+pub(crate) const CREATED_IDENTITY: &str = "Default";
 
 /// What to tell the user about the identities imported from the official
 /// clients at start ([`voelin_core::identity::import_new`]), if any.
@@ -28,6 +31,59 @@ pub(crate) fn imported_status(imported: &[Found], had_identity: bool) -> Option<
 	})
 }
 
+/// The bookmark the form describes, over `old` (what the form does not show,
+/// like the identity, the default channel or the client version, stays; a
+/// new server has none of it). Only the address is needed: the name is the
+/// address until the server tells its own (`adopt_server_name`), the
+/// nickname `default_nickname`, the gateway is looked up later.
+fn bookmark_from_form(
+	old: Option<&Bookmark>,
+	form: &BookmarkForm,
+	default_nickname: impl FnOnce() -> String,
+) -> Bookmark {
+	let mut bookmark = old.cloned().unwrap_or_default();
+	bookmark.id = form.id as i64;
+	bookmark.address = form.address.trim().to_string();
+	bookmark.name = match form.name.trim() {
+		"" => bookmark.address.clone(),
+		name => name.to_string(),
+	};
+	bookmark.nickname = match form.nickname.trim() {
+		"" => default_nickname(),
+		nickname => nickname.to_string(),
+	};
+	bookmark.gateway_url = Some(form.gateway_url.trim().to_string()).filter(|u| !u.is_empty());
+	bookmark.query = match form.query_transport.as_str() {
+		"none" | "" => None,
+		t => {
+			let (host, port) = form
+				.query_addr
+				.rsplit_once(':')
+				.map_or((form.query_addr.to_string(), None), |(h, p)| {
+					(h.to_string(), p.parse().ok())
+				});
+			let transport = match t {
+				"raw" => QueryTransport::Raw,
+				"http" => QueryTransport::Http,
+				_ => QueryTransport::Ssh,
+			};
+			let default_port = match transport {
+				QueryTransport::Raw => 10011,
+				QueryTransport::Ssh => 10022,
+				QueryTransport::Http => 10080,
+			};
+			Some(QueryConfig {
+				transport,
+				host,
+				port: port.unwrap_or(default_port),
+				user: form.query_user.to_string(),
+				server_port: bookmark.query.as_ref().and_then(|q| q.server_port),
+			})
+		}
+	};
+	bookmark
+}
+
 impl App {
 	pub(crate) fn connect_voice(&mut self) {
 		let Some(b) = self.current.and_then(|id| self.bookmark(id)).cloned() else { return };
@@ -40,6 +96,75 @@ impl App {
 		self.engine
 			.send(Command::ConnectVoice { session: b.id as u64, options: Box::new(options) });
 		self.set_status(format!("Connecting to {}…", b.address));
+		// The admin may have published the gateway since it was added.
+		self.discover_gateway(b.id);
+	}
+
+	/// The nickname a new server gets: the default identity's (one imported
+	/// from TeamSpeak keeps the nickname used there), else the system user's.
+	pub(crate) fn default_nickname(&self) -> String {
+		self.store
+			.identities()
+			.ok()
+			.and_then(|identities| identities.into_iter().next())
+			.map(|identity| identity.name)
+			.filter(|name| {
+				![CREATED_IDENTITY, voelin_core::identity::DEFAULT_NICKNAME]
+					.contains(&name.as_str())
+			})
+			.or_else(|| std::env::var("USER").or_else(|_| std::env::var("USERNAME")).ok())
+			.unwrap_or_default()
+	}
+
+	/// Look up the gateway of a server that has none in DNS
+	/// ([`voelin_core::discover`]); one found is kept as if typed.
+	pub(crate) fn discover_gateway(&self, id: i64) {
+		let Some(b) = self.bookmark(id).filter(|b| b.gateway_url.is_none() && !self.demo_ui) else {
+			return;
+		};
+		let address = b.address.clone();
+		self.engine.runtime().spawn(async move {
+			if let Some(url) = voelin_core::discover::gateway(&address).await {
+				later(move |app| app.gateway_found(id, &address, url));
+			}
+		});
+	}
+
+	/// A gateway was found for the server at `address`; it is kept unless
+	/// the server changed meanwhile.
+	fn gateway_found(&mut self, id: i64, address: &str, url: String) {
+		let Some(b) = self
+			.bookmarks
+			.iter_mut()
+			.find(|b| b.id == id && b.address == address && b.gateway_url.is_none())
+		else {
+			return;
+		};
+		b.gateway_url = Some(url.clone());
+		let name = b.name.clone();
+		if let Err(e) = self.store.update_bookmark(b) {
+			warn!(%e, "could not keep the gateway found");
+			return;
+		}
+		self.set_status(format!("Found the gateway of {name}: {url}"));
+		self.refresh_toolbar();
+	}
+
+	/// The server told its name: a server still named by its address takes
+	/// it, so the address is all a user has to type.
+	pub(crate) fn adopt_server_name(&mut self, id: i64, name: &str) {
+		let Some(b) = self.bookmarks.iter_mut().find(|b| b.id == id && b.name == b.address) else {
+			return;
+		};
+		if name.trim().is_empty() || self.demo_ui {
+			return;
+		}
+		b.name = name.trim().to_owned();
+		if let Err(e) = self.store.update_bookmark(b) {
+			warn!(%e, "could not name the server");
+		}
+		self.refresh_servers();
+		self.refresh_toolbar();
 	}
 
 	pub(crate) fn toggle_observe(&mut self) {
@@ -87,7 +212,7 @@ impl App {
 		let Some(b) = self.bookmark(id) else {
 			return BookmarkForm {
 				id: -1,
-				nickname: std::env::var("USER").unwrap_or_default().into(),
+				nickname: self.default_nickname().into(),
 				query_transport: "none".into(),
 				query_user: "serveradmin".into(),
 				..Default::default()
@@ -110,7 +235,8 @@ impl App {
 		};
 		BookmarkForm {
 			id: b.id as i32,
-			name: b.name.clone().into(),
+			// Named by its address: empty, so a new address names it again.
+			name: if b.name == b.address { SharedString::new() } else { b.name.clone().into() },
 			address: b.address.clone().into(),
 			nickname: b.nickname.clone().into(),
 			server_password: secret(b.server_password_key()),
@@ -123,49 +249,8 @@ impl App {
 	}
 
 	pub(crate) fn save_bookmark(&mut self, form: BookmarkForm) {
-		let query = match form.query_transport.as_str() {
-			"none" | "" => None,
-			t => {
-				let (host, port) = form
-					.query_addr
-					.rsplit_once(':')
-					.map_or((form.query_addr.to_string(), None), |(h, p)| {
-						(h.to_string(), p.parse().ok())
-					});
-				let transport = match t {
-					"raw" => QueryTransport::Raw,
-					"http" => QueryTransport::Http,
-					_ => QueryTransport::Ssh,
-				};
-				let default_port = match transport {
-					QueryTransport::Raw => 10011,
-					QueryTransport::Ssh => 10022,
-					QueryTransport::Http => 10080,
-				};
-				Some(QueryConfig {
-					transport,
-					host,
-					port: port.unwrap_or(default_port),
-					user: form.query_user.to_string(),
-					server_port: None,
-				})
-			}
-		};
-		let mut bookmark = Bookmark {
-			id: form.id as i64,
-			name: if form.name.is_empty() {
-				form.address.to_string()
-			} else {
-				form.name.to_string()
-			},
-			address: form.address.to_string(),
-			nickname: form.nickname.to_string(),
-			identity: None,
-			default_channel: None,
-			gateway_url: Some(form.gateway_url.to_string()).filter(|u| !u.is_empty()),
-			query,
-			client_version: None,
-		};
+		let mut bookmark =
+			bookmark_from_form(self.bookmark(form.id as i64), &form, || self.default_nickname());
 		let result = if bookmark.id < 0 {
 			self.store.add_bookmark(&bookmark).map(|id| bookmark.id = id)
 		} else {
@@ -191,6 +276,7 @@ impl App {
 		self.current = Some(bookmark.id);
 		self.bookmarks = self.store.bookmarks().unwrap_or_default();
 		self.refresh_all();
+		self.discover_gateway(bookmark.id);
 	}
 
 	pub(crate) fn delete_bookmark(&mut self, id: i64) {
@@ -377,5 +463,85 @@ impl App {
 			self.tree_filter = text;
 			self.refresh_tree();
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn the_address_alone_makes_a_server() {
+		let form = BookmarkForm {
+			id: -1,
+			address: " ts.example.test ".into(),
+			query_transport: "none".into(),
+			..Default::default()
+		};
+		let b = bookmark_from_form(None, &form, || "Nick".into());
+		assert_eq!((b.address.as_str(), b.name.as_str()), ("ts.example.test", "ts.example.test"));
+		assert_eq!(b.nickname, "Nick");
+		assert_eq!(
+			(b.gateway_url, b.query, b.identity, b.default_channel),
+			(None, None, None, None)
+		);
+	}
+
+	#[test]
+	fn editing_keeps_what_the_form_does_not_show() {
+		let old = Bookmark {
+			id: 7,
+			name: "Old".into(),
+			address: "old.example.test".into(),
+			nickname: "Me".into(),
+			identity: Some(2),
+			default_channel: Some("Lobby/Sub".into()),
+			gateway_url: Some("ws://gw.example.test:7788/v1".into()),
+			query: Some(QueryConfig { server_port: Some(9988), ..Default::default() }),
+			client_version: Some("linux".into()),
+		};
+		let form = BookmarkForm {
+			id: 7,
+			name: "Mine".into(),
+			address: "new.example.test:9988".into(),
+			nickname: "Other".into(),
+			// Cleared: looked up again.
+			gateway_url: "".into(),
+			query_transport: "raw".into(),
+			query_addr: "q.example.test".into(),
+			query_user: "serveradmin".into(),
+			..Default::default()
+		};
+		let b = bookmark_from_form(Some(&old), &form, || unreachable!("a nickname was given"));
+		assert_eq!((b.id, b.name.as_str(), b.nickname.as_str()), (7, "Mine", "Other"));
+		assert_eq!(b.address, "new.example.test:9988");
+		assert_eq!((b.identity, b.default_channel), (Some(2), Some("Lobby/Sub".into())));
+		assert_eq!(b.client_version.as_deref(), Some("linux"));
+		assert_eq!(b.gateway_url, None);
+		let q = b.query.unwrap();
+		assert_eq!(
+			(q.transport, q.host.as_str(), q.port),
+			(QueryTransport::Raw, "q.example.test", 10011)
+		);
+		assert_eq!(q.server_port, Some(9988));
+	}
+
+	#[test]
+	fn the_import_is_told_by_nickname() {
+		let found = |nickname: &str| Found {
+			nickname: nickname.into(),
+			identity: tsclientlib::Identity::create(),
+			source: "settings.db".into(),
+			selected: false,
+		};
+		assert_eq!(imported_status(&[], false), None);
+		assert_eq!(
+			imported_status(&[found("Main")], false).unwrap(),
+			"Using your TeamSpeak identity \u{201c}Main\u{201d}"
+		);
+		assert_eq!(
+			imported_status(&[found("Main"), found("Alt")], true).unwrap(),
+			"Imported 2 identities from TeamSpeak: Main, Alt"
+		);
 	}
 }

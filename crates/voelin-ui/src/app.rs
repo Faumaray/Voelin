@@ -544,7 +544,7 @@ pub fn run(options: RunOptions) -> Result<()> {
 		None => {
 			// Creating an identity takes a moment (security level 8).
 			let identity = tsclientlib::Identity::create();
-			store.add_identity("Default", &identity)?;
+			store.add_identity(crate::servers::CREATED_IDENTITY, &identity)?;
 			identity
 		}
 	};
@@ -794,6 +794,7 @@ impl App {
 			}
 			Event::ServerInfo { session, name, flavor, capabilities } => {
 				self.sessions.entry(session as i64).or_default().capabilities = capabilities;
+				self.adopt_server_name(session as i64, &name);
 				if self.current == Some(session as i64) {
 					let kind = match flavor {
 						voelin_model::ServerFlavor::Ts3(v) => format!("TeamSpeak 3 {v}"),

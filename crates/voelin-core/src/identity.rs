@@ -34,7 +34,7 @@ use voelin_gateway_proto::UniqueIds;
 use voelin_store::Store;
 
 /// Name given to an identity whose source kept none.
-const DEFAULT_NICKNAME: &str = "imported";
+pub const DEFAULT_NICKNAME: &str = "imported";
 
 /// Item field holding the item's type; the payload is in field
 /// [`PAYLOAD_FIELD_BASE`] `+ type`.
