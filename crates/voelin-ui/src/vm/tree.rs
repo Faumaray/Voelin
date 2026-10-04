@@ -107,10 +107,10 @@ fn talking(input: &TreeInput, client: &ClientInfo) -> bool {
 /// Centered spacer prefixes are presentation metadata, not part of the title.
 /// Leave other names untouched rather than guessing at the full spacer syntax.
 fn channel_label(name: &str) -> (&str, bool) {
-	if let Some((suffix, label)) = name.strip_prefix("[cspacer").and_then(|s| s.split_once(']')) {
-		if suffix.bytes().all(|b| b.is_ascii_digit()) {
-			return (label, true);
-		}
+	if let Some((suffix, label)) = name.strip_prefix("[cspacer").and_then(|s| s.split_once(']'))
+		&& suffix.bytes().all(|b| b.is_ascii_digit())
+	{
+		return (label, true);
 	}
 	(name, false)
 }

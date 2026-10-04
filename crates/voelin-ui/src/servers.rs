@@ -333,10 +333,11 @@ impl App {
 		};
 		let changed =
 			apply_server_icon(bookmark, self.sessions.entry(id).or_default(), address, icon);
-		if changed && !self.demo_ui {
-			if let Err(error) = self.store.update_bookmark(bookmark) {
-				warn!(%error, "could not keep the server icon");
-			}
+		if changed
+			&& !self.demo_ui
+			&& let Err(error) = self.store.update_bookmark(bookmark)
+		{
+			warn!(%error, "could not keep the server icon");
 		}
 	}
 
