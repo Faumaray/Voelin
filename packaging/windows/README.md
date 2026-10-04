@@ -11,21 +11,35 @@ is for servers and packaged for Linux only.
 ## Build
 
 Needs the MSVC build tools, CMake (bundled libopus), NASM (assembly of
-`aws-lc-sys`, used by the WebRTC stack) and libvpx (video, `voelin-media`):
+`aws-lc-sys`, used by the WebRTC stack), libvpx (VP8/VP9) and dav1d (AV1
+decoding), both for `voelin-media`:
 
 ```powershell
 winget install NASM.NASM Kitware.CMake NSIS.NSIS
-vcpkg install libvpx:x64-windows-static-md
+vcpkg install libvpx:x64-windows-static-md dav1d:x64-windows-static-md
 
 $vpx = "$env:VCPKG_ROOT\installed\x64-windows-static-md"
 $env:VPX_LIB_DIR = "$vpx\lib"
 $env:VPX_INCLUDE_DIR = "$vpx\include"
 $env:VPX_VERSION = "1.15.2"   # what `vcpkg list libvpx` shows
 $env:VPX_STATIC = "1"
+# dav1d-sys through system-deps, without pkg-config.
+$env:SYSTEM_DEPS_DAV1D_NO_PKG_CONFIG = "1"
+$env:SYSTEM_DEPS_DAV1D_SEARCH_NATIVE = "$vpx\lib"
+$env:SYSTEM_DEPS_DAV1D_LIB = "dav1d"
+$env:SYSTEM_DEPS_DAV1D_LINK = "static"
 
 cargo build --release --locked -p voelin-ui
-makensis /DVERSION=0.1.0 packaging\windows\installer.nsi
+bash scripts/fetch-ffmpeg-windows.sh ffmpeg
+makensis /DVERSION=0.1.0 /DFFMPEG=..\..\ffmpeg packaging\windows\installer.nsi
 ```
+
+FFmpeg (hardware encoders and decoders, H.265, more AV1 decoders) is not
+linked: the app loads `avcodec-*.dll` and `avutil-*.dll` from its own
+directory, then `PATH`. The packages carry BtbN's LGPL build of FFmpeg 8.1
+(`scripts/fetch-ffmpeg-windows.sh`, with `FFMPEG-LICENSE.txt` and
+`FFMPEG-README.txt` naming the build and its source); replacing the DLLs
+with another build of the same major versions works.
 
 This gives `target\release\voelin.exe` and
 `packaging\windows\voelin-0.1.0-setup.exe`. The installer puts the app in

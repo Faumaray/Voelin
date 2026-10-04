@@ -13,9 +13,9 @@
 FROM ubuntu:24.04 AS toolchain
 ARG DEBIAN_FRONTEND=noninteractive
 # The same libraries as CI (.github/actions/system-deps), plus dpkg-dev for
-# the .deb's dependencies.
+# the .deb's dependencies and patchelf for the .tar.gz's bundled libraries.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-		build-essential ca-certificates cmake curl dpkg-dev pkg-config \
+		build-essential ca-certificates cmake curl dpkg-dev patchelf pkg-config \
 		libasound2-dev libfontconfig1-dev libxkbcommon-dev \
 		libvpx-dev libdav1d-dev libpipewire-0.3-dev libspa-0.2-dev libclang-dev \
 	&& rm -rf /var/lib/apt/lists/*

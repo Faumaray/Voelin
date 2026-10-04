@@ -384,7 +384,7 @@ off), the automatic order after it.
 |---|---|---|---|---|
 | libvpx | `vpx` (default) | VP8, VP9 | VP8, VP9 | system libvpx (1.14 tested), dynamically linked; bindings from `libvpx-native-sys` (pre-generated, no bindgen) |
 | OpenH264 | `openh264` (default) | H.264 Constrained High / Baseline | H.264 | Cisco's prebuilt binary, loaded at runtime |
-| dav1d | `av1` | – | AV1 | system libdav1d >= 1.3 (1.4.1 tested) |
+| dav1d | `av1` (default) | – | AV1 | system libdav1d >= 1.3 (1.4.1 tested); static from vcpkg (MSVC) and built in `docker/windows.Dockerfile` (MinGW) on Windows |
 | FFmpeg | `ffmpeg` (default; off on Android) | H.264, HEVC, AV1, VP9, VP8 in hardware; H.264 (x264, OpenH264), AV1 (SVT-AV1, libaom, rav1e) in software | AV1, HEVC, VP9, H.264, VP8 in hardware (VA-API, NVDEC, D3D11VA, DXVA2, VideoToolbox) and in software (dav1d, libaom, FFmpeg's own) | the system's (or `VOELIN_FFMPEG_DIR`'s) libavcodec / libavutil, any major version, loaded at runtime; see below |
 | MediaCodec (Android) | – | H.264, VP8, VP9 | VP8, VP9, H.264, AV1 | the device's default codec per type through the NDK (`ndk` crate); an encoder factory named `mediacodec` |
 
@@ -397,8 +397,10 @@ every build has).
 ### FFmpeg encoders, loaded at runtime
 
 `crate::ffmpeg` (feature `ffmpeg`) uses whatever FFmpeg is installed; it is
-never linked or shipped. Without it, or when a backend fails its self-test,
-the software encoders above are used as before.
+never linked. The Windows packages ship FFmpeg's LGPL DLLs next to
+`voelin.exe`; on Linux the packages depend on (or install, see
+`voelin-install-deps`) the distribution's. Without it, or when a backend
+fails its self-test, the software encoders above are used as before.
 
 - Finding it: `VOELIN_FFMPEG_DIR` (only that directory; its libavutil and
   libswresample are loaded first so libavcodec's dependencies resolve
@@ -652,7 +654,11 @@ on (`Video::set_decoder_preference`); a running watch keeps its decoder.
   thread before the first comes out), `threads` up to 8 in software and 1
   in hardware, dav1d's `max_frame_delay` 1 (`framethreads` 1 before FFmpeg
   5.0). Every frame's picture comes out of the call that decoded it, except
-  what B-frames reorder.
+  what B-frames reorder. VP8 decodes on one thread and dav1d on a quarter
+  of the cores (1 to 4):
+  FFmpeg's VP8 slice threads work on the token partitions and wait on each
+  other, so our 4- and 8-partition streams decoded 40-80 % slower on four
+  threads than on one ([research/stream-fps.md](research/stream-fps.md)).
 - The self-test (`ffmpeg::decoder::probe()`, once per process, every decoder
   on a thread of its own, at the same time as the encoders' probe in
   `Codecs::new()`): each decoder decodes a three-frame clip of its codec
@@ -1329,8 +1335,10 @@ voelin-media, str0m, x11rb-protocol, pipewire, wayland-client, ...) with
 
 Linux (Debian/Ubuntu packages): `libvpx-dev` (feature `vpx`),
 `libpipewire-0.3-dev libspa-0.2-dev libclang-dev` (feature `pipewire`; the
-PipeWire bindings run bindgen), `pkg-config`, and `libdav1d-dev` for
-`--features av1`. X11 capture is pure Rust (x11rb) and needs no packages.
+PipeWire bindings run bindgen), `pkg-config`, and `libdav1d-dev` (feature
+`av1`, on by default like every other codec backend: desktop builds always
+have every encoder and decoder voelin-media has). X11 capture is pure Rust
+(x11rb) and needs no packages.
 Tests of X11 capture need an X server: `xvfb`, run with `xvfb-run -a cargo
 test -p voelin-media` (skipped without `DISPLAY`). FFmpeg needs nothing at
 build time (feature `ffmpeg` only adds `libloading`); its tests run with the
@@ -1364,7 +1372,7 @@ has not run on Windows yet.
 | `zune-jpeg`, `zune-core` | MIT OR Apache-2.0 OR Zlib | the studio's MJPEG cameras (`pipewire`) |
 | `tract-onnx`; PP-HumanSeg (ONNX model) | MIT OR Apache-2.0; Apache-2.0 | the studio's person segmentation (`segment`); the model is bundled |
 | `windows-capture`, `wasapi`, `windows` | MIT (`windows`: MIT OR Apache-2.0) | Windows only |
-| FFmpeg (libavcodec, libavutil, libavformat) | LGPL-2.1+ (GPL-2+ in builds with x264 and other GPL parts) | the user's installed libraries, loaded at runtime; never linked or shipped |
+| FFmpeg (libavcodec, libavutil, libavformat) | LGPL-2.1+ (GPL-2+ in builds with x264 and other GPL parts) | loaded at runtime, never linked: on Linux the distribution's libraries (the `.deb` recommends them, the `.tar.gz` has `voelin-install-deps`, the Flatpak runtime has its own); the Windows packages ship BtbN's LGPL shared build next to `voelin.exe` with its license and source pointer (`scripts/fetch-ffmpeg-windows.sh`) |
 | libva | MIT | the user's `libva.so.2` (the one FFmpeg's VA-API support uses), loaded at runtime for the GPU colour conversion; never linked or shipped |
 | `libloading` | ISC | opens FFmpeg (and OpenH264, through the `openh264` crate) |
 | `bzip2` / `libbz2-rs-sys` | MIT OR Apache-2.0 / bzip2-1.0.6 | unpacks the OpenH264 download; `bzip2-1.0.6` is allowed in `deny.toml` |

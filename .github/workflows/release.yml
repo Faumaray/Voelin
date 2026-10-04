@@ -35,10 +35,11 @@ jobs:
           key: release
       - name: Build
         run: cargo build --release --locked -p voelin-ui -p voelin-gateway
-      # dpkg-shlibdeps works out the .deb's dependencies.
+      # dpkg-shlibdeps works out the .deb's dependencies; patchelf points
+      # the .tar.gz's binary at the libraries it carries.
       - name: Package (.tar.gz, .deb)
         run: |
-          sudo apt-get install -y --no-install-recommends dpkg-dev
+          sudo apt-get install -y --no-install-recommends dpkg-dev patchelf
           scripts/package.sh linux dist
       - uses: actions/upload-artifact@v4
         with:
@@ -70,6 +71,12 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           "MAKENSIS=$($makensis.Replace('\', '/'))" >> $env:GITHUB_ENV
+      # FFmpeg's LGPL DLLs, shipped next to voelin.exe.
+      - name: FFmpeg
+        shell: bash
+        run: |
+          scripts/fetch-ffmpeg-windows.sh "$RUNNER_TEMP/ffmpeg"
+          echo "FFMPEG_DLL_DIR=$RUNNER_TEMP/ffmpeg" >> "$GITHUB_ENV"
       - name: Package (.zip, installer)
         shell: bash
         run: scripts/package.sh windows dist
