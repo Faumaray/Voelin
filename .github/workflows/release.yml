@@ -20,8 +20,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "0"
-  CARGO_BUILD_JOBS: "1"
-  CARGO_INCREMENTAL: "0"
 
 jobs:
   package-linux:

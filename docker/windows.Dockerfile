@@ -11,8 +11,6 @@
 # on Windows 10 and 11. Unsigned, like CI's (signing: docs/release.md).
 
 FROM ubuntu:24.04 AS toolchain
-# Serial builds keep the generated Slint UI within the CI memory budget.
-ENV CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0
 ARG DEBIAN_FRONTEND=noninteractive
 # mingw-w64 (C compiler and linker), NASM (aws-lc and libvpx assembly), CMake
 # (the bundled libopus, aws-lc), NSIS (the installer), zip.
