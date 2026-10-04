@@ -53,7 +53,8 @@ fn sps_profile(data: &[u8]) -> Option<u8> {
 
 fn roundtrip(library: OpenH264) {
 	let codecs = Codecs::builtin().with_openh264(library.clone());
-	assert_eq!(codecs.decoders().last(), Some(&Codec::H264));
+	assert!(codecs.decoders().contains(&Codec::H264));
+	assert_eq!(codecs.decoders_for(Codec::H264), [voelin_media::DecoderBackend::OpenH264]);
 	assert!(codecs.encoders().contains(&(Codec::H264, EncoderBackend::OpenH264)));
 
 	let screen = SyntheticScreen::new(320, 240);

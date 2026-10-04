@@ -815,7 +815,7 @@ async fn watch(
 	);
 	let mut tick = tokio::time::interval(Duration::from_millis(100));
 	let mut first_picture = true;
-	let mut last_picture: Option<VideoFrame> = None;
+	let mut last_picture: Option<Arc<VideoFrame>> = None;
 	let summary = |video: u64, audio: u64, decoder: &VideoPipeline| {
 		let stats = decoder.stats();
 		println!(
@@ -824,7 +824,7 @@ async fn watch(
 			stats.error.map(|e| format!(" (last error: {e})")).unwrap_or_default()
 		);
 	};
-	let save_last = |last: &Option<VideoFrame>| -> Result<()> {
+	let save_last = |last: &Option<Arc<VideoFrame>>| -> Result<()> {
 		match (save, last) {
 			(Some(path), Some(picture)) => {
 				save_png(picture, path)?;

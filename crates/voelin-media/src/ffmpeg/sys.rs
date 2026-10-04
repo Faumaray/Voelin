@@ -226,6 +226,7 @@ api! {
 	fn av_opt_child_next(obj: Ptr, prev: Ptr) -> Ptr;
 	fn av_strerror(errnum: c_int, buf: *mut c_char, size: usize) -> c_int;
 	fn av_get_pix_fmt(name: *const c_char) -> c_int;
+	fn av_get_pix_fmt_name(fmt: c_int) -> *const c_char;
 	fn av_log_set_level(level: c_int);
 	fn av_log_set_callback(callback: Option<LogCallback>);
 	fn av_log_format_line2(
@@ -616,6 +617,17 @@ impl Api {
 		// SAFETY: a valid C string.
 		let fmt = unsafe { (self.av_get_pix_fmt)(name.as_ptr()) };
 		(fmt >= 0).then_some(fmt)
+	}
+
+	/// The name of pixel format `fmt` (for messages).
+	pub fn pix_fmt_name(&self, fmt: c_int) -> String {
+		// SAFETY: returns a static string, or NULL for an unknown format.
+		let name = unsafe { (self.av_get_pix_fmt_name)(fmt) };
+		if name.is_null() {
+			return format!("pixel format {fmt}");
+		}
+		// SAFETY: a NUL-terminated static string.
+		unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned()
 	}
 }
 

@@ -2,7 +2,8 @@
 //! pattern, encoded by each encoder this machine has as a share encodes the
 //! screen, sent by our streamer peer offering just that codec, must decode
 //! at its size in headless Chromium (libwebrtc, the stack the official
-//! TeamSpeak 6 client is built on).
+//! TeamSpeak 6 client is built on). And the other way: what Chromium sends
+//! (AV1, VP9, H.264) our viewer accepts and the engine's pipeline decodes.
 //!
 //! Runs only with `VOELIN_INTEROP=1` (see `tests/interop/README.md`). Codecs
 //! the browser does not decode (H.264 in Playwright's Chromium, HEVC) are
@@ -11,6 +12,8 @@
 
 #![cfg(feature = "media-desktop")]
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -18,8 +21,8 @@ use tokio::time::timeout;
 use voelin_core::media::voelin_media::capture::SourceId;
 use voelin_core::media::voelin_media::{Codec, Codecs};
 use voelin_core::media::{
-	EncodedSource, EncoderPreference, Streamer, StreamerConfig, decoded_everywhere, media_codec,
-	peer_config, preferred_codec, video_codec,
+	EncodedSource, EncoderPreference, Streamer, StreamerConfig, VideoPipeline, decoded_everywhere,
+	media_codec, peer_config, preferred_codec, video_codec,
 };
 use voelin_core::stream::{FrameSource, PeerConfig, VideoCodec};
 use voelin_stream::{Peer, PeerEvent};
@@ -184,4 +187,73 @@ async fn share_offer_picks_a_codec_every_client_decodes() {
 	eprintln!("{chosen}: {video}");
 	browser.quit().await;
 	decoded(&video).unwrap();
+}
+
+/// Headless Chromium sends its canvas (320x240) in AV1, VP9 and H.264 in
+/// turn (what it cannot send is skipped; a system Chromium sends H.264) to
+/// our viewer peer, which accepts what this machine decodes
+/// (`peer_config`); the engine's pipeline decodes 30 pictures at that size
+/// with the first decoder of the codec's ladder (VA-API where it decodes
+/// the codec), asking the browser for keyframes as a watch does.
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_streams_decode_in_the_pipeline() {
+	if !enabled() {
+		eprintln!("skipped: set VOELIN_INTEROP=1 (needs node, Playwright and Chromium)");
+		return;
+	}
+	let mut browser = Browser::start().await;
+	let codecs = Arc::new(Codecs::new());
+	let config = peer_config(&codecs, PeerConfig::loopback());
+	let mut decoded = Vec::new();
+	for codec in [Codec::Av1, Codec::Vp9, Codec::H264] {
+		let offer = browser.call(json!({ "op": "offer", "codec": codec.name() })).await;
+		if offer.get("unsupported").is_some() {
+			eprintln!("{codec}: the browser cannot send it, skipped");
+			continue;
+		}
+		assert!(config.accept_video_codecs.contains(&video_codec(codec)), "{codec} not accepted");
+		let (mut peer, answer) =
+			Peer::answer(&config, offer["sdp"].as_str().unwrap()).await.unwrap();
+		browser.call(json!({ "op": "accept", "sdp": answer })).await;
+		let keyframe = Arc::new(AtomicBool::new(false));
+		let (tx, pictures) = std::sync::mpsc::channel();
+		let pipeline = VideoPipeline::new(
+			codecs.clone(),
+			move |picture| {
+				let _ = tx.send((picture.width, picture.height));
+			},
+			{
+				let keyframe = keyframe.clone();
+				move || keyframe.store(true, Ordering::Relaxed)
+			},
+		);
+		let mut sizes = Vec::new();
+		let _ = timeout(Duration::from_secs(15), async {
+			while let Some(event) = peer.next_event().await {
+				match event {
+					PeerEvent::Media(frame) => pipeline.push(frame),
+					PeerEvent::Closed => break,
+					_ => {}
+				}
+				if keyframe.swap(false, Ordering::Relaxed) {
+					peer.request_keyframe();
+				}
+				sizes.extend(pictures.try_iter());
+				if sizes.len() >= 30 {
+					break;
+				}
+			}
+		})
+		.await;
+		let stats = pipeline.stats();
+		peer.close();
+		eprintln!("{codec}: {} pictures, {stats:?}", sizes.len());
+		assert!(sizes.len() >= 30, "{codec}: {} pictures decoded, {stats:?}", sizes.len());
+		assert!(sizes.iter().all(|&s| s == (320, 240)), "{codec}: {sizes:?}");
+		assert_eq!(stats.codec, Some(codec));
+		assert_eq!(stats.decoder, codecs.decoders_for(codec).first().copied(), "{stats:?}");
+		decoded.push(codec);
+	}
+	browser.quit().await;
+	assert!(decoded.contains(&Codec::Av1), "the browser sent no AV1: {decoded:?}");
 }

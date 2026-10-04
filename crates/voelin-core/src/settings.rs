@@ -1031,13 +1031,30 @@ pub static STREAM_SRTP_PROFILES: Key<Vec<String>> = Key::new(
 )
 .validated(valid_srtp);
 
-/// Use hardware video encoders and decoders where available.
+/// Use hardware video encoders where available.
 pub static STREAM_HARDWARE_ACCELERATION: Key<bool> = Key::new(
 	"stream.hardware_acceleration",
 	Kind::Bool,
-	"Use hardware video encoders and decoders where available.",
+	"Use hardware video encoders where available.",
 	|| true,
 );
+
+/// Use hardware video decoders where available.
+pub static STREAM_HARDWARE_DECODING: Key<bool> = Key::new(
+	"stream.hardware_decoding",
+	Kind::Bool,
+	"Use hardware video decoders where available.",
+	|| true,
+);
+
+/// Video decoder: `auto`, `software`, or the name of a decoder backend.
+pub static STREAM_DECODER_BACKEND: Key<String> = Key::new(
+	"stream.decoder_backend",
+	Kind::Text { suggestions: &["auto", "software"] },
+	"Video decoder: auto, software, or a decoder's name.",
+	|| "auto".into(),
+)
+.validated(not_empty);
 
 /// Who may watch our stream without being asked.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1291,6 +1308,8 @@ pub fn builtin_keys() -> Vec<&'static dyn Setting> {
 		&STREAM_ENCODER_BACKEND,
 		&STREAM_SRTP_PROFILES,
 		&STREAM_HARDWARE_ACCELERATION,
+		&STREAM_HARDWARE_DECODING,
+		&STREAM_DECODER_BACKEND,
 		&STREAM_PERMISSIONS,
 		&CHAT_STORE_HISTORY,
 		&CHAT_HISTORY_PAGE,
@@ -1362,6 +1381,8 @@ mod tests {
 		);
 		assert!(s.get(&STREAM_HARDWARE_ACCELERATION));
 		assert_eq!(s.get(&STREAM_ENCODER_BACKEND), "auto");
+		assert!(s.get(&STREAM_HARDWARE_DECODING));
+		assert_eq!(s.get(&STREAM_DECODER_BACKEND), "auto");
 		assert!(s.get(&CHAT_STORE_HISTORY));
 		assert_eq!(s.get(&CHAT_HISTORY_PAGE), 100);
 		assert_eq!(s.get(&CHAT_DEDUPE_TOLERANCE_MS), 5000);

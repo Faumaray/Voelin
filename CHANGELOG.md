@@ -25,6 +25,15 @@ The first release is in preparation.
   another offered codec get their own encoder. Settings:
   `stream.hardware_acceleration`, `stream.encoder_backend`, `stream.codec`;
   `voelinctl stream encoders` lists what works.
+- Video decoding through the installed FFmpeg as well: hardware first
+  (VA-API, NVDEC, D3D11VA, DXVA2, VideoToolbox), then FFmpeg's software
+  decoders, then the built-in ones; each decoder is tested at start, and
+  one that fails while watching is replaced by the next without ending the
+  stream. Viewers now take AV1, HEVC and H.264 without OpenH264, and
+  H.264 with B-frames as the official client sends it (OpenH264 showed
+  under 1 fps of such a stream; 60 fps now). After a lost frame H.264 and
+  HEVC go on decoding while a keyframe is asked for. Settings:
+  `stream.hardware_decoding`, `stream.decoder_backend`.
 - `tsgw`: companion gateway for server admins (presence, channel chat
   relay, history).
 - Chat history: messages are kept on the device and, with a gateway, what

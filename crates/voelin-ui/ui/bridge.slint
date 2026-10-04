@@ -105,6 +105,8 @@ export struct MemberCard {
     muted: bool,
     // The client has a unique id, so contacts and private chats work.
     known: bool,
+    // The client streams: the card offers to watch it.
+    streaming: bool,
 }
 
 export struct ChatTab {
@@ -299,6 +301,8 @@ export struct ClientAudio {
     name: string,
     volume: float,
     muted: bool,
+    // The client streams: the dialog offers to watch it.
+    streaming: bool,
 }
 
 // The appearance settings (`ui.*` keys).
@@ -489,6 +493,9 @@ export global Bridge {
     callback respond-viewer(int, bool);
     callback kick-viewer(int);
     callback watch-stream(string);
+    // Watch the stream of a client (a streaming user in the tree or the
+    // members), as soon as it is known.
+    callback watch-client(int);
     callback show-viewer();
     callback hide-viewer();
     callback leave-stream();
