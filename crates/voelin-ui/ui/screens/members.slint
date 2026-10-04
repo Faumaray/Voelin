@@ -407,7 +407,7 @@ export component MembersPanel inherits VerticalLayout {
         padding-left: Theme.space-5;
         padding-right: Theme.space-5;
         Text {
-            text: @tr("Connect or observe to see who is here.");
+            text: Bridge.observing ? @tr("Loading who is here…") : @tr("Connect to see who is here.");
             color: Theme.text-muted;
             font-size: Theme.font-sm;
             wrap: word-wrap;

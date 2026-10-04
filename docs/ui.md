@@ -276,16 +276,23 @@ with the sample studio's sources, live at once with sample viewers.
 The add-server dialog (`BookmarkDialog` in `screens/dialogs.slint`, logic in
 `servers.rs`) asks for the address (host, host:port, IP or server
 nickname; the resolver finds the port through SRV records and TSDNS) and
-an optional server password. *Advanced* (open when editing) has the rest,
-and empty fields there are filled in: the name is the address until the
-first connection, then the server's own name (`adopt_server_name`); the
-nickname is the default identity's (one imported from TeamSpeak keeps its
-nickname there), else the system user's, else "Voelin user"; the identity is the default one,
-there is no default channel; the gateway is looked up in DNS when the
-server is saved without one and when it connects
-([gateway-admin.md](gateway-admin.md#letting-voelin-find-the-gateway)),
-and one found is stored as if typed. `bookmark` and `bookmark:edit` open
-it (below).
+an optional server password. *Advanced* (open when editing) has the name
+and the nickname, and empty fields there are filled in: the name is the
+address until the first connection, then the server's own name
+(`adopt_server_name`); the nickname is the default identity's (one imported
+from TeamSpeak keeps its nickname there), else the system user's, else
+"Voelin user"; the identity is the default one, there is no default channel.
+There are no gateway or ServerQuery fields: the gateway is looked up from
+the address (DNS SRV records, else the gateway's `/.well-known/tsgw`) when
+the server is saved, selected or connected
+([gateway-admin.md](gateway-admin.md#letting-voelin-find-the-gateway)), one
+found is stored, and a new address looks again. `bookmark` and
+`bookmark:edit` open it (below).
+
+Selecting a server observes it invisibly through its gateway (or a query
+login an older version stored), so its channels, members and chats show
+without joining; there is no Observe button. Without a gateway, observing
+starts once one is found.
 
 Settings → Profiles (`ProfilesSection` in `screens/settings-pages.slint`;
 `settings_pages.rs`, and `identities.rs` for the default and the import

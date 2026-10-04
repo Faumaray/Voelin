@@ -41,7 +41,7 @@ Done so far (milestones M0–M4 and the first part of M5 of [the plan](docs/arch
   reactions, topics, events, stream directory and administration; the media pipeline for streams
   (capture → VP8 + Opus → stream, stream → decoder)
 - `crates/voelin-ui` (`voelin`): Slint desktop app: servers, channel tree with talking indicators,
-  chat tabs (own channel via voice, other channels via relay), connect / observe invisibly, mute, push-to-talk
+  chat tabs (own channel via voice, other channels via relay), connect, observe invisibly (on selecting a server, through its gateway), mute, push-to-talk
   (in the window and as a global hotkey), audio settings with a level meter, per-client volume, and on
   TeamSpeak 6 streams: watch in a viewer, share the screen with sound. Desktop and phone layouts
   from one design system, dark and light themes, text size, emoji ([docs/ui.md](docs/ui.md))

@@ -160,7 +160,11 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 			with_app(|app| app.connect_voice());
 		}
 		Some("observe") => {
-			with_app(|app| app.toggle_observe());
+			with_app(|app| {
+				if let Some(id) = app.current {
+					app.observe(id);
+				}
+			});
 		}
 		_ => {}
 	}

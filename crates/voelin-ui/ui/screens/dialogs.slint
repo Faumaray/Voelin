@@ -26,11 +26,13 @@ export component BookmarkDialog inherits Modal {
     // The fields beyond address and password: shown when editing.
     property <bool> advanced: form.id >= 0;
     title: join ? @tr("Join a server") : form.id < 0 ? @tr("Add server") : @tr("Edit server");
-    subtitle: @tr("Only the address is needed; Voelin finds the rest.");
+    // The gateway (presence and chat without joining) is found from the
+    // address: DNS SRV records, else the gateway's own well-known URL.
+    subtitle: @tr("Only the address is needed; Voelin finds the rest, including the server's gateway.");
     icon: Icons.server;
     card-width: 560px;
     // Fits the address and password (two lines more on a phone).
-    card-height: advanced ? 720px : Nav.narrow ? 360px : 330px;
+    card-height: advanced ? 500px : Nav.narrow ? 360px : 330px;
     dismissed => { done(); }
     ScrollView {
         vertical-stretch: 1;
@@ -57,7 +59,7 @@ export component BookmarkDialog inherits Modal {
                     clicked => { root.advanced = !root.advanced; }
                 }
                 Text {
-                    text: @tr("Name, nickname, gateway, ServerQuery");
+                    text: @tr("Name, nickname");
                     color: Theme.text-muted;
                     font-size: Theme.font-sm;
                     vertical-alignment: center;
@@ -76,44 +78,6 @@ export component BookmarkDialog inherits Modal {
                     label: @tr("Nickname");
                     hint: @tr("Empty: the nickname of your identity.");
                     TextField { text <=> form.nickname; label: @tr("Nickname"); icon: Icons.user; }
-                }
-                Text {
-                    text: @tr("Invisible presence and chat without joining");
-                    font-weight: Theme.weight-semibold;
-                    color: Theme.text;
-                    wrap: word-wrap;
-                }
-                Field {
-                    label: @tr("Gateway URL");
-                    hint: @tr("Empty: looked up in DNS, as published by the server's admin.");
-                    TextField { text <=> form.gateway-url; placeholder: @tr("Found automatically"); label: @tr("Gateway URL"); }
-                }
-                HorizontalLayout {
-                    spacing: Theme.space-4;
-                    Field {
-                        label: @tr("Query transport");
-                        Select {
-                            model: ["none", "ssh", "raw", "http"];
-                            current-value <=> form.query-transport;
-                            current-index: form.query-transport == "ssh" ? 1 : form.query-transport == "raw" ? 2 : form.query-transport == "http" ? 3 : 0;
-                            label: @tr("Query transport");
-                        }
-                    }
-                    Field {
-                        label: @tr("Query address");
-                        TextField { text <=> form.query-addr; placeholder: "ts.example.org:10022"; label: @tr("Query address"); }
-                    }
-                }
-                HorizontalLayout {
-                    spacing: Theme.space-4;
-                    Field {
-                        label: @tr("Query login");
-                        TextField { text <=> form.query-user; label: @tr("Query login"); }
-                    }
-                    Field {
-                        label: @tr("Query password");
-                        TextField { text <=> form.query-password; input-type: InputType.password; label: @tr("Query password"); }
-                    }
                 }
             }
         }

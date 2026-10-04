@@ -1,5 +1,6 @@
-// The server's sidebar: the server card, connect and observe, and the
-// channel tree with its clients.
+// The server's sidebar: the server card, connect, and the channel tree
+// with its clients. Selecting a server observes it invisibly (through its
+// gateway) on its own, so there is no button for it.
 
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
@@ -82,14 +83,11 @@ export component ServerHeader inherits Rectangle {
     menu := PopupMenu {
         entries: [
             { text: @tr("Edit server"), icon: Icons.pencil, enabled: Bridge.current-server >= 0 },
-            { text: Bridge.observing ? @tr("Stop observing") : @tr("Observe invisibly"), icon: Icons.eye, enabled: Bridge.can-observe },
             { text: @tr("Add server"), icon: Icons.plus, enabled: true, separator: true },
         ];
         activated(i) => {
             if i == 0 {
                 Nav.edit-server(Bridge.current-server);
-            } else if i == 1 {
-                Bridge.toggle-observe();
             } else {
                 Nav.add-server();
             }
@@ -97,7 +95,7 @@ export component ServerHeader inherits Rectangle {
     }
 }
 
-// Connect and observe while not connected.
+// Connect while not connected.
 export component ConnectActions inherits HorizontalLayout {
     spacing: Theme.space-3;
     Button {
@@ -107,13 +105,6 @@ export component ConnectActions inherits HorizontalLayout {
         text: Bridge.voice-connecting ? @tr("Connecting…") : @tr("Connect");
         enabled: Bridge.current-server >= 0 && !Bridge.voice-connecting;
         clicked => { Bridge.connect-voice(); }
-    }
-    Button {
-        icon: Bridge.observing ? Icons.eye-off : Icons.eye;
-        text: Bridge.observing ? @tr("Stop observing") : @tr("Observe");
-        enabled: Bridge.can-observe;
-        checked: Bridge.observing;
-        clicked => { Bridge.toggle-observe(); }
     }
 }
 
@@ -352,7 +343,7 @@ export component ChannelTree inherits VerticalLayout {
         small: true;
     }
     if Bridge.tree.length == 0: Text {
-        text: Bridge.current-server < 0 ? @tr("No server yet.") : @tr("Connect or observe to see the channels.");
+        text: Bridge.current-server < 0 ? @tr("No server yet.") : Bridge.observing ? @tr("Loading the channels…") : @tr("Connect to see the channels.");
         color: Theme.text-muted;
         font-size: Theme.font-sm;
         wrap: word-wrap;

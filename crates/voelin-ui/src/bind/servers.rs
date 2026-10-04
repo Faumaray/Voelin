@@ -23,9 +23,6 @@ pub(super) fn wire(ui: &MainWindow) {
 	bridge.on_disconnect_voice(|| {
 		with_app(|app| app.command(|session| Command::DisconnectVoice { session }));
 	});
-	bridge.on_toggle_observe(|| {
-		with_app(|app| app.toggle_observe());
-	});
 	bridge.on_join_channel(|cid| {
 		with_app(|app| {
 			app.command(|session| Command::MoveToChannel {

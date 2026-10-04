@@ -240,11 +240,6 @@ export struct BookmarkForm {
     address: string,
     nickname: string,
     server-password: string,
-    gateway-url: string,
-    query-transport: string,
-    query-addr: string,
-    query-user: string,
-    query-password: string,
 }
 
 // A stream on the server, ours first: a stream can be watched from any
@@ -853,8 +848,9 @@ export global Bridge {
     in property <int> own-channel-banner-mode;
     in property <bool> voice-connected;
     in property <bool> voice-connecting;
+    // Presence without joining (gateway or query), started when the server
+    // is selected.
     in property <bool> observing;
-    in property <bool> can-observe;
     in property <bool> input-muted;
     in property <bool> output-muted;
     in property <bool> transmitting;
@@ -945,7 +941,6 @@ export global Bridge {
     callback search(string);
     callback connect-voice();
     callback disconnect-voice();
-    callback toggle-observe();
     callback join-channel(int);
     callback open-channel-chat(int);
     callback toggle-collapse(int);

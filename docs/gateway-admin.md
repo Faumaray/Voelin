@@ -94,12 +94,13 @@ Every login, post and settings change is written to the audit table.
 
 When a user adds a server by its address (`ts.example.org`), Voelin looks
 for its gateway the way TeamSpeak looks for the voice server (SRV
-`_ts3._udp`, then TSDNS), and uses what it finds as if the user had typed
-the URL (the field stays editable under *Advanced*). It asks at the
-server's host name and then at each parent domain down to the registered
-domain, the most specific name first; for `ts.example.org` that is
-`ts.example.org`, then `example.org`. It looks again when the server is
-saved with an empty gateway URL and when it connects with voice.
+`_ts3._udp`, then TSDNS), and observes the server through it as soon as the
+user selects the server (users do not type gateway URLs or query logins).
+It asks at the server's host name and then at each parent domain down to the
+registered domain, the most specific name first; for `ts.example.org` that
+is `ts.example.org`, then `example.org`. It looks again when the server is
+selected or saved without a gateway (a new address drops the old one) and
+when it connects with voice.
 
 **DNS records** (preferred). An SRV record names the gateway's host and
 port, the service name says whether it speaks TLS:
@@ -144,7 +145,7 @@ Discovery is as trustworthy as DNS and the network, like TSDNS: prefer a
 use one from a public CA (Caddy's automatic Let's Encrypt certificates
 work); the Android app cannot reach `wss://` gateways yet (it has no
 system store to read). A user logs in with
-their own identity, and only when they choose to observe the server.
+their own identity, when they select the server in Voelin.
 
 ## Install
 
