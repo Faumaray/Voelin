@@ -308,6 +308,13 @@ export component MemberCardPopup inherits Rectangle {
             }
         }
         Divider { }
+        if Bridge.member-card.streaming: Button {
+            small: true;
+            kind: ButtonKind.primary;
+            icon: Icons.monitor;
+            text: @tr("Watch stream");
+            clicked => { Bridge.member-action("watch"); }
+        }
         HorizontalLayout {
             spacing: Theme.space-2;
             Button {

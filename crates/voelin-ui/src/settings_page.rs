@@ -207,6 +207,7 @@ impl App {
 				name: info.nickname.into(),
 				volume: playback.volume * 100.0,
 				muted: playback.muted,
+				streaming: info.streaming == Some(true),
 			});
 		}
 		true

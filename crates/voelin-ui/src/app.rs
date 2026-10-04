@@ -388,6 +388,9 @@ pub(crate) struct App {
 	pub share_error: String,
 	/// The stream in the viewer.
 	pub watch: Option<Watch>,
+	/// A client whose stream was asked for before it was known (session,
+	/// client): watched when the lookup brings it.
+	pub pending_watch: Option<(i64, u16)>,
 	/// Stream volume in percent, kept between streams.
 	pub stream_volume: f32,
 	/// `VOELIN_DEMO_STREAM`: the viewer shows a local test stream.
@@ -595,6 +598,7 @@ pub fn run(options: RunOptions) -> Result<()> {
 		share_busy: false,
 		share_error: String::new(),
 		watch: None,
+		pending_watch: None,
 		stream_volume: 100.0,
 		demo: switches.demo_stream,
 		demo_ui: switches.demo_ui,
