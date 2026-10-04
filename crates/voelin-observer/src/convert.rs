@@ -1,10 +1,10 @@
 //! Query rows and events to model types.
 
-use voelin_model::{ChannelInfo, ChatMessage, ChatTarget, ClientInfo, PresenceDelta};
+use voelin_model::{BannerMode, ChannelInfo, ChatMessage, ChatTarget, ClientInfo, PresenceDelta};
 use voelin_query::{Notification, Row};
 
-/// From a `channellist -topic -flags -voice -limits` row, or the fields of
-/// `notifychannelcreated`.
+/// From a `channellist -topic -flags -voice -limits -icon -banners` row, or
+/// the fields of `notifychannelcreated`.
 pub fn channel_from_row(row: &Row) -> Option<ChannelInfo> {
 	Some(ChannelInfo {
 		id: row.parse("cid")?,
@@ -18,6 +18,13 @@ pub fn channel_from_row(row: &Row) -> Option<ChannelInfo> {
 		needed_talk_power: row.parse("channel_needed_talk_power").unwrap_or(0),
 		is_default: row.flag("channel_flag_default").unwrap_or(false),
 		icon: row.parse::<i64>("channel_icon_id").map_or(0, |i| i as u32),
+		banner_gfx_url: row
+			.get("channel_banner_gfx_url")
+			.filter(|u| !u.is_empty())
+			.map(str::to_string),
+		banner_mode: row
+			.get("channel_banner_mode")
+			.map_or(BannerMode::NoAdjust, BannerMode::from_wire),
 	})
 }
 
@@ -47,6 +54,15 @@ pub fn update_channel(channel: &mut ChannelInfo, row: &Row) {
 	}
 	if let Some(d) = row.flag("channel_flag_default") {
 		channel.is_default = d;
+	}
+	if let Some(i) = row.parse::<i64>("channel_icon_id") {
+		channel.icon = i as u32;
+	}
+	if let Some(url) = row.get("channel_banner_gfx_url") {
+		channel.banner_gfx_url = Some(url.to_string()).filter(|u| !u.is_empty());
+	}
+	if let Some(mode) = row.get("channel_banner_mode") {
+		channel.banner_mode = BannerMode::from_wire(mode);
 	}
 }
 
@@ -186,11 +202,24 @@ mod tests {
 			 channel_flag_default=1 channel_flag_password=0 channel_maxclients=-1 \
 			 channel_needed_subscribe_power=0 channel_needed_talk_power=5",
 		)[0];
-		let c = channel_from_row(row).unwrap();
+		let mut c = channel_from_row(row).unwrap();
 		assert_eq!(c.name, "Default Channel");
 		assert!(c.is_default && !c.has_password);
 		assert_eq!(c.max_clients, None);
 		assert_eq!(c.needed_talk_power, 5);
+		assert_eq!((c.banner_gfx_url.as_deref(), c.banner_mode), (None, BannerMode::NoAdjust));
+		// `-banners` (TeamSpeak 6 and 3.13), and the edit that changes them.
+		let row = &voelin_query::parse_rows(
+			"cid=2 pid=0 channel_name=Raid channel_banner_gfx_url=https:\\/\\/e.com\\/b.png \
+			 channel_banner_mode=2",
+		)[0];
+		let banner = |c: &ChannelInfo| (c.banner_gfx_url.clone(), c.banner_mode);
+		let raid = channel_from_row(row).unwrap();
+		assert_eq!(banner(&raid), (Some("https://e.com/b.png".into()), BannerMode::KeepAspect));
+		update_channel(&mut c, row);
+		assert_eq!(banner(&c), banner(&raid));
+		update_channel(&mut c, &voelin_query::parse_rows("cid=1 channel_banner_gfx_url")[0]);
+		assert_eq!(banner(&c), (None, BannerMode::KeepAspect));
 	}
 
 	#[test]

@@ -106,3 +106,14 @@ against or offered back to upstream.
    handed those fewer than 32 bytes to `from_short`, which refused them: one
    identity in 256 (the official client's ones included) could not be imported.
    The scalar is padded to 32 bytes now; a test round-trips such keys.
+13. **Channel banners** (`tsproto-structs/declarations/Messages.toml`, `Book.toml`).
+   TeamSpeak 6 channels have a banner picture, `channel_banner_gfx_url` and
+   `channel_banner_mode`, which its server sends in `channellist`,
+   `notifychannelcreated` and `notifychanneledited` (verified against
+   6.0.0-beta13.1; upstream declared them for `channellist` only, so creating
+   or editing a channel logged "Unknown argument" and lost them). The book's
+   `Channel` keeps them as `banner_gfx_url` and `banner_mode`. The mode stays
+   a string, as upstream declared it, so a value the parser does not know
+   cannot drop the whole channel list; its numbers are those of
+   `HostBannerMode` (the server's `channeledit` documentation: 0 as it is,
+   1 stretched, 2 scaled keeping the aspect ratio).

@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::server::ServerDetails;
+use crate::server::{BannerMode, ServerDetails};
 
 pub type ChannelId = u64;
 pub type ClientId = u16;
@@ -30,6 +30,10 @@ fn is_zero_u32(n: &u32) -> bool {
 
 fn is_false(b: &bool) -> bool {
 	!*b
+}
+
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+	*v == T::default()
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +60,12 @@ pub struct ChannelInfo {
 	/// Icon id (`channel_icon_id`); 0: none.
 	#[serde(default, skip_serializing_if = "is_zero_u32")]
 	pub icon: u32,
+	/// The address of the channel's banner picture (TeamSpeak 6,
+	/// `channel_banner_gfx_url`), drawn behind the channel.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub banner_gfx_url: Option<String>,
+	#[serde(default, skip_serializing_if = "is_default")]
+	pub banner_mode: BannerMode,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

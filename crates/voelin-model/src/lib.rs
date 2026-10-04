@@ -14,6 +14,6 @@ pub use presence::{
 	Presence, PresenceDelta, PresenceSnapshot, parse_badges,
 };
 pub use server::{
-	Capabilities, HostBannerMode, HostMessageMode, ServerDetails, ServerFlavor, ServerVersion,
+	BannerMode, Capabilities, HostMessageMode, ServerDetails, ServerFlavor, ServerVersion,
 };
 pub use tree::{TreeRow, order_siblings, tree_rows};
