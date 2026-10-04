@@ -1,0 +1,745 @@
+// Direct messages (design mockup 02): the conversations of every server at
+// the left, the open one in the middle (the chat's message list and
+// composer; pokes show in it), who it is with at the right. TeamSpeak
+// delivers private messages only to people online on the same server; the
+// server keeps offline messages (mail) for the others.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Bridge, ConversationItem } from "../bridge.slint";
+import { Nav, Page } from "../nav.slint";
+import { Icon, Button, ButtonKind, IconButton, Avatar, Status, Chip, CountBadge, SearchBox, TextField, Field, Slider, Divider, Banner, Modal, PopupMenu, MenuEntry, ListView, ScrollView } from "../components/index.slint";
+import { MessageList, Composer } from "chat.slint";
+
+// One conversation of the list.
+component ConversationRow inherits Rectangle {
+    in property <ConversationItem> chat;
+    height: 64px * Theme.font-scale;
+    border-radius: Theme.radius-md;
+    background: chat.selected ? Theme.accent-soft : touch.has-hover ? Theme.surface-3 : transparent;
+    border-width: chat.selected ? 1px : 0px;
+    border-color: Theme.accent;
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: chat.title;
+    accessible-description: chat.preview;
+    accessible-item-selectable: true;
+    accessible-item-selected: chat.selected;
+    accessible-action-default => { Bridge.open-conversation(chat.key); }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { Bridge.open-conversation(root.chat.key); }
+    }
+    HorizontalLayout {
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-3;
+        spacing: Theme.space-3;
+        VerticalLayout {
+            alignment: center;
+            Avatar {
+                size: 44px;
+                initials: root.chat.initials;
+                tint: root.chat.tint;
+                image: root.chat.avatar;
+                square: root.chat.kind < 2;
+                label: root.chat.title;
+                status: root.chat.kind == 2 ? (root.chat.online ? Status.online : Status.offline) : Status.none;
+                if root.chat.kind == 3: Icon {
+                    source: Icons.mail;
+                    size: 20px;
+                    tint: #ffffff;
+                }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: 1px;
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                Text {
+                    text: root.chat.title;
+                    color: Theme.text;
+                    font-size: Theme.font-md;
+                    font-weight: root.chat.unread > 0 ? Theme.weight-bold : Theme.weight-medium;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.chat.time;
+                    color: root.chat.selected ? Theme.text-secondary : Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    vertical-alignment: center;
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                Text {
+                    text: root.chat.preview;
+                    color: root.chat.unread > 0 ? Theme.text : Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                if root.chat.unread > 0: CountBadge {
+                    count: root.chat.unread;
+                    fill: Theme.accent;
+                    y: (parent.height - self.height) / 2;
+                }
+            }
+        }
+    }
+}
+
+// Pill tabs: All, Unread, Inbox.
+component PillTab inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    in property <int> badge;
+    callback clicked();
+    height: 30px;
+    width: row.preferred-width + 24px;
+    border-radius: Theme.radius-md;
+    background: selected ? Theme.accent-soft : touch.has-hover ? Theme.surface-3 : transparent;
+    border-width: selected ? 1px : 0px;
+    border-color: Theme.accent;
+    accessible-role: AccessibleRole.tab;
+    accessible-label: text;
+    accessible-item-selectable: true;
+    accessible-item-selected: selected;
+    accessible-action-default => { clicked(); }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+    row := HorizontalLayout {
+        alignment: center;
+        spacing: Theme.space-2;
+        Text {
+            text: root.text;
+            color: root.selected ? Theme.text : Theme.text-secondary;
+            font-size: Theme.font-sm;
+            font-weight: root.selected ? Theme.weight-semibold : Theme.weight-regular;
+            vertical-alignment: center;
+        }
+        if root.badge > 0: CountBadge {
+            count: root.badge;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+}
+
+// The list of conversations.
+export component ConversationList inherits VerticalLayout {
+    padding: Theme.space-4;
+    padding-right: Theme.space-3;
+    spacing: Theme.space-3;
+    HorizontalLayout {
+        spacing: Theme.space-3;
+        Text {
+            text: @tr("Messages");
+            font-size: Theme.font-2xl;
+            font-weight: Theme.weight-bold;
+            color: Theme.text;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        IconButton {
+            icon: Icons.plus;
+            label: @tr("New message");
+            filled: true;
+            checked: true;
+            size: 34px;
+            y: (parent.height - self.height) / 2;
+            clicked => { Nav.open-search("@"); }
+        }
+    }
+    SearchBox {
+        height: 38px;
+        show-shortcut: false;
+        placeholder: @tr("Search messages…");
+        label: @tr("Search messages");
+        edited(text) => { Bridge.search-conversations(text); }
+    }
+    HorizontalLayout {
+        spacing: Theme.space-2;
+        alignment: start;
+        PillTab {
+            text: @tr("All");
+            selected: Nav.dm-tab == 0;
+            clicked => {
+                Nav.dm-tab = 0;
+                Bridge.dm-tab(0);
+            }
+        }
+        PillTab {
+            text: @tr("Unread");
+            selected: Nav.dm-tab == 1;
+            badge: Bridge.dm-unread;
+            clicked => {
+                Nav.dm-tab = 1;
+                Bridge.dm-tab(1);
+            }
+        }
+        PillTab {
+            text: @tr("Inbox");
+            selected: Nav.dm-tab == 2;
+            badge: Bridge.inbox-unread;
+            clicked => {
+                Nav.dm-tab = 2;
+                Bridge.dm-tab(2);
+            }
+        }
+    }
+    if Bridge.conversations.length == 0: Text {
+        text: Nav.dm-tab == 2 ? @tr("No offline messages. Servers keep them for you while you are away; connect with voice to fetch them.")
+            : Nav.dm-tab == 1 ? @tr("Nothing unread.")
+            : @tr("No conversations yet. Message someone from their card on a server, or with the + above.");
+        color: Theme.text-muted;
+        font-size: Theme.font-sm;
+        wrap: word-wrap;
+    }
+    ListView {
+        vertical-stretch: 1;
+        accessible-role: AccessibleRole.list;
+        accessible-label: @tr("Conversations");
+        for chat in Bridge.conversations: VerticalLayout {
+            padding-bottom: Theme.space-1;
+            ConversationRow {
+                chat: chat;
+            }
+        }
+    }
+}
+
+// The open conversation (or offline message).
+export component Conversation inherits VerticalLayout {
+    in property <bool> compact;
+    if !Bridge.dm.open: VerticalLayout {
+        vertical-stretch: 1;
+        alignment: center;
+        spacing: Theme.space-3;
+        HorizontalLayout {
+            alignment: center;
+            Icon {
+                source: Icons.messages-square;
+                size: 56px;
+                tint: Theme.text-disabled;
+            }
+        }
+        Text {
+            text: @tr("Pick a conversation, or start one with +.");
+            color: Theme.text-muted;
+            horizontal-alignment: center;
+        }
+    }
+    if Bridge.dm.open: Rectangle {
+        height: 76px;
+        HorizontalLayout {
+            padding-left: Theme.space-5;
+            padding-right: Theme.space-4;
+            spacing: Theme.space-4;
+            VerticalLayout {
+                alignment: center;
+                Avatar {
+                    size: 50px;
+                    initials: Bridge.dm.initials;
+                    tint: Bridge.dm.tint;
+                    image: Bridge.dm.avatar;
+                    label: Bridge.dm.name;
+                    status: Bridge.dm.online ? Status.online : Status.offline;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                spacing: 2px;
+                HorizontalLayout {
+                    spacing: Theme.space-3;
+                    alignment: start;
+                    Text {
+                        text: Bridge.dm.name;
+                        color: Theme.text;
+                        font-size: Theme.font-xl;
+                        font-weight: Theme.weight-semibold;
+                        overflow: elide;
+                    }
+                    if Bridge.dm.online: Rectangle {
+                        width: 10px;
+                        height: 10px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 5px;
+                        background: Theme.success;
+                    }
+                }
+                Text {
+                    text: Bridge.dm.status;
+                    color: Bridge.dm.online ? Theme.accent-text : Theme.text-muted;
+                    font-size: Theme.font-sm;
+                    overflow: elide;
+                }
+            }
+            if Bridge.dm.can-send: IconButton {
+                icon: Icons.hand;
+                label: @tr("Poke {}", Bridge.dm.name);
+                filled: true;
+                size: 42px;
+                y: (parent.height - self.height) / 2;
+                clicked => { Bridge.dm-action("poke"); }
+            }
+            if Bridge.dm.online: IconButton {
+                icon: Icons.log-in;
+                label: @tr("Join {}'s channel", Bridge.dm.name);
+                filled: true;
+                size: 42px;
+                y: (parent.height - self.height) / 2;
+                clicked => { Bridge.dm-action("join"); }
+            }
+            IconButton {
+                icon: Bridge.dm.friend ? Icons.user-check : Icons.user-plus;
+                label: Bridge.dm.friend ? @tr("Remove friend") : @tr("Add friend");
+                checked: Bridge.dm.friend;
+                filled: true;
+                size: 42px;
+                y: (parent.height - self.height) / 2;
+                clicked => { Bridge.dm-action("friend"); }
+            }
+            more := IconButton {
+                icon: Icons.more-horizontal;
+                label: @tr("More");
+                filled: true;
+                size: 42px;
+                y: (parent.height - self.height) / 2;
+                clicked => { menu.show(self.x + self.width - 220px, self.y + self.height + 4px); }
+            }
+        }
+        Rectangle {
+            y: parent.height - 1px;
+            height: 1px;
+            background: Theme.border;
+        }
+        menu := PopupMenu {
+            entries: [
+                { text: Bridge.dm.muted ? @tr("Unmute for me") : @tr("Mute for me"), icon: Icons.volume-x, enabled: true },
+                { text: @tr("Write an offline message"), icon: Icons.mail, enabled: Bridge.dm.offline },
+                { text: Bridge.dm.blocked ? @tr("Unblock") : @tr("Block"), icon: Icons.ban, enabled: true, danger: !Bridge.dm.blocked, separator: true },
+            ];
+            activated(i) => {
+                if i == 0 {
+                    Bridge.dm-action("mute");
+                } else if i == 1 {
+                    Nav.write-offline(Bridge.dm.uid, Bridge.dm.name);
+                } else {
+                    Bridge.dm-action("block");
+                }
+            }
+        }
+    }
+    // An offline message instead of the conversation.
+    if Bridge.dm.open && Bridge.dm.mail: ScrollView {
+        vertical-stretch: 1;
+        VerticalLayout {
+            padding: Theme.space-6;
+            spacing: Theme.space-4;
+            alignment: start;
+            HorizontalLayout {
+                spacing: Theme.space-3;
+                Icon {
+                    source: Icons.mail;
+                    tint: Theme.accent-text;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: Bridge.dm.mail-subject;
+                    color: Theme.text;
+                    font-size: Theme.font-xl;
+                    font-weight: Theme.weight-semibold;
+                    horizontal-stretch: 1;
+                    wrap: word-wrap;
+                }
+            }
+            Text {
+                text: Bridge.dm.mail-time;
+                color: Theme.text-muted;
+                font-size: Theme.font-sm;
+            }
+            Text {
+                text: Bridge.dm.mail-text != "" ? Bridge.dm.mail-text : @tr("Fetching the message…");
+                color: Theme.text;
+                font-size: Theme.font-md;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: Theme.space-3;
+                alignment: start;
+                Button {
+                    kind: ButtonKind.primary;
+                    icon: Icons.send;
+                    text: @tr("Reply");
+                    enabled: Bridge.dm.offline;
+                    clicked => { Nav.write-offline(Bridge.dm.uid, Bridge.dm.name); }
+                }
+                Button {
+                    icon: Icons.mail;
+                    text: @tr("Mark unread");
+                    clicked => { Bridge.dm-action("unread-mail"); }
+                }
+                Button {
+                    kind: ButtonKind.danger;
+                    icon: Icons.trash-2;
+                    text: @tr("Delete");
+                    clicked => { Bridge.dm-action("delete-mail"); }
+                }
+            }
+        }
+    }
+    if Bridge.dm.open && !Bridge.dm.mail && Bridge.dm.stored: MessageList {
+        vertical-stretch: 1;
+        model: Bridge.dm-messages;
+    }
+    if Bridge.dm.open && !Bridge.dm.mail && !Bridge.dm.stored: MessageList {
+        vertical-stretch: 1;
+        model: Bridge.messages;
+        older: true;
+    }
+    if Bridge.dm.open && !Bridge.dm.mail && Bridge.dm.notice != "": HorizontalLayout {
+        padding-left: Theme.space-5;
+        padding-right: Theme.space-5;
+        padding-top: Theme.space-2;
+        Banner {
+            text: Bridge.dm.notice;
+            icon: Icons.info;
+            tone: Theme.info;
+            if Bridge.dm.can-connect: Button {
+                small: true;
+                kind: ButtonKind.primary;
+                icon: Icons.log-in;
+                text: @tr("Connect");
+                y: (parent.height - self.height) / 2;
+                clicked => { Bridge.dm-action("connect"); }
+            }
+            if Bridge.dm.offline: Button {
+                small: true;
+                icon: Icons.mail;
+                text: @tr("Offline message");
+                y: (parent.height - self.height) / 2;
+                clicked => { Nav.write-offline(Bridge.dm.uid, Bridge.dm.name); }
+            }
+        }
+    }
+    if Bridge.dm.open && !Bridge.dm.mail: Composer {
+        attach: false;
+        enabled: Bridge.dm.can-send;
+        placeholder: Bridge.dm.can-send ? @tr("Message @{}…", Bridge.dm.name) : @tr("{} cannot get messages now", Bridge.dm.name);
+    }
+}
+
+// The messages page: the list and the open conversation side by side.
+export component MessagesPage inherits HorizontalLayout {
+    ConversationList {
+        width: 310px * max(1.0, Theme.font-scale);
+    }
+    Rectangle {
+        width: 1px;
+        background: Theme.border;
+    }
+    Conversation {
+        horizontal-stretch: 1;
+    }
+}
+
+// Who the conversation is with (the right panel).
+export component DmProfile inherits Rectangle {
+    sv := ScrollView {
+        VerticalLayout {
+            width: sv.visible-width;
+            padding: Theme.space-5;
+            spacing: Theme.space-4;
+            alignment: start;
+            HorizontalLayout {
+                spacing: Theme.space-4;
+                Avatar {
+                    size: 72px;
+                    initials: Bridge.dm.initials;
+                    tint: Bridge.dm.tint;
+                    image: Bridge.dm.avatar;
+                    label: Bridge.dm.name;
+                    status: Bridge.dm.online ? Status.online : Status.offline;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: Bridge.dm.name;
+                        color: Theme.text;
+                        font-size: Theme.font-xl;
+                        font-weight: Theme.weight-semibold;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: Bridge.dm.online ? @tr("Online") : @tr("Offline");
+                        color: Bridge.dm.online ? Theme.accent-text : Theme.text-muted;
+                        font-size: Theme.font-sm;
+                    }
+                }
+            }
+            if Bridge.dm.description != "": Text {
+                text: "“" + Bridge.dm.description + "”";
+                color: Theme.text-secondary;
+                font-size: Theme.font-md;
+                wrap: word-wrap;
+            }
+            if Bridge.dm.groups.length > 0: FlexboxLayout {
+                spacing: Theme.space-2;
+                for group in Bridge.dm.groups: Chip {
+                    text: group;
+                    icon: Icons.shield;
+                    outlined: true;
+                }
+            }
+            Divider { }
+            Text {
+                text: @tr("About");
+                color: Theme.text;
+                font-weight: Theme.weight-semibold;
+            }
+            Text {
+                text: Bridge.dm.note != "" ? Bridge.dm.note : @tr("No note. Add one on the Friends page.");
+                color: Bridge.dm.note != "" ? Theme.text-secondary : Theme.text-muted;
+                font-size: Theme.font-sm;
+                wrap: word-wrap;
+            }
+            if Bridge.dm.since != "": HorizontalLayout {
+                spacing: Theme.space-3;
+                Icon {
+                    source: Icons.calendar;
+                    size: Theme.icon-sm;
+                    tint: Theme.text-secondary;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: Bridge.dm.since;
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                    horizontal-stretch: 1;
+                }
+            }
+            Divider { }
+            Text {
+                text: @tr("Servers — {}", Bridge.dm.servers.length);
+                color: Theme.text;
+                font-weight: Theme.weight-semibold;
+            }
+            for server in Bridge.dm.servers: HorizontalLayout {
+                spacing: Theme.space-3;
+                Rectangle {
+                    width: 34px;
+                    height: 34px;
+                    border-radius: Theme.radius-md;
+                    background: Theme.surface-4;
+                    Icon {
+                        source: Icons.server;
+                        size: Theme.icon-sm;
+                        tint: Theme.accent-text;
+                    }
+                }
+                Text {
+                    text: server;
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    wrap: word-wrap;
+                }
+            }
+            if Bridge.dm.media.length > 0: Divider { }
+            if Bridge.dm.media.length > 0: Text {
+                text: @tr("Shared Media — {}", Bridge.dm.media.length + Bridge.dm.media-more);
+                color: Theme.text;
+                font-weight: Theme.weight-semibold;
+            }
+            // Three pictures a row; the last cell counts the ones left out.
+            if Bridge.dm.media.length > 0: grid := Rectangle {
+                property <length> gap: Theme.space-2;
+                property <length> cell-w: (self.width - 2 * self.gap) / 3;
+                property <length> cell-h: self.cell-w * 0.75;
+                property <int> cells: Bridge.dm.media.length + (Bridge.dm.media-more > 0 ? 1 : 0);
+                height: ceil(self.cells / 3) * (self.cell-h + self.gap) - self.gap;
+                for picture[i] in Bridge.dm.media: Rectangle {
+                    x: mod(i, 3) * (grid.cell-w + grid.gap);
+                    y: floor(i / 3) * (grid.cell-h + grid.gap);
+                    width: grid.cell-w;
+                    height: grid.cell-h;
+                    border-radius: Theme.radius-md;
+                    clip: true;
+                    background: Theme.surface-2;
+                    accessible-role: AccessibleRole.image;
+                    accessible-label: @tr("Picture {}", i + 1);
+                    accessible-action-default => {
+                        Nav.lightbox = picture;
+                        Nav.lightbox-open = true;
+                    }
+                    Image {
+                        width: parent.width;
+                        height: parent.height;
+                        source: picture;
+                        image-fit: cover;
+                    }
+                    TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            Nav.lightbox = picture;
+                            Nav.lightbox-open = true;
+                        }
+                    }
+                }
+                if Bridge.dm.media-more > 0: Rectangle {
+                    x: mod(Bridge.dm.media.length, 3) * (grid.cell-w + grid.gap);
+                    y: floor(Bridge.dm.media.length / 3) * (grid.cell-h + grid.gap);
+                    width: grid.cell-w;
+                    height: grid.cell-h;
+                    border-radius: Theme.radius-md;
+                    background: Theme.surface-3;
+                    Text {
+                        text: "+" + Bridge.dm.media-more;
+                        color: Theme.text;
+                        font-size: Theme.font-lg;
+                        font-weight: Theme.weight-semibold;
+                    }
+                }
+            }
+            Divider { }
+            Text {
+                text: @tr("Shared Files — {}", Bridge.dm.files.length);
+                color: Theme.text;
+                font-weight: Theme.weight-semibold;
+            }
+            for file in Bridge.dm.files: HorizontalLayout {
+                spacing: Theme.space-3;
+                Rectangle {
+                    width: 34px;
+                    height: 34px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: Theme.radius-md;
+                    background: file.picture ? Theme.accent-soft : Theme.danger-soft;
+                    Icon {
+                        source: file.picture ? Icons.image : Icons.file-text;
+                        size: Theme.icon-sm;
+                        tint: file.picture ? Theme.accent-text : Theme.danger;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    spacing: 1px;
+                    Text {
+                        text: file.name;
+                        color: Theme.text;
+                        font-size: Theme.font-sm;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: file.detail;
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        overflow: elide;
+                    }
+                }
+            }
+            if Bridge.dm.files.length == 0: Text {
+                text: @tr("Files linked in this conversation show up here.");
+                color: Theme.text-muted;
+                font-size: Theme.font-sm;
+                wrap: word-wrap;
+            }
+            Divider { }
+            VerticalLayout {
+                spacing: Theme.space-2;
+                HorizontalLayout {
+                    Text {
+                        text: @tr("Volume for me");
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: @tr("{}%", round(Bridge.dm.volume));
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    IconButton {
+                        icon: Bridge.dm.muted ? Icons.volume-x : Icons.volume-2;
+                        label: Bridge.dm.muted ? @tr("Unmute for me") : @tr("Mute for me");
+                        checked: Bridge.dm.muted;
+                        danger: true;
+                        size: 30px;
+                        icon-size: Theme.icon-sm;
+                        clicked => { Bridge.dm-action("mute"); }
+                    }
+                    Slider {
+                        horizontal-stretch: 1;
+                        minimum: 0;
+                        maximum: 400;
+                        step: 5;
+                        value: Bridge.dm.volume;
+                        enabled: !Bridge.dm.muted;
+                        label: @tr("Volume of {}", Bridge.dm.name);
+                        released(v) => { Bridge.dm-volume(v); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Write an offline message (the server keeps it until they read it).
+export component OfflineDialog inherits Modal {
+    in-out property <string> subject;
+    in-out property <string> body;
+    callback done();
+    title: @tr("Offline message to {}", Nav.offline-form.to);
+    subtitle: @tr("The server keeps it until {} reads it.", Nav.offline-form.to);
+    icon: Icons.mail;
+    card-width: 520px;
+    card-height: 380px;
+    dismissed => { done(); }
+    Field {
+        label: @tr("Subject");
+        TextField {
+            text <=> root.subject;
+            placeholder: @tr("Subject");
+            label: @tr("Subject");
+        }
+    }
+    Field {
+        label: @tr("Message");
+        TextField {
+            text <=> root.body;
+            placeholder: @tr("Your message");
+            label: @tr("Message");
+        }
+    }
+    Rectangle {
+        vertical-stretch: 1;
+    }
+    HorizontalLayout {
+        alignment: end;
+        spacing: Theme.space-3;
+        Button {
+            text: @tr("Cancel");
+            clicked => { root.done(); }
+        }
+        Button {
+            kind: ButtonKind.primary;
+            icon: Icons.send;
+            text: @tr("Send");
+            enabled: root.body != "";
+            clicked => {
+                Bridge.send-offline({ uid: Nav.offline-form.uid, to: Nav.offline-form.to, subject: root.subject, text: root.body });
+                root.done();
+            }
+        }
+    }
+}

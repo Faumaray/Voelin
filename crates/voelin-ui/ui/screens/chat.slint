@@ -147,16 +147,18 @@ component FileCard inherits Rectangle {
         padding: Theme.space-3;
         padding-left: Theme.space-4;
         spacing: Theme.space-4;
+        // A document in red, a picture in blue (as in the profile panel's
+        // shared files and the design's file cards).
         Rectangle {
             width: 40px;
             height: 40px;
             y: (parent.height - self.height) / 2;
-            border-radius: 20px;
-            background: Theme.surface-4;
+            border-radius: Theme.radius-md;
+            background: file.picture ? Theme.accent-soft : Theme.danger-soft;
             Icon {
                 source: file.picture ? Icons.image : Icons.file-text;
                 size: Theme.icon-md;
-                tint: Theme.accent-text;
+                tint: file.picture ? Theme.accent-text : Theme.danger;
             }
         }
         VerticalLayout {
@@ -199,6 +201,37 @@ component FileCard inherits Rectangle {
             size: 18px;
             y: (parent.height - self.height) / 2;
         }
+    }
+}
+
+// A picture a message links, shown inline (downloaded into memory); a
+// click opens it larger.
+component ImageCard inherits Rectangle {
+    in property <int> key;
+    in property <FileItem> file;
+    // As wide as the column allows, up to 520 px, keeping the picture's
+    // shape (at most 340 px high).
+    property <float> ratio: file.preview.height > 0 ? file.preview.width / file.preview.height : 1.6;
+    max-width: min(520px, 340px * ratio);
+    preferred-width: self.max-width;
+    height: min(self.width, self.max-width) / ratio;
+    border-radius: Theme.radius-lg;
+    clip: true;
+    background: Theme.surface-2;
+    border-width: 1px;
+    border-color: touch.has-hover ? Theme.border-strong : Theme.border;
+    accessible-role: AccessibleRole.image;
+    accessible-label: file.name;
+    accessible-action-default => { Nav.open-picture(root.key, root.file.index); }
+    Image {
+        width: parent.width;
+        height: parent.height;
+        source: root.file.preview;
+        image-fit: cover;
+    }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { Nav.open-picture(root.key, root.file.index); }
     }
 }
 
@@ -353,10 +386,17 @@ export component MessageRow inherits Rectangle {
                 padding-top: Theme.space-2;
                 padding-bottom: Theme.space-1;
                 spacing: Theme.space-2;
-                for file in line.files: FileCard {
-                    key: line.key;
-                    file: file;
-                    max-width: 440px;
+                for file in line.files: HorizontalLayout {
+                    alignment: start;
+                    if file.preview.width > 0: ImageCard {
+                        key: line.key;
+                        file: file;
+                    }
+                    if file.preview.width == 0: FileCard {
+                        key: line.key;
+                        file: file;
+                        max-width: 440px;
+                    }
                 }
             }
             if line.reactions.length > 0: VerticalLayout {
@@ -457,12 +497,15 @@ export component MessageList inherits VerticalLayout {
 export component Composer inherits HorizontalLayout {
     in property <string> placeholder;
     in property <bool> topic;
+    // Files can be attached (channel chats).
+    in property <bool> attach: true;
+    in property <bool> enabled: true;
     padding: Theme.space-4;
     padding-left: Theme.space-5;
     padding-right: Theme.space-5;
     spacing: Theme.space-3;
     // Files go to the channel's file browser and a link into the chat.
-    if !root.topic: IconButton {
+    if !root.topic && root.attach: IconButton {
         icon: Icons.plus;
         label: @tr("Attach a file");
         round: true;
@@ -485,6 +528,7 @@ export component Composer inherits HorizontalLayout {
             input := TextField {
                 text <=> Nav.draft;
                 bare: true;
+                enabled: root.enabled;
                 placeholder: root.placeholder;
                 label: @tr("Message");
                 accepted(text) => {

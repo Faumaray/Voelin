@@ -3,8 +3,10 @@
 
 mod chat;
 mod emoji;
+mod pages;
 mod servers;
 mod settings;
+mod social;
 mod streams;
 pub(crate) mod studio;
 
@@ -19,5 +21,7 @@ pub(crate) fn wire(ui: &MainWindow) {
 	streams::wire(ui);
 	settings::wire(ui);
 	emoji::wire(ui);
+	social::wire(ui);
+	pages::wire(ui);
 	studio::wire(&ui.global::<StudioBridge>());
 }

@@ -176,7 +176,7 @@ identity the official client uses by default (field 5 of its payload, below;
 TeamSpeak 6's before TeamSpeak 3's) becomes Voelin's default when Voelin has
 none, or only the one it created on its own the first time it started,
 which nobody chose. That happens once: the created identity is kept, and
-choosing it again in Settings → Identities makes it the user's own, which
+choosing it again in Settings → Profiles makes it the user's own, which
 no import replaces; identities that were imported or chosen are never
 replaced. The store keeps where each identity came from and which one is the
 default (`identities.origin`: `created`, `imported`, `user`;
@@ -185,13 +185,20 @@ named `Default` of an older database as created). What happened is shown
 once in the status line (the toast on desktop), by nickname, e.g. "You now
 use your TeamSpeak identity "X"; your previous one is kept". The runtime
 setting `identity.import_from_teamspeak` (default on, also in Settings →
-Identities) turns it off, e.g. `--set identity.import_from_teamspeak=false`.
+Profiles) turns it off, e.g. `--set identity.import_from_teamspeak=false`.
 The sample data of `VOELIN_DEMO_UI` never imports.
 
-**Settings → Identities** lists the stored identities with where they came
-from, their security level and unique id; "Use as default" picks the one
-servers see from the next connection on. `voelinctl identity list` shows
-the same (origin and default).
+**Settings → Profiles** lists the stored identities with where they came
+from ("Made in Voelin", "Imported", "Chosen by you"), their security level
+and unique ids; "Use as default" picks the one servers see from the next
+connection on (`Store::set_default_identity` as the user's choice). The
+store's default is the only default: a server connects with the identity its
+bookmark names, if any (Profiles → Identity per server), else with the
+store's default, and My Account shows the one the current server uses. The
+page also renames, exports, deletes and raises the security level of
+identities, and finds and imports the official clients' identities by
+hand. `voelinctl identity list` shows the same (origin and default).
+`VOELIN_OPEN=settings:profiles` (or `settings:identities`) opens it.
 
 - **Import** prints what it found as nickname, unique id and security level —
   all three are public, everything else in an identity is the private key —

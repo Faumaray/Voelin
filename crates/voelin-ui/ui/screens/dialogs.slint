@@ -3,7 +3,7 @@
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, BookmarkForm, ShareForm } from "../bridge.slint";
-import { Nav } from "../nav.slint";
+import { Nav, Page } from "../nav.slint";
 import { Icon, Button, ButtonKind, IconButton, TextField, Field, Select, Toggle, ToggleRow, Slider, Modal, Card, Chip, Banner, Avatar, Status, ListView, ScrollView } from "../components/index.slint";
 import { AboutSlint } from "std-widgets.slint";
 import { StudioBridge } from "../studio-bridge.slint";
@@ -20,10 +20,12 @@ component Footer inherits HorizontalLayout {
 // fills in itself when left empty.
 export component BookmarkDialog inherits Modal {
     in-out property <BookmarkForm> form;
+    // Join by address: connect once saved.
+    in property <bool> join;
     callback done();
     // The fields beyond address and password: shown when editing.
     property <bool> advanced: form.id >= 0;
-    title: form.id < 0 ? @tr("Add server") : @tr("Edit server");
+    title: join ? @tr("Join a server") : form.id < 0 ? @tr("Add server") : @tr("Edit server");
     subtitle: @tr("Only the address is needed; Voelin finds the rest.");
     icon: Icons.server;
     card-width: 560px;
@@ -133,10 +135,14 @@ export component BookmarkDialog inherits Modal {
         }
         Button {
             kind: ButtonKind.primary;
-            text: form.id < 0 ? @tr("Add") : @tr("Save");
+            text: root.join ? @tr("Join") : form.id < 0 ? @tr("Add") : @tr("Save");
             enabled: form.address != "";
             clicked => {
                 Bridge.save-bookmark(form);
+                if root.join {
+                    Bridge.connect-voice();
+                    Nav.show(Page.server);
+                }
                 done();
             }
         }

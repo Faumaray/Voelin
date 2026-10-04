@@ -529,6 +529,24 @@ impl Store {
 		Ok(rows)
 	}
 
+	/// The newest message of every chat (of every server), the most
+	/// recently active chat first, at most `limit` chats (`None`: all).
+	pub fn recent_chats(&self, limit: Option<usize>) -> Result<Vec<StoredMessage>> {
+		// SQLite takes the bare columns from the row with the MAX.
+		// ponytail: one pass over the time index; keep a table of each
+		// chat's last message if histories grow into the millions.
+		let sql = format!(
+			"SELECT {COLUMNS}, MAX(ts_ms) FROM messages WHERE server_uid <> ''
+			 GROUP BY server_uid, target ORDER BY ts_ms DESC, id DESC LIMIT ?1"
+		);
+		let limit = limit.map_or(-1, |l| l as i64);
+		Ok(self
+			.db
+			.prepare_cached(&sql)?
+			.query_map([limit], message_from_row)?
+			.collect::<rusqlite::Result<Vec<_>>>()?)
+	}
+
 	/// One message by its local id.
 	pub fn message(&self, id: i64) -> Result<Option<StoredMessage>> {
 		Ok(self
@@ -765,6 +783,30 @@ mod tests {
 
 	fn texts(rows: &[StoredMessage]) -> Vec<&str> {
 		rows.iter().map(|m| m.text.as_str()).collect()
+	}
+
+	#[test]
+	fn recent_chats_newest_first() {
+		let mut store = Store::open_in_memory().unwrap();
+		let mut dm = msg(MessageSource::Voice, "b", "hi", 3000);
+		dm.target = ChatTarget::Private("uid-b".into());
+		let mut other = msg(MessageSource::Voice, "c", "elsewhere", 2500);
+		other.server_uid = "srv2".into();
+		store
+			.write_messages(
+				&[
+					msg(MessageSource::Voice, "a", "old", 1000),
+					msg(MessageSource::Voice, "a", "newer", 2000),
+					dm,
+					other,
+				],
+				0,
+			)
+			.unwrap();
+		let recent = store.recent_chats(None).unwrap();
+		assert_eq!(texts(&recent), ["hi", "elsewhere", "newer"]);
+		assert_eq!(recent[0].target, ChatTarget::Private("uid-b".into()));
+		assert_eq!(texts(&store.recent_chats(Some(1)).unwrap()), ["hi"]);
 	}
 
 	#[test]
