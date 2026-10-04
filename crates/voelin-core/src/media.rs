@@ -79,6 +79,8 @@ const OPUS_BITRATE: i32 = 128_000;
 pub const MAX_QUEUED: usize = 30;
 /// Keyframe requests while waiting for one are at least this far apart.
 const KEYFRAME_RETRY: Duration = Duration::from_millis(500);
+/// The decoding rates of [`DecodeStats`] cover at least this long.
+const RATE_WINDOW: Duration = Duration::from_millis(500);
 
 #[derive(Debug, thiserror::Error)]
 pub enum MediaError {
@@ -1582,7 +1584,8 @@ impl Ingest {
 	}
 
 	/// Whether frames go to the GPU: every layer's encoders take GPU frames
-	/// and the GPU stage has not failed.
+	/// and the GPU stage has not failed. On Android: the screen can render
+	/// straight into the encoder (`mediacodec`'s surface path).
 	fn gpu_path(&self) -> bool {
 		#[cfg(all(target_os = "linux", feature = "media-desktop"))]
 		{
@@ -1593,7 +1596,18 @@ impl Ingest {
 					.iter()
 					.all(|l| l.layer.stopped() || l.layer.gpu.load(Ordering::Relaxed) != 0)
 		}
-		#[cfg(not(all(target_os = "linux", feature = "media-desktop")))]
+		#[cfg(target_os = "android")]
+		{
+			!self.layers.is_empty()
+				&& self
+					.layers
+					.iter()
+					.all(|l| l.layer.stopped() || l.layer.gpu.load(Ordering::Relaxed) != 0)
+		}
+		#[cfg(not(any(
+			all(target_os = "linux", feature = "media-desktop"),
+			target_os = "android"
+		)))]
 		false
 	}
 
@@ -1717,7 +1731,38 @@ impl FrameSink for Ingest {
 	}
 
 	fn accepts_dmabuf(&self) -> bool {
-		self.gpu_path()
+		cfg!(all(target_os = "linux", feature = "media-desktop")) && self.gpu_path()
+	}
+
+	fn accepts_gpu(&self) -> bool {
+		cfg!(target_os = "android") && self.gpu_path()
+	}
+
+	/// Android: the screen goes straight into each due layer's encoder,
+	/// which draws it at the layer's size; only its size and time come here.
+	#[cfg(target_os = "android")]
+	fn gpu(&mut self, frame: GpuFrame) -> bool {
+		if self.shared.stopped() {
+			return false;
+		}
+		self.pacer.keep(frame.timestamp);
+		self.refresh();
+		let shared = &self.shared;
+		shared.captured.fetch_add(1, Ordering::Relaxed);
+		shared
+			.size
+			.store(u64::from(frame.width) << 32 | u64::from(frame.height), Ordering::Relaxed);
+		if shared.sink().is_none() {
+			return true;
+		}
+		for l in &mut self.layers {
+			if !l.layer.stopped() && l.pacer.take(frame.timestamp) {
+				let (width, height) = l.spec.output_size(frame.width, frame.height);
+				l.layer.gpu_inbox.put(Arc::new(frame.sized(width, height)));
+			}
+		}
+		shared.gpu_converted.fetch_add(1, Ordering::Relaxed);
+		true
 	}
 
 	/// The tiled layout the GPU's own RGB surfaces have, once the GPU stage
@@ -1852,6 +1897,17 @@ fn gpu_alignment<'a>(encoders: impl IntoIterator<Item = &'a dyn VideoEncoder>) -
 	u64::from(alignment.0) << 32 | u64::from(alignment.1)
 }
 
+/// Which of a studio's outputs get an encoder's packets.
+#[derive(Clone, Copy)]
+enum ToStudio<'a> {
+	None,
+	/// The stream codec's: all of them, recordings and replay buffer too.
+	All(&'a Studio),
+	/// Another codec's: the outputs that asked for it
+	/// ([`Studio::output_codecs`]).
+	Asked(&'a Studio),
+}
+
 /// One encoder of a layer: its keyframe and bitrate state.
 struct LayerEncoder {
 	codec: Codec,
@@ -1878,7 +1934,7 @@ impl LayerEncoder {
 		shared: &Shared,
 		layer: &Layer,
 		sink: &dyn MediaSink,
-		studio: Option<&Studio>,
+		studio: ToStudio<'_>,
 		picture: &Picture,
 		requested: bool,
 		target: u64,
@@ -1907,15 +1963,18 @@ impl LayerEncoder {
 		let mut produced_keyframe = false;
 		let mut out = |chunk: EncodedChunk<'_>| {
 			produced_keyframe |= chunk.keyframe;
-			if let Some(studio) = studio {
-				studio.write_packet(&Packet {
-					track: Track::Video { codec, layer: u32::from(layer.id) },
-					pts_90khz: chunk.pts_90khz,
-					keyframe: chunk.keyframe,
-					width,
-					height,
-					data: chunk.data,
-				});
+			let packet = Packet {
+				track: Track::Video { codec, layer: u32::from(layer.id) },
+				pts_90khz: chunk.pts_90khz,
+				keyframe: chunk.keyframe,
+				width,
+				height,
+				data: chunk.data,
+			};
+			match studio {
+				ToStudio::All(studio) => studio.write_packet(&packet),
+				ToStudio::Asked(studio) => studio.write_output_packet(&packet),
+				ToStudio::None => {}
 			}
 			let encoded = EncodedFrame {
 				kind: MediaKind::Video,
@@ -2007,6 +2066,14 @@ fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 		// The codecs viewers chose; none known: the stream codec.
 		wanted.clear();
 		sink.video_codecs(&mut wanted);
+		// With a studio, the stream codec for its recordings and replay
+		// buffer, and the codecs its outputs of this layer need (RTMP: H.264).
+		if let Some(studio) = &shared.studio {
+			if !wanted.contains(&primary.codec) {
+				wanted.insert(0, primary.codec);
+			}
+			studio.output_codecs(u32::from(layer.id), &mut wanted);
+		}
 		let now = shared.encoders_generation.load(Ordering::Relaxed);
 		if now != generation {
 			generation = now;
@@ -2068,12 +2135,13 @@ fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 		let target = sink.layer_bitrate(layer.id).unwrap_or(configured).clamp(1, cap);
 		let started = Instant::now();
 		if primary_on {
-			let studio = shared.studio.as_deref();
+			let studio = shared.studio.as_deref().map_or(ToStudio::None, ToStudio::All);
 			primary.encode(shared, layer, &*sink, studio, &picture, requested, target);
 			layer.target.store(primary.bitrate, Ordering::Relaxed);
 		}
 		for encoder in &mut extra {
-			encoder.encode(shared, layer, &*sink, None, &picture, requested, target);
+			let studio = shared.studio.as_deref().map_or(ToStudio::None, ToStudio::Asked);
+			encoder.encode(shared, layer, &*sink, studio, &picture, requested, target);
 		}
 		layer.encode_ns.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 		layer.encoded.fetch_add(1, Ordering::Relaxed);
@@ -2401,6 +2469,23 @@ pub struct DecodeStats {
 	pub height: u32,
 	/// The last error (no decoder for the codec, decoding failed).
 	pub error: Option<String>,
+	/// Bytes of video received.
+	pub bytes: u64,
+	/// Pictures decoded per second and video received in bit/s, over the
+	/// time since the previous [`VideoPipeline::stats`] (at least
+	/// [`RATE_WINDOW`]; the watch screen asks once a second).
+	pub fps: u32,
+	pub bitrate: u64,
+}
+
+/// Where the rates of [`DecodeStats`] were last measured from.
+#[derive(Default)]
+struct DecodeRates {
+	since: Option<Instant>,
+	decoded: u64,
+	bytes: u64,
+	fps: u32,
+	bitrate: u64,
 }
 
 #[derive(Default)]
@@ -2416,6 +2501,7 @@ struct DecodeQueue {
 	state: Mutex<QueueState>,
 	cond: Condvar,
 	stats: Mutex<DecodeStats>,
+	rates: Mutex<DecodeRates>,
 }
 
 /// Feeds frames into a [`VideoPipeline`]; cheap to clone.
@@ -2432,6 +2518,7 @@ impl FrameInput {
 		if frame.kind != MediaKind::Video {
 			return;
 		}
+		lock(&self.queue.stats).bytes += frame.data.len() as u64;
 		let mut state = lock(&self.queue.state);
 		if state.frames.len() >= MAX_QUEUED {
 			state.frames.clear();
@@ -2486,7 +2573,19 @@ impl VideoPipeline {
 	}
 
 	pub fn stats(&self) -> DecodeStats {
-		lock(&self.input.queue.stats).clone()
+		let mut stats = lock(&self.input.queue.stats).clone();
+		let mut rates = lock(&self.input.queue.rates);
+		let now = Instant::now();
+		let elapsed = rates.since.map(|since| now.saturating_duration_since(since));
+		if elapsed.is_none_or(|e| e >= RATE_WINDOW) {
+			if let Some(seconds) = elapsed.map(|e| e.as_secs_f64()) {
+				rates.fps = ((stats.decoded - rates.decoded) as f64 / seconds).round() as u32;
+				rates.bitrate = ((stats.bytes - rates.bytes) as f64 * 8.0 / seconds) as u64;
+			}
+			(rates.since, rates.decoded, rates.bytes) = (Some(now), stats.decoded, stats.bytes);
+		}
+		(stats.fps, stats.bitrate) = (rates.fps, rates.bitrate);
+		stats
 	}
 }
 
@@ -2981,6 +3080,11 @@ mod tests {
 		assert!(stats.decoded >= 10 && stats.error.is_none(), "{stats:?}");
 		assert_eq!(stats.codec, Some(Codec::Vp8));
 		assert_eq!(preview.streamer().backend(), "synthetic");
+		// Rates over the second since: the pattern's rate, its bitrate.
+		tokio::time::sleep(Duration::from_secs(1)).await;
+		let stats = preview.stats();
+		assert!((20..=40).contains(&stats.fps), "{stats:?}");
+		assert!((100_000..5_000_000).contains(&stats.bitrate), "{stats:?}");
 	}
 
 	fn layer(id: LayerId, scale: f32, max_fps: Option<u32>, bitrate: u64) -> LayerSpec {

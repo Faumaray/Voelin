@@ -252,6 +252,7 @@ pub struct MediaFrame {
 
 enum Cmd {
 	Answer(String, oneshot::Sender<Result<(), PeerError>>),
+	Offer(String, oneshot::Sender<Result<String, PeerError>>),
 	RemoteCandidate(String),
 	Write { kind: MediaKind, time: MediaTime, data: Arc<[u8]>, rid: Option<Rid> },
 	RequestKeyframe,
@@ -369,6 +370,16 @@ impl Peer {
 	pub async fn accept_answer(&self, sdp: &str) -> Result<(), PeerError> {
 		let (tx, rx) = oneshot::channel();
 		self.cmd.send(Cmd::Answer(sdp.to_owned(), tx)).map_err(|_| PeerError::Closed)?;
+		rx.await.map_err(|_| PeerError::Closed)?
+	}
+
+	/// Viewer side: answer a new offer of the streamer on this connection
+	/// (a renegotiation: the same ICE credentials and DTLS fingerprint).
+	/// The official client re-offers when the codec our answer chose is one
+	/// it does not encode, and expects the answer from the same peer.
+	pub async fn renegotiate(&self, offer: &str) -> Result<String, PeerError> {
+		let (tx, rx) = oneshot::channel();
+		self.cmd.send(Cmd::Offer(offer.to_owned(), tx)).map_err(|_| PeerError::Closed)?;
 		rx.await.map_err(|_| PeerError::Closed)?
 	}
 
@@ -494,6 +505,40 @@ fn build_rtc(
 		};
 	}
 	dtls::build_rtc(rtc_config, &config.srtp_profiles)
+}
+
+/// `answer` with the payload types of each media line in the order of the
+/// same media line of `offer` (those the offer lacks last). The offerer sends
+/// the answer's first codec; str0m answers a new offer on a running
+/// connection in the codec order the connection was built with, so without
+/// this a streamer that re-offers with another codec first keeps sending the
+/// old one. Only the `m=` line order changes, which str0m's own state does
+/// not depend on.
+fn order_like_offer(answer: &str, offer: &str) -> String {
+	let offered: Vec<Vec<&str>> = offer
+		.lines()
+		.filter_map(|l| l.trim_end().strip_prefix("m="))
+		.map(|m| m.split_whitespace().skip(3).collect())
+		.collect();
+	let mut section = 0;
+	let mut out = String::with_capacity(answer.len());
+	for line in answer.split_inclusive('\n') {
+		let Some(media) = line.trim_end().strip_prefix("m=") else {
+			out.push_str(line);
+			continue;
+		};
+		let mut parts: Vec<&str> = media.split_whitespace().collect();
+		if let Some(order) = offered.get(section)
+			&& parts.len() > 3
+		{
+			parts[3..].sort_by_key(|pt| order.iter().position(|o| o == pt).unwrap_or(usize::MAX));
+		}
+		section += 1;
+		out.push_str("m=");
+		out.push_str(&parts.join(" "));
+		out.push_str(&line[line.trim_end().len()..]);
+	}
+	out
 }
 
 /// The video codecs of the first video media line of `sdp`, in offered order.
@@ -826,6 +871,13 @@ impl Task {
 				let result = self.accept_answer(&sdp);
 				let _ = reply.send(result);
 			}
+			Cmd::Offer(sdp, reply) => {
+				let result = SdpOffer::from_sdp_string(&sdp)
+					.map_err(|e| PeerError::Sdp(e.to_string()))
+					.and_then(|offer| Ok(self.rtc.sdp_api().accept_offer(offer)?.to_sdp_string()))
+					.map(|answer| order_like_offer(&answer, &sdp));
+				let _ = reply.send(result);
+			}
 			Cmd::RemoteCandidate(line) => {
 				let line = line.trim().trim_start_matches("a=");
 				match Candidate::from_sdp_string(line) {
@@ -949,6 +1001,53 @@ mod tests {
 			PeerConfig { accept_video_codecs: vec![VideoCodec::Vp8], ..PeerConfig::loopback() };
 		let (_peer, answer) = Peer::answer(&vp8_only, &offer).await.unwrap();
 		assert_eq!(offered_video_codecs(&answer), [VideoCodec::Vp8], "{answer}");
+	}
+
+	/// The ICE username fragment and DTLS fingerprint of an SDP.
+	fn transport(sdp: &str) -> (String, String) {
+		let line = |prefix: &str| {
+			sdp.lines().find_map(|l| l.strip_prefix(prefix)).unwrap_or_default().trim().to_owned()
+		};
+		(line("a=ice-ufrag:"), line("a=fingerprint:"))
+	}
+
+	/// A streamer's new offer (the official client re-offers when it does not
+	/// encode the codec our answer chose) is answered on the same connection:
+	/// same ICE credentials and DTLS fingerprint, the new media answered.
+	#[tokio::test]
+	async fn a_new_offer_is_answered_on_the_same_connection() {
+		let mut streamer = RtcConfig::new()
+			.clear_codecs()
+			.enable_vp8(true)
+			.enable_opus(true)
+			.build(Instant::now());
+		let mut api = streamer.sdp_api();
+		api.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);
+		let (offer, pending) = api.apply().unwrap();
+		let (peer, answer) =
+			Peer::answer(&PeerConfig::loopback(), &offer.to_sdp_string()).await.unwrap();
+		let answer_sdp = SdpAnswer::from_sdp_string(&answer).unwrap();
+		streamer.sdp_api().accept_answer(pending, answer_sdp).unwrap();
+
+		let mut api = streamer.sdp_api();
+		api.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
+		let (offer, _pending) = api.apply().unwrap();
+		let again = peer.renegotiate(&offer.to_sdp_string()).await.unwrap();
+		assert_eq!(transport(&again), transport(&answer), "{again}");
+		assert!(again.lines().all(|l| !l.is_empty() || l.ends_with('\r')), "line ends kept");
+		assert!(!transport(&again).0.is_empty());
+		assert!(again.contains("m=audio") && again.contains("opus/48000"), "{again}");
+	}
+
+	#[test]
+	fn answers_follow_the_offers_codec_order() {
+		let offer = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\nm=video 9 UDP/TLS/RTP/SAVPF 98 99 96 97 45\r\n";
+		let answer = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96 97 7 98 99\r\na=rtpmap:96 VP8/90000\r\n";
+		assert_eq!(
+			order_like_offer(answer, offer),
+			"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\nm=video 9 UDP/TLS/RTP/SAVPF 98 99 96 97 7\r\na=rtpmap:96 VP8/90000\r\n"
+		);
+		assert_eq!(order_like_offer("v=0\r\n", offer), "v=0\r\n");
 	}
 
 	/// An offer of codecs we cannot decode is refused with the reason, not

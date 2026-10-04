@@ -130,6 +130,22 @@ pub trait FrameSink: Send {
 		None
 	}
 
+	/// Whether the sink takes pictures the platform puts straight into the
+	/// encoder ([`gpu`](Self::gpu)), because every encoder it feeds takes
+	/// them. Android's screen capture then renders into MediaCodec's input
+	/// surface instead of handing over pixels.
+	fn accepts_gpu(&self) -> bool {
+		false
+	}
+
+	/// Such a picture: only its size and time
+	/// ([`GpuFrame::rendered`](crate::GpuFrame::rendered)). Returns `false`
+	/// when no more frames are wanted.
+	fn gpu(&mut self, frame: crate::GpuFrame) -> bool {
+		let _ = frame;
+		true
+	}
+
 	/// Tiled DRM format modifiers of RGB buffers the sink takes now
 	/// ([`accepts_dmabuf`](Self::accepts_dmabuf)), best first; backends that
 	/// negotiate buffers (the portal) offer them ahead of LINEAR, and offer

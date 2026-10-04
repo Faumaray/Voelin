@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 use tokio::time::timeout;
 use voelin_stream::{
-	Codec, FrameSource, MediaKind, Peer, PeerConfig, PeerEvent, Signal, SrtpProfile,
+	Codec, FrameSource, LayerSpec, MediaKind, Peer, PeerConfig, PeerEvent, Signal, SrtpProfile,
 	SyntheticSource,
 };
 
@@ -50,6 +50,14 @@ async fn rust_streams_to_browser() {
 	let mut browser = Browser::start().await;
 	let config = PeerConfig::loopback();
 	let (mut peer, offer) = Peer::offer(&config, "interop").await.unwrap();
+	// As a Voelin streamer with several layers offers: with the list of its
+	// layers, which libwebrtc (the official client's stack) must skip.
+	let layers = [
+		LayerSpec::single(4_000_000),
+		LayerSpec { id: 1, scale: 0.5, ..LayerSpec::single(1_000_000) },
+	];
+	let offer = voelin_stream::layer::add_to_sdp(&offer, &layers);
+	assert!(offer.contains("\r\na=x-voelin-layers:0/1/4000000 1/0.5/1000000\r\n"), "{offer}");
 	let answer = browser.call(json!({ "op": "answer", "sdp": offer })).await;
 	let answer = answer["sdp"].as_str().unwrap();
 	eprintln!("browser answer:\n{answer}");
@@ -271,5 +279,36 @@ async fn browser_streams_to_rust() {
 	assert!(tested.contains(&"VP8") && tested.contains(&"VP9"), "tested {tested:?}");
 	let stats = browser.call(json!({ "op": "stats" })).await;
 	assert!(aes_cm_128_sha1_80(&stats["transport"]["srtpCipher"]), "{stats:#}");
+	browser.quit().await;
+}
+
+/// Chromium streams VP8, then renegotiates to VP9 on the same connection, as
+/// the official client re-offers when it does not encode the codec our
+/// answer chose: our viewer answers on the same peer and keeps receiving,
+/// now VP9.
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_renegotiates_with_rust() {
+	if !enabled() {
+		eprintln!("skipped: set VOELIN_INTEROP=1 (needs node, Playwright and Chromium)");
+		return;
+	}
+	let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
+	let mut browser = Browser::start().await;
+	let offer = browser.call(json!({ "op": "offer", "codec": "VP8", "trickle": false })).await;
+	let (mut peer, answer) =
+		Peer::answer(&PeerConfig::loopback(), offer["sdp"].as_str().unwrap()).await.unwrap();
+	browser.call(json!({ "op": "accept", "sdp": answer })).await;
+	wait_connected(&mut peer).await;
+	let before = receive(&mut peer, Duration::from_secs(5), 30).await;
+	assert!(before.video.get(Codec::Vp8) >= 30, "before: {:?}", before.video);
+
+	let offer = browser.call(json!({ "op": "reoffer", "codec": "VP9" })).await;
+	let again = peer.renegotiate(offer["sdp"].as_str().unwrap()).await.unwrap();
+	browser.call(json!({ "op": "accept", "sdp": again })).await;
+	let after = receive(&mut peer, Duration::from_secs(8), 30).await;
+	eprintln!("after the new offer: video {:?}, audio {:?}", after.video, after.audio);
+	assert!(after.video.get(Codec::Vp9) >= 30, "after: {:?}", after.video);
+	let stats = browser.call(json!({ "op": "stats" })).await;
+	assert_eq!(stats["connectionState"], "connected", "{stats:#}");
 	browser.quit().await;
 }

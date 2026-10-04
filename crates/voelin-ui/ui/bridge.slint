@@ -124,6 +124,9 @@ export struct ChatTab {
     unread: int,
     // The channel's topic (channel chats).
     topic: string,
+    // The last message ("Mira: the banner I promised") and its time.
+    last: string,
+    time: string,
 }
 
 // A piece of a chat line: text, or an emoji shown as an image (`emoji` is
@@ -810,6 +813,8 @@ export global Bridge {
     in property <[SourceItem]> share-sources;
     in property <string> share-error;
     in property <bool> share-busy;
+    // Our share carries sound: its audio mixer can change it.
+    in property <bool> share-audio;
     // Whether capture and encoding are built in.
     in property <bool> can-share: true;
 
@@ -839,6 +844,8 @@ export global Bridge {
     in-out property <int> viewer-quality: 0;
     // What "Auto" picked ("720p · 2.4 Mbit/s").
     in property <string> viewer-quality-detail;
+    // The streamer is in an admin group (the crown beside their name).
+    in property <bool> viewer-streamer-admin;
 
     // Settings.
     in property <[string]> input-devices;
@@ -946,6 +953,9 @@ export global Bridge {
     callback delete-crash-reports();
     callback dismiss-crash-notice();
     callback open-about();
+    // A link to our voice channel (`ts3server://`) to hand to others; the
+    // caller copies it.
+    callback invite() -> string;
 
     // Home, friends, direct messages, notifications, search, events and
     // the settings pages.

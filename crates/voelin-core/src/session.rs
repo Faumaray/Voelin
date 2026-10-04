@@ -484,6 +484,9 @@ impl Session {
 			Command::RequestStreamKeyframe { stream_id, .. } => {
 				self.stream_input(StreamInput::RequestKeyframe { stream_id });
 			}
+			Command::SetWatchLayer { stream_id, layer, .. } => {
+				self.stream_input(StreamInput::WatchLayer { stream_id, layer });
+			}
 			// Kept for streams started later, also without a connection.
 			Command::SetStreamLayers { layers, .. } => {
 				self.stream_layers = layers.clone();
@@ -1118,6 +1121,8 @@ impl Session {
 					bitrate: 0,
 					viewer_limit: 0,
 					audio: true,
+					// The UI takes the directory's count, which stays current.
+					viewers: None,
 				})
 			})
 			.collect();

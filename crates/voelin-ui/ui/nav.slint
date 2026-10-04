@@ -102,6 +102,14 @@ export global Nav {
     in-out property <int> dm-tab;
     in-out property <bool> join-open;
 
+    // The phone layout (narrow windows).
+    // The server's members as a page of their own (the desktop shows them
+    // beside the chat).
+    in-out property <bool> members-open;
+    // The voice channel screen (design mockup 02) instead of a tab: the
+    // voice channel view, or a stream we watch.
+    out property <bool> phone-voice: narrow && page == Page.server && Bridge.voice-connected && (voice-view || Bridge.viewer-open);
+
     // Settings were opened (so leaving them tells Rust).
     property <bool> settings-active;
 
@@ -109,6 +117,15 @@ export global Nav {
         if p != Page.settings && settings-active {
             settings-active = false;
             Bridge.close-settings();
+        }
+        // The phone shows Home on its own tab: a server goes to Servers,
+        // and Home from anywhere (the desktop's logo, a switch) is that tab.
+        // Also while wide, so the tab is right when the window narrows.
+        if p == Page.server && mobile-tab == MobileTab.home {
+            mobile-tab = MobileTab.servers;
+        }
+        if p == Page.home {
+            mobile-tab = MobileTab.home;
         }
         page = p;
         notifications-open = false;
@@ -121,6 +138,16 @@ export global Nav {
         if p == Page.library {
             Bridge.open-library();
         }
+    }
+
+    // A tab of the phone's bottom navigation, without the pages that were
+    // over the last one (pins, topics, members).
+    public function show-tab(tab: MobileTab) {
+        pins-open = false;
+        topics-open = false;
+        members-open = false;
+        show(tab == MobileTab.home ? Page.home : Page.server);
+        mobile-tab = tab;
     }
 
     public function open-settings(section: SettingsSection) {

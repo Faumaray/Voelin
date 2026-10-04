@@ -288,8 +288,10 @@ impl VideoFrame {
 /// from a captured DMA-BUF on the GPU (`ffmpeg::GpuConverter`, Linux) so
 /// that no CPU reads its pixels, for the encoders that take one
 /// ([`VideoEncoder::gpu_alignment`](crate::VideoEncoder::gpu_alignment)).
-/// Dropping it gives the surface back to its pool. Only this crate makes
-/// them.
+/// Dropping it gives the surface back to its pool. On Android it stands for
+/// a screen picture the virtual display renders straight into MediaCodec's
+/// input surface ([`GpuFrame::rendered`]): only its size and time travel.
+/// Only this crate makes them.
 #[non_exhaustive]
 pub struct GpuFrame {
 	pub width: u32,
@@ -304,6 +306,27 @@ impl GpuFrame {
 	/// The timestamp on the 90 kHz RTP video clock.
 	pub fn pts_90khz(&self) -> u64 {
 		(self.timestamp.as_micros() * u128::from(VIDEO_CLOCK_RATE) / 1_000_000) as u64
+	}
+
+	/// A screen picture the virtual display renders straight into the
+	/// encoder's input surface (`codec::mediacodec`, the zero-copy path):
+	/// nothing but its size and time is handed over.
+	#[cfg(all(target_os = "android", not(feature = "ffmpeg")))]
+	pub fn rendered(width: u32, height: u32, timestamp: Duration) -> Self {
+		Self { width, height, timestamp }
+	}
+
+	/// Such a picture as a simulcast layer of `width` x `height` sees it
+	/// (Android: the encoder draws the screen at its own size).
+	#[cfg(target_os = "android")]
+	pub fn sized(&self, width: u32, height: u32) -> Self {
+		Self {
+			width,
+			height,
+			timestamp: self.timestamp,
+			#[cfg(feature = "ffmpeg")]
+			surface: self.surface.new_ref(),
+		}
 	}
 
 	/// The same picture at another time (another reference to the same

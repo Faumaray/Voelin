@@ -38,6 +38,10 @@ use crate::settings::{STREAM_PERMISSIONS, SharedSettings, StreamPermissions};
 use crate::voice::VoiceCmd;
 use crate::{Event, SessionId};
 
+/// How often the viewer count of one stream in our channel is asked for
+/// (round robin, see [`Streams::refresh_viewer_counts`]).
+const VIEWER_COUNTS: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Our own stream.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StreamState {
@@ -158,6 +162,10 @@ pub(crate) enum StreamInput {
 	},
 	RequestKeyframe {
 		stream_id: String,
+	},
+	WatchLayer {
+		stream_id: String,
+		layer: Option<LayerId>,
 	},
 	/// Simulcast layers of our stream (now and for streams started later).
 	Layers(Vec<LayerSpec>),
@@ -320,6 +328,8 @@ struct StreamTask {
 
 impl StreamTask {
 	async fn run(mut self, mut rx: mpsc::UnboundedReceiver<StreamInput>) {
+		let mut counts = tokio::time::interval(VIEWER_COUNTS);
+		counts.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 		loop {
 			tokio::select! {
 				input = rx.recv() => match input {
@@ -331,6 +341,7 @@ impl StreamTask {
 					Some(input) => self.input(input).await,
 				},
 				() = self.streams.wait_peers() => {}
+				_ = counts.tick() => self.streams.refresh_viewer_counts(),
 			}
 			self.flush();
 		}
@@ -365,6 +376,10 @@ impl StreamTask {
 				self.streams.request_keyframe(&stream_id);
 				Ok(())
 			}
+			StreamInput::WatchLayer { stream_id, layer } => self
+				.streams
+				.set_watch_layer(&stream_id, layer)
+				.map(|()| self.watch_layers(&stream_id)),
 			StreamInput::Layers(layers) => {
 				self.layers = layers.clone();
 				// Without a stream they are used for the next one.
@@ -533,6 +548,7 @@ impl StreamTask {
 						}
 						WatchState::Ended(reason)
 					}
+					WatchEvent::Layers(_) => return self.watch_layers(&id),
 					WatchEvent::Frame(frame) => {
 						if let (MediaKind::Audio, Some(audio)) = (frame.kind, &self.audio) {
 							audio.send(AudioIn::StreamAudio {
@@ -548,6 +564,17 @@ impl StreamTask {
 				self.emit(Event::WatchState { session, stream_id: id, state });
 			}
 		}
+	}
+
+	/// Tell the layers of watched stream `id` and the one we asked for.
+	fn watch_layers(&self, id: &str) {
+		let Some(watched) = self.streams.watching().find(|v| v.id() == id) else { return };
+		self.emit(Event::WatchLayers {
+			session: self.session,
+			stream_id: id.to_owned(),
+			layers: watched.layers().to_vec(),
+			layer: watched.layer(),
+		});
 	}
 
 	/// The answer `stream.permissions` gives to a join request; `None`: ask.
@@ -618,6 +645,7 @@ mod tests {
 						bitrate: setup.bitrate,
 						viewer_limit: setup.viewer_limit,
 						audio: setup.audio,
+						viewers: Some(0),
 					};
 					let return_code = (c == from).then(|| "1".to_owned());
 					(c, StreamNotification::Started { info, return_code })
@@ -977,6 +1005,7 @@ mod tests {
 			bitrate: 0,
 			viewer_limit: 0,
 			audio: true,
+			viewers: None,
 		};
 		handles[1].send(StreamInput::Directory(vec![entry]));
 		wait(&mut rx, |e| match e {

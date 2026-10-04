@@ -7,6 +7,8 @@
 
 use serde_json::{Map, Value, json};
 
+use crate::layer::LayerId;
+
 /// One signalling message between streamer and viewer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Signal {
@@ -18,6 +20,11 @@ pub enum Signal {
 	IceCandidate { candidate: String, mid: Option<String>, mline_index: Option<u32> },
 	/// The other side asks for a new offer.
 	Reconnect,
+	/// A Voelin viewer asks for simulcast layer `layer` (`None`: let its
+	/// bandwidth estimate decide again). Sent only to a streamer whose offer
+	/// listed its layers ([`crate::layer::SDP_ATTRIBUTE`]): only Voelin
+	/// streamers do, so other clients never get it.
+	Layer { layer: Option<LayerId> },
 	/// A command this client does not know; kept for logging.
 	Unknown { cmd: String, args: Value },
 }
@@ -63,6 +70,9 @@ impl Signal {
 					.and_then(|v| u32::try_from(v).ok()),
 			},
 			"reconnect" => Signal::Reconnect,
+			"x-voelin-layer" => Signal::Layer {
+				layer: args.get("layer").and_then(Value::as_u64).and_then(|v| v.try_into().ok()),
+			},
 			other => Signal::Unknown { cmd: other.to_owned(), args: Value::Object(args.clone()) },
 		})
 	}
@@ -79,6 +89,9 @@ impl Signal {
 				"args": { "candidate": candidate, "sdpMid": mid, "sdpMLineIndex": mline_index },
 			}),
 			Signal::Reconnect => json!({ "cmd": "reconnect", "args": {} }),
+			Signal::Layer { layer } => {
+				json!({ "cmd": "x-voelin-layer", "args": { "layer": layer } })
+			}
 			Signal::Unknown { cmd, args } => json!({ "cmd": cmd, "args": args }),
 		};
 		value.to_string()
@@ -101,6 +114,8 @@ mod tests {
 				mline_index: Some(0),
 			},
 			Signal::Reconnect,
+			Signal::Layer { layer: Some(2) },
+			Signal::Layer { layer: None },
 		];
 		for s in signals {
 			assert_eq!(Signal::parse(&s.to_json()).unwrap(), s);

@@ -108,12 +108,13 @@ export component StreamsPanel inherits VerticalLayout {
             overflow: elide;
             vertical-alignment: center;
         }
-        IconButton {
-            icon: Icons.x;
-            label: @tr("Close the panel");
+        // The phone's voice channel screen.
+        if Bridge.voice-connected: IconButton {
+            icon: Icons.chevron-right;
+            label: @tr("Open the voice channel");
             size: 28px;
             icon-size: Theme.icon-sm;
-            clicked => { Nav.right-panel-open = false; }
+            clicked => { Nav.show-voice(true); }
         }
     }
     if Bridge.members.length == 0: Text {
@@ -367,7 +368,16 @@ component StreamPlayer inherits Rectangle {
                 vertical-alignment: center;
             }
         }
-        Rectangle { horizontal-stretch: 1; }
+        // What arrives: codec, size, frame rate, bitrate.
+        Text {
+            horizontal-stretch: 1;
+            text: Bridge.viewer-quality-detail;
+            color: #ffffff80;
+            font-size: Theme.font-xs;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            overflow: elide;
+        }
         if !Bridge.viewer-fullscreen && !Nav.narrow: IconButton {
             icon: Icons.minimize-2;
             label: @tr("Back to the chat (keeps watching)");

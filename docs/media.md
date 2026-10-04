@@ -8,8 +8,9 @@ MediaTime::new(frame.pts_90khz, Frequency::NINETY_KHZ), data)`), and received
 `MediaFrame`s go to `VideoDecoder::decode`.
 
 The Stream Studio (`studio`: scenes of sources composited into the stream's
-video, recording, a replay buffer, WHIP) is described in
-[studio.md](studio.md).
+video, cameras among them (MJPEG ones decoded on a thread of their own,
+Media Foundation on Windows); recording, a replay buffer, WHIP and RTMP) is
+described in [studio.md](studio.md).
 
 ## API overview
 
@@ -20,8 +21,8 @@ video, recording, a replay buffer, WHIP) is described in
 | `AudioBuffer { samples, channels, timestamp }` | interleaved `f32`, 48 kHz |
 | `convert::to_rgba(&frame, out, stride)`, `to_rgba_vec`, `to_i420`, `psnr` | BT.601 limited range (the WebRTC default). `to_rgba` writes straight into a Slint `SharedPixelBuffer<Rgba8Pixel>` (`make_mut_bytes()`, stride `width * 4`) |
 | `Codec` | `Vp8`, `Vp9`, `H264`, `Av1`; `FromStr` for SDP/MIME names; `From`/`TryFrom` `str0m::format::Codec` with feature `str0m` |
-| `VideoEncoder` | `encode(&frame, force_keyframe) -> Vec<EncodedFrame>`; `encode_with(&frame, force_keyframe, &mut |EncodedChunk| ..)` hands out the encoder's own buffer (no copy); `set_bitrate(bps)` (libvpx: in place, no keyframe), `set_fps`, `speed()`, `codec()`, `backend()`; `gpu_alignment()` / `encode_gpu(&GpuFrame, ..)` for encoders that take frames in GPU memory (VA-API) |
-| `GpuFrame` | a picture in GPU memory (an NV12 VA-API surface), made by `ffmpeg::GpuConverter` from a captured DMA-BUF; `width`, `height`, `timestamp`, `at(timestamp)` (the same surface at another time) |
+| `VideoEncoder` | `encode(&frame, force_keyframe) -> Vec<EncodedFrame>`; `encode_with(&frame, force_keyframe, &mut |EncodedChunk| ..)` hands out the encoder's own buffer (no copy); `set_bitrate(bps)` (libvpx: in place, no keyframe), `set_fps`, `speed()`, `codec()`, `backend()`; `gpu_alignment()` / `encode_gpu(&GpuFrame, ..)` for encoders that take frames in GPU memory (VA-API; MediaCodec's surface path on Android) |
+| `GpuFrame` | a picture in GPU memory (an NV12 VA-API surface), made by `ffmpeg::GpuConverter` from a captured DMA-BUF; `width`, `height`, `timestamp`, `at(timestamp)` (the same surface at another time). On Android `rendered(width, height, timestamp)`: a screen picture the virtual display renders straight into MediaCodec's input surface, only its size and time travel |
 | `EncodedFrame { data, keyframe, pts_90khz }` | one frame for `Peer::write` |
 | `VideoDecoder` | `decode(&[u8]) -> Option<VideoFrame>` (timestamp zero; the caller knows the RTP time) |
 | `EncoderConfig { fps, bitrate_bps, keyframe_interval, content, threads, speed }` | resolution follows the frames; a size change restarts with a keyframe; `threads` is a maximum (0: all CPUs but one), still capped at one per 320x240 pixels; `speed: None` adapts libvpx `cpu-used` to the encode time |
@@ -30,6 +31,7 @@ video, recording, a replay buffer, WHIP) is described in
 | `EncoderReport { ffmpeg, zero_copy, encoders: Vec<EncoderInfo> }` | for the UI: FFmpeg's release and path (or why none), whether DMA-BUF import works, and per backend `name`, `api`, `codec`, `hardware`, `status` (self-test result or why it cannot be used) and `rank` under the current preference |
 | `EncoderBackend` | `Libvpx`, `OpenH264`, `Ffmpeg("h264_vaapi")`, `Hardware("mediacodec")`; `name()` is the settings spelling |
 | `ffmpeg::{Ffmpeg, probe, FfmpegEncoder, BACKENDS}` | FFmpeg loaded at runtime (feature `ffmpeg`), see [FFmpeg encoders](#ffmpeg-encoders-loaded-at-runtime) |
+| `ffmpeg::avio::Connection`, `ffmpeg::audio::AacEncoder` | bytes written through libavformat's protocols (`rtmp://`, `rtmps://`) with their write errors and an abort flag; the studio's Opus as AAC through FFmpeg's own codecs. See [RTMP output](#rtmp-output) |
 | `ffmpeg::{GpuConverter, GpuLayer}` | an RGB DMA-BUF converted to NV12 and scaled for every simulcast layer on the GPU (`convert(&DmaBufRef, &[GpuLayer], out)`), `modifiers()` it imports; see zero-copy under [FFmpeg encoders](#ffmpeg-encoders-loaded-at-runtime) |
 | `ScreenCapture` | `sources()`, `start_sink(&SourceId, &CaptureOptions, Box<dyn FrameSink>)` (frames borrowed from the capture buffer, on the backend's thread), `start(..)` (copies into a queue), `stop()`; async: the portal asks the user |
 | `FrameSink` | `max_fps()` (may change while capturing), `wants(timestamp)` (asked before anything is mapped or copied), `frame(FrameRef) -> bool`; `accepts_dmabuf()`, `dmabuf(&DmaBufRef) -> Option<bool>` (a frame still in GPU memory, offered before it is mapped) and `dmabuf_modifiers()` (tiled layouts the sink imports) |
@@ -144,6 +146,11 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   go out through `MediaSink::send_video(frame, codec)`. Sinks that do not
   tell codecs apart (`EncodedSource`, a `FrameSource`) get the stream codec
   only, so their offers must list it alone (`voelinctl stream start` does).
+  A studio's outputs count as viewers too: the stream codec always runs
+  for its recordings and replay buffer, and an output that needs a codec of
+  its own (RTMP: H.264) gets an encoder of the layer it takes
+  (`Studio::output_codecs`), whose packets reach only such outputs
+  (`Studio::write_output_packet`).
 - `stats()`: `StreamerStats` with capture fps, convert time and threads,
   the GPU path (`gpu_frames`, `gpu_convert_time`, `gpu_error`),
   dropped frames, codec, and per layer (`LayerStats`) size, frames,
@@ -184,10 +191,41 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   longer than 30 frames) or a decoder error it skips to the next keyframe,
   asking for one at most every 500 ms. Keyframes are recognised from the
   bitstream (VP8 frame tag, VP9 header, H.264 IDR/SPS NAL units, AV1
-  sequence header OBU).
+  sequence header OBU). `stats()` (`DecodeStats`) tells the codec, the
+  picture's size, pictures decoded and skipped, the video bytes received,
+  and the decoded frame rate and received bitrate since the previous call
+  (at least half a second); the watch screen shows codec, size, rate and
+  bitrate over the player and in Stream Info, refreshed once a second.
+  These are read from the pipeline, which runs in the app, not sent as
+  engine events: the engine never sees the decoded pictures.
 - `Viewer` feeds a `VideoPipeline` from the engine and sends
   `RequestStreamKeyframe`; `LocalPreview` runs capture → encoder → decoder
   without a server (the desktop app's `VOELIN_DEMO_STREAM`).
+- Viewer counts come from the server: `StreamInfo::viewers` in
+  `Event::StreamsChanged` is TeamSpeak 6's own count (`viewer` of
+  `notifystreaminfo`), counted up from `notifystreamclientjoined` and
+  refreshed with `requeststreaminfo`, one stream every 5 s, because the
+  server tells only the streamer and the viewer when someone leaves
+  ([protocol notes](protocol-notes/ts6-streaming.md#viewer-counts-confirmed-600-beta131-2026-10-03)).
+  The app shows it, and the gateway directory's count where the server
+  gave none.
+- A viewer picks a simulcast layer (the watch screen's quality picker): a
+  Voelin streamer with several layers lists them in its offer, in a
+  session-level SDP attribute (`a=x-voelin-layers:0/1/6000000
+  1/640x360/1500000/15`: id, size or scale, bitrate, frame-rate cap;
+  `voelin_stream::layer::SDP_ATTRIBUTE`). The viewer reports them
+  (`WatchEvent::Layers`, `Event::WatchLayers`), and `Command::SetWatchLayer`
+  sends `{"cmd":"x-voelin-layer","args":{"layer":1}}` through
+  `streamsignaling` (`Signal::Layer`; `null` is "Auto"). The streamer moves
+  that viewer to the layer at its next keyframe and keeps it there whatever
+  its estimate says, and such a viewer no longer lowers its layer's bitrate
+  for the others; "Auto" hands it back to the estimate. Official clients
+  never see either: libwebrtc skips session attributes it does not know
+  (headless Chromium 152 answers such an offer and decodes, see the
+  browser interop test), and a viewer sends the request only to a streamer
+  whose offer had the attribute, which only Voelin streamers add. Not with
+  RID simulcast (that viewer gets every layer), and a streamer that changes
+  its layers live is seen with its next offer.
 - The audio of watched streams does not go through this module: the session
   hands the Opus frames to its audio thread, which plays them through the
   jitter buffer and mixer under a made-up client id, with its own volume.
@@ -234,9 +272,13 @@ The audio of our stream is a mix of any number of sources
   `[{"kind": "desktop"}, {"kind": "app", "name": "firefox", "gain": 0.5},
   {"kind": "microphone", "muted": true}]`. Other kinds are `"window"` and
   `"synthetic"` (`frequency`), and an app can be given by `"pid"`. The
-  default is desktop audio; `[]` shares without sound. The desktop app
-  reads it when sharing starts (`media::audio_source_specs`).
-  `media::audio_apps()` lists the applications for a picker.
+  default is desktop audio; `[]` shares without sound. The app's share
+  dialog and the Stream Studio pick and mix the sources with the same
+  mixer rows and picker ([ui.md](ui.md#sound-in-the-quick-share)); a share
+  hands them to its capture when it starts (`media::audio_source_specs`),
+  and a running share or studio follows every change of the key through
+  `Streamer::reconfigure`. `media::audio_apps()` lists the applications
+  for a picker.
 
 What applications play is captured by `capture::playback::start_playback`:
 
@@ -297,8 +339,8 @@ the software encoders above are used as before.
   `/usr/local/lib`) and MacPorts (`/opt/local/lib`) (macOS). No version is
   refused. libavutil's functions come from the libavutil libavcodec itself
   loaded (through its handle; on Windows the already loaded DLL), so the two
-  always match; libavformat of the same major is opened if present (for RTMP
-  output later). `VOELIN_FFMPEG=0` disables FFmpeg. Only functions are
+  always match; libavformat of the same major is opened if present (for
+  [RTMP output](#rtmp-output)). `VOELIN_FFMPEG=0` disables FFmpeg. Only functions are
   looked up by name (`sys.rs`); FFmpeg's warnings and errors go to
   `tracing` (target `ffmpeg`) and into the self-test's failure reasons.
 - ABI across major versions: every codec setting goes through AVOptions
@@ -477,6 +519,56 @@ the software encoders above are used as before.
   (no compression metadata); the portal offers it ahead of LINEAR (see
   [Capture](#capture)). See [the measurements](#zero-copy-measured).
 
+### RTMP output
+
+The studio's RTMP output ([studio.md](studio.md#outputs-studiooutput))
+goes through the same runtime-loaded FFmpeg, libavformat included, and
+links nothing.
+
+- Connection (`ffmpeg/avio.rs`): `avio_open2` with libavformat's own
+  `rtmp://` / `rtmps://` protocols (handshake, `connect`, `publish`, TLS),
+  `avio_write`, `avio_flush`, `avio_closep` (unpublish). Five functions and
+  `AVIOInterruptCB` (two fields, unchanged since libavformat 53): every
+  blocking call polls an abort flag, so a stop or a stuck network never
+  holds a thread for longer than FFmpeg's 100 ms poll once it is set;
+  `rw_timeout` (10 s) bounds a connect or a send to a server that stopped
+  answering. Protocol options go in as an `AVDictionary` (`rtmp_app`,
+  `rtmp_playpath` for a key given apart, `tcp_nodelay`).
+- What it sends is FLV (`studio/output/flv.rs`): libavformat's RTMP writer
+  reads an FLV byte stream and sends each tag as an RTMP message, so the
+  FLV is written by us like the recordings' Matroska and no muxer
+  (`AVFormatContext`, `AVStream`, codec parameters, all of which moved
+  between releases) is ever used.
+- Write errors: `avio_write` and `avio_flush` return nothing; a failed
+  write is only stored in `AVIOContext.error`, which moved (120 bytes in
+  libavformat 58, 84 in 63). It is found at load by search
+  (`layout::avio_error`): a context of our own whose write callback fails
+  with a sentinel value is flushed, and the one `int` of its first 200
+  bytes that changed to the sentinel is the field. Checked against the
+  `offsetof` of FFmpeg 4.4.8 and 9.0.1.
+- Audio (`ffmpeg/audio.rs`): RTMP services take AAC, so the studio's Opus
+  is decoded by FFmpeg's `opus` decoder and encoded by its native `aac`
+  encoder (AAC-LC, 48 kHz stereo, 160 kbit/s; `AudioSpecificConfig`
+  `11 90`). An audio encoder needs its sample format before it opens, and
+  `AVCodecContext.sample_fmt` has no AVOption: it is located like
+  `hw_frames_ctx`, from the option offsets of its neighbours (after
+  `sample_rate` directly from libavcodec 61 with `ch_layout` after it;
+  after `channels` up to 60), and checked to be `NONE` in a new context.
+  The encoder takes 1024-sample frames and Opus gives 960, so the samples
+  are queued and cut into frames of our own; such a frame needs its
+  channel layout, whose field also moved (`ch_layout` from libavutil 57,
+  `channels` and `channel_layout` before), and `avcodec_send_frame` copies
+  frames with `av_frame_ref`, which refuses one without a layout unless its
+  buffers are reference-counted. So the encoder's input frame is a
+  reference to the first frame the decoder made (FFmpeg filled in layout,
+  rate, format and buffer references), with only its leading fields
+  (`data`, `linesize`, `nb_samples`, unchanged since libavutil 51) and
+  `pts` pointed at our planes; the decoded buffers it keeps are never read.
+  The AAC frames carry the Opus packets' clock (less the encoder's 1024
+  samples of priming), and a gap in the studio's audio restarts it.
+- Without libavformat, or when a check fails, `LibraryInfo::rtmp` says why
+  and adding an RTMP output fails with that reason.
+
 Installing FFmpeg (runtime libraries only, no `-dev` packages):
 
 | OS | |
@@ -496,9 +588,32 @@ takes and returns `VideoFrame`s like the software codecs. Encoders get NV12
 `slice-height`, parsed by `codec::image_layout`, which is tested on every
 platform); H.264 is High (preferably Constrained High) without B-frames, SPS/PPS
 in front of every keyframe, keyframes on request (`request-sync`), bitrate
-changes at runtime (`video-bitrate`). Encoder order: the device's hardware
-encoders (H.264, VP9, VP8), then Google's software VP8 and H.264. Decoders
-return the newest finished picture per `decode` call (NV12 or I420).
+changes at runtime (`video-bitrate`). Encoders: the device's hardware ones
+(H.264, VP9, VP8, AV1) and Google's software VP8 and H.264 (software VP9 and
+AV1 are too slow), ordered by codec like every hardware encoder: the codecs
+every TeamSpeak client decodes (AV1, VP9, VP8) before H.264. So a phone
+without a hardware VP8, VP9 or AV1 encoder streams Google's software VP8 by
+default; a stream codec set to H.264 uses its hardware H.264 encoder.
+Decoders return the newest finished picture per `decode` call (NV12 or I420).
+
+The zero-copy path for screen sharing: while it is the only MediaCodec
+encoder in the process (one simulcast layer, one codec), an encoder reports a
+`gpu_alignment`, and the capture's sink then takes `GpuFrame`s. The Android
+provider's ticker hands it one per frame at the stream's rate; for the first
+the encoder starts a codec with an input surface (`createInputSurface`,
+`COLOR_FormatSurface`, `max-fps-to-encoder` at the stream's rate,
+`repeat-previous-frame-after` 100 ms so a still screen still answers keyframe
+requests) and publishes it (`mediacodec::input_surface`); the app points its
+virtual display at that surface (`Bridge.setScreenSurface`, resized to the
+layer's size), so the compositor renders the screen into the encoder: no
+`ImageReader` frame, no RGBA to NV12 conversion, no copy. Each `GpuFrame`
+then only collects what the codec encoded since; presentation times are the
+display's (`CLOCK_MONOTONIC`), moved onto the capture's timeline. A second
+encoder (another simulcast layer, another codec a viewer chose) turns the
+path off for every encoder: the display goes back to the reader and frames
+in memory, until it is the only one again. An encoder whose surface fails to
+start stays on frames in memory. A frame-rate change restarts the surface
+codec (the cap is fixed when it starts).
 
 libvpx settings follow libwebrtc's realtime setup: one pass CBR, no lag,
 `VPX_DL_REALTIME`, error resilient, keyframes only at start and on request
@@ -567,7 +682,7 @@ found at ...").
 | Linux Wayland (`pipewire`, default) | `PortalCapture`: xdg-desktop-portal ScreenCast via `ashpd`, frames from a PipeWire video stream (LINEAR DMA-BUF or shared memory) | `PipeWireAudioCapture`: default sink monitor (`stream.capture.sink = true`) |
 | Linux wlroots (`wlroots`, default) | `WlrootsCapture`: `ext-image-copy-capture-v1`, else `wlr-screencopy-unstable-v1`, outputs only, shared memory | |
 | Windows | `WindowsCapture`: Windows Graphics Capture (`windows-capture`), monitors and windows | `WasapiLoopback`: process loopback excluding our own process tree, falling back to plain loopback |
-| Android | `ExternalScreenCapture` fed by the app (MediaProjection → `ImageReader`, RGBA; see [android.md](android.md)) | `ExternalAudioCapture` fed by the app (`AudioPlaybackCapture` of every app but ours, 48 kHz float) |
+| Android | `ExternalScreenCapture` fed by the app (MediaProjection → `ImageReader`, RGBA borrowed from the reader; or straight into the MediaCodec encoder's input surface, see [MediaCodec](#codecs); [android.md](android.md)) | `ExternalAudioCapture` fed by the app (`AudioPlaybackCapture` of every app but ours, 48 kHz float) |
 
 `default_screen_capture()` picks a registered external provider first
 (`capture::external::set_screen_provider`, which the Android app calls at
@@ -631,7 +746,8 @@ renders into one buffer, conversion and scaling write into recycled frames,
 handoffs are atomic pointer swaps, and libvpx output is borrowed. The one
 allocation per encoded frame is the `Arc<[u8]>` of `EncodedFrame`, whose size
 varies per frame and so cannot be recycled. Backends outside our control add
-their own (x11rb reply buffers; the Android provider hands owned frames).
+their own (x11rb reply buffers; the Android provider's `start` path copies
+frames into the queue, its `start_sink` path, the one streams use, does not).
 
 ```sh
 # The real pipeline on the test pattern, no server:
@@ -901,6 +1017,8 @@ has not run on Windows yet.
 | `wayland-client`, `wayland-protocols`, `wayland-protocols-wlr` | MIT | wlroots capture |
 | `criterion` | Apache-2.0 OR MIT | benchmarks only (dev-dependency) |
 | `ashpd`, `pipewire`, `libspa` / libpipewire | MIT | libpipewire is dynamic |
+| `zune-jpeg`, `zune-core` | MIT OR Apache-2.0 OR Zlib | the studio's MJPEG cameras (`pipewire`) |
+| `tract-onnx`; PP-HumanSeg (ONNX model) | MIT OR Apache-2.0; Apache-2.0 | the studio's person segmentation (`segment`); the model is bundled |
 | `windows-capture`, `wasapi`, `windows` | MIT (`windows`: MIT OR Apache-2.0) | Windows only |
 | FFmpeg (libavcodec, libavutil, libavformat) | LGPL-2.1+ (GPL-2+ in builds with x264 and other GPL parts) | the user's installed libraries, loaded at runtime; never linked or shipped |
 | libva | MIT | the user's `libva.so.2` (the one FFmpeg's VA-API support uses), loaded at runtime for the GPU colour conversion; never linked or shipped |
@@ -925,6 +1043,7 @@ has not run on Windows yet.
 | Portal / PipeWire error paths (no bus, bus without portal, no daemon) | unit tests, manual probe | tested |
 | Portal capture (shared memory and DMA-BUF), PipeWire video and audio streams | `voelinctl stream bench --source portal` on a 2560x1440 Wayland desktop | tested: it delivered no frames at all (the DMA-BUF mapping length), and the DMA-BUF path cost 19.5 cores where shared memory costs 0.41. Both fixed; 1440p60 now runs on 0.55 cores (see the table above). Portal audio is still untested |
 | Windows Graphics Capture, WASAPI | – | type-checked for `x86_64-pc-windows-gnu` only |
+| RTMP through libavformat: write errors from `AVIOContext.error`, an abort ending a stuck connect, `AVCodecContext.sample_fmt`, Opus → AAC, FLV tags, a studio stream to FFmpeg's own RTMP server read back by ffprobe, a reconnect | `ffmpeg::avio`, `ffmpeg::audio`, `ffmpeg::tests`, `studio::output::{flv, rtmp}` tests, `voelin-core/tests/studio.rs` (see [studio.md](studio.md#status)) | tested with FFmpeg 9.0.1 and 4.4.8 (`VOELIN_FFMPEG_DIR`); no public service tried. FFmpeg 4.4.8 also showed that the existing `hw_frames_ctx` check refuses its layout there (VA-API off, as designed for a failed check) |
 | FFmpeg loader: sonames, missing FFmpeg, layout checks on a real release | `ffmpeg::sys` / `ffmpeg` unit tests; mirrors compared with offsets compiled from the 4.4-9.0 headers | tested (FFmpeg 6.1.1 on Ubuntu 24.04; FFmpeg 9.0.1 / libavutil 61 / libavcodec 63 on Arch, every offset compared with that release's own headers) |
 | FFmpeg software encoders → our decoders: x264 → OpenH264, SVT-AV1 / rav1e / libaom → dav1d (PSNR > 28 dB, keyframes at start and on request, timestamps, bitrate change, size change, odd sizes, Constrained High / Baseline) | `tests/ffmpeg.rs` (`VOELIN_OPENH264_LIB`, `--features av1`) | tested |
 | Self-test failures (NVENC without CUDA, Quick Sync without a session, VA-API without a render node, encoders not in the build) | `tests/ffmpeg.rs`, `voelinctl stream encoders` | tested: each fails alone with FFmpeg's reason |
@@ -949,12 +1068,16 @@ has not run on Windows yet.
 | Zero-copy from a real screen capture | `voelinctl stream bench --source portal --encoder h264_vaapi` | not run yet (a portal capture asks the person at the desktop); everything up to the portal is tested with the test pattern as DMA-BUFs (rows above, and the measurements) |
 | Offer [VP9, VP8], a viewer that decodes only VP8 → its own VP8 encoder, VP9 idle, pictures decoded | `voelin-core/tests/media_live.rs` `ts6_viewer_gets_the_codec_it_chose` (`VOELIN_LIVE=1`) | tested against the TeamSpeak 6 dev server (our client on both ends) |
 | Several codecs against official TeamSpeak viewers | – | not tested (no official client here) |
-| Test pattern → VP8 → decoder, rectangle position and colour | `voelin-core` `media::tests::local_preview_decodes_the_pattern` | tested |
+| Viewer counts: `viewer` of `notifystreaminfo`, counted up and down from the viewers joining and leaving, refreshed one stream at a time | `voelin-stream` `proto::tests::stream_info_answers`, `session::tests::viewer_counts`; `voelinctl stream list` | tested; against the TeamSpeak 6 dev server `stream list` printed "1 watching" while a viewer watched and "0 watching" after |
+| A viewer picks a layer: the offer's `a=x-voelin-layers`, `Signal::Layer`, the streamer moving it (and back with "Auto"); no request to a streamer whose offer lists no layers | `voelin-stream` `layer::tests::layers_in_the_sdp`, `tests/sessions.rs` `viewer_picks_a_layer` and `no_layer_request_without_the_offer_listing_layers` (two sessions, peers on loopback); `voelinctl stream watch --layer 1` against `stream start --placeholder --layer 1.0:2000k --layer 0.5:500k` | tested, also through the TeamSpeak 6 dev server: the viewer stayed on layer 1 at a 2.5 Mbit/s estimate that fits layer 0, and with a real two-layer VP8 stream of the test pattern (`stream start --synthetic --size 1280x720 --layer 1.0:3000k --layer 0.5:800k`) it decoded 640x360 pictures at a 3 Mbit/s estimate |
+| An offer with `a=x-voelin-layers` against libwebrtc | `tests/browser_interop.rs` `rust_streams_to_browser` (`VOELIN_INTEROP=1`, system Chromium 152 through `playwright-core`) | tested: answered and decoded as before. The official client itself not tried |
+| Test pattern → VP8 → decoder, rectangle position and colour; decoded frame rate and received bitrate | `voelin-core` `media::tests::local_preview_decodes_the_pattern`; the watch screen with the sample stream (`scripts/shots.sh ... watch`) | tested: the screenshot showed "VP8 · 1280×720 · 30 fps · 0.4 Mbit/s" over the player |
 | Test pattern → two engine stream tasks → str0m peers on loopback → decoder | `voelin-core` `stream::tests::test_pattern_through_stream_tasks` | tested |
 | Stream audio (RTP time → jitter buffer ids, volume, end) | `voelin-core` `audio::tests::stream_audio_with_volume`, stream task test | tested |
 | Stream mixer (latency, fade on underrun, drift correction, rate conversion, limiter, levels, live source changes), `BlockClock` | `voelin-media` `mix::tests`, `tests/mix_alloc.rs` (no allocation per block) | tested |
 | Application audio on PipeWire: desktop without our own stream, by name, by pid, a new player linked live, a quit one dropped, a restarted one matched again, the app list | `voelin-media/tests/pipewire_apps.rs` (private PipeWire, WirePlumber and D-Bus; tones told apart by frequency) | tested with PipeWire 1.0 and WirePlumber 0.4; skipped without them |
 | Streamer audio sources (mix levels, gain, mute, live change, microphone tap, window source error, silence) | `voelin-core` `media::tests::audio_sources_change_live`, `audio_sources_from_settings`, `settings::tests::audio_sources` | tested |
+| The share dialog's audio: the picked sources (gain, mute) in the capture request, none with "Share system audio" off; a running share following `stream.audio_sources` (a share without sound left so) | `voelin-ui` `streams::tests::the_share_carries_the_picked_audio`, `video::tests::a_share_follows_its_audio_sources`; headless screenshots (`share`, `share:live`) | tested; the dialog itself only in headless screenshots (nothing clicked) |
 | X11 `_NET_WM_PID` of the shared window | `tests/x11_capture.rs` under Xvfb (`VOELIN_X11_TEST_DISPLAY`) | tested |
 | WASAPI per-process loopback, audio sessions, `HWND` owner | – | type-checked for `x86_64-pc-windows-gnu` only |
 | Android per-app and all-but-ours playback capture | `cargo ndk -t arm64-v8a clippy`, `gradlew compileDebugKotlin` | compiles only (no device or emulator here) |
@@ -964,3 +1087,4 @@ has not run on Windows yet.
 | External capture providers (start, refusal, end of capture, default selection) | unit tests | tested |
 | MediaCodec buffer layouts (I420, NV12 with padding, `MediaImage2` NV21, crop) | unit tests (`codec::image_layout`) | tested |
 | MediaCodec encoders and decoders | – | compiles for `aarch64-linux-android` only (no device or emulator here) |
+| MediaCodec zero-copy screen path (virtual display into the encoder's input surface, back to the reader for simulcast) | `cargo ndk -t arm64-v8a clippy` | compiles only (no device or emulator here; fps and CPU not measured) |

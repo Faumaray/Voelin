@@ -136,8 +136,8 @@ comes from the engine's events; what a gateway adds is hidden without it.
 | Member card | `member` | Description, groups, talk power, country; private message, poke, friend, block; volume and mute for us | `ContactsChanged`; `Command::SetContact`, `SetClientVolume`, `SetClientMuted`, `Poke` |
 | Pinned messages | `pins` | In the members panel's place: cards with author, time, text, files and reactions; the pin unpins, a click jumps to the message | `Gateway` `Pins`, `Pinned`, `Unpinned`; `GatewayRequest::Pins`, `Unpin` |
 | Topics | `topics`, `topic:<id>` | In the members panel's place: search, cards with the message count, creator and last activity, Create Topic; an open topic replaces the chat's messages and takes replies | `Gateway` `Topics`, `Topic`, `TopicHistory`; `GatewayRequest::Topics`, `TopicHistory`, `CreateTopic`, `Post` |
-| Voice channel | `voice` | Title, topic, "5 in voice / 50 total", Voice Settings, Leave; the people as large avatars (talking ring and bars, muted, crown, streaming); the streams as cards (LIVE, viewers, kind, bitrate, sound, Watch Stream); the channel's chat | `Presence`, `Talking`, `StreamsChanged`, `Gateway` stream directory (viewer counts) |
-| Watching a stream | `watch`, `popout` | The channel's header with "5 in voice" and Leave; the player with the streamer, title, viewers, LIVE, the picture's height (the simulcast picker when the streamer offers layers), volume, elapsed time, back to the chat, pop out, full screen; a note that the stream belongs to the channel; the channel's chat and a Stream Info tab. Popped out (and in full screen) it fills the window | `WatchState`, decoded frames (`src/video.rs`), `Gateway` stream directory |
+| Voice channel | `voice` | Title, topic, "5 in voice / 50 total", Voice Settings, Leave; the people as large avatars (talking ring and bars, muted, crown, streaming); the streams as cards (LIVE, viewers, kind, bitrate, sound, Watch Stream); the channel's chat | `Presence`, `Talking`, `StreamsChanged`, viewer counts from `StreamsChanged`, else the `Gateway` stream directory |
+| Watching a stream | `watch`, `popout` | The channel's header with "5 in voice" and Leave; the player with the streamer, title, viewers, LIVE, the picture's height (the simulcast picker when a Voelin streamer offers layers), volume, elapsed time, what arrives (codec, size, frame rate, bitrate), back to the chat, pop out, full screen; a note that the stream belongs to the channel; the channel's chat and a Stream Info tab. Popped out (and in full screen) it fills the window | `WatchState`, `WatchLayers`, decoded frames and their stats (`src/video.rs`), `StreamsChanged` (viewer counts; the `Gateway` stream directory where the server gives none) |
 
 The pins and topics share the place of the members panel: opening one
 closes the other, and the members button brings the panel back. On the
@@ -180,6 +180,25 @@ game"), which is also what the gateway's directory shows. With sample data
 (`VOELIN_DEMO_UI`) the studio runs from synthetic sources (the test pattern,
 the synthetic camera with background blur, text, colours) and test tones,
 on settings in memory, and recordings go to a temporary folder.
+
+### Sound in the quick share
+
+The share dialog (`share`, and `share:live` for a running share) mixes its
+sound with the studio's pieces: while "Share system audio" is on (off: no
+audio at all) it shows the studio's mixer rows (`MixerRow`: meter, gain,
+mute, a menu) for `stream.audio_sources`, and Add opens the studio's picker
+(`PickDialog`) over it: the microphone, desktop audio without Voelin, the
+shared window's application, any application that plays (on Android the
+launchable apps with their icons), several at once. The rows read the
+main window's `StudioBridge`, filled without starting the studio
+(`App::mixer_show`). Starting a share hands the sources to the capture
+(`CaptureRequest::audio_sources`); while it runs the dialog shows the
+same rows with the share mixer's meters (about 15 times a second), and
+every change of `stream.audio_sources`, from the dialog or anywhere else,
+goes to the running capture at once (`Capture::follow_audio`, which calls
+`Streamer::reconfigure`). A share started without sound has no audio track
+to add sources to. With sample data `share:live` shares the test pattern
+with the sample studio's sources, live at once with sample viewers.
 
 ## Adding a screen
 
@@ -243,7 +262,7 @@ Environment variables (see `src/dev.rs`):
 - `VOELIN_DEMO_UI=1`: sample servers, channels, members, chat with emoji and
   a stream, without a server (nothing is stored).
 - `VOELIN_OPEN=<what>[,<what>...]`: `home`, `server`, `settings[:voice|keybinds|streaming|privacy|appearance]`,
-  `about`, `share`, `bookmark`, `emoji`, `client`, `panel`, `no-panel`,
+  `about`, `share[:live]`, `bookmark`, `emoji`, `client`, `panel`, `no-panel`,
   `voice`, `pins`, `topics`, `topic:<id>`, `member`, `watch`, `popout`
   (the server page, above), `tab:<home|servers|chat|activity|you>` (phone
   layout). With sample data, `watch` plays the local test pattern in the
@@ -296,13 +315,13 @@ the window's size so the pointer is not over the window, and passes
 | ![home](screenshots/desktop-home.png) | ![light](screenshots/desktop-light.png) |
 | ![settings](screenshots/desktop-settings-voice.png) | ![appearance](screenshots/desktop-settings-appearance.png) |
 | ![emoji](screenshots/desktop-emoji-picker.png) | ![volume](screenshots/desktop-client-volume.png) |
-| ![share](screenshots/desktop-share-dialog.png) | ![add server](screenshots/desktop-add-server.png) |
-| ![about](screenshots/desktop-about.png) | |
+| ![share](screenshots/desktop-share-dialog.png) | ![sharing](screenshots/desktop-share-live.png) |
+| ![add server](screenshots/desktop-add-server.png) | ![about](screenshots/desktop-about.png) |
 
 | Phone layout | | | | |
 |---|---|---|---|---|
 | ![chat](screenshots/mobile-chat.png) | ![servers](screenshots/mobile-servers.png) | ![home](screenshots/mobile-home.png) | ![you](screenshots/mobile-you.png) | ![settings](screenshots/mobile-settings.png) |
-| ![studio](screenshots/mobile-studio.png) | | | | |
+| ![voice channel](screenshots/mobile-voice.png) | ![activity](screenshots/mobile-activity.png) | ![studio](screenshots/mobile-studio.png) | ![share](screenshots/mobile-share.png) | ![sharing](screenshots/mobile-share-live.png) |
 
 ## Limits
 
@@ -314,9 +333,10 @@ the window's size so the pointer is not over the window, and passes
 - The members panel lists the people online: TeamSpeak tells a client
   nothing about offline members, so the mockup's "Offline" section and a
   server-wide member count are left out.
-- The quality picker shows only when the streamer's simulcast layers are
-  known; the engine does not yet tell a viewer which layers a stream has,
-  so in practice the player shows the decoded picture's height.
+- The quality picker shows only when the streamer lists its simulcast
+  layers, which only a Voelin streamer does (`a=x-voelin-layers`, see
+  [media.md](media.md)); for the official client's streams the player
+  shows the decoded picture's height.
 - Popping the stream out fills the main window (no second window yet).
 - A jump to a pinned message scrolls to where an average row would be
   (rows differ in height), and only to messages already loaded.
@@ -325,6 +345,7 @@ the window's size so the pointer is not over the window, and passes
   stream belongs to its channel): its destination picks among the servers,
   not among their channels. Image paths (image sources, backgrounds) are
   typed, there is no file chooser. The background effect replaces what is
-  outside an oval (the engine has no person segmentation model yet). The
+  around the person the engine's segmentation model finds (an oval where
+  the model does not load). The
   studio cannot be detached on Android (one window). Its own window shows
   no toasts; status messages go to the main window.

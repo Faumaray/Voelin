@@ -91,7 +91,8 @@ pub struct SourceChange {
 pub enum OutputSpec {
 	/// Record to a file; the name decides WebM or Matroska.
 	Record { path: PathBuf },
-	/// WHIP (or RTMP, which says it is not implemented yet).
+	/// WHIP (`http(s)://`, `token`: the bearer token) or RTMP
+	/// (`rtmp(s)://`, `token`: the stream key, unless it ends the URL).
 	Url { url: String, token: Option<String> },
 }
 
@@ -724,11 +725,11 @@ impl Studio {
 			OutputSpec::Record { path } => {
 				(Box::new(output::record::Recorder::start(path, layer, 2)?), false)
 			}
+			OutputSpec::Url { url, token } if output::rtmp::Rtmp::handles(url) => {
+				let rtmp = output::rtmp::Rtmp::start(url, token.as_deref(), layer).await?;
+				(Box::new(rtmp), true)
+			}
 			OutputSpec::Url { url, token } => {
-				if output::rtmp::Rtmp::handles(url) {
-					return Err(output::rtmp::Rtmp::connect(url, token.as_deref())
-						.expect_err("the RTMP seam always refuses"));
-				}
 				#[cfg(feature = "whip")]
 				{
 					let codec = self.stream_codec();
@@ -738,6 +739,7 @@ impl Studio {
 				}
 				#[cfg(not(feature = "whip"))]
 				{
+					let _ = (url, token);
 					return Err(Error::CaptureUnavailable {
 						backend: "whip",
 						reason: "this build has no WHIP output (feature `whip`)".into(),
@@ -834,10 +836,31 @@ impl Studio {
 		self.shared.state_changed();
 	}
 
-	/// Hand one encoded packet to every output. Called on the streamer's
-	/// encoder threads.
+	/// Hand one encoded packet of the stream's codec to every output.
+	/// Called on the streamer's encoder threads.
 	pub fn write_packet(&self, packet: &Packet<'_>) {
 		self.shared.write_packet(packet);
+	}
+
+	/// Adds to `out` the video codecs the outputs taking `layer` need besides
+	/// the stream's ([`OutputSink::video_codec`]), which the streamer then
+	/// encodes too, for that layer only.
+	pub fn output_codecs(&self, layer: u32, out: &mut Vec<Codec>) {
+		for output in lock(&self.shared.outputs).iter() {
+			let Some(codec) = output.sink.video_codec() else { continue };
+			if !out.contains(&codec) && output.sink.wants(Track::Video { codec, layer }) {
+				out.push(codec);
+			}
+		}
+	}
+
+	/// Hand a video packet of a codec an output asked for
+	/// ([`Studio::output_codecs`]) to the outputs that need that codec only:
+	/// the replay buffer and recordings keep the stream's.
+	pub fn write_output_packet(&self, packet: &Packet<'_>) {
+		if let Track::Video { codec, .. } = packet.track {
+			self.shared.to_outputs(packet, Some(codec));
+		}
 	}
 
 	/// Whether an output needs a keyframe of `layer` now (a recording that
@@ -921,11 +944,18 @@ impl Shared {
 		if let Err(e) = lock(&self.replay).write(packet) {
 			self.fail("replay", e);
 		}
+		self.to_outputs(packet, None);
+	}
+
+	/// Write `packet` to the outputs that want it; with `codec`, only to
+	/// those that need that codec of their own.
+	fn to_outputs(&self, packet: &Packet<'_>, codec: Option<Codec>) {
 		let mut failed = Vec::new();
 		{
 			let mut outputs = lock(&self.outputs);
 			for output in outputs.iter_mut() {
-				if !output.sink.wants(packet.track) {
+				let own = codec.is_none_or(|c| output.sink.video_codec() == Some(c));
+				if !own || !output.sink.wants(packet.track) {
 					continue;
 				}
 				if let Err(e) = output.sink.write(packet) {
@@ -1052,7 +1082,7 @@ fn stats_loop(shared: &Shared) {
 					name: output.sink.name().to_owned(),
 					bytes,
 					kbps: output.kbps,
-					error: output.error.clone(),
+					error: output.error.clone().or_else(|| output.sink.error()),
 				});
 			}
 			stats
@@ -1292,15 +1322,16 @@ mod tests {
 			.await
 			.unwrap();
 		studio.apply(Command::SetReplay { seconds: 2, memory_mb: 4 }).await.unwrap();
+		let vp8 = |n: u64| Packet {
+			track: Track::Video { codec: Codec::Vp8, layer: 0 },
+			pts_90khz: n * 3000,
+			keyframe: n.is_multiple_of(15),
+			width: 64,
+			height: 48,
+			data: &[1, 2, 3, 4],
+		};
 		for n in 0..30u64 {
-			studio.write_packet(&Packet {
-				track: Track::Video { codec: Codec::Vp8, layer: 0 },
-				pts_90khz: n * 3000,
-				keyframe: n.is_multiple_of(15),
-				width: 64,
-				height: 48,
-				data: &[1, 2, 3, 4],
-			});
+			studio.write_packet(&vp8(n));
 		}
 		{
 			let outputs = lock(&studio.shared.outputs);
@@ -1308,16 +1339,60 @@ mod tests {
 			assert!(outputs[0].sink.bytes() > 0);
 		}
 		assert!(lock(&studio.shared.replay).stats().packets > 0);
-		// An RTMP url is refused with its reason, not silently dropped.
-		let e = studio
-			.apply(Command::AddOutput(OutputSpec::Url {
-				url: "rtmp://live.example/app".into(),
-				token: None,
-			}))
-			.await
-			.unwrap_err()
-			.to_string();
-		assert!(e.contains("FFmpeg"), "{e}");
+
+		// An output that needs H.264 of layer 0 (as RTMP does) while the
+		// stream is VP8: the streamer is asked for H.264 of that layer only,
+		// and those packets reach that output only.
+		struct NeedsH264(Arc<AtomicU64>);
+		impl OutputSink for NeedsH264 {
+			fn name(&self) -> &str {
+				"h264"
+			}
+
+			fn wants(&self, track: Track) -> bool {
+				track == Track::Video { codec: Codec::H264, layer: 0 }
+			}
+
+			fn video_codec(&self) -> Option<Codec> {
+				Some(Codec::H264)
+			}
+
+			fn write(&mut self, packet: &Packet<'_>) -> Result<()> {
+				self.0.fetch_add(packet.data.len() as u64, Ordering::Relaxed);
+				Ok(())
+			}
+		}
+		let got = Arc::new(AtomicU64::new(0));
+		lock(&studio.shared.outputs).push(Output {
+			id: 7,
+			sink: Box::new(NeedsH264(got.clone())),
+			path: None,
+			started: Instant::now(),
+			kbps: 0.0,
+			last_bytes: 0,
+			pushes: true,
+			error: None,
+		});
+		let mut codecs = vec![Codec::Vp8];
+		studio.output_codecs(0, &mut codecs);
+		assert_eq!(codecs, [Codec::Vp8, Codec::H264]);
+		let mut codecs = vec![Codec::Vp8];
+		studio.output_codecs(1, &mut codecs);
+		assert_eq!(codecs, [Codec::Vp8], "no H.264 for a layer nothing takes");
+		let (recorded, replayed) = {
+			let outputs = lock(&studio.shared.outputs);
+			(outputs[0].sink.bytes(), lock(&studio.shared.replay).stats().packets)
+		};
+		let h264 = Packet { track: Track::Video { codec: Codec::H264, layer: 0 }, ..vp8(30) };
+		studio.write_output_packet(&h264);
+		assert_eq!(got.load(Ordering::Relaxed), 4);
+		// The recording and the replay buffer keep the stream's codec.
+		assert_eq!(lock(&studio.shared.outputs)[0].sink.bytes(), recorded);
+		assert_eq!(lock(&studio.shared.replay).stats().packets, replayed);
+		// And the stream's own packets do not reach it.
+		studio.write_packet(&vp8(31));
+		assert_eq!(got.load(Ordering::Relaxed), 4);
+		lock(&studio.shared.outputs).retain(|o| o.id != 7);
 
 		// The studio is a capture backend the streamer can use unchanged.
 		let mut capture = studio.capture();

@@ -18,6 +18,8 @@ use std::ffi::{CStr, c_char, c_int};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
+pub mod audio;
+pub mod avio;
 pub mod encoder;
 mod gpu;
 mod layout;
@@ -33,7 +35,7 @@ pub use encoder::{
 pub use sys::Search;
 
 use self::layout::{FrameFields, FrameRefs};
-use self::sys::{Api, Libs, LogCallback, Ptr, VaList};
+use self::sys::{Api, FormatApi, Libs, LogCallback, Ptr, VaList};
 
 /// Pixel format numbers of this release (looked up by name).
 #[derive(Clone, Copy, Debug)]
@@ -46,6 +48,13 @@ pub(crate) struct PixFmts {
 	pub bgr0: Option<c_int>,
 }
 
+/// libavformat's I/O functions and where a write error lands
+/// (`AVIOContext.error`, see [`layout::avio_error`]).
+pub(crate) struct Io {
+	pub api: FormatApi,
+	pub error: usize,
+}
+
 /// What was loaded, for logs and the UI.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LibraryInfo {
@@ -56,8 +65,10 @@ pub struct LibraryInfo {
 	/// `major.minor.micro` of libavcodec and libavutil.
 	pub avcodec: String,
 	pub avutil: String,
-	/// libavformat of the same release was found (for RTMP output later).
+	/// libavformat of the same release was found.
 	pub avformat: bool,
+	/// Why RTMP output (libavformat's network I/O) cannot be used, if not.
+	pub rtmp: Result<(), String>,
 	/// Why hardware frame pools (VA-API) cannot be used, if not.
 	pub hw_frames: Result<(), String>,
 	/// Why DMA-BUF frames cannot be imported (zero-copy), if not.
@@ -73,6 +84,10 @@ pub struct Ffmpeg {
 	pub(crate) codec_hw_frames: Result<usize, String>,
 	/// `AVFrame.buf[0]` / `hw_frames_ctx`.
 	pub(crate) frame_refs: Result<FrameRefs, String>,
+	/// `AVCodecContext.sample_fmt`, for the AAC encoder of RTMP output.
+	pub(crate) codec_sample_fmt: Result<usize, String>,
+	/// libavformat's I/O for RTMP output.
+	pub(crate) io: Result<Io, String>,
 	pub(crate) pix: PixFmts,
 	info: LibraryInfo,
 }
@@ -109,6 +124,11 @@ impl Ffmpeg {
 		};
 		let codec_hw_frames = layout::codec_hw_frames(&api);
 		let frame_refs = layout::frame_refs(&api, yuv420p);
+		let codec_sample_fmt = layout::codec_sample_fmt(&api);
+		let io = libs.format_api().and_then(|format| {
+			let error = layout::avio_error(&format, &api)?;
+			Ok(Io { api: format, error })
+		});
 		// SAFETY: no arguments; returns version numbers and a static string.
 		let (avcodec, avutil, release) = unsafe {
 			(
@@ -123,6 +143,10 @@ impl Ffmpeg {
 			avcodec: version_text(avcodec),
 			avutil: version_text(avutil),
 			avformat: libs.avformat.is_some(),
+			rtmp: match (&io, &codec_sample_fmt) {
+				(Err(e), _) | (_, Err(e)) => Err(e.clone()),
+				_ => Ok(()),
+			},
 			hw_frames: codec_hw_frames.clone().map(|_| ()),
 			dmabuf_import: match (&codec_hw_frames, &frame_refs, pix.drm_prime) {
 				(Err(e), _, _) | (_, Err(e), _) => Err(e.clone()),
@@ -130,7 +154,17 @@ impl Ffmpeg {
 				_ => Ok(()),
 			},
 		};
-		Ok(Self { api, _libs: libs, frame, codec_hw_frames, frame_refs, pix, info })
+		Ok(Self {
+			api,
+			_libs: libs,
+			frame,
+			codec_hw_frames,
+			frame_refs,
+			codec_sample_fmt,
+			io,
+			pix,
+			info,
+		})
 	}
 
 	/// The process's FFmpeg, loaded on first use from [`Search::from_env`]
@@ -253,8 +287,34 @@ mod tests {
 		assert!(!info.release.is_empty());
 		assert!(info.avcodec.split('.').count() == 3);
 		assert!(info.hw_frames.is_ok(), "{info:?}");
+		// libavformat comes with libavcodec in every package.
+		assert!(info.rtmp.is_ok(), "{info:?}");
 		if cfg!(target_pointer_width = "64") {
 			assert!(ffmpeg.frame_refs.is_ok(), "{:?}", ffmpeg.frame_refs);
+		}
+	}
+
+	/// `AVIOContext.error` is where the headers of the installed releases
+	/// put it (compiled with `offsetof`: 120 in libavformat 58, FFmpeg 4.4;
+	/// 84 in 63, FFmpeg 9.0).
+	#[cfg(target_pointer_width = "64")]
+	#[test]
+	fn write_errors_are_found_where_the_headers_put_them() {
+		let Ok(ffmpeg) = Ffmpeg::get() else { return };
+		let io = ffmpeg.io.as_ref().expect("libavformat's I/O");
+		// SAFETY: no arguments.
+		let major = unsafe { (io.api.avformat_version)() } >> 16;
+		match major {
+			58 => assert_eq!(io.error, 120),
+			63 => assert_eq!(io.error, 84),
+			_ => {}
+		}
+		// And `AVCodecContext.sample_fmt`: 408 in libavcodec 58, 348 in 63.
+		// SAFETY: no arguments.
+		match unsafe { (ffmpeg.api.avcodec_version)() } >> 16 {
+			58 => assert_eq!(ffmpeg.codec_sample_fmt, Ok(408)),
+			63 => assert_eq!(ffmpeg.codec_sample_fmt, Ok(348)),
+			_ => {}
 		}
 	}
 

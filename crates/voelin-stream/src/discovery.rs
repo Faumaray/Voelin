@@ -201,6 +201,13 @@ impl Discovery {
 		changed
 	}
 
+	/// Ask the server (`requeststreaminfo`) for the streams of `streamer`
+	/// again, e.g. for their viewer counts; `false` if it cannot answer.
+	pub fn ask_server(&mut self, streamer: ClientId, out: &mut Outbox) -> bool {
+		// The server is the first lookup (see `new`).
+		self.lookups.first_mut().is_some_and(|server| server.lookup(streamer, out))
+	}
+
 	/// A request of a lookup failed on the server.
 	pub fn failed(&mut self, request: &Request, error: &str) {
 		for lookup in &mut self.lookups {
@@ -246,6 +253,7 @@ mod tests {
 				bitrate: 4608,
 				viewer_limit: 0,
 				audio: true,
+				viewers: Some(0),
 			},
 			return_code: None,
 		}

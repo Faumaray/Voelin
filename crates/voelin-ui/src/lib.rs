@@ -11,6 +11,7 @@ mod events;
 mod home;
 mod hotkey;
 mod images;
+mod inbox;
 mod members;
 mod messages;
 mod previews;
@@ -25,3 +26,4 @@ mod video;
 mod vm;
 
 pub use app::{HostedEngine, RunOptions, run};
+pub use inbox::{Request, request};

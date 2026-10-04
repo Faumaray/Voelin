@@ -78,6 +78,10 @@ export struct StudioPick {
     detail: string,
     // For the icon: monitor, window, portal, camera, microphone, desktop, app, tone
     kind: string,
+    // The application's own icon (audio), if it has one.
+    icon: image,
+    // Already mixed in (audio): picking it again takes it out.
+    selected: bool,
 }
 
 // The header, the preview's badges and the bottom bar.
@@ -223,9 +227,10 @@ export global StudioBridge {
     // The phone layout's source cards: screen, camera, window.
     callback main-source(string);
 
-    // Audio: fill `picks` with what can be added; add, change, remove.
+    // Audio: fill `picks` with what can be mixed in (marking what is);
+    // mix one in or take it out, change, remove.
     callback list-audio();
-    callback add-audio(int);
+    callback toggle-audio(int);
     // While dragging (`done` false) and at the end.
     callback set-gain(int, float, bool);
     callback toggle-mute(int);
