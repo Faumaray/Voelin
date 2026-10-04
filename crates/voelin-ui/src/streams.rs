@@ -19,7 +19,8 @@ use crate::app::{
 	App, Bridge, ShareForm, SourceItem, StreamItem, ViewerItem, later, model, with_app,
 };
 use crate::settings::{
-	BITRATE_CHOICES, FPS_CHOICES, ShareDefaults, nearest_choice, parse_positive,
+	BITRATE_CHOICES, FPS_CHOICES, LEGACY_BITRATE_CHOICES, LEGACY_FPS_CHOICES, ShareDefaults,
+	nearest_choice, parse_positive,
 };
 use crate::video::{self, Capture, CaptureRequest, Decoder};
 
@@ -540,7 +541,8 @@ impl App {
 			fps_index: nearest_choice(&FPS_CHOICES, fps) as i32,
 			fps: fps.to_string().into(),
 			bitrate_index: nearest_choice(&BITRATE_CHOICES, bitrate) as i32,
-			bitrate: bitrate.to_string().into(),
+			// Automatic (0): the field stays empty.
+			bitrate: if bitrate == 0 { String::new() } else { bitrate.to_string() }.into(),
 			audio: defaults.audio,
 			auto_accept: defaults.auto_accept,
 		}
@@ -586,7 +588,8 @@ impl App {
 			self.refresh_streams();
 			return;
 		}
-		// Typed values (no maximum), else the chosen presets.
+		// Typed values (no maximum), else the chosen presets (bitrate 0:
+		// automatic).
 		let choice = |i: i32, choices: &[u32]| {
 			choices[usize::try_from(i).unwrap_or(0).min(choices.len() - 1)]
 		};
@@ -602,8 +605,8 @@ impl App {
 			}
 		}
 		let defaults = ShareDefaults {
-			fps_index: nearest_choice(&FPS_CHOICES, fps),
-			bitrate_index: nearest_choice(&BITRATE_CHOICES, bitrate),
+			fps_index: nearest_choice(&LEGACY_FPS_CHOICES, fps),
+			bitrate_index: nearest_choice(&LEGACY_BITRATE_CHOICES, bitrate),
 			audio: form.audio,
 			auto_accept: form.auto_accept,
 		};
@@ -650,6 +653,10 @@ impl App {
 					self.settings.portal_restore_token = Some(token);
 					self.store_settings();
 				}
+				if setup.bitrate == 0 {
+					// Automatic: what it comes to for the size captured.
+					setup.bitrate = capture.streamer().bitrate_kbps();
+				}
 				if setup.audio && !capture.has_audio() {
 					setup.audio = false;
 					let reason = capture.audio_error().unwrap_or_default();
@@ -660,6 +667,8 @@ impl App {
 					(true, demo_viewers())
 				} else {
 					let session = session as u64;
+					// One layer, whatever a studio stream had before.
+					self.engine.send(Command::SetStreamLayers { session, layers: Vec::new() });
 					self.engine.send(Command::StartStream { session, setup, auto_accept });
 					(false, Vec::new())
 				};

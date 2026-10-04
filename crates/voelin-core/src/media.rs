@@ -232,6 +232,22 @@ pub fn test_pattern_source() -> CaptureSource {
 	}
 }
 
+/// The most an automatic bitrate ([`auto_bitrate`]) gives, in bit/s. A
+/// typed bitrate may be higher: nothing in Voelin caps it.
+pub const AUTO_BITRATE_MAX: u64 = 60_000_000;
+
+/// The least an automatic bitrate gives, in bit/s.
+pub const AUTO_BITRATE_MIN: u64 = 300_000;
+
+/// The automatic bitrate (bit/s) of a `width` x `height` stream at `fps`:
+/// 0.12 bits per pixel and frame (7.5 Mbit/s at 1080p30, 15 at 1080p60, 27
+/// at 1440p60), from [`AUTO_BITRATE_MIN`] up to [`AUTO_BITRATE_MAX`], which
+/// 3840x2160 reaches at 60 fps and 1920x1080 at 240.
+pub fn auto_bitrate(width: u32, height: u32, fps: u32) -> u64 {
+	let pixels = u128::from(width) * u128::from(height) * u128::from(fps.max(1));
+	(pixels * 12 / 100).clamp(AUTO_BITRATE_MIN.into(), AUTO_BITRATE_MAX.into()) as u64
+}
+
 /// Where a [`Streamer`] puts encoded frames.
 pub trait MediaSink: Send + Sync {
 	/// Send one frame; `false` once nobody takes frames any more.
@@ -267,6 +283,14 @@ pub trait MediaSink: Send + Sync {
 	fn video_codecs(&self, out: &mut Vec<Codec>) {
 		let _ = out;
 	}
+
+	/// Layer `layer` has an automatic bitrate and is encoded at `bitrate`
+	/// bit/s ([`auto_bitrate`] of its size and frame rate): told with its
+	/// first frame and whenever it changes, so the stream's connections can
+	/// probe for it.
+	fn auto_bitrate(&self, layer: LayerId, bitrate: u64) {
+		let _ = (layer, bitrate);
+	}
 }
 
 impl MediaSink for StreamSink {
@@ -296,6 +320,10 @@ impl MediaSink for StreamSink {
 
 	fn layer_bitrate(&self, layer: LayerId) -> Option<u64> {
 		StreamSink::layer_bitrate(self, layer)
+	}
+
+	fn auto_bitrate(&self, layer: LayerId, bitrate: u64) {
+		StreamSink::auto_bitrate(self, layer, bitrate);
 	}
 }
 
@@ -500,7 +528,8 @@ pub struct StreamerConfig {
 	/// gives up to this rate; layers may cap lower.
 	pub fps: u32,
 	/// Video bitrate in kbit/s, as in `StreamSetup::bitrate`, for the single
-	/// layer when `layers` is empty.
+	/// layer when `layers` is empty; 0: automatic, [`auto_bitrate`] of the
+	/// size and frame rate encoded, following both as they change.
 	pub bitrate_kbps: u32,
 	/// The codec of our offer, see [`stream_codec`].
 	pub codec: Codec,
@@ -553,10 +582,10 @@ impl Default for StreamerConfig {
 
 impl StreamerConfig {
 	/// The layers that are encoded: [`layers`](Self::layers), or one layer at
-	/// `bitrate_kbps`.
+	/// `bitrate_kbps` (bitrate 0: automatic).
 	pub fn effective_layers(&self) -> Vec<LayerSpec> {
 		if self.layers.is_empty() {
-			vec![LayerSpec::single(u64::from(self.bitrate_kbps.max(1)) * 1000)]
+			vec![LayerSpec::single(u64::from(self.bitrate_kbps) * 1000)]
 		} else {
 			self.layers.clone()
 		}
@@ -569,7 +598,8 @@ impl StreamerConfig {
 pub struct StreamerConfigUpdate {
 	/// Frame-rate cap; the capture follows without restarting.
 	pub fps: Option<u32>,
-	/// Bitrate of the single layer (used while `layers` is empty).
+	/// Bitrate of the single layer (used while `layers` is empty); 0:
+	/// automatic.
 	pub bitrate_kbps: Option<u32>,
 	/// Another codec: new encoders, starting with keyframes.
 	pub codec: Option<Codec>,
@@ -674,7 +704,7 @@ struct Layer {
 	/// A keyframe was asked for.
 	keyframe: AtomicBool,
 	stop: AtomicBool,
-	/// Configured bitrate and cap (0: none), bit/s.
+	/// Configured bitrate (0: automatic) and cap (0: none), bit/s.
 	bitrate: AtomicU64,
 	max_bitrate: AtomicU64,
 	/// Frame rate the encoder plans for.
@@ -708,7 +738,7 @@ impl Layer {
 			gpu: AtomicU64::new(0),
 			keyframe: AtomicBool::new(false),
 			stop: AtomicBool::new(false),
-			bitrate: AtomicU64::new(spec.bitrate.max(1)),
+			bitrate: AtomicU64::new(spec.bitrate),
 			max_bitrate: AtomicU64::new(spec.max_bitrate.unwrap_or(0)),
 			fps: AtomicU32::new(layer_fps(spec, fps)),
 			next_encoder: Mutex::new(None),
@@ -728,7 +758,7 @@ impl Layer {
 
 	fn update(&self, spec: &LayerSpec, fps: u32) {
 		*lock(&self.spec) = spec.clone();
-		self.bitrate.store(spec.bitrate.max(1), Ordering::Relaxed);
+		self.bitrate.store(spec.bitrate, Ordering::Relaxed);
 		self.max_bitrate.store(spec.max_bitrate.unwrap_or(0), Ordering::Relaxed);
 		self.fps.store(layer_fps(spec, fps), Ordering::Relaxed);
 	}
@@ -878,6 +908,8 @@ fn cores() -> u32 {
 fn encoder_config(spec: &LayerSpec, fps: u32, threads: u32) -> EncoderConfig {
 	EncoderConfig {
 		fps: layer_fps(spec, fps),
+		// An automatic bitrate (0) is set with the first frame, whose size it
+		// takes.
 		bitrate_bps: spec.bitrate.clamp(1, u64::from(u32::MAX)) as u32,
 		content: ContentHint::Screen,
 		threads,
@@ -1217,6 +1249,25 @@ impl Streamer {
 	/// The ids of the layers being encoded.
 	pub fn layer_ids(&self) -> Vec<LayerId> {
 		lock(&self.shared.layers).iter().map(|l| l.id).collect()
+	}
+
+	/// The stream's video bitrate in kbit/s, for `StreamSetup::bitrate`: its
+	/// highest layer's; an automatic one ([`auto_bitrate`]) from the size
+	/// captured last and the layer's frame rate, [`AUTO_BITRATE_MAX`] while
+	/// nothing was captured yet.
+	pub fn bitrate_kbps(&self) -> u32 {
+		let size = self.shared.size.load(Ordering::Relaxed);
+		let (width, height) = ((size >> 32) as u32, size as u32);
+		let layers = lock(&self.shared.layers).clone();
+		let bitrate = layers.iter().map(|layer| match layer.bitrate.load(Ordering::Relaxed) {
+			0 if size == 0 => AUTO_BITRATE_MAX,
+			0 => {
+				let (w, h) = lock(&layer.spec).output_size(width, height);
+				auto_bitrate(w, h, layer.fps.load(Ordering::Relaxed))
+			}
+			bitrate => bitrate,
+		});
+		u32::try_from(bitrate.max().unwrap_or(0) / 1000).unwrap_or(u32::MAX)
 	}
 
 	pub fn stats(&self) -> StreamerStats {
@@ -2040,6 +2091,8 @@ fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 	let mut generation = shared.encoders_generation.load(Ordering::Relaxed);
 	// Whether the stream codec was encoded for the last frame.
 	let mut primary_on = true;
+	// The automatic bitrate last told, and to which sink.
+	let mut told: Option<(u64, *const ())> = None;
 	// The last picture, and when it came: a static screen sends no frames,
 	// so keyframe requests are answered by encoding it again.
 	let mut last: Option<(Picture, Instant)> = None;
@@ -2127,7 +2180,19 @@ fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 			None => continue,
 		};
 		// Follow the layer's bitrate, or what the viewers' estimates allow.
-		let configured = layer.bitrate.load(Ordering::Relaxed);
+		let configured = match layer.bitrate.load(Ordering::Relaxed) {
+			0 => {
+				let (width, height) = picture.size();
+				let auto = auto_bitrate(width, height, layer.fps.load(Ordering::Relaxed));
+				let to = Arc::as_ptr(&sink).cast::<()>();
+				if told != Some((auto, to)) {
+					told = Some((auto, to));
+					sink.auto_bitrate(layer.id, auto);
+				}
+				auto
+			}
+			bitrate => bitrate,
+		};
 		let cap = match layer.max_bitrate.load(Ordering::Relaxed) {
 			0 => u64::MAX,
 			max => max,
@@ -2960,6 +3025,8 @@ mod tests {
 		codecs: Mutex<Vec<Codec>>,
 		frames: Mutex<Vec<(Codec, EncodedFrame)>>,
 		keyframe: AtomicBool,
+		/// What [`MediaSink::auto_bitrate`] told, in order.
+		auto: Mutex<Vec<(LayerId, u64)>>,
 	}
 
 	impl MediaSink for CodecSink {
@@ -2979,6 +3046,70 @@ mod tests {
 		fn video_codecs(&self, out: &mut Vec<Codec>) {
 			out.extend(lock(&self.codecs).iter());
 		}
+
+		fn auto_bitrate(&self, layer: LayerId, bitrate: u64) {
+			lock(&self.auto).push((layer, bitrate));
+		}
+	}
+
+	#[test]
+	fn automatic_bitrates() {
+		assert_eq!(auto_bitrate(1920, 1080, 30), 7_464_960);
+		assert_eq!(auto_bitrate(1920, 1080, 60), 14_929_920);
+		assert_eq!(auto_bitrate(2560, 1440, 60), 26_542_080);
+		// The ceiling: 4K60, 1080p240 and anything beyond.
+		assert_eq!(auto_bitrate(3840, 2160, 60), 59_719_680);
+		assert_eq!(auto_bitrate(3840, 2160, 120), AUTO_BITRATE_MAX);
+		assert_eq!(auto_bitrate(7680, 4320, 320), AUTO_BITRATE_MAX);
+		assert_eq!(auto_bitrate(1920, 1080, 320), AUTO_BITRATE_MAX);
+		// The floor, and no overflow at absurd sizes.
+		assert_eq!(auto_bitrate(160, 120, 1), AUTO_BITRATE_MIN);
+		assert_eq!(auto_bitrate(u32::MAX, u32::MAX, u32::MAX), AUTO_BITRATE_MAX);
+		assert_eq!(auto_bitrate(0, 0, 0), AUTO_BITRATE_MIN);
+	}
+
+	/// Bitrate 0 is automatic: the encoder runs at the stream's own
+	/// automatic bitrate, which the sink is told, and follows a new frame
+	/// rate.
+	#[cfg(feature = "media-desktop")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn an_automatic_bitrate_follows_the_stream() {
+		let codecs = Codecs::builtin();
+		let config = StreamerConfig {
+			source: SourceId::Synthetic,
+			synthetic_size: (640, 480),
+			fps: 30,
+			bitrate_kbps: 0,
+			audio: false,
+			..StreamerConfig::default()
+		};
+		let streamer = Streamer::start(&codecs, config).await.unwrap();
+		let sink = Arc::new(CodecSink::default());
+		streamer.attach(sink.clone());
+		let told = |bitrate: u64| {
+			let sink = sink.clone();
+			async move {
+				let deadline = Instant::now() + Duration::from_secs(10);
+				while lock(&sink.auto).last() != Some(&(0, bitrate)) {
+					assert!(Instant::now() < deadline, "{:?}", lock(&sink.auto));
+					tokio::time::sleep(Duration::from_millis(20)).await;
+				}
+			}
+		};
+		told(auto_bitrate(640, 480, 30)).await;
+		assert_eq!(streamer.bitrate_kbps(), 1105);
+		// Told once, not per frame.
+		tokio::time::sleep(Duration::from_millis(200)).await;
+		assert_eq!(lock(&sink.auto).len(), 1);
+		assert_eq!(streamer.stats().layers[0].bitrate, auto_bitrate(640, 480, 30));
+		let update = StreamerConfigUpdate { fps: Some(15), ..StreamerConfigUpdate::default() };
+		streamer.reconfigure(&codecs, update).unwrap();
+		told(auto_bitrate(640, 480, 15)).await;
+		// A typed bitrate is not automatic.
+		let update =
+			StreamerConfigUpdate { bitrate_kbps: Some(2000), ..StreamerConfigUpdate::default() };
+		streamer.reconfigure(&codecs, update).unwrap();
+		assert_eq!(streamer.bitrate_kbps(), 2000);
 	}
 
 	/// Viewers that chose another codec get their own encoder per layer,

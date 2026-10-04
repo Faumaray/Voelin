@@ -1459,40 +1459,28 @@ export component StreamSettings inherits VerticalLayout {
         }
         HorizontalLayout {
             spacing: Theme.space-2;
-            Button {
+            for size in [
+                { text: "720p", width: "1280", height: 720 },
+                { text: "1080p", width: "1920", height: 1080 },
+                { text: "1440p", width: "2560", height: 1440 },
+                { text: "4K", width: "3840", height: 2160 },
+                { text: "8K", width: "7680", height: 4320 },
+            ]: Button {
                 small: true;
-                text: "720p";
+                text: size.text;
                 horizontal-stretch: 1;
-                checked: StudioBridge.status.output-height == 720;
-                clicked => { StudioBridge.set-output("1280", "720", out-fps.text); }
+                checked: StudioBridge.status.output-height == size.height;
+                clicked => { StudioBridge.set-output(size.width, "\{size.height}", out-fps.text); }
             }
-            Button {
+        }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            for fps in [30, 60, 120, 144, 240] : Button {
                 small: true;
-                text: "1080p";
+                text: "\{fps}";
                 horizontal-stretch: 1;
-                checked: StudioBridge.status.output-height == 1080;
-                clicked => { StudioBridge.set-output("1920", "1080", out-fps.text); }
-            }
-            Button {
-                small: true;
-                text: "1440p";
-                horizontal-stretch: 1;
-                checked: StudioBridge.status.output-height == 1440;
-                clicked => { StudioBridge.set-output("2560", "1440", out-fps.text); }
-            }
-            Button {
-                small: true;
-                text: "30";
-                horizontal-stretch: 1;
-                checked: StudioBridge.status.fps == 30;
-                clicked => { StudioBridge.set-output(out-w.text, out-h.text, "30"); }
-            }
-            Button {
-                small: true;
-                text: "60";
-                horizontal-stretch: 1;
-                checked: StudioBridge.status.fps == 60;
-                clicked => { StudioBridge.set-output(out-w.text, out-h.text, "60"); }
+                checked: StudioBridge.status.fps == fps;
+                clicked => { StudioBridge.set-output(out-w.text, out-h.text, "\{fps}"); }
             }
         }
     }
@@ -1502,6 +1490,8 @@ export component StreamSettings inherits VerticalLayout {
         if StudioBridge.layers.length == 0: TextField {
             text: StudioBridge.form.bitrate;
             input-type: number;
+            // Empty: automatic, from the output's size and frame rate.
+            placeholder: @tr("Auto (up to 60 Mbit/s)");
             label: @tr("Bitrate in kbit/s");
             accepted(t) => { StudioBridge.edit-form("bitrate", t); }
         }

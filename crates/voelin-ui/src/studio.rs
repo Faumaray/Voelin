@@ -29,14 +29,14 @@ use voelin_core::media::voelin_media::mix::SourceHandle;
 use voelin_core::media::voelin_media::{VideoFrame, convert};
 use voelin_core::media::{
 	AudioApps, AudioSourceSpec, AudioSourceStats, Latest, Streamer, StreamerConfigUpdate,
-	StreamerStats, audio_apps, audio_source_specs, screen_sources,
+	StreamerStats, audio_apps, audio_source_specs, auto_bitrate, screen_sources,
 };
 use voelin_core::settings::{
 	AudioSourceKindSetting, AudioSourceSetting, Key, Kind, STREAM_AUDIO_SOURCES,
 	STREAM_BITRATE_KBPS, STREAM_LAYERS, STUDIO_RECORDING_DIR, STUDIO_REPLAY_MEMORY_MB,
 	STUDIO_REPLAY_SECONDS, STUDIO_SCENES, Settings, layer_specs,
 };
-use voelin_core::stream::{EndReason, StreamSetup, ViewerInfo, ViewerState};
+use voelin_core::stream::{EndReason, LayerSpec, StreamSetup, ViewerInfo, ViewerState};
 use voelin_core::studio::scene::{
 	Align, Background, Colour, Crop, Fit, Scene, Scenes, Source, SourceKind, Transform,
 };
@@ -434,6 +434,30 @@ impl App {
 
 	fn studio_streamer(&self) -> Option<&Streamer> {
 		self.studio.run.as_ref()?.streamer.as_ref()
+	}
+
+	/// The stream's layers for the engine: `stream.layers`, or the single
+	/// layer at [`studio_bitrate_kbps`](Self::studio_bitrate_kbps).
+	fn studio_session_layers(&self, settings: &Settings) -> Vec<LayerSpec> {
+		match layer_specs(&settings.get(&STREAM_LAYERS)) {
+			layers if layers.is_empty() => {
+				vec![LayerSpec::single(u64::from(self.studio_bitrate_kbps(settings)) * 1000)]
+			}
+			layers => layers,
+		}
+	}
+
+	/// `stream.bitrate_kbps`, an automatic one (0) as it comes to for the
+	/// output's size and frame rate.
+	fn studio_bitrate_kbps(&self, settings: &Settings) -> u32 {
+		match settings.get(&STREAM_BITRATE_KBPS) {
+			0 => {
+				let (width, height) = self.studio.scenes.size();
+				let bitrate = auto_bitrate(width, height, self.studio.scenes.fps());
+				u32::try_from(bitrate / 1000).unwrap_or(u32::MAX)
+			}
+			kbps => kbps,
+		}
 	}
 
 	fn studio_op(&self, op: Op) {
@@ -960,7 +984,9 @@ impl App {
 			.destination
 			.and_then(|id| list.iter().position(|(d, _)| *d == id))
 			.map_or(-1, |i| i as i32);
+		// Automatic (0): the field stays empty and says so.
 		let bitrate = self.studio.settings.as_ref().map_or(0, |s| s.get(&STREAM_BITRATE_KBPS));
+		let bitrate = if bitrate == 0 { String::new() } else { bitrate.to_string() };
 		let form = StudioForm {
 			destination,
 			title: ui.title.clone().into(),
@@ -970,7 +996,7 @@ impl App {
 			show_chat: ui.show_chat,
 			show_now_playing: ui.show_now_playing,
 			audio: ui.audio,
-			bitrate: bitrate.to_string().into(),
+			bitrate: bitrate.into(),
 		};
 		self.studio_each(|b| {
 			if b.get_form() != form {
@@ -993,7 +1019,7 @@ impl App {
 		let measured: f64 = encoder.map_or(0.0, |e| e.layers.iter().map(|l| l.kbps).sum());
 		let layers = settings.map(|s| s.get(&STREAM_LAYERS)).unwrap_or_default();
 		let configured_bps: u64 = if layers.is_empty() {
-			settings.map_or(0, |s| u64::from(s.get(&STREAM_BITRATE_KBPS)) * 1000)
+			settings.map_or(0, |s| u64::from(self.studio_bitrate_kbps(s)) * 1000)
 		} else {
 			layers.iter().map(|l| l.bitrate).max().unwrap_or(0)
 		};
@@ -1191,6 +1217,11 @@ impl App {
 	/// `stream.layers` or `stream.bitrate_kbps` changed.
 	pub(crate) fn studio_encoding_changed(&mut self) {
 		let settings = self.studio_settings();
+		if let Some(stream) = &self.studio.stream {
+			let session = stream.session as u64;
+			let layers = self.studio_session_layers(&settings);
+			self.engine.send(Command::SetStreamLayers { session, layers });
+		}
 		let update = StreamerConfigUpdate {
 			bitrate_kbps: Some(settings.get(&STREAM_BITRATE_KBPS)),
 			layers: Some(layer_specs(&settings.get(&STREAM_LAYERS))),
@@ -1254,13 +1285,16 @@ impl App {
 			"audio" => ui.audio = on,
 			"bitrate" => {
 				let settings = self.studio_settings();
-				match parse_positive(value) {
+				// Nothing, 0 or "auto": automatic.
+				let auto =
+					matches!(value.trim(), "" | "0") || value.trim().eq_ignore_ascii_case("auto");
+				match parse_positive(value).or(auto.then_some(0)) {
 					Some(kbps) => {
 						if let Err(e) = settings.set(&STREAM_BITRATE_KBPS, kbps) {
 							self.set_status(e.to_string());
 						}
 					}
-					None => self.set_status("The bitrate is a whole number of kbit/s above 0."),
+					None => self.set_status("The bitrate is a whole number of kbit/s, or auto."),
 				}
 				return;
 			}
@@ -1328,7 +1362,7 @@ impl App {
 	pub(crate) fn studio_add_layer(&mut self) {
 		let settings = self.studio_settings();
 		let mut layers = settings.get(&STREAM_LAYERS);
-		let bitrate = settings.get(&STREAM_BITRATE_KBPS);
+		let bitrate = self.studio_bitrate_kbps(&settings);
 		if layers.is_empty() {
 			layers.push(vm::studio::next_layer(&[], bitrate));
 		}
@@ -1897,7 +1931,7 @@ impl App {
 		let layers = settings.get(&STREAM_LAYERS);
 		let bitrate = match layers.iter().map(|l| l.bitrate).max() {
 			Some(bps) => u32::try_from(bps / 1000).unwrap_or(u32::MAX),
-			None => settings.get(&STREAM_BITRATE_KBPS),
+			None => self.studio_bitrate_kbps(&settings),
 		};
 		let setup = StreamSetup {
 			name: stream_name(&self.studio.ui),
@@ -1906,7 +1940,12 @@ impl App {
 			..StreamSetup::default()
 		};
 		let auto_accept = self.settings.share.auto_accept;
-		self.engine.send(Command::StartStream { session: session as u64, setup, auto_accept });
+		// The stream's layers are the encoder's, so viewers move between
+		// them (the session sends only layers it knows of).
+		let session = session as u64;
+		let layers = self.studio_session_layers(&settings);
+		self.engine.send(Command::SetStreamLayers { session, layers });
+		self.engine.send(Command::StartStream { session, setup, auto_accept });
 		self.studio_refresh_status();
 	}
 

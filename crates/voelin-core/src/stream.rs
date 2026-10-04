@@ -124,6 +124,14 @@ impl StreamSink {
 		self.feedback.bitrate(layer)
 	}
 
+	/// The encoder of `layer` runs at `bitrate` bit/s by itself (an
+	/// automatic bitrate, from the size and frame rate it encodes): the
+	/// stream's layer takes it, so new connections start at it and every
+	/// connection probes for it.
+	pub fn auto_bitrate(&self, layer: LayerId, bitrate: u64) {
+		let _ = self.tx.send(StreamInput::AutoBitrate { layer, bitrate });
+	}
+
 	pub fn is_live(&self) -> bool {
 		self.live.load(Ordering::Relaxed)
 	}
@@ -169,6 +177,12 @@ pub(crate) enum StreamInput {
 	},
 	/// Simulcast layers of our stream (now and for streams started later).
 	Layers(Vec<LayerSpec>),
+	/// The bitrate an encoder chose for a layer of the live stream
+	/// ([`StreamSink::auto_bitrate`]).
+	AutoBitrate {
+		layer: LayerId,
+		bitrate: u64,
+	},
 	/// SRTP profile order of new connections.
 	SrtpProfiles(Vec<SrtpProfile>),
 	Frame(EncodedFrame),
@@ -387,6 +401,21 @@ impl StreamTask {
 					self.streams.set_layers(layers)
 				} else {
 					Ok(())
+				}
+			}
+			StreamInput::AutoBitrate { layer, bitrate } => {
+				// The live stream's layers only; the configured ones (for
+				// streams started later) keep their automatic bitrate.
+				let layers = self.streams.streamer().map(|s| s.layers().to_vec());
+				match layers {
+					Some(mut layers) => match layers.iter_mut().find(|l| l.id == layer) {
+						Some(spec) if spec.bitrate != bitrate => {
+							spec.bitrate = bitrate;
+							self.streams.set_layers(layers)
+						}
+						_ => Ok(()),
+					},
+					None => Ok(()),
 				}
 			}
 			StreamInput::SrtpProfiles(profiles) => {
@@ -960,6 +989,33 @@ mod tests {
 		})
 		.await;
 		feeder.await.unwrap();
+	}
+
+	/// An encoder's automatic bitrate reaches the live stream's layer (which
+	/// asks the viewer's layer for a keyframe, as every layer change does);
+	/// the same bitrate again changes nothing.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn automatic_bitrates_reach_the_live_stream() {
+		let (handles, mut rx, _frames) = pair(None);
+		let sink = live_and_watching(&handles, &mut rx).await;
+		let keyframes = || {
+			let mut layers = LayerSet::new();
+			sink.take_layer_keyframes(&mut layers);
+			layers.contains(0)
+		};
+		keyframes();
+		sink.auto_bitrate(0, 9_000_000);
+		timeout(Duration::from_secs(5), async {
+			while !keyframes() {
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the layer did not change");
+		sink.auto_bitrate(0, 9_000_000);
+		tokio::time::sleep(Duration::from_millis(200)).await;
+		assert!(!keyframes(), "nothing changed");
+		handles[0].send(StreamInput::Stop);
 	}
 
 	/// A viewer that was not told about a running stream, and whose server

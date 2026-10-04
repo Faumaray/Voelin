@@ -126,6 +126,22 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   `MediaSink::layer_bitrate(id)` when the sink knows it (capped by
   `max_bitrate`), else its configured bitrate; libvpx changes it in place
   without a keyframe.
+- Automatic bitrate: `bitrate_kbps` 0 (the default of the setting
+  `stream.bitrate_kbps`) gives the single layer `auto_bitrate(width,
+  height, fps)`: 0.12 bits per pixel and frame of the size and rate it is
+  encoded at (7.5 Mbit/s at 1080p30, 15 at 1080p60, 27 at 1440p60), at
+  least 300 kbit/s and at most 60 Mbit/s (`AUTO_BITRATE_MAX`, reached at
+  3840x2160@60, 2560x1440@135, 1920x1080@240). It follows the stream live:
+  the encoder thread works it out from each picture's size and the layer's
+  frame rate, so a resolution or frame-rate change moves it at once. The
+  sink is told with the first frame and whenever it changes
+  (`MediaSink::auto_bitrate`); the engine's `StreamSink` puts it into the
+  live stream's layer, so new connections start their bandwidth estimate at
+  it and all of them probe for it. `Streamer::bitrate_kbps()` is what to
+  announce in `setupstream` (the share dialog and the studio do, up to the
+  65535 kbit/s a server keeps: [protocol notes](protocol-notes/ts6-streaming.md#what-setupstream-takes-confirmed-600-beta131-2026-10-04)).
+  A typed bitrate is used as it is, above 60 Mbit/s too; nothing in Voelin
+  caps it (encoders take up to 2^32-1 bit/s).
 - `Streamer::reconfigure(&codecs, StreamerConfigUpdate { fps, bitrate_kbps,
   codec, encoder, layers, audio_sources })` applies from the next frame without restarting the
   capture: encoders are created first (an error changes nothing), layers

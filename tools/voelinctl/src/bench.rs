@@ -92,8 +92,9 @@ struct BenchArgs {
 	/// k/M suffixes); repeatable. Without it: one layer at --bitrate.
 	#[arg(long = "layer")]
 	layers: Vec<String>,
-	/// Bitrate in kbit/s without --layer.
-	#[arg(long, default_value_t = 4608)]
+	/// Bitrate in kbit/s without --layer; 0: automatic, from the size and
+	/// frame rate (up to 60 Mbit/s).
+	#[arg(long, default_value_t = 0)]
 	bitrate: u32,
 	/// Measured time in seconds (after the warm-up).
 	#[arg(long, default_value_t = 10)]

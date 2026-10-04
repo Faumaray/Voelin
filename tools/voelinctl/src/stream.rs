@@ -17,7 +17,7 @@ use voelin_core::media::voelin_media::capture::SourceId;
 use voelin_core::media::voelin_media::{Codec, Codecs, VideoFrame, convert};
 use voelin_core::media::{
 	CaptureBackend, EncodedSource, EncoderPreference, Latest, Streamer, StreamerConfig,
-	VideoPipeline, peer_config, preferred_codec, stream_codec, video_codec,
+	VideoPipeline, auto_bitrate, peer_config, preferred_codec, stream_codec, video_codec,
 };
 use voelin_model::ServerFlavor;
 use voelin_stream::{
@@ -75,8 +75,10 @@ pub enum StreamCommand {
 		/// Video frames per second.
 		#[arg(long, default_value_t = 30)]
 		fps: u32,
-		/// Video bitrate in kbit/s (announced in `setupstream` too).
-		#[arg(long, default_value_t = 4608)]
+		/// Video bitrate in kbit/s (announced in `setupstream` too, up to the
+		/// 65535 a server keeps); 0: automatic, from the size and frame rate
+		/// (up to 60 Mbit/s).
+		#[arg(long, default_value_t = 0)]
 		bitrate: u32,
 		/// No audio track.
 		#[arg(long)]
@@ -194,7 +196,7 @@ pub async fn run(con: &mut Connection, args: &StreamArgs) -> Result<()> {
 			}
 			if *synthetic {
 				let (w, h) = parse_size(size)?;
-				let bitrate = u64::from(*bitrate) * 1000;
+				let bitrate = u64::from(pattern_kbps(size, *fps, *bitrate)?) * 1000;
 				config.set_h264_format(H264Profile::ConstrainedHigh, w, h, *fps, bitrate);
 			}
 		}
@@ -241,10 +243,14 @@ pub async fn run(con: &mut Connection, args: &StreamArgs) -> Result<()> {
 					l.rid.as_ref().map(|r| format!(", rid {r}")).unwrap_or_default()
 				);
 			}
+			// The test pattern's (and the placeholder's) automatic bitrate is
+			// known now; a capture's once it captures.
+			let wanted = *bitrate;
+			let mut bitrate = pattern_kbps(size, *fps, wanted)?;
 			let (source, audio) = if *placeholder {
 				let source = SyntheticSource::with_layers(
 					*fps,
-					(u64::from(*bitrate) * 1000 / 8 / u64::from((*fps).max(1))) as usize,
+					(u64::from(bitrate) * 1000 / 8 / u64::from((*fps).max(1))) as usize,
 					!no_audio,
 					layers,
 				);
@@ -252,12 +258,13 @@ pub async fn run(con: &mut Connection, args: &StreamArgs) -> Result<()> {
 			} else {
 				let source = if *synthetic { "synthetic" } else { source.as_str() };
 				let (source, backend) = parse_source(source)?;
+				let config_source = source.clone();
 				let Some(codec) = codec else { bail!("no video encoder in this build") };
 				let config = StreamerConfig {
 					source,
 					backend,
 					fps: *fps,
-					bitrate_kbps: *bitrate,
+					bitrate_kbps: wanted,
 					codec,
 					encoder: codecs.preference().clone(),
 					audio: !no_audio,
@@ -266,6 +273,9 @@ pub async fn run(con: &mut Connection, args: &StreamArgs) -> Result<()> {
 					..StreamerConfig::default()
 				};
 				let streamer = Streamer::start(&codecs, config).await.context("capture")?;
+				if wanted == 0 && !matches!(config_source, SourceId::Synthetic) {
+					bitrate = streamer.bitrate_kbps();
+				}
 				let backend = streamer.stats().layers.first().and_then(|l| l.backend);
 				let backend = backend.map_or("?".to_owned(), |b| b.to_string());
 				println!("capturing with {} ({codec} through {backend})", streamer.backend());
@@ -275,8 +285,8 @@ pub async fn run(con: &mut Connection, args: &StreamArgs) -> Result<()> {
 				let audio = streamer.has_audio();
 				(Source::Encoded(EncodedSource::new(streamer)), audio)
 			};
-			let setup =
-				StreamSetup { name: name.clone(), bitrate: *bitrate, audio, ..Default::default() };
+			println!("bitrate: {}", rate(u64::from(bitrate) * 1000));
+			let setup = StreamSetup { name: name.clone(), bitrate, audio, ..Default::default() };
 			let options = StreamerOptions {
 				setup,
 				auto_accept: *auto_accept,
@@ -319,6 +329,16 @@ fn parse_source(spec: &str) -> Result<(SourceId, CaptureBackend)> {
 		"window" if arg.is_some() => (SourceId::Window(number(0)?), CaptureBackend::Auto),
 		_ => bail!("unknown source {spec:?}: synthetic, x11[:N], screen[:N], window:<id>, portal"),
 	})
+}
+
+/// `wanted` kbit/s, or for 0 (automatic) the automatic bitrate of a test
+/// pattern of `size` at `fps`.
+fn pattern_kbps(size: &str, fps: u32, wanted: u32) -> Result<u32> {
+	if wanted > 0 {
+		return Ok(wanted);
+	}
+	let (w, h) = parse_size(size)?;
+	Ok(u32::try_from(auto_bitrate(w, h, fps) / 1000).unwrap_or(u32::MAX))
 }
 
 /// `<width>x<height>`.
