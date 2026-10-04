@@ -106,5 +106,6 @@ jobs:
       - name: Draft Gitea release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         env:
-          GITEA_RELEASE_TOKEN: ${{ secrets.GITEA_RELEASE_TOKEN }}
+          # Gitea refuses secret names starting with GITEA_ or GITHUB_.
+          GITEA_RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: scripts/gitea-release.sh dist/release

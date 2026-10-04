@@ -26,8 +26,10 @@ checks in GitHub or separately before accepting a release.
   combined `SHA256SUMS` are attached to a **draft** Gitea release. Review,
   sign checksums and publish manually, just as on GitHub.
 
-Set the repository secret `GITEA_RELEASE_TOKEN` to a Gitea personal access
-token with `write:repository`, limited to this repository where supported.
+Set the repository secret `RELEASE_TOKEN` to a Gitea personal access
+token with `write:repository`, limited to this repository where supported
+(Gitea refuses secret names that start with `GITEA_` or `GITHUB_`; the
+workflow hands it to the script as `GITEA_RELEASE_TOKEN`).
 The token's account must be able to write releases. The publishing script
 uses the runner's `GITHUB_SERVER_URL` and `GITHUB_REPOSITORY`; it requires
 HTTPS and never uses GitHub's release API. On this instance the server URL

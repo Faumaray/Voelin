@@ -68,7 +68,10 @@ the separate `release.yml` workflow below.
 
    Newer `gitea-runner` (2.0+) supports the workflow-level timeout. Check
    the installed runner's configuration rather than assuming the YAML
-   timeout is enforced.
+   timeout is enforced. The Gitea server also stops any task running
+   longer than `ENDLESS_TASK_TIMEOUT` (default `3h`, `[actions]` in
+   `app.ini`), whatever the runner or the workflow say; raise it above the
+   longest job (see the release runner below).
 
 The workflow shares the repository's local system-dependencies action with
 GitHub CI and bootstraps rustup if absent, then installs the toolchain and
@@ -134,10 +137,17 @@ runner:
 ```
 
 The workflow requests eight hours; older act_runner ignores job-level
-timeouts, so the runner limit is required. Keep sufficient RAM/swap and
-free disk for all package builds and their Docker caches. Builds run
-sequentially and limit Cargo to one job. The workflow never prunes shared
-Docker state or creates host swap. The token and optional Android signing
+timeouts, so the runner limit is required. The server's own limit must
+allow it too, or Gitea stops the release after three hours:
+
+```ini
+[actions]
+ENDLESS_TASK_TIMEOUT = 9h
+```
+
+Keep sufficient RAM/swap and free disk for all package builds and their
+Docker caches. Builds run sequentially and limit Cargo to one job. The
+workflow never prunes shared Docker state or creates host swap. The token and optional Android signing
 secrets are documented in [Gitea releases](release.md#gitea-releases).
 
 Gitea packages pass the shared Linux checks but do not gain native Windows,
