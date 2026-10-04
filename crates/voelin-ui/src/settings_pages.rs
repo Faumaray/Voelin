@@ -15,12 +15,13 @@ use tracing::warn;
 use voelin_core::settings::{
 	AudioSourceKindSetting, AudioSourceSetting, BlockMode, CACHE_FETCH_IMAGES, CACHE_MAX_MB,
 	CHAT_DEDUPE_TOLERANCE_MS, CHAT_HISTORY_PAGE, CHAT_RETENTION_DAYS, CHAT_STORE_HISTORY,
-	CaptureChoice, CodecChoice, FILES_PROGRESS_MS, Key, LayerSetting, PRIVACY_BLOCK_MODE,
-	PRIVACY_POKES, PRIVACY_PRIVATE_MESSAGES, SRTP_PROFILES, STREAM_AUDIO_SOURCES,
-	STREAM_BITRATE_KBPS, STREAM_CAPTURE_BACKEND, STREAM_CODEC, STREAM_DECODER_BACKEND,
-	STREAM_ENCODER_BACKEND, STREAM_FPS, STREAM_HARDWARE_ACCELERATION, STREAM_HARDWARE_DECODING,
-	STREAM_LAYERS, STREAM_PERMISSIONS, STREAM_SRTP_PROFILES, STUDIO_RECORDING_DIR,
-	STUDIO_REPLAY_MEMORY_MB, STUDIO_REPLAY_SECONDS, Source as SettingSource, StreamPermissions,
+	CaptureChoice, CodecChoice, FILES_PROGRESS_MS, IDENTITY_IMPORT, Key, LayerSetting,
+	PRIVACY_BLOCK_MODE, PRIVACY_POKES, PRIVACY_PRIVATE_MESSAGES, SRTP_PROFILES,
+	STREAM_AUDIO_SOURCES, STREAM_BITRATE_KBPS, STREAM_CAPTURE_BACKEND, STREAM_CODEC,
+	STREAM_DECODER_BACKEND, STREAM_ENCODER_BACKEND, STREAM_FPS, STREAM_HARDWARE_ACCELERATION,
+	STREAM_HARDWARE_DECODING, STREAM_LAYERS, STREAM_PERMISSIONS, STREAM_SRTP_PROFILES,
+	STUDIO_RECORDING_DIR, STUDIO_REPLAY_MEMORY_MB, STUDIO_REPLAY_SECONDS, Source as SettingSource,
+	StreamPermissions,
 };
 use voelin_core::{Command, GatewayRequest};
 use voelin_gateway_proto::{Action, ConfigSource, PermRule, UniqueIds, feature};
@@ -31,9 +32,9 @@ use crate::app::{
 	PrivacyForm, SettingItem, StreamingForm, VideoForm, later, model,
 };
 use crate::settings::{
-	IDENTITY_DEFAULT, NOTIFY_EVENTS, NOTIFY_FRIENDS, NOTIFY_MENTIONS, NOTIFY_MESSAGES,
-	NOTIFY_POKES, NotifyLevel, UI_IMAGE_PREVIEW_KB, VIDEO_BACKGROUND, VIDEO_CAMERA, VIDEO_MIRROR,
-	VIDEO_RESOLUTION, page_keys, parse_size,
+	NOTIFY_EVENTS, NOTIFY_FRIENDS, NOTIFY_MENTIONS, NOTIFY_MESSAGES, NOTIFY_POKES, NotifyLevel,
+	UI_IMAGE_PREVIEW_KB, VIDEO_BACKGROUND, VIDEO_CAMERA, VIDEO_MIRROR, VIDEO_RESOLUTION, page_keys,
+	parse_size,
 };
 use crate::social::{allowed_index, allowed_of};
 
@@ -333,9 +334,6 @@ impl App {
 				voelin_core::media::encoder_preference(&self.prefs),
 				voelin_core::media::configured_codec(&self.prefs),
 			);
-		}
-		if key == IDENTITY_DEFAULT.name() {
-			self.load_default_identity();
 		}
 		if key == VIDEO_CAMERA.name()
 			|| key == VIDEO_BACKGROUND.name()
@@ -913,18 +911,6 @@ impl App {
 
 	// Identities (My Account, Profiles).
 
-	/// The identity used unless a bookmark names another: `identity.default`,
-	/// else the first.
-	pub(crate) fn load_default_identity(&mut self) {
-		let wanted = self.prefs.get(&IDENTITY_DEFAULT) as i64;
-		let entries = self.store.identities().unwrap_or_default();
-		let id = entries.iter().find(|e| e.id == wanted).or(entries.first()).map(|e| e.id);
-		if let Some(identity) = id.and_then(|id| self.store.identity(id).ok()) {
-			self.identity = identity;
-		}
-		self.load_own_uids();
-	}
-
 	/// Our unique ids (every identity, both server generations), to tell
 	/// our own messages.
 	pub(crate) fn load_own_uids(&mut self) {
@@ -939,19 +925,28 @@ impl App {
 		self.social.own_uids = uids;
 	}
 
-	/// The identity a bookmark connects with.
-	pub(crate) fn identity_for(&self, bookmark: Option<i64>) -> tsclientlib::Identity {
+	/// The identity servers see us as on `bookmark` (the one place that
+	/// picks it): the bookmark's own if it names one that exists, else the
+	/// store's default.
+	fn identity_id_for(&self, bookmark: Option<i64>) -> Option<i64> {
+		let entries = self.store.identities().unwrap_or_default();
 		bookmark
 			.and_then(|b| self.bookmark(b))
 			.and_then(|b| b.identity)
+			.filter(|id| entries.iter().any(|e| e.id == *id))
+			.or_else(|| self.default_identity_id())
+	}
+
+	/// The identity a connection to `bookmark` uses ([`Self::identity_id_for`]).
+	pub(crate) fn identity_for(&self, bookmark: Option<i64>) -> tsclientlib::Identity {
+		self.identity_id_for(bookmark)
 			.and_then(|id| self.store.identity(id).ok())
 			.unwrap_or_else(|| self.identity.clone())
 	}
 
+	/// The store's default identity (`Store::default_identity`).
 	fn default_identity_id(&self) -> Option<i64> {
-		let entries = self.store.identities().unwrap_or_default();
-		let wanted = self.prefs.get(&IDENTITY_DEFAULT) as i64;
-		entries.iter().find(|e| e.id == wanted).or(entries.first()).map(|e| e.id)
+		self.store.default_identity().ok().flatten().map(|e| e.id)
 	}
 
 	pub(crate) fn refresh_account(&self) {
@@ -960,7 +955,7 @@ impl App {
 		let bookmark = self.current.and_then(|id| self.bookmark(id));
 		let identity = self.identity_for(self.current);
 		let ids = UniqueIds::from_omega(&identity.key().to_pub().to_ts());
-		let entry_id = bookmark.and_then(|b| b.identity).or_else(|| self.default_identity_id());
+		let entry_id = self.identity_id_for(self.current);
 		let name = self
 			.store
 			.identities()
@@ -985,6 +980,11 @@ impl App {
 		let bridge = ui.global::<Bridge>();
 		let entries = self.store.identities().unwrap_or_default();
 		let default = self.default_identity_id();
+		let picks: Vec<(&str, Option<i64>)> = self
+			.bookmarks
+			.iter()
+			.map(|b| (b.name.as_str(), self.identity_id_for(Some(b.id))))
+			.collect();
 		let items: Vec<IdentityItem> = entries
 			.iter()
 			.map(|e| {
@@ -992,13 +992,10 @@ impl App {
 				let ids =
 					identity.as_ref().map(|i| UniqueIds::from_omega(&i.key().to_pub().to_ts()));
 				let improving = self.pages.improving.get(&e.id);
-				let used: Vec<&str> = self
-					.bookmarks
+				let used: Vec<&str> = picks
 					.iter()
-					.filter(|b| {
-						b.identity == Some(e.id) || (b.identity.is_none() && Some(e.id) == default)
-					})
-					.map(|b| b.name.as_str())
+					.filter(|(_, id)| *id == Some(e.id))
+					.map(|(name, _)| *name)
 					.collect();
 				IdentityItem {
 					id: e.id as i32,
@@ -1007,6 +1004,7 @@ impl App {
 					uid6: ids.map(|i| i.ts6).unwrap_or_default().into(),
 					level: i32::from(identity.map_or(e.level, |i| i.level())),
 					default: Some(e.id) == default,
+					origin: crate::identities::origin_label(e.origin).into(),
 					improving: improving.map_or(0, |i| i32::from(i.target)),
 					reached: improving.map_or(0, |i| i32::from(i.reached)),
 					used_by: used.join(", ").into(),
@@ -1049,14 +1047,14 @@ impl App {
 			})
 			.collect();
 		bridge.set_found_identities(model(found));
+		bridge.set_identity_import(self.prefs.get(&IDENTITY_IMPORT));
 		self.refresh_account();
 	}
 
-	/// "default", "delete", "export", "stop".
+	/// "delete", "export", "stop" (the default: [`Self::use_identity`]).
 	pub(crate) fn identity_action(&mut self, id: i32, action: &str) {
 		let id = i64::from(id);
 		match action {
-			"default" => self.put(&IDENTITY_DEFAULT, id as u64),
 			"delete" => {
 				if self.default_identity_id() == Some(id) {
 					self.set_status(

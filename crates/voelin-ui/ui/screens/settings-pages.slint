@@ -236,15 +236,15 @@ export component AccountSection inherits VerticalLayout {
     }
 }
 
-// Make default, export, delete.
+// Use as default, export, delete.
 component IdentityActions inherits HorizontalLayout {
     in property <IdentityItem> item;
     spacing: Theme.space-3;
     if !root.item.default: Button {
         small: true;
-        text: @tr("Make default");
+        text: @tr("Use as default");
         y: (parent.height - self.height) / 2;
-        clicked => { Bridge.identity-action(root.item.id, "default"); }
+        clicked => { Bridge.use-identity(root.item.id); }
     }
     Button {
         small: true;
@@ -323,8 +323,8 @@ component IdentityRow inherits Rectangle {
             spacing: Theme.space-3;
             Text {
                 text: root.item.improving > 0
-                    ? @tr("Security level {}; raising it to {} on every core (best so far: {})…", root.item.level, root.item.improving, root.item.reached)
-                    : @tr("Security level {}", root.item.level);
+                    ? @tr("{} · security level {}; raising it to {} on every core (best so far: {})…", root.item.origin, root.item.level, root.item.improving, root.item.reached)
+                    : @tr("{} · security level {}", root.item.origin, root.item.level);
                 color: root.item.improving > 0 ? Theme.accent-text : Theme.text-secondary;
                 font-size: Theme.font-sm;
                 vertical-alignment: center;
@@ -381,13 +381,19 @@ export component ProfilesSection inherits VerticalLayout {
             wrap: word-wrap;
         }
         Hint {
-            text: @tr("The security level is hash cash: servers may require a minimum (often 8). Each level takes about twice as long as the one before. Exported identities are written as TeamSpeak 3 .ini files into your downloads folder; they hold the private key.");
+            text: @tr("Servers know you by the default identity's unique id, from the next connection on, unless a server names another below. The security level is hash cash: servers may require a minimum (often 8). Each level takes about twice as long as the one before. Exported identities are written as TeamSpeak 3 .ini files into your downloads folder; they hold the private key.");
         }
     }
     Card {
         title: @tr("Import from TeamSpeak");
         icon: Icons.download;
         subtitle: @tr("From the official clients' settings and .ini exports on this device; their files are only read.");
+        ToggleRow {
+            text: @tr("Import identities from TeamSpeak on start");
+            description: @tr("While you use the identity Voelin made for you, the one TeamSpeak uses becomes your default, once.");
+            checked <=> Bridge.identity-import;
+            toggled => { Bridge.set-identity-import(Bridge.identity-import); }
+        }
         HorizontalLayout {
             alignment: start;
             spacing: Theme.space-3;

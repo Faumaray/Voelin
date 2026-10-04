@@ -3,7 +3,7 @@
 
 use slint::{ComponentHandle, SharedString};
 use tracing::warn;
-use voelin_core::identity::Found;
+use voelin_core::identity::LaunchImport;
 use voelin_core::{Command, ObserveState, Source, VoiceOptions, VoiceState};
 use voelin_store::{Bookmark, QueryConfig, QueryTransport};
 
@@ -14,20 +14,20 @@ use crate::vm;
 pub(crate) const CREATED_IDENTITY: &str = "Default";
 
 /// What to tell the user about the identities imported from the official
-/// clients at start ([`voelin_core::identity::import_new`]), if any.
-/// `had_identity`: we had one before, so it stays the default.
-pub(crate) fn imported_status(imported: &[Found], had_identity: bool) -> Option<String> {
-	let first = imported.first()?;
-	let n = imported.len();
-	let names = imported.iter().map(|f| f.nickname.as_str()).collect::<Vec<_>>().join(", ");
-	Some(match (had_identity, n) {
-		(true, 1) => format!("Imported the identity \u{201c}{names}\u{201d} from TeamSpeak"),
-		(true, _) => format!("Imported {n} identities from TeamSpeak: {names}"),
-		(false, 1) => format!("Using your TeamSpeak identity \u{201c}{names}\u{201d}"),
-		(false, _) => format!(
-			"Using your TeamSpeak identity \u{201c}{}\u{201d} ({n} imported: {names})",
-			first.nickname
+/// clients at start ([`voelin_core::identity::import_new`]), if anything.
+pub(crate) fn imported_status(report: &LaunchImport) -> Option<String> {
+	let n = report.added.len();
+	let names = report.added.iter().map(|f| f.nickname.as_str()).collect::<Vec<_>>().join(", ");
+	let more = if n > 1 { format!(" ({n} imported: {names})") } else { String::new() };
+	Some(match &report.default {
+		Some(f) if report.replaced => format!(
+			"You now use your TeamSpeak identity \u{201c}{}\u{201d}; your previous one is kept{more}",
+			f.nickname
 		),
+		Some(f) => format!("Using your TeamSpeak identity \u{201c}{}\u{201d}{more}", f.nickname),
+		None if n == 1 => format!("Imported the identity \u{201c}{names}\u{201d} from TeamSpeak"),
+		None if n > 1 => format!("Imported {n} identities from TeamSpeak: {names}"),
+		None => return None,
 	})
 }
 
@@ -115,9 +115,9 @@ impl App {
 	/// from TeamSpeak keeps the nickname used there), else the system user's.
 	pub(crate) fn default_nickname(&self) -> String {
 		self.store
-			.identities()
+			.default_identity()
 			.ok()
-			.and_then(|identities| identities.into_iter().next())
+			.flatten()
 			.map(|identity| identity.name)
 			.filter(|name| {
 				![CREATED_IDENTITY, voelin_core::identity::DEFAULT_NICKNAME]
@@ -478,6 +478,8 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+	use voelin_core::identity::Found;
+
 	use super::*;
 
 	#[test]
@@ -544,14 +546,24 @@ mod tests {
 			source: "settings.db".into(),
 			selected: false,
 		};
-		assert_eq!(imported_status(&[], false), None);
+		let report = |added: &[&str], default: Option<&str>, replaced| LaunchImport {
+			added: added.iter().map(|n| found(n)).collect(),
+			default: default.map(found),
+			replaced,
+		};
+		assert_eq!(imported_status(&report(&[], None, false)), None);
 		assert_eq!(
-			imported_status(&[found("Main")], false).unwrap(),
+			imported_status(&report(&["Main"], Some("Main"), false)).unwrap(),
 			"Using your TeamSpeak identity \u{201c}Main\u{201d}"
 		);
 		assert_eq!(
-			imported_status(&[found("Main"), found("Alt")], true).unwrap(),
+			imported_status(&report(&["Main", "Alt"], None, false)).unwrap(),
 			"Imported 2 identities from TeamSpeak: Main, Alt"
+		);
+		// Imported earlier, now ours instead of the one the app made.
+		assert_eq!(
+			imported_status(&report(&[], Some("Main"), true)).unwrap(),
+			"You now use your TeamSpeak identity \u{201c}Main\u{201d}; your previous one is kept"
 		);
 	}
 }

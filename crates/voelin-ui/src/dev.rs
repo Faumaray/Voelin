@@ -29,7 +29,8 @@
 //!   `notifications` (the bell), `join` (join by address), `offline` (an
 //!   offline message), `picture` (a chat picture opened large), `camera`
 //!   (the settings' camera preview); settings sections also `account`,
-//!   `profiles`, `devices`, `notifications`, `integrations`, `advanced`;
+//!   `profiles` (also `identities`), `devices`, `notifications`,
+//!   `integrations`, `advanced` (5-10);
 //!   `studio[:<what>]`: the Stream Studio (with `VOELIN_DEMO_UI` a demo
 //!   studio from synthetic sources), `studio:window` in a window of its own,
 //!   `studio:live` going live, `studio:record`, or a dialog: `studio:source`,
@@ -121,7 +122,7 @@ fn section(name: &str) -> SettingsSection {
 		"3" | "privacy" => SettingsSection::Privacy,
 		"4" | "appearance" => SettingsSection::Appearance,
 		"5" | "account" => SettingsSection::Account,
-		"6" | "profiles" => SettingsSection::Profiles,
+		"6" | "profiles" | "identities" => SettingsSection::Profiles,
 		"7" | "devices" => SettingsSection::Devices,
 		"8" | "notifications" => SettingsSection::Notifications,
 		"9" | "integrations" => SettingsSection::Integrations,

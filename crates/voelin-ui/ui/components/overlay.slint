@@ -234,8 +234,10 @@ export component Toast inherits Rectangle {
     in property <image> icon: Icons.info;
     in property <duration> timeout: 5s;
     in-out property <bool> shown;
+    // The widest it gets (e.g. the window less a margin); longer text wraps.
+    in property <length> widest: 560px;
     height: shown ? row.preferred-height + 16px : 0px;
-    width: min(row.preferred-width + 24px, 560px);
+    width: min(row.preferred-width + 24px, widest);
     visible: shown;
     border-radius: Theme.radius-lg;
     background: Theme.surface-3;
@@ -266,7 +268,7 @@ export component Toast inherits Rectangle {
             text: root.text;
             color: Theme.text;
             vertical-alignment: center;
-            overflow: elide;
+            wrap: word-wrap;
         }
     }
 }

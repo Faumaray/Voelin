@@ -564,24 +564,24 @@ pub fn run(options: RunOptions) -> Result<()> {
 	let prefs = open_settings(&dir, &options.setting_overrides);
 	let switches = crate::dev::Switches::from_env();
 	// New identities of the official TeamSpeak clients, on every start (not
-	// with the sample data of VOELIN_DEMO_UI); with none of our own yet, the
-	// client's default identity becomes ours.
-	let had_identity = !store.identities()?.is_empty();
+	// with the sample data of VOELIN_DEMO_UI); the client's default
+	// identity becomes ours while we have none the user chose.
 	let imported = if prefs.get(&IDENTITY_IMPORT) && !switches.demo_ui {
 		voelin_core::identity::import_new(&store, &voelin_core::identity::discover())
 			.unwrap_or_else(|e| {
 				warn!(%e, "could not import TeamSpeak identities");
-				Vec::new()
+				Default::default()
 			})
 	} else {
-		Vec::new()
+		Default::default()
 	};
-	let identity = match store.identities()?.first() {
+	let identity = match store.default_identity()? {
 		Some(entry) => store.identity(entry.id)?,
 		None => {
 			// Creating an identity takes a moment (security level 8).
 			let identity = tsclientlib::Identity::create();
-			store.add_identity(crate::servers::CREATED_IDENTITY, &identity)?;
+			let origin = voelin_store::IdentityOrigin::Created;
+			store.add_identity(crate::servers::CREATED_IDENTITY, &identity, origin)?;
 			identity
 		}
 	};
@@ -661,7 +661,7 @@ pub fn run(options: RunOptions) -> Result<()> {
 	crate::bind::wire(&ui);
 	with_app(|app| {
 		app.apply_appearance();
-		app.load_default_identity();
+		app.load_own_uids();
 		app.apply_srtp();
 		app.refresh_all();
 		app.refresh_settings_flags();
@@ -674,7 +674,7 @@ pub fn run(options: RunOptions) -> Result<()> {
 		if app.demo {
 			app.start_demo();
 		}
-		if let Some(text) = crate::servers::imported_status(&imported, had_identity) {
+		if let Some(text) = crate::servers::imported_status(&imported) {
 			app.set_status(text);
 		}
 	});

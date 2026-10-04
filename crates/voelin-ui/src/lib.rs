@@ -10,6 +10,7 @@ mod emoji;
 mod events;
 mod home;
 mod hotkey;
+mod identities;
 mod images;
 mod inbox;
 mod members;

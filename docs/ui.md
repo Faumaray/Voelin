@@ -178,7 +178,7 @@ Settings sections (`settings:<section>`):
 | Section | Holds |
 |---|---|
 | `account` | The identity in use (nickname, TeamSpeak 3 and 6 unique ids, security level) and why there is no myTeamSpeak sign-in |
-| `profiles` | Identities: rename, make default (`identity.default`), export as a TeamSpeak 3 .ini, delete, raise the security level on every core; import from the official clients' settings and .ini files (key material is never shown); the identity per server |
+| `profiles` (also `identities`) | Identities with where they came from: rename, use as default (the store's default, `Store::set_default_identity`), export as a TeamSpeak 3 .ini, delete, raise the security level on every core; the import of the official clients' identities on start (`identity.import_from_teamspeak`) and by hand from their settings and .ini files (key material is never shown); the identity per server |
 | `appearance` | Theme, text size, the phone layout's width, the image cache |
 | `voice` | Microphone (device, test, level, noise suppression, echo cancellation, automatic gain), output (device, test sound, volume), streaming permissions, camera (device, preview with the background effect), video settings (resolution, frame rate, codec, hardware acceleration, mirror), stream quality presets with free bitrate entry and the upload it takes |
 | `streaming` | Frame rate, bitrate, codec, capture backend, simulcast layers, the stream's audio sources (desktop without Voelin, applications, the shared window's application, microphone; gain and mute each), recording and replay |
@@ -264,6 +264,14 @@ server is saved without one and when it connects
 and one found is stored as if typed. `bookmark` and `bookmark:edit` open
 it (below).
 
+Settings → Profiles (`ProfilesSection` in `screens/settings-pages.slint`;
+`settings_pages.rs`, and `identities.rs` for the default and the import
+switch) lists the stored identities with where they came from, marks the
+store's default and has "Use as default" for the others, plus the switch
+for importing the official clients' identities on start
+([identity.md](identity.md)). `settings:profiles` opens it, and
+`settings:identities` as well.
+
 ## Adding a screen
 
 1. Write the screen in `ui/screens/<name>.slint` from the components
@@ -299,7 +307,6 @@ live when they change (settings page, `--set`, another window):
 | `ui.image_preview_kb` | kilobytes | 8192 | pictures linked in chat up to this size show as pictures (0: never) |
 | `notify.mentions`, `notify.private_messages`, `notify.pokes`, `notify.event_reminders`, `notify.friends_online` | off / app / desktop | desktop (friends: app) | what the bell and the desktop say about each kind |
 | `video.camera`, `video.background`, `video.resolution`, `video.mirror` | device id; none / blur; auto or WxH; bool | first camera, none, auto, true | the camera of the preview and the default of camera sources |
-| `identity.default` | identity id | 0 (the first) | the identity used where a bookmark names none |
 | `studio.ui` | JSON | see below | the Stream Studio's stream settings: `title`, `game`, `message` (go-live), `show_viewers`, `show_chat`, `show_now_playing`, `audio` (stream audio), `preview_width` (960), `preview_fps` (15) |
 
 In a config file write them as dotted keys at the top level
@@ -329,7 +336,7 @@ Environment variables (see `src/dev.rs`):
 
 - `VOELIN_DEMO_UI=1`: sample servers, channels, members, chat with emoji and
   a stream, without a server (nothing is stored).
-- `VOELIN_OPEN=<what>[,<what>...]`: `home`, `server`, `settings[:voice|keybinds|streaming|privacy|appearance]`,
+- `VOELIN_OPEN=<what>[,<what>...]`: `home`, `server`, `settings[:voice|keybinds|streaming|privacy|appearance|profiles]` (`identities` is the same as `profiles`),
   `about`, `share[:live]`, `bookmark[:edit]`, `emoji`, `client`, `panel`, `no-panel`,
   `voice`, `pins`, `topics`, `topic:<id>`, `member`, `watch`, `popout`
   (the server page, above), `tab:<home|servers|chat|activity|you>` (phone

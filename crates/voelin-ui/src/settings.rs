@@ -201,15 +201,6 @@ pub static UI_IMAGE_PREVIEW_KB: Key<u32> = Key::new(
 	|| 8192,
 );
 
-/// `identity.default`: the identity used where a server names none (its
-/// id in the identities; 0: the first one).
-pub static IDENTITY_DEFAULT: Key<u64> = Key::new(
-	"identity.default",
-	Kind::UInt { min: 0 },
-	"The identity servers see unless their bookmark names another (0: the first).",
-	|| 0,
-);
-
 #[allow(clippy::ptr_arg)] // a validation of `Key<String>` is `fn(&String)`
 fn valid_resolution(text: &String) -> Result<(), String> {
 	if text == "auto" || parse_size(text).is_some() {
@@ -227,7 +218,7 @@ pub fn parse_size(text: &str) -> Option<(u32, u32)> {
 }
 
 /// The keys of the home, messages and settings pages, for registering.
-pub fn page_keys() -> [&'static dyn voelin_core::settings::Setting; 11] {
+pub fn page_keys() -> [&'static dyn voelin_core::settings::Setting; 10] {
 	[
 		&NOTIFY_MENTIONS,
 		&NOTIFY_MESSAGES,
@@ -239,7 +230,6 @@ pub fn page_keys() -> [&'static dyn voelin_core::settings::Setting; 11] {
 		&VIDEO_RESOLUTION,
 		&VIDEO_MIRROR,
 		&UI_IMAGE_PREVIEW_KB,
-		&IDENTITY_DEFAULT,
 	]
 }
 

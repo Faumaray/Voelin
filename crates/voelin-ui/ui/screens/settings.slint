@@ -43,7 +43,7 @@ export component SettingsNav inherits VerticalLayout {
             NavItem {
                 icon: Icons.users;
                 text: @tr("Profiles");
-                subtitle: @tr("Identities, import, export");
+                subtitle: @tr("Who servers see you as, import, export");
                 selected: Nav.settings-section == SettingsSection.profiles;
                 clicked => { Nav.open-settings(SettingsSection.profiles); }
             }

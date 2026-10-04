@@ -553,7 +553,11 @@ export struct IdentityItem {
     uid: string,
     uid6: string,
     level: int,
+    // The store's default: servers see us as this one unless a bookmark
+    // names another.
     default: bool,
+    // Where it came from: "Made in Voelin", "Imported", "Chosen by you".
+    origin: string,
     // Raising its level: the level aimed at and the best one reached (0: no).
     improving: int,
     reached: int,
@@ -882,6 +886,12 @@ export global Bridge {
     in property <string> crash-notice;
     // Third-party notices, one entry per line, for the About page.
     in property <[string]> notices;
+    // Settings → Profiles: the identity servers see us as (the store's
+    // default, from the next connection) and the import of the official
+    // clients' identities on start (identity.import_from_teamspeak).
+    in-out property <bool> identity-import;
+    callback use-identity(int);
+    callback set-identity-import(bool);
 
     callback select-server(int);
     // The search field of the top bar: filters the channel tree.
