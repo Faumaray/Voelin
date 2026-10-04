@@ -620,7 +620,7 @@ export component StreamingSection inherits VerticalLayout {
         }
         NumberRow {
             text: @tr("Video bitrate");
-            description: @tr("Of the single layer, when no layers are set below.");
+            description: @tr("Of the single layer, when no layers are set below. 0: automatic, from the size and frame rate, up to 60 Mbit/s.");
             value: Bridge.streaming.bitrate;
             unit: "kbit/s";
             accepted(t) => {

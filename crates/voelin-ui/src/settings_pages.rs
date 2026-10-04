@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use slint::{ComponentHandle, Model, SharedString};
 use tracing::warn;
+use voelin_core::media::auto_bitrate;
 use voelin_core::settings::{
 	AudioSourceKindSetting, AudioSourceSetting, BlockMode, CACHE_FETCH_IMAGES, CACHE_MAX_MB,
 	CHAT_DEDUPE_TOLERANCE_MS, CHAT_HISTORY_PAGE, CHAT_RETENTION_DAYS, CHAT_STORE_HISTORY,
@@ -39,7 +40,8 @@ use crate::settings::{
 use crate::social::{allowed_index, allowed_of};
 
 /// Sizes of the stream quality presets (Auto: the source's size).
-const PRESETS: [(u32, u32); 3] = [(1280, 720), (1920, 1080), (2560, 1440)];
+const PRESETS: [(u32, u32); 5] =
+	[(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160), (7680, 4320)];
 
 /// An identity whose level is being raised.
 pub(crate) struct Improving {
@@ -109,6 +111,22 @@ pub(crate) fn layer_of(item: &LayerItem, base: &LayerSetting) -> Option<LayerSet
 
 /// The preset of a list of layers: 0 Auto (none), 1..3 a preset size, -1
 /// other layers.
+/// The layers of quality preset `quality` (0: none, the source's size;
+/// then [`PRESETS`]) at `kbps` (0: automatic, for the preset's size and
+/// `fps`); `None` for no preset (layers of one's own).
+fn preset_layers(quality: i32, kbps: u32, fps: u32) -> Option<Vec<LayerSetting>> {
+	match usize::try_from(quality).ok()? {
+		0 => Some(Vec::new()),
+		q => PRESETS.get(q - 1).map(|&(width, height)| {
+			let bitrate = match kbps {
+				0 => auto_bitrate(width, height, fps),
+				kbps => u64::from(kbps) * 1000,
+			};
+			vec![LayerSetting { size: Some((width, height)), bitrate, ..LayerSetting::default() }]
+		}),
+	}
+}
+
 pub(crate) fn quality_of(layers: &[LayerSetting]) -> i32 {
 	match layers {
 		[] => 0,
@@ -401,21 +419,15 @@ impl App {
 		if self.prefs.get(&STREAM_PERMISSIONS) != permissions {
 			self.put(&STREAM_PERMISSIONS, permissions);
 		}
-		let bitrate = form.bitrate.round().max(1.0) as u32;
+		// 0: automatic.
+		let bitrate = form.bitrate.round().max(0.0) as u32;
 		if self.prefs.get(&STREAM_BITRATE_KBPS) != bitrate {
 			self.put(&STREAM_BITRATE_KBPS, bitrate);
 		}
-		// A preset: one layer of that size at the bitrate; Auto: none.
+		// A preset: one layer of that size at the bitrate (an automatic one
+		// for that size and the frame rate); Auto: none.
 		let layers = self.prefs.get(&STREAM_LAYERS);
-		let wanted = match form.quality {
-			0 => Some(Vec::new()),
-			q @ 1..=3 => Some(vec![LayerSetting {
-				size: Some(PRESETS[q as usize - 1]),
-				bitrate: u64::from(bitrate) * 1000,
-				..LayerSetting::default()
-			}]),
-			_ => None,
-		};
+		let wanted = preset_layers(form.quality, bitrate, self.prefs.get(&STREAM_FPS));
 		if let Some(wanted) = wanted.filter(|w| *w != layers) {
 			self.put(&STREAM_LAYERS, wanted);
 		}
@@ -426,7 +438,10 @@ impl App {
 		if let Some(fps) = crate::settings::parse_positive(&form.fps) {
 			self.put(&STREAM_FPS, fps);
 		}
-		if let Some(bitrate) = crate::settings::parse_positive(&form.bitrate) {
+		// Nothing, 0 or "auto": automatic.
+		let bitrate = form.bitrate.trim();
+		let auto = bitrate.is_empty() || bitrate == "0" || bitrate.eq_ignore_ascii_case("auto");
+		if let Some(bitrate) = crate::settings::parse_positive(bitrate).or(auto.then_some(0)) {
 			self.put(&STREAM_BITRATE_KBPS, bitrate);
 		}
 		self.put(&STREAM_CODEC, codec_of(form.codec));
@@ -1377,7 +1392,16 @@ mod tests {
 		assert_eq!(quality_of(&[]), 0);
 		let layer = |size| LayerSetting { size: Some(size), ..LayerSetting::default() };
 		assert_eq!(quality_of(&[layer((1920, 1080))]), 2);
+		assert_eq!(quality_of(&[layer((3840, 2160))]), 4);
+		assert_eq!(quality_of(&[layer((7680, 4320))]), 5);
 		assert_eq!(quality_of(&[layer((800, 600))]), -1);
+		// A preset at the bitrate, or the automatic one of its size and rate.
+		let one = |l: Option<Vec<LayerSetting>>| l.map(|l| (l[0].size, l[0].bitrate));
+		assert_eq!(one(preset_layers(5, 60_000, 30)), Some((Some((7680, 4320)), 60_000_000)));
+		assert_eq!(one(preset_layers(4, 0, 60)), Some((Some((3840, 2160)), 59_719_680)));
+		assert_eq!(preset_layers(0, 0, 60), Some(Vec::new()));
+		assert_eq!(preset_layers(-1, 0, 60), None);
+		assert_eq!(preset_layers(6, 0, 60), None);
 		assert_eq!(quality_of(&[layer((1280, 720)), layer((640, 360))]), -1);
 		for i in 0..5 {
 			assert_eq!(codec_index(codec_of(i)), i);
