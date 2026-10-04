@@ -1,0 +1,111 @@
+name: Release
+
+# Complete package set, built on a dedicated trusted host; see docs/ci.md.
+# Manual runs upload artifacts only. v* tags also create a draft release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "1"
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "0"
+
+jobs:
+  package:
+    name: packages + draft release
+    # Native host, not the untrusted-PR CI container: Docker and Flatpak need
+    # host privileges. Register only for this repository; capacity must be 1.
+    runs-on: voelin-release
+    timeout-minutes: 480
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: https://github.com/actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.gitea/actions/checks
+      - name: Check release tools
+        run: |
+          set -euo pipefail
+          command -v docker python3
+          docker info >/dev/null
+          # Remove only output owned by this workflow in its checkout.
+          rm -rf dist
+      - name: Linux packages
+        run: scripts/docker-build.sh linux --progress=plain
+      - name: Windows packages (MinGW)
+        run: scripts/docker-build.sh windows --progress=plain
+      - name: Android debug APK
+        run: scripts/docker-build.sh android --progress=plain
+      - name: Android release APK (signed, optional)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          VOELIN_SIGNING_STORE_PASSWORD: ${{ secrets.VOELIN_SIGNING_STORE_PASSWORD }}
+          VOELIN_SIGNING_KEY_ALIAS: ${{ secrets.VOELIN_SIGNING_KEY_ALIAS }}
+          VOELIN_SIGNING_KEY_PASSWORD: ${{ secrets.VOELIN_SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$KEYSTORE_BASE64" ]]; then
+            echo "No ANDROID_KEYSTORE_BASE64: debug APK only"
+            exit 0
+          fi
+          : "${VOELIN_SIGNING_STORE_PASSWORD:?Missing Android store password}"
+          : "${VOELIN_SIGNING_KEY_ALIAS:?Missing Android key alias}"
+          : "${VOELIN_SIGNING_KEY_PASSWORD:?Missing Android key password}"
+          umask 077
+          signing=$(mktemp -d "$RUNNER_TEMP/voelin-signing.XXXXXX")
+          trap 'rm -rf "$signing"' EXIT
+          signing=$(cd "$signing" && pwd -P)
+          [[ "$signing" != "$(pwd -P)/"* ]] || { echo "RUNNER_TEMP must be outside the checkout" >&2; exit 1; }
+          export SIGNING_ENV="$signing/signing.env"
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$signing/release.jks"
+          # The Dockerfile sources this with /bin/sh; quote arbitrary secret
+          # values as POSIX shell data, never interpolate them into code.
+          python3 - <<'PY'
+          import os, shlex
+          from pathlib import Path
+          names = ("VOELIN_SIGNING_STORE_PASSWORD", "VOELIN_SIGNING_KEY_ALIAS", "VOELIN_SIGNING_KEY_PASSWORD")
+          Path(os.environ["SIGNING_ENV"]).write_text("".join(f"{name}={shlex.quote(os.environ[name])}\n" for name in names))
+          PY
+          scripts/docker-build.sh android --progress=plain --build-arg APK=release \
+            --build-arg "SIGNING_CACHE_BUST=$(basename "$signing")" \
+            --secret "id=keystore,src=$signing/release.jks" \
+            --secret "id=signing,src=$SIGNING_ENV"
+      - name: Flatpak bundle
+        run: scripts/flatpak-build.sh dist/flatpak
+      - name: Gateway container image
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/voelin-gateway/Cargo.toml | head -n 1)
+          test -n "$version"
+          docker build -f crates/voelin-gateway/Dockerfile -t "tsgw:$version" -t tsgw:latest .
+          mkdir -p dist/gateway
+          docker save "tsgw:$version" tsgw:latest | gzip > dist/gateway/tsgw-image.tar.gz
+      - name: Collect packages and checksums
+        run: |
+          set -euo pipefail
+          mkdir -p dist/release
+          for file in dist/{linux,windows,android,flatpak,gateway}/*; do
+            [[ -f "$file" && ! -L "$file" ]] || { echo "Missing package: $file" >&2; exit 1; }
+            name=$(basename "$file")
+            [[ "$name" != SHA256SUMS* ]] || continue
+            [[ ! -e "dist/release/$name" ]] || { echo "Duplicate package: $name" >&2; exit 1; }
+            cp -- "$file" "dist/release/$name"
+          done
+          (cd dist/release && sha256sum -- * > SHA256SUMS)
+      # Gitea-compatible artifact API (Node 20), not stock GitHub artifact v4.
+      - uses: https://gitea.com/actions/gitea-upload-artifact@81f940d004763f986ba3582c007fd842dd5cb0d7
+        with:
+          name: voelin-packages
+          path: dist/release/
+          if-no-files-found: error
+      - name: Draft Gitea release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          # Gitea refuses secret names starting with GITEA_ or GITHUB_.
+          GITEA_RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: scripts/gitea-release.sh dist/release

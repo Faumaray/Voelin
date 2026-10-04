@@ -30,6 +30,13 @@ signed with a debug key (fine for testing, not for the Play Store).
 The gateway's image can also be built directly:
 `docker build -f crates/voelin-gateway/Dockerfile -t tsgw .`.
 
+Gitea at [git.faumaray.ru](https://git.faumaray.ru) builds the same package
+types through `.gitea/workflows/release.yml`: manual runs produce one
+`voelin-packages` artifact; `v*` tag pushes also attach the packages to a
+draft release. Windows packages there use MinGW rather than MSVC. See
+[Gitea releases](release.md#gitea-releases) for signing and publishing,
+and [runner setup](ci.md#gitea-release-runner) for host requirements.
+
 ## From releases
 
 `.github/workflows/release.yml` builds every package:
@@ -109,3 +116,7 @@ the proxy is on localhost. If the proxy inspects TLS, set
 - **Android:** [android.md](android.md) (SDK, NDK, cargo-ndk), then
   `cd android && ./gradlew assembleDebug` and `scripts/package.sh android`.
 - **Flatpak:** [packaging/README.md](../packaging/README.md#flatpak).
+  On a trusted machine with rootful Docker,
+  `scripts/flatpak-build.sh` writes `dist/flatpak/voelin.flatpak` using the
+  release builder image. It requires a privileged container for Flatpak's
+  nested sandbox; do not use it on an untrusted build host.

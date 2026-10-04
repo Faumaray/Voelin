@@ -140,10 +140,11 @@ debug = false
 dimpl = { path = "third_party/dimpl" }
 
 [profile.release]
-# One optimisation unit across all crates: inlining across crate boundaries
-# matters for the per-pixel and per-packet code of streams. Panics still
+# Thin LTO keeps cross-crate optimisation without materialising the entire
+# app in one LLVM module. Split codegen keeps the generated Slint UI within
+# the memory budget of CI and release builders. Panics still
 # unwind (no `panic = "abort"`): a panic in one tokio task or media thread
 # must not end the app (tasks and threads report it, mutexes recover from
 # poisoning), and the crash reporter's hook runs either way.
-lto = "fat"
-codegen-units = 1
+lto = "thin"
+codegen-units = 16

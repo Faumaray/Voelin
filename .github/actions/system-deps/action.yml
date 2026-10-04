@@ -19,11 +19,16 @@ runs:
       # (video codecs), PipeWire + SPA (screen and audio capture), libclang
       # (bindgen), Xvfb (X11 tests).
       run: |
-        sudo apt-get update
-        sudo apt-get install -y --no-install-recommends \
+        # Gitea container runners may run as root and need the base build
+        # tools that GitHub's hosted images already provide.
+        sudo=()
+        if [ "$(id -u)" -ne 0 ]; then sudo=(sudo); fi
+        "${sudo[@]}" apt-get update
+        "${sudo[@]}" apt-get install -y --no-install-recommends \
+          build-essential ca-certificates cmake curl git jq pkg-config python3 \
           libasound2-dev libfontconfig1-dev libxkbcommon-dev \
           libvpx-dev libdav1d-dev libpipewire-0.3-dev libspa-0.2-dev libclang-dev \
-          xvfb
+          xvfb xauth
 
     # aws-lc-sys (WebRTC DTLS through str0m) assembles with NASM on Windows.
     - name: NASM

@@ -21,6 +21,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "0"
+  CARGO_BUILD_JOBS: "1"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   # The same checks as every push (lint, Linux tests, Windows and Android
@@ -177,13 +179,17 @@ jobs:
           java-version: 17
       - name: Android SDK packages
         run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          # Ignore yes's SIGPIPE when sdkmanager closes stdin, but preserve
+          # sdkmanager failures under bash -o pipefail.
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || test "${PIPESTATUS[1]}" -eq 0
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
             "ndk;$NDK_VERSION" "platforms;android-36" "build-tools;36.0.0" > /dev/null
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
-          # CMake (libopus) and Slint's Java helper.
-          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
-          echo "ANDROID_JAR=$ANDROID_HOME/platforms/android-36/android.jar" >> "$GITHUB_ENV"
+          {
+            echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION"
+            # CMake (libopus) and Slint's Java helper.
+            echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$NDK_VERSION"
+            echo "ANDROID_JAR=$ANDROID_HOME/platforms/android-36/android.jar"
+          } >> "$GITHUB_ENV"
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked --version 4.1.2
       - name: Debug APK
@@ -203,9 +209,10 @@ jobs:
             exit 0
           fi
           export VOELIN_SIGNING_STORE_FILE="$RUNNER_TEMP/release.jks"
+          trap 'rm -f "$VOELIN_SIGNING_STORE_FILE"' EXIT
+          umask 077
           echo "$KEYSTORE_BASE64" | base64 -d > "$VOELIN_SIGNING_STORE_FILE"
           ./gradlew --no-daemon assembleRelease -Pvoelin.abis=arm64-v8a,x86_64
-          rm -f "$VOELIN_SIGNING_STORE_FILE"
       - name: Package
         run: scripts/package.sh android dist
       - uses: actions/upload-artifact@v4
@@ -236,7 +243,7 @@ jobs:
       - name: Checksums
         run: |
           cd dist
-          rm -f SHA256SUMS-*
+          rm -f SHA256SUMS SHA256SUMS-*
           sha256sum -- * > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
