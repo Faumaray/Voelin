@@ -414,8 +414,8 @@ export component AccountCard inherits Card {
     if !Bridge.myts.available: Note { text: @tr("Account sign-in is available on desktop."); }
     if Bridge.myts.signed-in || Bridge.myts.restoring: AccountProfile { }
     if Bridge.myts.available && !Bridge.myts.signed-in && !Bridge.myts.restoring: LoginForm { }
-    AccountNotices { }
-    SessionActions { }
+    if AccountText.status(Bridge.myts.status) != "" || AccountText.persistence(Bridge.myts.persistence-status) != "": AccountNotices { }
+    if Bridge.myts.busy || Bridge.myts.can-forget: SessionActions { }
     if Bridge.myts.signed-in: Divider { }
     if Bridge.myts.signed-in: AccountManagement { }
 }
@@ -427,8 +427,9 @@ component LoginHero inherits Rectangle {
     background: @linear-gradient(150deg, #0e1d5c 0%, #1c1470 45%, #3a1f86 75%, #0b2a6b 100%);
     property <float> ratio: art.source.width * 1.0 / max(1, art.source.height);
     art := Image {
-        source: Icons.art-banner;
-        // Cover the panel, the moon (right) kept.
+        // The tall night landscape (the home sidebar's), covering the
+        // panel from the bottom.
+        source: Icons.art-sidebar;
         width: max(root.width, root.height * root.ratio);
         height: self.width / root.ratio;
         x: root.width - self.width;
@@ -437,7 +438,7 @@ component LoginHero inherits Rectangle {
         accessible-role: AccessibleRole.none;
     }
     Rectangle {
-        background: @linear-gradient(180deg, #060c2ce0 0%, #060c2c90 45%, #060c2c30 100%);
+        background: @linear-gradient(180deg, #060c2cd8 0%, #060c2c30 100%);
     }
     VerticalLayout {
         padding: Theme.space-8;
@@ -501,6 +502,9 @@ export component LoginPage inherits Rectangle {
     // The window's width (`Nav.narrow`), not this page's: the artwork's
     // width is part of the page's own layout.
     property <bool> wide: !Nav.narrow;
+    // Only rows with something in them (an empty one still takes spacing).
+    property <bool> notices: AccountText.status(Bridge.myts.status) != "" || AccountText.persistence(Bridge.myts.persistence-status) != "";
+    property <bool> actions: Bridge.myts.busy || Bridge.myts.can-forget;
     HorizontalLayout {
         padding: root.wide ? Theme.space-6 : 0px;
         spacing: Theme.space-6;
@@ -560,8 +564,8 @@ export component LoginPage inherits Rectangle {
                                 spacing: Theme.space-5;
                                 if !Bridge.myts.available: Note { text: @tr("Account sign-in is available on desktop."); }
                                 if Bridge.myts.available: LoginForm { }
-                                AccountNotices { }
-                                SessionActions { }
+                                if root.notices: AccountNotices { }
+                                if root.actions: SessionActions { }
                             }
                         }
                         HorizontalLayout {

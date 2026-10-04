@@ -26,9 +26,9 @@ export component BookmarkDialog inherits Modal {
     // The fields beyond address and password: shown when editing.
     property <bool> advanced: form.id >= 0;
     title: join ? @tr("Join a server") : form.id < 0 ? @tr("Add server") : @tr("Edit server");
-    // The gateway (presence and chat without joining) is found from the
-    // address: DNS SRV records, else the gateway's own well-known URL.
-    subtitle: @tr("Only the address is needed; Voelin finds the rest, including the server's gateway.");
+    // The rest includes the gateway (presence and chat without joining),
+    // found from the address: DNS SRV records, else its well-known URL.
+    subtitle: @tr("Only the address is needed; Voelin finds the rest.");
     icon: Icons.server;
     card-width: 560px;
     // Fits the address and password (two lines more on a phone).
