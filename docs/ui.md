@@ -422,6 +422,98 @@ the window's size so the pointer is not over the window, and passes
 | ![friends](screenshots/mobile-friends.png) | ![messages](screenshots/mobile-messages.png) | ![events](screenshots/mobile-events.png) | ![the bell](screenshots/mobile-notifications.png) | ![streaming settings](screenshots/mobile-settings-streaming.png) |
 | ![add server](screenshots/mobile-add-server.png) | | | | |
 
+## Server and channel pictures
+
+The compact server card shows its icon over the host banner. TeamSpeak 6
+channel banners sit behind their titles in fixed-height tree rows (34 pixels),
+and behind desktop and phone chat/voice headers. Artwork uses centred cover
+cropping without distortion; it never adds height to navigation. Custom channel
+icons lead the title, and recognized `[cspacerN]` labels are centred without
+showing the prefix. A theme-aware surface gradient (74% to 66% opacity) keeps
+primary text above 4.5:1 contrast even on all-white or all-black artwork, while
+leaving the image visible. Missing pictures retain the normal background.
+
+Bookmarks remember the server icon ID and the address that supplied it. The
+server list, search results and server header load its cached bytes before
+connecting, including after restarting the app. Editing a server address
+invalidates the association; queued details from the old address cannot replace
+it. A missing or evicted image falls back to initials. This requires no
+ServerQuery configuration and starts no background voice connection.
+
+First-visit icon downloads before login remain unverified. On a private TS6
+6.0.0-beta13.1 fixture, the native encrypted handshake completed without
+`clientinit`, but pre-login `serverinfo`, `getserverinfo`, `servergetvariables`,
+`ftinitdownload` and `ftgetchannelfilehttptoken scid=icons` probes each received
+no response within three seconds. The installed official client's UI code
+populates its bookmark icon cache from connected server properties. Its clean
+profile requires account setup before the server list, so no fresh-profile
+network capture was obtained. These observations do not establish that every
+server or client version lacks a pre-login mechanism.
+
+The engine downloads banners only while `cache.fetch_images` is enabled.
+Banners on the web (`http`, `https`) come from their host; banners in the
+server's own files, linked as `ts3image://` (TeamSpeak 5 and 6:
+`ts3image://<host>?port=…&channel=…&path=…&filename=…`, the file browser's
+`ts3file://` link with its scheme changed; TeamSpeak 3:
+`ts3image://<name>?channel=…&path=…`), come through the voice connection's
+file transfer, so they need voice and the server's file permissions. Their
+cache entry is named by the server too, as the same address names another
+file elsewhere. Up to eight distinct web banners download concurrently;
+duplicate URLs share a request. A picture may be up to 64 MiB, avatars and
+icons too, and goes to disk as it arrives. Web downloads have a 10-second
+connection timeout and fail after 20 seconds without data or when, after
+their first 30 seconds, they average less than 32 KiB/s; there is no
+fixed overall deadline, so large banners on slow hosts still arrive. Failed
+avatars, icons and banners receive up to three automatic retries after
+1, 4 and 16 seconds,
+without waiting for a presence update. Avatar/icon/banner file-transfer
+negotiation expires after 15 seconds, and the download after 30 seconds
+plus its size at 32 KiB/s. User file transfers retain their existing
+timing. Replaced images and closed sessions discard
+obsolete results. A host banner's reload interval is at least 60 seconds;
+failed refreshes preserve the previous cached picture. Closing the session
+stops its reload timer. `PictureReady` invalidates the decoded image before
+refreshing the visible models, including when the URL and cache path stay
+the same.
+
+PNG, JPEG, GIF, WebP and SVG are decoded by content, since cached files have
+no extension. Raster pictures larger than 16,384 pixels on either axis or
+64 MiB of decoded RGBA are refused before pixel allocation on the UI
+thread. SVG uses Slint's vector loader and the existing vector-cache cost.
+Avatars and server, channel, client and group icons use the same image cache.
+
+The focused checks are the `voelin-core`, `voelin-model`, `voelin-observer`,
+`voelin-store` and `voelin-ui` library tests. They cover offline icon restoration,
+bookmark compatibility, cache misses and old-address event rejection. The live
+`ts6_banners` test checks disabled
+fetching, recovery from HTTP 503 without another presence update, all three
+modes, channel URL replacement and removal, and a fresh host download after
+the 60-second interval. `ts6_avatars` uploads an avatar with one client and
+verifies its bytes and MD5 after another client downloads it into an independent
+cache. Both use
+the development TS6 server by default; a private fixture can override its
+endpoints without changing the other live tests:
+
+```sh
+VOELIN_LIVE=1 \
+VOELIN_BANNER_VOICE_ADDR=127.0.0.1:19988 \
+VOELIN_BANNER_QUERY_ADDR=127.0.0.1:20022 \
+cargo test --locked -p voelin-core --test live ts6_banners -- --exact
+```
+
+The 2026-10-04 follow-up passed all 200 focused library tests. The download
+checks passed both live scenarios against a private
+TS6 6.0.0-beta13.1 instance, including its real reload interval. The compact
+layout passed seven headless screenshot scenarios. These screenshots use
+sample data on Xvfb with Slint's software
+renderer; the phone layouts are desktop renders, not Android device tests.
+
+| Desktop | Phone layout |
+|---|---|
+| ![Dark chat and channel banners](screenshots/banners-desktop-dark.png) | ![Channel banner in the mobile chat header](screenshots/banners-mobile-chat.png) |
+| ![Light chat and channel banners](screenshots/banners-desktop-light.png) | ![Light server list](screenshots/banners-mobile-servers.png) |
+| ![Banner in the desktop voice header](screenshots/banners-desktop-voice.png) | ![Banner in the mobile voice header](screenshots/banners-mobile-voice.png) |
+
 ## Limits
 
 - No drop shadows or blur (the software renderer draws none): glows are

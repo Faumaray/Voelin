@@ -116,10 +116,11 @@ pub enum HostMessageMode {
 	ModalQuit,
 }
 
-/// How the host banner image is scaled.
+/// How a banner picture (the host banner, a TeamSpeak 6 channel banner) is
+/// scaled to its area: `0`, `1` and `2` on the wire.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum HostBannerMode {
+pub enum BannerMode {
 	/// As it is.
 	#[default]
 	NoAdjust,
@@ -127,6 +128,18 @@ pub enum HostBannerMode {
 	IgnoreAspect,
 	/// Scaled to fit, keeping its aspect ratio.
 	KeepAspect,
+}
+
+impl BannerMode {
+	/// From its number on the wire; an unknown one shows the picture as it
+	/// is.
+	pub fn from_wire(value: &str) -> Self {
+		match value.trim() {
+			"1" => Self::IgnoreAspect,
+			"2" => Self::KeepAspect,
+			_ => Self::NoAdjust,
+		}
+	}
 }
 
 /// What a server tells its (voice) clients about itself.
@@ -152,7 +165,7 @@ pub struct ServerDetails {
 	#[serde(default)]
 	pub banner_gfx_interval_s: u64,
 	#[serde(default)]
-	pub banner_mode: HostBannerMode,
+	pub banner_mode: BannerMode,
 	#[serde(default)]
 	pub host_button_tooltip: String,
 	#[serde(default)]

@@ -2,8 +2,8 @@
 
 use tsclientlib::{ClientType, MaxClients, data};
 use voelin_model::{
-	ChannelInfo, ClientInfo, GroupInfo, GroupNamingMode, GroupType, HostBannerMode,
-	HostMessageMode, Presence, ServerDetails, parse_badges,
+	BannerMode, ChannelInfo, ClientInfo, GroupInfo, GroupNamingMode, GroupType, HostMessageMode,
+	Presence, ServerDetails, parse_badges,
 };
 
 fn group_info(
@@ -49,9 +49,9 @@ fn server_details(server: &data::Server, uid: Option<&str>) -> ServerDetails {
 		banner_gfx_url: server.hostbanner_gfx_url.clone(),
 		banner_gfx_interval_s: server.hostbanner_gfx_interval.whole_seconds().max(0) as u64,
 		banner_mode: match server.hostbanner_mode {
-			tsclientlib::HostBannerMode::NoAdjust => HostBannerMode::NoAdjust,
-			tsclientlib::HostBannerMode::AdjustIgnoreAspect => HostBannerMode::IgnoreAspect,
-			tsclientlib::HostBannerMode::AdjustKeepAspect => HostBannerMode::KeepAspect,
+			tsclientlib::HostBannerMode::NoAdjust => BannerMode::NoAdjust,
+			tsclientlib::HostBannerMode::AdjustIgnoreAspect => BannerMode::IgnoreAspect,
+			tsclientlib::HostBannerMode::AdjustKeepAspect => BannerMode::KeepAspect,
 		},
 		host_button_tooltip: server.hostbutton_tooltip.clone(),
 		host_button_url: server.hostbutton_url.clone(),
@@ -115,6 +115,12 @@ pub(crate) fn presence_from_book(
 						needed_talk_power: c.needed_talk_power.unwrap_or(0),
 						is_default: c.is_default.unwrap_or(false),
 						icon: c.icon.map_or(0, |i| i.0),
+						banner_gfx_url: c.banner_gfx_url.clone().filter(|u| !u.is_empty()),
+						// A number the book keeps as text.
+						banner_mode: c
+							.banner_mode
+							.as_deref()
+							.map_or(BannerMode::NoAdjust, BannerMode::from_wire),
 					},
 				)
 			})
@@ -155,5 +161,109 @@ pub(crate) fn presence_from_book(
 				)
 			})
 			.collect(),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use tsclientlib::InMessage;
+	use tsproto_packets::packets::{Direction, Flags, OutPacket, PacketType};
+	use tsproto_types::crypto::EccKeyPrivP256;
+
+	use super::*;
+
+	fn message(text: &str) -> InMessage {
+		let packet = OutPacket::new_with_dir(Direction::S2C, Flags::empty(), PacketType::Command);
+		InMessage::new(&packet.header(), text.as_bytes()).unwrap()
+	}
+
+	/// Channel banners as a TeamSpeak 6 server (6.0.0-beta13.1) sends them:
+	/// in the channel list, when a channel is created and when it is edited.
+	#[test]
+	fn channel_banners() {
+		let InMessage::InitServer(init) = message(concat!(
+			"initserver virtualserver_name=Test virtualserver_welcomemessage ",
+			"virtualserver_platform=Linux virtualserver_version=6.0.0-beta13.1 ",
+			"virtualserver_maxclients=32 virtualserver_created=0 ",
+			"virtualserver_codec_encryption_mode=0 virtualserver_hostmessage ",
+			"virtualserver_hostmessage_mode=0 virtualserver_default_server_group=8 ",
+			"virtualserver_default_channel_group=8 virtualserver_hostbanner_url ",
+			r"virtualserver_hostbanner_gfx_url=https:\/\/example.com\/banner.png ",
+			"virtualserver_hostbanner_gfx_interval=60 ",
+			"virtualserver_priority_speaker_dimm_modificator=-18.0000 virtualserver_id=1 ",
+			"virtualserver_ask_for_privilegekey=0 ",
+			"virtualserver_hostbutton_tooltip virtualserver_hostbutton_url ",
+			"virtualserver_hostbutton_gfx_url virtualserver_name_phonetic ",
+			"virtualserver_icon_id=0 virtualserver_hostbanner_mode=2 ",
+			"virtualserver_channel_temp_delete_delay_default=0 acn=t aclid=2 pv=7 ",
+			"client_talk_power=75 client_needed_serverquery_view_power=75",
+		)) else {
+			panic!("not an initserver");
+		};
+		let mut book = data::Connection::new(EccKeyPrivP256::create().to_pub(), &init);
+		let channel = |cid: u64, order: u64, name: &str, banner: &str| {
+			format!(
+				"cid={cid} cpid=0 channel_name={name} channel_topic channel_codec=4 \
+				 channel_codec_quality=6 channel_maxclients=-1 channel_maxfamilyclients=-1 \
+				 channel_order={order} channel_flag_permanent=1 channel_flag_semi_permanent=0 \
+				 channel_flag_default=0 channel_flag_password=0 channel_codec_latency_factor=1 \
+				 channel_codec_is_unencrypted=1 channel_delete_delay=0 \
+				 channel_flag_maxclients_unlimited=1 channel_flag_maxfamilyclients_unlimited=1 \
+				 channel_flag_maxfamilyclients_inherited=0 channel_needed_talk_power=0 \
+				 channel_forced_silence=0 channel_name_phonetic channel_icon_id=0 {banner} \
+				 channel_storage_quota=4294967295"
+			)
+		};
+		let list = format!(
+			"channellist {}|{}",
+			channel(1, 0, "Lobby", "channel_banner_gfx_url channel_banner_mode=0"),
+			channel(
+				12,
+				1,
+				"Raid",
+				r"channel_banner_gfx_url=http:\/\/127.0.0.1:1\/d.png channel_banner_mode=2"
+			),
+		);
+		for text in [
+			list.as_str(),
+			concat!(
+				"notifychannelcreated cid=13 cpid=0 invokerid=1 invokername=serveradmin ",
+				"invokeruid=serveradmin channel_name=New channel_order=12 ",
+				r"channel_flag_permanent=1 channel_banner_gfx_url=https:\/\/example.com\/new.jpg ",
+				"channel_banner_mode=1",
+			),
+			concat!(
+				"notifychanneledited cid=12 reasonid=10 invokerid=1 invokername=serveradmin ",
+				"invokeruid=serveradmin channel_banner_mode=1",
+			),
+		] {
+			book.handle_command(&message(text)).unwrap();
+		}
+		let p = presence_from_book(&book, None, |_| false);
+		let banner = |p: &Presence, cid| {
+			let c = &p.channels[&cid];
+			(c.banner_gfx_url.clone(), c.banner_mode)
+		};
+		assert_eq!(banner(&p, 1), (None, BannerMode::NoAdjust));
+		assert_eq!(
+			banner(&p, 12),
+			(Some("http://127.0.0.1:1/d.png".into()), BannerMode::IgnoreAspect)
+		);
+		assert_eq!(
+			banner(&p, 13),
+			(Some("https://example.com/new.jpg".into()), BannerMode::IgnoreAspect)
+		);
+		// Removing the banner sends an empty address.
+		book.handle_command(&message(
+			"notifychanneledited cid=12 reasonid=10 invokerid=1 invokername=x channel_banner_gfx_url",
+		))
+		.unwrap();
+		let p = presence_from_book(&book, None, |_| false);
+		assert_eq!(p.channels[&12].banner_gfx_url, None);
+		// The host banner, for comparison.
+		assert_eq!(p.server.banner_gfx_url, "https://example.com/banner.png");
+		assert_eq!(p.server.banner_gfx_interval_s, 60);
+		assert_eq!(p.server.banner_mode, BannerMode::KeepAspect);
+		assert_eq!(BannerMode::from_wire("7"), BannerMode::NoAdjust);
 	}
 }

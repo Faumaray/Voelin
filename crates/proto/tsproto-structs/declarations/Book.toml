@@ -76,6 +76,8 @@ properties = [
 	{ name="Icon", type="IconId", opt=true },
 	{ name="IsPrivate", type="bool", opt=true },
 	{ name="StorageQuota", type="u32", opt=true },
+	{ name="BannerGfxUrl", type="str", opt=true, doc="TeamSpeak 6: the address of the channel's banner picture" },
+	{ name="BannerMode", type="str", opt=true, doc="TeamSpeak 6: how the banner is scaled, the values of `HostBannerMode`" },
 	{ name="Subscribed", type="bool" },
 	{ name="PermissionHints", type="ChannelPermissionHint", opt=true },
 	{ name="OptionalData", type="OptionalChannelData", opt=true },

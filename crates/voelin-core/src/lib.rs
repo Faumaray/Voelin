@@ -39,8 +39,10 @@
 //! [`Event::Poke`]), private messages to any client (a
 //! [`ChatTarget::Private`] chat, stored under the peer's unique id), the
 //! channels' file browsers, avatars and icons ([`files`], cached in
-//! [`cache`]) and offline messages ([`offline`]). Contacts (friends,
-//! blocked people, per-person volume) are engine-wide ([`contacts`]).
+//! [`cache`]) and offline messages ([`offline`]). The host banner and
+//! channel banners are pictures on the web, fetched into the same cache
+//! ([`Event::PictureReady`]). Contacts (friends, blocked people, per-person
+//! volume) are engine-wide ([`contacts`]).
 
 mod audio;
 mod book;
@@ -62,6 +64,7 @@ pub mod stream;
 #[cfg(feature = "media")]
 pub mod studio;
 mod voice;
+mod web;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -590,6 +593,9 @@ pub enum Event {
 	/// The server's details changed (also in [`Presence::server`]; voice).
 	ServerDetails {
 		session: SessionId,
+		/// The requested voice address that supplied these details. A queued
+		/// event may outlive a reconnect to another address in this session.
+		address: String,
 		details: Arc<ServerDetails>,
 	},
 	/// The server or channel groups changed (also in the presence; voice),
@@ -644,6 +650,17 @@ pub enum Event {
 	IconReady {
 		session: SessionId,
 		icon: u32,
+		path: PathBuf,
+	},
+	/// A picture on the web is in the cache: the host banner
+	/// ([`ServerDetails::banner_gfx_url`]) or a channel's
+	/// ([`voelin_model::ChannelInfo::banner_gfx_url`]) at `url` (setting
+	/// `cache.fetch_images`). Comes again when the host banner was reloaded
+	/// (`banner_gfx_interval_s`, at least a minute): the file at `path`
+	/// changed.
+	PictureReady {
+		session: SessionId,
+		url: String,
 		path: PathBuf,
 	},
 	/// Answer to [`Command::ListOfflineMessages`].

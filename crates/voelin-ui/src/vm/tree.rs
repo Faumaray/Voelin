@@ -4,11 +4,27 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use voelin_model::{ChannelId, ClientInfo, GroupInfo, Presence, TreeRow, tree_rows};
+use voelin_model::{
+	BannerMode, ChannelId, ChannelInfo, ClientInfo, GroupInfo, Presence, TreeRow, tree_rows,
+};
 
 use crate::app::{MemberItem, TreeItem};
 use crate::settings::ClientPlaybackMap;
 use crate::vm::avatar;
+
+/// A banner mode as the UI takes it (`TreeItem.banner-mode`).
+pub fn banner_mode(mode: BannerMode) -> i32 {
+	match mode {
+		BannerMode::NoAdjust => 0,
+		BannerMode::IgnoreAspect => 1,
+		BannerMode::KeepAspect => 2,
+	}
+}
+
+/// The picture of a banner address, if the engine fetched it.
+pub fn banner(pictures: &HashMap<String, PathBuf>, url: Option<&str>) -> slint::Image {
+	avatar::image(url.and_then(|u| pictures.get(u)))
+}
 
 /// What the tree shows besides the presence.
 pub struct TreeInput<'a> {
@@ -23,16 +39,41 @@ pub struct TreeInput<'a> {
 	pub filter: &'a str,
 	/// Avatar pictures in the engine's cache, by unique id.
 	pub avatars: &'a HashMap<String, PathBuf>,
-	/// Icons in the engine's cache, by icon id (group icons).
+	/// Icons in the engine's cache, by icon id (channel, group and client
+	/// icons).
 	pub icons: &'a HashMap<u32, PathBuf>,
+	/// Banner pictures in the engine's cache, by address.
+	pub pictures: &'a HashMap<String, PathBuf>,
 	/// The server groups in display order; members are grouped by the
 	/// first one each client is in.
 	pub groups: &'a [GroupInfo],
+	/// The channel groups (their icons).
+	pub channel_groups: &'a [GroupInfo],
 }
 
 impl TreeInput<'_> {
 	fn avatar(&self, client: &ClientInfo) -> slint::Image {
 		avatar::image(client.uid.as_ref().and_then(|uid| self.avatars.get(uid)))
+	}
+
+	/// An icon by id, if the engine fetched it (0: none).
+	fn icon(&self, id: u32) -> Option<slint::Image> {
+		let path = self.icons.get(&id).filter(|_| id != 0)?;
+		Some(avatar::image(Some(path))).filter(|i| i.size().width > 0)
+	}
+
+	/// The icons beside a client, as TeamSpeak shows them: its server
+	/// groups' in display order, its channel group's, its own.
+	fn client_icons(&self, client: &ClientInfo) -> Vec<slint::Image> {
+		let groups = self.groups.iter().filter(|g| client.server_groups.contains(&g.id));
+		let channel_group =
+			self.channel_groups.iter().filter(|g| client.channel_group == Some(g.id));
+		groups
+			.chain(channel_group)
+			.map(|g| g.icon)
+			.chain([client.icon])
+			.filter_map(|id| self.icon(id))
+			.collect()
 	}
 
 	/// The group a client is sorted under: the first of its server groups
@@ -63,25 +104,50 @@ fn talking(input: &TreeInput, client: &ClientInfo) -> bool {
 	input.talking.contains(&client.id) || client.talking == Some(true)
 }
 
+/// Centered spacer prefixes are presentation metadata, not part of the title.
+/// Leave other names untouched rather than guessing at the full spacer syntax.
+fn channel_label(name: &str) -> (&str, bool) {
+	if let Some((suffix, label)) = name.strip_prefix("[cspacer").and_then(|s| s.split_once(']'))
+		&& suffix.bytes().all(|b| b.is_ascii_digit())
+	{
+		return (label, true);
+	}
+	(name, false)
+}
+
+/// A channel's name as shown, and whether it is a centred spacer. Only
+/// top-level channels are spacers, as in TeamSpeak: a sub-channel keeps its
+/// name as it is.
+pub fn channel_title(channel: &ChannelInfo) -> (&str, bool) {
+	if channel.parent == 0 { channel_label(&channel.name) } else { (&channel.name, false) }
+}
+
 /// The rows of the tree, channels with their clients below.
 pub fn rows(input: &TreeInput) -> Vec<TreeItem> {
 	let p = input.presence;
 	let rows: Vec<TreeItem> = tree_rows(p, &|cid| input.collapsed.contains(&cid))
 		.into_iter()
 		.map(|row| match row {
-			TreeRow::Channel { depth, channel } => TreeItem {
-				is_channel: true,
-				depth: depth as i32,
-				id: channel.id as i32,
-				name: channel.name.clone().into(),
-				own: input.own_channel == Some(channel.id),
-				locked: channel.has_password,
-				collapsed: input.collapsed.contains(&channel.id),
-				local_volume: 100,
-				members: p.members(channel.id).count() as i32,
-				max_members: channel.max_clients.filter(|m| *m >= 0).unwrap_or(-1),
-				..Default::default()
-			},
+			TreeRow::Channel { depth, channel } => {
+				let (name, centered_spacer) = channel_title(channel);
+				TreeItem {
+					centered_spacer,
+					is_channel: true,
+					depth: depth as i32,
+					id: channel.id as i32,
+					name: name.into(),
+					own: input.own_channel == Some(channel.id),
+					locked: channel.has_password,
+					collapsed: input.collapsed.contains(&channel.id),
+					local_volume: 100,
+					members: p.members(channel.id).count() as i32,
+					max_members: channel.max_clients.filter(|m| *m >= 0).unwrap_or(-1),
+					icon: input.icon(channel.icon).unwrap_or_default(),
+					banner: banner(input.pictures, channel.banner_gfx_url.as_deref()),
+					banner_mode: banner_mode(channel.banner_mode),
+					..Default::default()
+				}
+			}
 			TreeRow::Client { depth, client } => {
 				let playback = client
 					.uid
@@ -89,6 +155,7 @@ pub fn rows(input: &TreeInput) -> Vec<TreeItem> {
 					.and_then(|uid| input.playback.get(uid))
 					.copied()
 					.unwrap_or_default();
+				let mut icons = input.client_icons(client).into_iter();
 				TreeItem {
 					is_channel: false,
 					depth: depth as i32,
@@ -105,6 +172,9 @@ pub fn rows(input: &TreeInput) -> Vec<TreeItem> {
 					initials: avatar::initials(&client.nickname).into(),
 					tint: avatar::tint(&client.nickname),
 					avatar: input.avatar(client),
+					icon: icons.next().unwrap_or_default(),
+					icon_2: icons.next().unwrap_or_default(),
+					icon_3: icons.next().unwrap_or_default(),
 					..Default::default()
 				}
 			}
@@ -174,7 +244,7 @@ impl TreeInput<'_> {
 			&& c.streaming != Some(true)
 			&& c.away.is_none();
 		let status = match self.presence.channels.get(&c.channel) {
-			Some(channel) if elsewhere => format!("In {}", channel.name),
+			Some(channel) if elsewhere => format!("In {}", channel_title(channel).0),
 			_ => status_of(c, talking),
 		};
 		MemberItem {
@@ -235,12 +305,7 @@ fn sectioned(
 fn group_section(input: &TreeInput, client: &ClientInfo) -> (Section, usize) {
 	match input.group_of(client) {
 		Some(g) => (
-			Section {
-				title: g.name.clone(),
-				icon: avatar::image(
-					Some(g.icon).filter(|i| *i != 0).and_then(|i| input.icons.get(&i)),
-				),
-			},
+			Section { title: g.name.clone(), icon: input.icon(g.icon).unwrap_or_default() },
 			1 + input.group_rank(client),
 		),
 		None => (Section { title: "Online".into(), ..Default::default() }, usize::MAX),
@@ -349,7 +414,9 @@ mod tests {
 	struct Extras {
 		avatars: HashMap<String, PathBuf>,
 		icons: HashMap<u32, PathBuf>,
+		pictures: HashMap<String, PathBuf>,
 		groups: Vec<GroupInfo>,
+		channel_groups: Vec<GroupInfo>,
 	}
 
 	fn input<'a>(
@@ -370,8 +437,96 @@ mod tests {
 			filter,
 			avatars: &extras.avatars,
 			icons: &extras.icons,
+			pictures: &extras.pictures,
 			groups: &extras.groups,
+			channel_groups: &extras.channel_groups,
 		}
+	}
+
+	/// A PNG of this width in a file (the engine's cache names them without
+	/// an extension).
+	fn picture_file(dir: &std::path::Path, name: &str, width: u32) -> PathBuf {
+		let mut png = Vec::new();
+		let mut encoder = png::Encoder::new(&mut png, width, 2);
+		encoder.set_color(png::ColorType::Rgba);
+		encoder.set_depth(png::BitDepth::Eight);
+		encoder.write_header().unwrap().write_image_data(&vec![120; width as usize * 8]).unwrap();
+		let path = dir.join(name);
+		std::fs::write(&path, png).unwrap();
+		path
+	}
+
+	/// Avatars, channel icons and banners, group and client icons (in
+	/// TeamSpeak's order, those that arrived) reach the rows.
+	#[test]
+	fn pictures_in_rows() {
+		let dir = std::env::temp_dir().join(format!("voelin-tree-{}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		let mut p = presence();
+		let lobby = p.channels.get_mut(&1).unwrap();
+		lobby.icon = 2001;
+		lobby.banner_gfx_url = Some("https://e.com/lobby.png".into());
+		lobby.banner_mode = BannerMode::KeepAspect;
+		let alice = p.clients.get_mut(&10).unwrap();
+		alice.uid = Some("alice=".into());
+		alice.server_groups = vec![7, 6];
+		alice.channel_group = Some(5);
+		alice.icon = 4004;
+		let group = |id, sort_id, icon| GroupInfo { id, icon, sort_id, ..Default::default() };
+		let e = Extras {
+			avatars: HashMap::from([("alice=".into(), picture_file(&dir, "avatar", 5))]),
+			icons: HashMap::from([
+				(2001, picture_file(&dir, "2001", 7)),
+				(3003, picture_file(&dir, "3003", 3)),
+				(4004, picture_file(&dir, "4004", 4)),
+				(5005, picture_file(&dir, "5005", 6)),
+			]),
+			pictures: HashMap::from([(
+				"https://e.com/lobby.png".into(),
+				picture_file(&dir, "banner", 9),
+			)]),
+			// Group 7 sorts first; group 6's icon has not arrived.
+			groups: vec![group(7, 10, 3003), group(6, 20, 9999)],
+			channel_groups: vec![group(5, 0, 5005)],
+		};
+		let (t, c, pb) = (HashSet::new(), HashSet::new(), ClientPlaybackMap::new());
+		let rows = rows(&input(&p, &t, &c, &pb, "", &e));
+		let width = |i: &slint::Image| i.size().width;
+		let lobby = &rows[0];
+		assert_eq!((width(&lobby.icon), width(&lobby.banner), lobby.banner_mode), (7, 9, 2));
+		let alice = &rows[1];
+		assert_eq!(width(&alice.avatar), 5);
+		assert_eq!([&alice.icon, &alice.icon_2, &alice.icon_3].map(width), [3, 6, 4]);
+		// Nothing for the others.
+		let games = &rows[2];
+		assert_eq!((width(&games.icon), width(&games.banner), games.banner_mode), (0, 0, 0));
+		assert_eq!(width(&rows[3].avatar), 0);
+		std::fs::remove_dir_all(dir).unwrap();
+	}
+
+	#[test]
+	fn centered_spacer_titles_keep_tree_identity_and_search() {
+		let mut p = presence();
+		p.channels.get_mut(&2).unwrap().name = "[cspacer12]Гамесы".into();
+		let (t, c, pb) = (HashSet::new(), HashSet::from([2]), ClientPlaybackMap::new());
+		let e = Extras::default();
+		let rows = rows(&input(&p, &t, &c, &pb, "Гамесы", &e));
+		assert_eq!(rows.len(), 1);
+		assert_eq!(rows[0].name, "Гамесы");
+		assert!(rows[0].centered_spacer && rows[0].collapsed);
+		assert_eq!(rows[0].id, 2);
+		assert_eq!(channel_label("[cspacer]Games"), ("Games", true));
+		for name in ["[cspacerx]Games", "[cspacer2Games", "Games", "[spacer0]Games"] {
+			assert_eq!(channel_label(name), (name, false));
+		}
+		// Only top-level channels are spacers: a sub-channel keeps its name.
+		p.channels.get_mut(&3).unwrap().name = "[cspacer1]Chess".into();
+		let (t, c) = (HashSet::new(), HashSet::new());
+		let found = super::rows(&input(&p, &t, &c, &pb, "Chess", &e));
+		let chess = found.iter().find(|r| r.is_channel && r.id == 3).unwrap();
+		assert_eq!((chess.name.as_str(), chess.centered_spacer), ("[cspacer1]Chess", false));
+		assert_eq!(channel_title(&p.channels[&2]), ("Гамесы", true));
+		assert_eq!(channel_title(&p.channels[&3]), ("[cspacer1]Chess", false));
 	}
 
 	#[test]

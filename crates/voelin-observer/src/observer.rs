@@ -105,7 +105,15 @@ async fn run(
 async fn load(client: &QueryClient) -> voelin_query::Result<Presence> {
 	let info = client.send(&Command::new("serverinfo")).await?;
 	let channels = client
-		.send(&Command::new("channellist").flag("topic").flag("flags").flag("voice").flag("limits"))
+		.send(
+			&Command::new("channellist")
+				.flag("topic")
+				.flag("flags")
+				.flag("voice")
+				.flag("limits")
+				.flag("icon")
+				.flag("banners"),
+		)
 		.await?;
 	let clients = client
 		.send(

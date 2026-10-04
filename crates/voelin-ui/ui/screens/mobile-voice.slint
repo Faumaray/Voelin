@@ -7,7 +7,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, MemberItem, StreamItem } from "../bridge.slint";
 import { Nav, MobileTab } from "../nav.slint";
-import { Icon, IconButton, Button, ButtonKind, Avatar, LiveBadge, Select, Slider, SpeakingBars, ScrollView } from "../components/index.slint";
+import { Icon, IconButton, Button, ButtonKind, Avatar, LiveBadge, Select, Slider, SpeakingBars, ScrollView, BannerPicture } from "../components/index.slint";
 import { MessageList, Composer } from "chat.slint";
 import { StudioBridge } from "../studio-bridge.slint";
 
@@ -21,52 +21,60 @@ export global PhoneVoice {
     }
 }
 
-// The channel's name and topic, back, and Leave.
-component ChannelBar inherits HorizontalLayout {
-    padding-left: Theme.space-3;
-    padding-right: Theme.space-3;
-    spacing: Theme.space-3;
+// Channel background behind its name, topic, Back and Leave.
+component ChannelBar inherits Rectangle {
     height: 56px;
-    IconButton {
-        icon: Icons.arrow-left;
-        label: @tr("Back");
-        round: true;
-        filled: true;
-        size: 40px;
-        y: (parent.height - self.height) / 2;
-        clicked => { PhoneVoice.close(); }
+    clip: true;
+    if Bridge.own-channel-banner.width > 0: BannerPicture {
+        y: 0;
+        source: Bridge.own-channel-banner;
     }
-    Icon {
-        source: Icons.volume-2;
-        size: 28px;
-        tint: Theme.text-secondary;
-        y: (parent.height - self.height) / 2;
-    }
-    VerticalLayout {
-        alignment: center;
-        horizontal-stretch: 1;
-        Text {
-            text: Bridge.own-channel;
-            color: Theme.text;
-            font-size: Theme.font-lg;
-            font-weight: Theme.weight-semibold;
-            overflow: elide;
+    HorizontalLayout {
+        height: 56px;
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-3;
+        spacing: Theme.space-3;
+        IconButton {
+            icon: Icons.arrow-left;
+            label: @tr("Back");
+            round: true;
+            filled: true;
+            size: 40px;
+            y: (parent.height - self.height) / 2;
+            clicked => { PhoneVoice.close(); }
         }
-        if Bridge.own-channel-topic != "": Text {
-            text: Bridge.own-channel-topic;
-            color: Theme.text-secondary;
-            font-size: Theme.font-sm;
-            overflow: elide;
+        Icon {
+            source: Icons.volume-2;
+            size: 28px;
+            tint: Theme.text-secondary;
+            y: (parent.height - self.height) / 2;
         }
-    }
-    Button {
-        kind: ButtonKind.danger;
-        icon: Icons.log-out;
-        text: @tr("Leave");
-        y: (parent.height - self.height) / 2;
-        clicked => {
-            PhoneVoice.close();
-            Bridge.disconnect-voice();
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: Bridge.own-channel;
+                color: Theme.text;
+                font-size: Theme.font-lg;
+                font-weight: Theme.weight-semibold;
+                overflow: elide;
+            }
+            if Bridge.own-channel-topic != "": Text {
+                text: Bridge.own-channel-topic;
+                color: Bridge.own-channel-banner.width > 0 ? Theme.text : Theme.text-secondary;
+                font-size: Theme.font-sm;
+                overflow: elide;
+            }
+        }
+        Button {
+            kind: ButtonKind.danger;
+            icon: Icons.log-out;
+            text: @tr("Leave");
+            y: (parent.height - self.height) / 2;
+            clicked => {
+                PhoneVoice.close();
+                Bridge.disconnect-voice();
+            }
         }
     }
 }

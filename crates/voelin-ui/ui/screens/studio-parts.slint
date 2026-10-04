@@ -930,6 +930,7 @@ component ChatRow inherits Rectangle {
             if !line.continued: Avatar {
                 size: 34px;
                 initials: line.initials;
+                image: line.avatar;
                 tint: line.tint;
                 label: line.author;
             }

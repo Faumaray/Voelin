@@ -63,7 +63,8 @@ impl App {
 				let name = self
 					.sessions
 					.get(&id)
-					.and_then(|v| v.presence.channels.get(cid).map(|c| c.name.clone()));
+					.and_then(|v| v.presence.channels.get(cid))
+					.map(|c| vm::tree::channel_title(c).0.to_owned());
 				format!("#{}", name.unwrap_or_else(|| cid.to_string()))
 			}
 			ChatTarget::Server => "Server".into(),
@@ -375,31 +376,33 @@ impl App {
 					.unwrap_or_default();
 				(t, last, time)
 			})
-			.map(|(t, last, time)| ChatTab {
-				last: last.into(),
-				time: time.into(),
-				title: t.title.clone().into(),
-				name: t.title.trim_start_matches(['#', '@']).into(),
-				kind: match t.target {
-					ChatTarget::Server => 0,
-					ChatTarget::Channel(_) => 1,
-					ChatTarget::Private(_) => 2,
-				},
-				id: match t.target {
-					ChatTarget::Channel(cid) => cid as i32,
-					_ => 0,
-				},
-				unread: t.unread,
-				topic: match t.target {
-					ChatTarget::Channel(cid) => view
-						.presence
-						.channels
-						.get(&cid)
-						.and_then(|c| c.topic.clone())
-						.unwrap_or_default()
-						.into(),
-					_ => Default::default(),
-				},
+			.map(|(t, last, time)| {
+				let channel = match t.target {
+					ChatTarget::Channel(cid) => view.presence.channels.get(&cid),
+					_ => None,
+				};
+				ChatTab {
+					last: last.into(),
+					time: time.into(),
+					title: t.title.clone().into(),
+					name: t.title.trim_start_matches(['#', '@']).into(),
+					kind: match t.target {
+						ChatTarget::Server => 0,
+						ChatTarget::Channel(_) => 1,
+						ChatTarget::Private(_) => 2,
+					},
+					id: match t.target {
+						ChatTarget::Channel(cid) => cid as i32,
+						_ => 0,
+					},
+					unread: t.unread,
+					topic: channel.and_then(|c| c.topic.clone()).unwrap_or_default().into(),
+					banner: vm::tree::banner(
+						&view.pictures,
+						channel.and_then(|c| c.banner_gfx_url.as_deref()),
+					),
+					banner_mode: channel.map_or(0, |c| vm::tree::banner_mode(c.banner_mode)),
+				}
 			})
 			.collect();
 		vm::list::sync(&self.models.tabs, &tabs);

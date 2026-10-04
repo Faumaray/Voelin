@@ -6,16 +6,18 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, ChatLine, ReactionItem, FileItem, Images } from "../bridge.slint";
 import { Nav } from "../nav.slint";
-import { Icon, IconButton, Avatar, Chip, TabItem, TextField, RichText, Banner, Button, ButtonKind, Spinner, Tooltip, ListView } from "../components/index.slint";
+import { Icon, IconButton, Avatar, Chip, TabItem, TextField, RichText, Banner, Button, ButtonKind, Spinner, Tooltip, ListView, BannerPicture } from "../components/index.slint";
 
-// The header of the main area: an icon, a title and a description, and
-// actions (@children) at the right.
+// A compact title and actions over the optional channel background.
 export component PageHeader inherits Rectangle {
     in property <image> icon: Icons.hash;
+    in property <image> banner;
     in property <string> title;
     in property <string> description;
     min-height: 60px;
     border-width: 0px;
+    clip: true;
+    if root.banner.width > 0: BannerPicture { source: root.banner; }
     HorizontalLayout {
         padding-left: Theme.space-6;
         padding-right: Theme.space-4;
@@ -44,7 +46,7 @@ export component PageHeader inherits Rectangle {
         Text {
             text: root.description;
             font-size: Theme.font-sm;
-            color: Theme.text-muted;
+            color: root.banner.width > 0 ? Theme.text : Theme.text-muted;
             vertical-alignment: center;
             horizontal-stretch: 1;
             overflow: elide;
@@ -583,8 +585,10 @@ export component ChatView inherits VerticalLayout {
     property <string> tab-name: Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length ? Bridge.tabs[Bridge.current-tab].name : "";
     property <int> tab-kind: Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length ? Bridge.tabs[Bridge.current-tab].kind : 0;
     property <string> tab-topic: Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length ? Bridge.tabs[Bridge.current-tab].topic : "";
+    property <image> tab-banner: Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length ? Bridge.tabs[Bridge.current-tab].banner : @image-url("");
 
     if root.header: PageHeader {
+        banner: root.tab-banner;
         icon: root.tab-kind == 1 ? Icons.hash : root.tab-kind == 2 ? Icons.at-sign : Icons.message-square;
         title: root.tab-name;
         description: root.tab-topic != "" ? root.tab-topic : Bridge.server-title;

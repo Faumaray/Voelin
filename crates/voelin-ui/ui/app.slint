@@ -214,6 +214,11 @@ export component MainWindow inherits Window {
             }
 
             if Nav.narrow && root.chrome: MobileShell {
+                property <bool> channel-chat: Nav.page == Page.server && !Nav.phone-voice
+                    && Nav.mobile-tab == MobileTab.chat && !Bridge.viewer-open
+                    && Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length
+                    && Bridge.tabs[Bridge.current-tab].kind == 1;
+                banner: self.channel-chat ? Bridge.tabs[Bridge.current-tab].banner : @image-url("");
                 title: Nav.page == Page.settings ? @tr("Settings")
                     : Nav.page == Page.friends ? @tr("Friends")
                     : Nav.page == Page.messages ? @tr("Messages")

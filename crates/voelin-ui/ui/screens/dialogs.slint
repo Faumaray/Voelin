@@ -290,11 +290,13 @@ component ShareCard inherits Modal {
                     Avatar {
                         size: 32px;
                         initials: "";
+                        image: viewer.avatar;
                         status: viewer.state == "connected" ? Status.online : viewer.state == "requested" ? Status.idle : Status.offline;
                         Icon {
                             source: Icons.user;
                             size: 16px;
                             tint: #ffffff;
+                            visible: viewer.avatar.width == 0;
                         }
                     }
                 }

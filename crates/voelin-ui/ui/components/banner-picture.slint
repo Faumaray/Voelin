@@ -1,0 +1,25 @@
+import { Theme } from "../theme.slint";
+
+// Banners decorate their owning row/header; they never add layout height.
+// Cover keeps artwork undistorted while cropping its centre to the surface.
+export component BannerPicture inherits Rectangle {
+    in property <image> source;
+    clip: true;
+    accessible-role: AccessibleRole.none;
+    Image {
+        width: 100%;
+        height: 100%;
+        source: root.source;
+        image-fit: cover;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        accessible-role: AccessibleRole.none;
+    }
+    // Even a white picture behind dark-theme text (or black behind light
+    // text) retains >4.5:1 contrast for Theme.text at the weakest stop.
+    Rectangle {
+        background: @linear-gradient(90deg,
+            Theme.surface.transparentize(0.26) 0%,
+            Theme.surface.transparentize(0.34) 100%);
+    }
+}

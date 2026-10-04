@@ -11,6 +11,8 @@ export struct ServerItem {
     // Avatar of a server without an icon.
     initials: string,
     tint: color,
+    // The server's icon, empty without one.
+    icon: image,
     // Unread messages in its chats.
     unread: int,
     // Someone streams in our channel there.
@@ -25,6 +27,8 @@ export struct ServerItem {
 
 export struct TreeItem {
     is-channel: bool,
+    // Recognized centred TeamSpeak spacer; name excludes its wire prefix.
+    centered-spacer: bool,
     depth: int,
     id: int,
     name: string,
@@ -50,6 +54,16 @@ export struct TreeItem {
     // Channels: clients inside, and the limit (-1: none).
     members: int,
     max-members: int,
+    // Leading channel icon or trailing client icons, empty where absent: a channel's
+    // icon; a client's server group icons, its channel group's and its own,
+    // in that order (the first three).
+    icon: image,
+    icon-2: image,
+    icon-3: image,
+    // A channel's banner picture (TeamSpeak 6), drawn behind the row;
+    // Wire sizing metadata; compact decorative backgrounds always cover.
+    banner: image,
+    banner-mode: int,
 }
 
 // A client for the members panel (everyone on the server) and the voice
@@ -129,6 +143,9 @@ export struct ChatTab {
     // The last message ("Mira: the banner I promised") and its time.
     last: string,
     time: string,
+    // The channel's banner picture behind the chat's header (as TreeItem).
+    banner: image,
+    banner-mode: int,
 }
 
 // A piece of a chat line: text, or an emoji shown as an image (`emoji` is
@@ -259,6 +276,8 @@ export struct ViewerItem {
     name: string,
     state: string,
     message: string,
+    // Their avatar picture, empty without one.
+    avatar: image,
 }
 
 // A capture source for the share dialog.
@@ -800,12 +819,22 @@ export global Bridge {
     in property <string> server-title: @tr("No server selected");
     // "12 online · 8 channels"
     in property <string> server-stats;
-    // Our nickname on the current server, and the channel we are in.
+    // The server's host banner, empty without one (the server card shows its
+    // painted art then); mode as TreeItem.banner-mode.
+    in property <image> server-icon;
+    in property <image> server-banner;
+    in property <int> server-banner-mode;
+    // Our nickname on the current server, our avatar there (empty without
+    // one), and the channel we are in.
     in property <string> nickname;
+    in property <image> own-avatar;
     in property <string> own-channel;
     // Its topic, and how many people it takes (-1: no limit).
     in property <string> own-channel-topic;
     in property <int> own-channel-limit: -1;
+    // Its banner picture (TeamSpeak 6), as TreeItem.banner.
+    in property <image> own-channel-banner;
+    in property <int> own-channel-banner-mode;
     in property <bool> voice-connected;
     in property <bool> voice-connecting;
     in property <bool> observing;

@@ -58,7 +58,7 @@ use voelin_gateway_proto::{
 	feature,
 };
 use voelin_model::{
-	ChannelInfo, ChatMessage, ChatTarget, ClientInfo, GroupInfo, Presence, ServerFlavor,
+	BannerMode, ChannelInfo, ChatMessage, ChatTarget, ClientInfo, GroupInfo, Presence, ServerFlavor,
 };
 use voelin_store::{Bookmark, MessageSource};
 
@@ -369,6 +369,7 @@ fn demo_ui(app: &mut App) {
 		gateway_url: None,
 		query: None,
 		client_version: None,
+		cached_server_icon: None,
 	};
 	app.bookmarks = vec![
 		Bookmark {
@@ -385,17 +386,31 @@ fn demo_ui(app: &mut App) {
 	p.server.welcome_message =
 		"Welcome to [b]Nightfall Guild[/b]! Raids on Tuesdays and Fridays, all levels welcome."
 			.into();
+	// The host banner, a server icon, backgrounds on three channels and an icon
+	// on another; the pictures arrive below (`demo_pictures`).
+	p.server.banner_gfx_url = DEMO_HOST_BANNER.into();
+	p.server.banner_mode = BannerMode::KeepAspect;
+	p.server.icon = DEMO_SERVER_ICON;
 	let mut chill = channel(2, 0, 1, "Chill Zone");
 	chill.max_clients = Some(50);
 	chill.topic = Some("Hang out, chat, and explore the worlds beyond.".into());
+	chill.banner_gfx_url = Some(DEMO_CHILL_BANNER.into());
+	chill.banner_mode = BannerMode::IgnoreAspect;
+	let mut raid = channel(4, 3, 0, "Raid Night");
+	raid.banner_gfx_url = Some(DEMO_RAID_BANNER.into());
+	raid.banner_mode = BannerMode::KeepAspect;
+	let mut music = channel(5, 0, 3, "Music");
+	music.icon = DEMO_MUSIC_ICON;
+	music.banner_gfx_url = Some(DEMO_MUSIC_BANNER.into());
+	music.banner_mode = BannerMode::NoAdjust;
 	let mut locked = channel(7, 0, 6, "Officers");
 	locked.has_password = true;
 	for c in [
 		channel(1, 0, 0, "Lobby"),
 		chill,
-		channel(3, 0, 2, "Gaming"),
-		channel(4, 3, 0, "Raid Night"),
-		channel(5, 0, 3, "Music"),
+		channel(3, 0, 2, "[cspacer0]Gaming"),
+		raid,
+		music,
 		channel(6, 0, 5, "AFK"),
 		locked,
 	] {
@@ -443,7 +458,11 @@ fn demo_ui(app: &mut App) {
 	let group = |id: u64, sort_id: i32, name: &str| GroupInfo {
 		id,
 		name: name.into(),
-		icon: 0,
+		icon: match id {
+			GROUP_ADMIN => DEMO_ADMIN_ICON,
+			GROUP_MOD => DEMO_MOD_ICON,
+			_ => 0,
+		},
 		sort_id,
 		..Default::default()
 	};
@@ -517,6 +536,7 @@ fn demo_ui(app: &mut App) {
 	for event in events {
 		app.handle_event(event);
 	}
+	demo_pictures(app);
 	demo_chat(app, session);
 	demo_social(app);
 	// No toast over the screenshots.
@@ -981,6 +1001,148 @@ fn demo_social(app: &mut App) {
 	app.refresh_home();
 }
 
+/// Addresses and icon ids of the sample server's pictures.
+const DEMO_HOST_BANNER: &str = "https://nightfall.example/banner.png";
+const DEMO_CHILL_BANNER: &str = "https://nightfall.example/chill.png";
+const DEMO_MUSIC_BANNER: &str = "https://nightfall.example/music.png";
+const DEMO_RAID_BANNER: &str = "https://nightfall.example/raid.png";
+const DEMO_SERVER_ICON: u32 = 3_120_211_001;
+const DEMO_ADMIN_ICON: u32 = 3_120_211_002;
+const DEMO_MOD_ICON: u32 = 3_120_211_003;
+const DEMO_MUSIC_ICON: u32 = 3_120_211_004;
+
+/// Avatars, icons and banners as the engine reports them once they are in
+/// its cache (here a folder of synthetic pictures in the temporary
+/// directory).
+fn demo_pictures(app: &mut App) {
+	let session = DEMO as u64;
+	let dir = std::env::temp_dir().join("voelin-demo-pictures");
+	let _ = std::fs::create_dir_all(&dir);
+	let save = |name: &str, png: Vec<u8>| {
+		let path = dir.join(name);
+		let _ = std::fs::write(&path, png);
+		path
+	};
+	let mut events = vec![Event::ServerDetails {
+		session,
+		address: app.bookmarks.iter().find(|b| b.id == DEMO).unwrap().address.clone(),
+		details: Arc::new(voelin_model::ServerDetails {
+			icon: DEMO_SERVER_ICON,
+			..Default::default()
+		}),
+	}];
+	for (url, picture) in [
+		(DEMO_HOST_BANNER, demo_picture(256, 256, 3)),
+		(DEMO_CHILL_BANNER, demo_picture(900, 120, 11)),
+		(DEMO_RAID_BANNER, demo_picture(240, 240, 5)),
+		(DEMO_MUSIC_BANNER, demo_picture(180, 36, 7)),
+	] {
+		let path = save(url.rsplit('/').next().unwrap_or(url), picture);
+		events.push(Event::PictureReady { session, url: url.into(), path });
+	}
+	for (icon, color, shape) in [
+		(DEMO_SERVER_ICON, [70, 92, 255], Shape::Moon),
+		(DEMO_ADMIN_ICON, [242, 178, 44], Shape::Diamond),
+		(DEMO_MOD_ICON, [45, 196, 132], Shape::Disc),
+		(DEMO_MUSIC_ICON, [214, 76, 182], Shape::Ring),
+	] {
+		let path = save(&icon.to_string(), demo_icon(color, shape));
+		events.push(Event::IconReady { session, icon, path });
+	}
+	// Some people have pictures, the rest initials.
+	for (sample_session, uid, seed) in [
+		(session, "demo-2", 1),
+		(session, "demo-3", 2),
+		(session, "demo-4", 3),
+		(session, "demo-7", 4),
+		(session, "demo-9", 5),
+		(session + 1, "demo-ivy", 6),
+	] {
+		let path = save(&format!("avatar-{uid}"), demo_avatar(seed));
+		events.push(Event::AvatarReady {
+			session: sample_session,
+			client_uid: uid.into(),
+			path,
+			hash: String::new(),
+		});
+	}
+	for event in events {
+		app.handle_event(event);
+	}
+}
+
+/// Shapes of the sample icons.
+#[derive(Clone, Copy)]
+enum Shape {
+	Moon,
+	Diamond,
+	Disc,
+	Ring,
+}
+
+/// A 32×32 icon: a shape in `color` on transparency; PNG bytes.
+fn demo_icon(color: [u8; 3], shape: Shape) -> Vec<u8> {
+	let size = 32u32;
+	let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+	for y in 0..size {
+		for x in 0..size {
+			let (dx, dy) = (x as f32 - 15.5, y as f32 - 15.5);
+			let d = (dx * dx + dy * dy).sqrt();
+			let inside = match shape {
+				Shape::Moon => d < 14.0 && ((dx - 6.0).powi(2) + (dy + 5.0).powi(2)).sqrt() > 10.0,
+				Shape::Diamond => dx.abs() + dy.abs() < 15.0,
+				Shape::Disc => d < 13.0,
+				Shape::Ring => (8.0..14.0).contains(&d) || d < 4.0,
+			};
+			let [r, g, b] = color;
+			rgba.extend(if inside { [r, g, b, 255] } else { [0, 0, 0, 0] });
+		}
+	}
+	png_of(size, size, &rgba)
+}
+
+/// A 96×96 portrait: a head and shoulders on a gradient; PNG bytes.
+fn demo_avatar(seed: u32) -> Vec<u8> {
+	const SKY: [[f32; 3]; 6] = [
+		[255.0, 140.0, 90.0],
+		[90.0, 170.0, 255.0],
+		[170.0, 110.0, 255.0],
+		[60.0, 200.0, 170.0],
+		[250.0, 200.0, 80.0],
+		[240.0, 110.0, 160.0],
+	];
+	let size = 96u32;
+	let sky = SKY[seed as usize % SKY.len()];
+	let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+	for y in 0..size {
+		for x in 0..size {
+			let (fx, fy) = (x as f32, y as f32);
+			let t = (fx + fy) / (2.0 * size as f32);
+			let mut c =
+				[sky[0] * (1.0 - 0.45 * t), sky[1] * (1.0 - 0.45 * t), sky[2] * (1.0 - 0.3 * t)];
+			let head = ((fx - 48.0).powi(2) + (fy - 40.0).powi(2)).sqrt() < 19.0;
+			let shoulders = ((fx - 48.0) / 36.0).powi(2) + ((fy - 98.0) / 30.0).powi(2) < 1.0;
+			if head || shoulders {
+				c = [250.0 - c[0] * 0.25, 244.0 - c[1] * 0.25, 238.0 - c[2] * 0.2];
+			}
+			rgba.extend([c[0] as u8, c[1] as u8, c[2] as u8, 255]);
+		}
+	}
+	png_of(size, size, &rgba)
+}
+
+/// RGBA pixels as PNG bytes.
+fn png_of(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+	let mut out = Vec::new();
+	let mut encoder = png::Encoder::new(&mut out, width, height);
+	encoder.set_color(png::ColorType::Rgba);
+	encoder.set_depth(png::BitDepth::Eight);
+	if let Ok(mut writer) = encoder.write_header() {
+		let _ = writer.write_image_data(rgba);
+	}
+	out
+}
+
 /// A painted night: sky, moon, stars, hills and a castle; PNG bytes.
 fn demo_picture(width: u32, height: u32, seed: u32) -> Vec<u8> {
 	let mut rgba = Vec::with_capacity((width * height * 4) as usize);
@@ -1031,14 +1193,7 @@ fn demo_picture(width: u32, height: u32, seed: u32) -> Vec<u8> {
 			rgba.extend([c[0].min(255.0) as u8, c[1].min(255.0) as u8, c[2].min(255.0) as u8, 255]);
 		}
 	}
-	let mut out = Vec::new();
-	let mut encoder = png::Encoder::new(&mut out, width, height);
-	encoder.set_color(png::ColorType::Rgba);
-	encoder.set_depth(png::BitDepth::Eight);
-	if let Ok(mut writer) = encoder.write_header() {
-		let _ = writer.write_image_data(&rgba);
-	}
-	out
+	png_of(width, height, &rgba)
 }
 
 /// Server group ids of the sample server.

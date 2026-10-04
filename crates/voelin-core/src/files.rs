@@ -364,6 +364,59 @@ pub(crate) fn normalize_dir(path: &str) -> String {
 	}
 }
 
+/// A picture in the voice server's files, as banners link one: its
+/// channel and path. TeamSpeak 5 and 6 write
+/// `ts3image://<host>?port=<port>&channel=<cid>&path=<dir>&filename=<name>`
+/// (the file browser's `ts3file://` link with its scheme changed, which is
+/// taken as well); TeamSpeak 3's BBCode `ts3image://<name>?channel=<cid>&path=<dir>`.
+/// The host is not checked: the file is asked of the server we are on.
+pub(crate) fn server_image(url: &str) -> Option<(u64, String)> {
+	let (scheme, rest) = url.trim().split_once("://")?;
+	if !scheme.eq_ignore_ascii_case("ts3image") && !scheme.eq_ignore_ascii_case("ts3file") {
+		return None;
+	}
+	let rest = rest.split('#').next().unwrap_or_default();
+	let (authority, query) = rest.split_once('?').unwrap_or((rest, ""));
+	let (mut channel, mut dir, mut name, mut port) = (None, None, None, false);
+	for pair in query.split('&') {
+		let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+		match key {
+			"channel" => channel = value.parse::<u64>().ok(),
+			"path" => dir = Some(percent_decode(value)?),
+			"filename" => name = Some(percent_decode(value)?),
+			"port" => port = true,
+			_ => {}
+		}
+	}
+	let dir = normalize_dir(dir.as_deref().unwrap_or("/"));
+	let path = match name {
+		Some(name) => join_path(&dir, &name),
+		// TeamSpeak 3: the file's name where the host would be.
+		None if !port => join_path(&dir, &percent_decode(authority.trim_end_matches('/'))?),
+		// Only a path: the file itself.
+		None => dir,
+	};
+	(!path.ends_with('/')).then_some((channel?, path))
+}
+
+/// `%XX` escapes decoded (a `+` stays one: the clients escape spaces).
+fn percent_decode(text: &str) -> Option<String> {
+	let mut out = Vec::with_capacity(text.len());
+	let mut bytes = text.bytes();
+	while let Some(b) = bytes.next() {
+		if b == b'%' {
+			let hex = [bytes.next()?, bytes.next()?];
+			if !hex.iter().all(u8::is_ascii_hexdigit) {
+				return None;
+			}
+			out.push(u8::from_str_radix(std::str::from_utf8(&hex).ok()?, 16).ok()?);
+		} else {
+			out.push(b);
+		}
+	}
+	String::from_utf8(out).ok()
+}
+
 #[cfg(test)]
 mod tests {
 	use std::sync::Mutex;
@@ -387,6 +440,42 @@ mod tests {
 		assert_eq!(normalize_dir(""), "/");
 		assert_eq!(normalize_dir("/docs/"), "/docs");
 		assert_eq!(normalize_dir("docs"), "/docs");
+	}
+
+	#[test]
+	fn server_images() {
+		// TeamSpeak 5 and 6, as the file browser links a file.
+		assert_eq!(
+			server_image(
+				"ts3image://ts.example.com?port=9987&channel=5&path=%2Fbanners&filename=raid%20night.gif&isDir=0&size=12345"
+			),
+			Some((5, "/banners/raid night.gif".into()))
+		);
+		assert_eq!(
+			server_image("TS3FILE://1.2.3.4?port=9987&channel=12&path=/&filename=a+b.png"),
+			Some((12, "/a+b.png".into()))
+		);
+		assert_eq!(
+			server_image("ts3image://h?port=1&channel=3&path=%2Fdir%2Fx.png"),
+			Some((3, "/dir/x.png".into()))
+		);
+		// TeamSpeak 3's BBCode: the name where the host would be.
+		assert_eq!(
+			server_image("ts3image://banner%201.png?channel=1&path=%2F"),
+			Some((1, "/banner 1.png".into()))
+		);
+		assert_eq!(server_image("ts3image://b.png?channel=7"), Some((7, "/b.png".into())));
+		for refused in [
+			"https://example.com/b.png",
+			"ts3image://h?port=1&path=%2F&filename=b.png",
+			"ts3image://h?port=1&channel=x&filename=b.png",
+			"ts3image://h?port=1&channel=1&path=%2F",
+			"ts3image://h?port=1&channel=1&filename=%zz.png",
+			"ts3image://h?port=1&channel=1&filename=%C3",
+			"ts3image://",
+		] {
+			assert_eq!(server_image(refused), None, "{refused}");
+		}
 	}
 
 	fn temp(tag: &str) -> PathBuf {

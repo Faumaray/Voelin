@@ -153,9 +153,33 @@ pub struct Bookmark {
 	pub query: Option<QueryConfig>,
 	/// Signed client version to present (`voelinctl versions` spec), `None` for the default.
 	pub client_version: Option<String>,
+	/// Last known icon, available before connecting. Bytes live in the image cache.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub cached_server_icon: Option<CachedServerIcon>,
+}
+
+/// Bind cached metadata to the address that supplied it, so editing a bookmark
+/// cannot display another server's icon. Do not persist machine-specific paths.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachedServerIcon {
+	pub address: String,
+	pub id: u32,
 }
 
 impl Bookmark {
+	pub fn server_icon_id(&self) -> Option<u32> {
+		self.cached_server_icon
+			.as_ref()
+			.filter(|icon| icon.address == self.address.trim() && icon.id != 0)
+			.map(|icon| icon.id)
+	}
+
+	/// Record a server's latest icon; zero removes the previous one.
+	pub fn remember_server_icon(&mut self, id: u32) {
+		self.cached_server_icon =
+			(id != 0).then(|| CachedServerIcon { address: self.address.trim().to_owned(), id });
+	}
+
 	/// Secret key of the server password.
 	pub fn server_password_key(&self) -> String {
 		format!("bookmark/{}/server-password", self.id)
@@ -536,6 +560,29 @@ mod tests {
 		store.update_bookmark(&b).unwrap();
 		assert_eq!(store.bookmarks().unwrap()[0].nickname, "renamed");
 		assert_eq!(b.server_password_key(), format!("bookmark/{}/server-password", b.id));
+	}
+
+	#[test]
+	fn bookmark_icons_survive_reload_and_are_bound_to_the_server_address() {
+		let store = Store::open_in_memory().unwrap();
+		let mut bookmark = Bookmark { address: "example.test:9987".into(), ..Default::default() };
+		bookmark.id = store.add_bookmark(&bookmark).unwrap();
+		assert_eq!(bookmark.server_icon_id(), None);
+		bookmark.remember_server_icon(4_000_000_000);
+		store.update_bookmark(&bookmark).unwrap();
+		let mut reloaded = store.bookmarks().unwrap().remove(0);
+		assert_eq!(reloaded.server_icon_id(), Some(4_000_000_000));
+		reloaded.address = "other.test:9987".into();
+		assert_eq!(reloaded.server_icon_id(), None);
+		reloaded.remember_server_icon(42);
+		assert_eq!(reloaded.server_icon_id(), Some(42));
+		reloaded.remember_server_icon(0);
+		assert!(reloaded.cached_server_icon.is_none());
+		store.update_bookmark(&reloaded).unwrap();
+		assert_eq!(store.bookmarks().unwrap()[0].server_icon_id(), None);
+		let old = serde_json::to_value(Bookmark::default()).unwrap();
+		assert!(old.get("cached_server_icon").is_none());
+		assert_eq!(serde_json::from_value::<Bookmark>(old).unwrap().server_icon_id(), None);
 	}
 
 	#[test]

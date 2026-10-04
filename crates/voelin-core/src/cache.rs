@@ -3,8 +3,9 @@
 //! An avatar's name is its MD5 hash (`client_flag_avatar`), an icon's its
 //! id (the CRC32 of the image, as TeamSpeak assigns them), so a lookup is a
 //! map access, and the same image seen on several servers or under
-//! several clients is one file. Keys are relative paths (`avatars/<md5>`,
-//! `icons/<id>`).
+//! several clients is one file. Pictures from the web (banners,
+//! [`crate::web`]) are named by the MD5 hash of their address. Keys are
+//! relative paths (`avatars/<md5>`, `icons/<id>`, `pictures/<md5>`).
 //!
 //! The cache is bounded by `cache.max_mb` (read on every insert; 0: no
 //! limit): the least recently used files go first. Use times survive
@@ -76,6 +77,30 @@ pub(crate) fn icon_key(id: u32) -> String {
 	format!("icons/{id}")
 }
 
+/// The largest picture downloaded into the cache, from the web or from the
+/// server's files: animated banners of several megabytes are common. The
+/// download goes to disk as it arrives, so this bounds the disk, not memory.
+pub(crate) const MAX_PICTURE_BYTES: u64 = 64 << 20;
+
+/// The slowest a picture may arrive on average after its first seconds:
+/// a large banner on a slow link still arrives, one trickling in forever
+/// does not hold a download slot.
+pub(crate) const MIN_PICTURE_RATE: u64 = 32 << 10;
+
+/// The cache key of a picture on the web: only `http` and `https`
+/// addresses.
+pub(crate) fn picture_key(url: &str) -> Option<String> {
+	let (scheme, rest) = url.split_once("://")?;
+	let web = scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https");
+	(web && !rest.is_empty()).then(|| format!("pictures/{:x}", md5::compute(url)))
+}
+
+/// The cache key of a picture in a server's files (`ts3image://`): the
+/// same address names another file on another server.
+pub(crate) fn server_picture_key(server: &str, url: &str) -> String {
+	format!("pictures/{:x}", md5::compute(format!("{server}\n{url}")))
+}
+
 impl Cache {
 	/// A cache in `dir` (created when the first file arrives).
 	pub fn new(dir: impl Into<PathBuf>) -> Self {
@@ -106,6 +131,18 @@ impl Cache {
 		self.touch(&mut index, key)
 	}
 
+	/// The cached server, channel, group or client icon, if available. Not
+	/// marked as used (no file is opened or touched): the UI asks on every
+	/// refresh of the server list.
+	pub fn icon(&self, id: u32) -> Option<PathBuf> {
+		if id == 0 {
+			return None;
+		}
+		let key = icon_key(id);
+		let path = self.dir.join(&key);
+		(self.lock().entries.contains_key(&key) && path.is_file()).then_some(path)
+	}
+
 	fn touch(&self, index: &mut Index, key: &str) -> Option<PathBuf> {
 		let path = self.dir.join(key);
 		let tick = index.entries.get(key)?.tick;
@@ -131,9 +168,11 @@ impl Cache {
 	}
 
 	/// Get `key`, downloading it once however many ask (see [`Fetch`]).
-	pub(crate) fn fetch(&self, key: &str, waiter: Waiter) -> Fetch {
+	/// With `fresh`, download it again even if it is cached (a picture that
+	/// changes at its address); the new file replaces the old one.
+	pub(crate) fn fetch(&self, key: &str, fresh: bool, waiter: Waiter) -> Fetch {
 		let mut index = self.lock();
-		if let Some(path) = self.touch(&mut index, key) {
+		if !fresh && let Some(path) = self.touch(&mut index, key) {
 			drop(index);
 			waiter(Ok(path));
 			return Fetch::Cached;
@@ -237,7 +276,7 @@ impl Cache {
 fn scan(dir: &Path, index: &mut Index) {
 	let _ = std::fs::remove_dir_all(dir.join("tmp"));
 	let mut found = Vec::new();
-	for sub in ["avatars", "icons"] {
+	for sub in ["avatars", "icons", "pictures"] {
 		let Ok(entries) = std::fs::read_dir(dir.join(sub)) else { continue };
 		for entry in entries.flatten() {
 			let Ok(meta) = entry.metadata() else { continue };
@@ -297,7 +336,8 @@ mod tests {
 	/// Fetch `key` and write `bytes` as its download.
 	fn put(cache: &Cache, key: &str, bytes: usize, max: u64) -> PathBuf {
 		let (tx, rx) = mpsc::channel();
-		let Fetch::Download(temp) = cache.fetch(key, Box::new(move |r| tx.send(r).unwrap())) else {
+		let Fetch::Download(temp) = cache.fetch(key, false, Box::new(move |r| tx.send(r).unwrap()))
+		else {
 			panic!("{key} should download");
 		};
 		std::fs::create_dir_all(temp.parent().unwrap()).unwrap();
@@ -314,9 +354,9 @@ mod tests {
 		let waiter = |tx: mpsc::Sender<_>| -> Waiter { Box::new(move |r| tx.send(r).unwrap()) };
 		let key = avatar_key("ABCDEF0123").unwrap();
 		assert_eq!(key, "avatars/abcdef0123");
-		let Fetch::Download(temp) = cache.fetch(&key, waiter(tx.clone())) else { panic!() };
+		let Fetch::Download(temp) = cache.fetch(&key, false, waiter(tx.clone())) else { panic!() };
 		// A second asker waits for the same download.
-		assert!(matches!(cache.fetch(&key, waiter(tx.clone())), Fetch::Waiting));
+		assert!(matches!(cache.fetch(&key, false, waiter(tx.clone())), Fetch::Waiting));
 		std::fs::create_dir_all(temp.parent().unwrap()).unwrap();
 		std::fs::write(&temp, b"png").unwrap();
 		cache.finish(&key, &temp, Ok(()), 0);
@@ -325,10 +365,18 @@ mod tests {
 		assert_eq!(a, b);
 		assert_eq!(std::fs::read(&a).unwrap(), b"png");
 		assert!(!temp.exists());
-		assert!(matches!(cache.fetch(&key, waiter(tx)), Fetch::Cached));
+		assert!(matches!(cache.fetch(&key, false, waiter(tx.clone())), Fetch::Cached));
 		assert_eq!(rx.recv().unwrap().unwrap(), a);
-		assert_eq!(cache.get(&key), Some(a));
+		assert_eq!(cache.get(&key), Some(a.clone()));
 		assert_eq!(cache.size(), 3);
+		// Fresh: downloaded again, the new file replaces the old one.
+		let Fetch::Download(temp) = cache.fetch(&key, true, waiter(tx)) else { panic!() };
+		std::fs::create_dir_all(temp.parent().unwrap()).unwrap();
+		std::fs::write(&temp, b"newer").unwrap();
+		cache.finish(&key, &temp, Ok(()), 0);
+		assert_eq!(rx.recv().unwrap().unwrap(), a);
+		assert_eq!(std::fs::read(&a).unwrap(), b"newer");
+		assert_eq!(cache.size(), 5);
 		std::fs::remove_dir_all(dir).unwrap();
 	}
 
@@ -338,19 +386,42 @@ mod tests {
 		let cache = Cache::new(&dir);
 		let (tx, rx) = mpsc::channel();
 		let tx2 = tx.clone();
-		let Fetch::Download(temp) = cache.fetch("icons/7", Box::new(move |r| tx.send(r).unwrap()))
+		let Fetch::Download(temp) =
+			cache.fetch("icons/7", false, Box::new(move |r| tx.send(r).unwrap()))
 		else {
 			panic!()
 		};
 		assert!(matches!(
-			cache.fetch("icons/7", Box::new(move |r| tx2.send(r).unwrap())),
+			cache.fetch("icons/7", false, Box::new(move |r| tx2.send(r).unwrap())),
 			Fetch::Waiting
 		));
 		cache.finish("icons/7", &temp, Err("file not found".into()), 0);
 		assert_eq!(rx.recv().unwrap(), Err("file not found".into()));
 		assert_eq!(rx.recv().unwrap(), Err("file not found".into()));
 		assert!(cache.get("icons/7").is_none());
-		assert!(matches!(cache.fetch("icons/7", Box::new(|_| {})), Fetch::Download(_)));
+		assert!(matches!(cache.fetch("icons/7", false, Box::new(|_| {})), Fetch::Download(_)));
+	}
+
+	#[test]
+	fn failed_picture_refresh_keeps_previous_file_and_can_retry() {
+		let dir = temp_dir("refresh-fail");
+		let cache = Cache::new(&dir);
+		let key = picture_key("https://example.com/banner.png").unwrap();
+		let path = put(&cache, &key, 32, 0);
+		let (tx, rx) = mpsc::channel();
+		let Fetch::Download(temp) = cache.fetch(&key, true, Box::new(move |r| tx.send(r).unwrap()))
+		else {
+			panic!("refresh download");
+		};
+		std::fs::write(&temp, b"partial download").unwrap();
+		cache.finish(&key, &temp, Err("connection lost".into()), 0);
+		assert_eq!(rx.recv().unwrap(), Err("connection lost".into()));
+		assert!(!temp.exists());
+		assert_eq!(cache.get(&key), Some(path.clone()));
+		assert_eq!(std::fs::read(&path).unwrap(), vec![0u8; 32]);
+		assert_eq!(cache.size(), 32);
+		assert!(matches!(cache.fetch(&key, true, Box::new(|_| {})), Fetch::Download(_)));
+		std::fs::remove_dir_all(dir).unwrap();
 	}
 
 	#[test]
@@ -383,5 +454,25 @@ mod tests {
 		assert!(avatar_key("").is_none());
 		assert!(avatar_key("../x").is_none());
 		assert_eq!(icon_key(4_294_967_295), "icons/4294967295");
+		let url = "https://example.com/banner.png";
+		assert_eq!(picture_key(url).unwrap(), format!("pictures/{:x}", md5::compute(url)));
+		assert_ne!(picture_key(url), picture_key("http://example.com/banner.png"));
+		assert!(picture_key("HTTP://example.com/b.gif").is_some());
+		for not_web in ["", "file:///etc/passwd", "ftp://h/b.png", "https://", "example.com/b.png"]
+		{
+			assert!(picture_key(not_web).is_none(), "{not_web}");
+		}
+	}
+
+	/// Pictures are cached files like the others (counted after a restart).
+	#[test]
+	fn pictures_survive_restart() {
+		let dir = temp_dir("pictures");
+		let key = picture_key("https://example.com/b.png").unwrap();
+		let path = put(&Cache::new(&dir), &key, 10, 0);
+		let again = Cache::new(&dir);
+		assert_eq!(again.size(), 10);
+		assert_eq!(again.get(&key), Some(path));
+		std::fs::remove_dir_all(dir).unwrap();
 	}
 }

@@ -5,78 +5,78 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, TreeItem } from "../bridge.slint";
 import { Nav } from "../nav.slint";
-import { Icon, Button, ButtonKind, IconButton, Avatar, LiveBadge, Chip, SectionHeader, SpeakingBars, PopupMenu, MenuEntry, ListView } from "../components/index.slint";
+import { Icon, Button, ButtonKind, IconButton, Avatar, LiveBadge, Chip, SectionHeader, SpeakingBars, PopupMenu, MenuEntry, ListView, BannerPicture } from "../components/index.slint";
 
 // The banner at the top of the sidebar: server name, counts, a menu.
 export component ServerHeader inherits Rectangle {
-    height: 132px;
+    height: 76px * Theme.font-scale;
     border-radius: Theme.radius-lg;
     clip: true;
     background: Theme.surface-2;
     accessible-role: AccessibleRole.groupbox;
     accessible-label: Bridge.server-title;
-    // Painted banner: a night sky gradient with a horizon glow.
-    Rectangle {
-        height: 72px;
-        y: 0;
-        background: @linear-gradient(180deg, #1a2d7a 0%, #3a2a8f 45%, #0b1330 100%);
-        Rectangle {
-            y: parent.height - 30px;
-            height: 30px;
-            background: @linear-gradient(180deg, transparent 0%, Theme.surface-2 100%);
-        }
-        for star[i] in [
-            { x: 0.12, y: 0.2 }, { x: 0.3, y: 0.45 }, { x: 0.52, y: 0.15 }, { x: 0.7, y: 0.35 },
-            { x: 0.86, y: 0.18 }, { x: 0.42, y: 0.62 }, { x: 0.93, y: 0.55 }, { x: 0.2, y: 0.7 },
-        ]: Rectangle {
-            x: parent.width * star.x;
-            y: parent.height * star.y;
-            width: mod(i, 3) == 0 ? 3px : 2px;
-            height: self.width;
-            border-radius: self.width / 2;
-            background: #ffffffb0;
-        }
+    if Bridge.server-banner.width > 0: BannerPicture {
+        source: Bridge.server-banner;
     }
-    VerticalLayout {
-        padding: Theme.space-4;
-        padding-top: 64px;
-        spacing: 2px;
-        HorizontalLayout {
-            spacing: Theme.space-2;
+    HorizontalLayout {
+        padding: Theme.space-3;
+        spacing: Theme.space-3;
+        Rectangle {
+            width: 42px;
+            height: 42px;
+            y: (parent.height - self.height) / 2;
+            if Bridge.server-icon.width > 0: Image {
+                width: 100%;
+                height: 100%;
+                source: Bridge.server-icon;
+                image-fit: contain;
+                accessible-role: AccessibleRole.none;
+            }
+            if Bridge.server-icon.width == 0: Icon {
+                source: Icons.server;
+                size: 32px;
+                tint: Theme.text-secondary;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: 3px;
             Text {
                 text: Bridge.server-title;
-                font-size: Theme.font-lg;
+                font-size: Theme.font-md;
                 font-weight: Theme.weight-semibold;
                 color: Theme.text;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
                 overflow: elide;
             }
-            if Bridge.current-server >= 0: IconButton {
-                icon: Icons.chevron-down;
-                label: @tr("Server menu");
-                size: 28px;
-                icon-size: Theme.icon-sm;
-                clicked => { menu.show(self.x + self.width - 220px, self.y + self.height + 4px); }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                Rectangle {
+                    width: 7px;
+                    height: 7px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 4px;
+                    background: Bridge.voice-connected ? Theme.success : Bridge.observing ? Theme.info : Bridge.voice-connecting ? Theme.warning : Theme.offline;
+                }
+                Text {
+                    text: Bridge.server-stats != "" ? Bridge.server-stats
+                        : Bridge.voice-connecting ? @tr("Connecting…")
+                        : Bridge.current-server >= 0 ? @tr("Not connected") : @tr("Add a server to start");
+                    font-size: Theme.font-xs;
+                    color: Bridge.server-banner.width > 0 ? Theme.text : Theme.text-secondary;
+                    overflow: elide;
+                }
             }
         }
-        HorizontalLayout {
-            spacing: Theme.space-2;
-            Rectangle {
-                width: 8px;
-                height: 8px;
-                y: (parent.height - self.height) / 2;
-                border-radius: 4px;
-                background: Bridge.voice-connected ? Theme.success : Bridge.observing ? Theme.info : Bridge.voice-connecting ? Theme.warning : Theme.offline;
-            }
-            Text {
-                text: Bridge.server-stats != "" ? Bridge.server-stats
-                    : Bridge.voice-connecting ? @tr("Connecting…")
-                    : Bridge.current-server >= 0 ? @tr("Not connected") : @tr("Add a server to start");
-                font-size: Theme.font-sm;
-                color: Theme.text-secondary;
-                overflow: elide;
-            }
+        if Bridge.current-server >= 0: IconButton {
+            icon: Icons.chevron-down;
+            label: @tr("Server menu");
+            size: 24px;
+            icon-size: Theme.icon-sm;
+            y: (parent.height - self.height) / 2;
+            clicked => { menu.show(self.x + self.width - 220px, self.y + self.height + 4px); }
         }
     }
     menu := PopupMenu {
@@ -117,12 +117,26 @@ export component ConnectActions inherits HorizontalLayout {
     }
 }
 
+// A server-provided icon in its own colours.
+component RowIcon inherits VerticalLayout {
+    in property <image> source;
+    alignment: center;
+    Image {
+        width: 16px;
+        height: 16px;
+        source: root.source;
+        image-fit: contain;
+        accessible-role: AccessibleRole.none;
+    }
+}
+
 // One row of the tree: a channel or a client.
 component TreeRow inherits Rectangle {
     in property <TreeItem> item;
     callback client-clicked(int);
     property <length> indent: item.depth * 14px;
     height: item.is-channel ? 34px * Theme.font-scale : 30px * Theme.font-scale;
+    clip: true;
     border-radius: Theme.radius-md;
     background: item.is-channel && item.own ? Theme.accent-soft : area.has-hover ? Theme.surface-3 : transparent;
     border-width: item.is-channel && item.own ? 1px : 0px;
@@ -136,6 +150,21 @@ component TreeRow inherits Rectangle {
         } else {
             client-clicked(item.id);
         }
+    }
+    // Artwork is clipped behind the same compact row as its title.
+    if item.is-channel && item.banner.width > 0: BannerPicture {
+        x: root.indent;
+        width: max(0px, root.width - root.indent);
+        y: 0;
+        source: item.banner;
+    }
+    // The artwork covers the row's own background: tint it as that would
+    // be for our channel and on hover, translucent so the picture shows.
+    if item.is-channel && item.banner.width > 0 && (item.own || area.has-hover): Rectangle {
+        x: root.indent;
+        width: max(0px, root.width - root.indent);
+        border-radius: root.border-radius;
+        background: item.own ? Theme.accent-soft.transparentize(0.35) : Theme.surface-3.transparentize(0.5);
     }
     area := TouchArea {
         mouse-cursor: MouseCursor.pointer;
@@ -153,38 +182,39 @@ component TreeRow inherits Rectangle {
         }
     }
     if item.is-channel: HorizontalLayout {
+        height: 34px * Theme.font-scale;
         padding-left: Theme.space-2 + root.indent;
         padding-right: Theme.space-3;
         spacing: Theme.space-2;
-        Rectangle {
-            width: 18px;
-            accessible-role: AccessibleRole.button;
-            accessible-label: item.collapsed ? @tr("Expand") : @tr("Collapse");
-            accessible-action-default => { Bridge.toggle-collapse(item.id); }
-            Icon {
-                source: item.collapsed ? Icons.chevron-right : Icons.chevron-down;
-                size: 14px;
-                tint: Theme.text-muted;
-            }
-            TouchArea {
-                clicked => { Bridge.toggle-collapse(item.id); }
-            }
+        if item.centered-spacer: Rectangle { width: 18px; }
+        if !item.centered-spacer && item.icon.width > 0: RowIcon {
+            source: item.icon;
         }
-        Icon {
+        if !item.centered-spacer && item.icon.width == 0: Icon {
             source: item.locked ? Icons.lock : Icons.volume-2;
             size: 18px;
-            tint: item.own ? Theme.text : Theme.icon;
+            tint: item.banner.width > 0 || item.own ? Theme.text : Theme.icon;
             y: (parent.height - self.height) / 2;
         }
         Text {
             text: item.name;
-            color: item.own ? Theme.text : Theme.text-secondary;
-            font-weight: item.own ? Theme.weight-semibold : Theme.weight-medium;
+            horizontal-alignment: item.centered-spacer ? center : left;
+            // Full contrast over a banner.
+            color: item.own || item.banner.width > 0 ? Theme.text : Theme.text-secondary;
+            font-weight: item.own || item.banner.width > 0 ? Theme.weight-semibold : Theme.weight-medium;
             vertical-alignment: center;
             horizontal-stretch: 1;
             overflow: elide;
         }
-        if item.members > 0 || item.max-members >= 0: HorizontalLayout {
+        // At the end where the start shows the channel's icon, or nothing
+        // (a centred spacer).
+        if item.locked && (item.icon.width > 0 || item.centered-spacer): Icon {
+            source: Icons.lock;
+            size: 14px;
+            tint: item.banner.width > 0 ? Theme.text : Theme.icon;
+            y: (parent.height - self.height) / 2;
+        }
+        if !item.centered-spacer && (item.members > 0 || item.max-members >= 0): HorizontalLayout {
             spacing: 3px;
             if item.own: Icon {
                 source: Icons.users;
@@ -194,9 +224,24 @@ component TreeRow inherits Rectangle {
             }
             Text {
                 text: item.max-members >= 0 ? item.members + "/" + item.max-members : item.members;
-                color: item.own ? Theme.text : Theme.text-muted;
+                color: item.own || item.banner.width > 0 ? Theme.text : Theme.text-muted;
                 font-size: Theme.font-sm;
                 vertical-alignment: center;
+            }
+        }
+        Rectangle {
+            width: 18px;
+            accessible-role: AccessibleRole.button;
+            accessible-label: item.collapsed ? @tr("Expand") : @tr("Collapse");
+            accessible-action-default => { Bridge.toggle-collapse(item.id); }
+            Icon {
+                source: item.collapsed ? Icons.chevron-right : Icons.chevron-down;
+                size: 14px;
+                tint: item.banner.width > 0 ? Theme.text : Theme.text-muted;
+                y: (parent.height - self.height) / 2;
+            }
+            TouchArea {
+                clicked => { Bridge.toggle-collapse(item.id); }
             }
         }
     }
@@ -210,6 +255,7 @@ component TreeRow inherits Rectangle {
                 size: 22px;
                 initials: item.initials;
                 tint: item.tint;
+                image: item.avatar;
                 speaking: item.talking;
                 label: item.name;
             }
@@ -282,6 +328,16 @@ component TreeRow inherits Rectangle {
             color: Theme.text-muted;
             font-size: Theme.font-xs;
             vertical-alignment: center;
+        }
+        // Group and client icons.
+        if item.icon.width > 0: RowIcon {
+            source: item.icon;
+        }
+        if item.icon-2.width > 0: RowIcon {
+            source: item.icon-2;
+        }
+        if item.icon-3.width > 0: RowIcon {
+            source: item.icon-3;
         }
     }
 }

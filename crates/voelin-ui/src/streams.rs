@@ -379,6 +379,9 @@ impl App {
 						}
 						.into(),
 						message: v.message.clone().into(),
+						avatar: crate::vm::avatar::image(
+							view.and_then(|view| view.avatar(v.client.0)),
+						),
 					})
 					.collect()
 			})

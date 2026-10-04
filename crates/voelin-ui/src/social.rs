@@ -958,6 +958,7 @@ impl App {
 							subtitle: b.address.clone().into(),
 							initials: vm::avatar::initials(&b.name).into(),
 							tint: vm::avatar::tint(&b.name),
+							avatar: self.server_list_icon(b),
 							..Default::default()
 						},
 						Found::Server(b.id),

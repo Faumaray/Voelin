@@ -9,6 +9,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use tokio::sync::{broadcast, mpsc, watch};
 use tracing::debug;
@@ -38,6 +42,7 @@ use crate::stream::{
 	StreamInput, StreamKind, kind_name, parse_kind,
 };
 use crate::voice::{self, Remote, VoiceCmd, VoiceEvent, VoiceLink};
+use crate::web;
 use crate::{Command, Event, ObserveState, SessionId, SessionState, Shared, Source, VoiceState};
 
 const NO_VOICE: &str = "not connected with voice";
@@ -108,6 +113,52 @@ enum SourceEvent {
 	KnownServer(String),
 	/// Our avatar file is uploaded (its MD5) or failed: announce it.
 	AvatarUploaded(u64, RequestId, Result<String, String>),
+	/// Time to fetch the host banner again (`banner_gfx_interval_s`).
+	ReloadBanner(String),
+	/// Image completion is checked against the current connection and presence.
+	ImageFinished(bool, u64, ImageRequest, Result<PathBuf, String>),
+}
+
+/// Identity of a wanted image, independent of its transport.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum ImageRequest {
+	Avatar { uid: String, hash: String },
+	Icon(u32),
+	Picture(String),
+}
+
+/// An image download over the voice connection, finished in the cache
+/// once: with its result, or as failed when the request is dropped
+/// unanswered (sent while the connection closes, or still queued when it
+/// ends). Otherwise the key would stay in flight, and every later fetch of
+/// it, in any session, would wait forever.
+struct ImageDownload {
+	cache: cache::Cache,
+	key: String,
+	temp: PathBuf,
+	settings: SharedSettings,
+	done: AtomicBool,
+}
+
+impl ImageDownload {
+	fn finish(&self, result: Result<(), String>) {
+		if !self.done.swap(true, Ordering::AcqRel) {
+			self.cache.finish(&self.key, &self.temp, result, max_cache_bytes(&self.settings));
+		}
+	}
+}
+
+impl Drop for ImageDownload {
+	fn drop(&mut self) {
+		self.finish(Err("the voice connection closed".into()));
+	}
+}
+
+/// At most three retries (after 1, 4 and 16 seconds) per image version.
+/// Keeping exhausted entries prevents presence traffic from causing a retry storm.
+struct ImageRetry {
+	failures: u8,
+	due: Option<Instant>,
 }
 
 /// Our live stream, for the gateway's directory.
@@ -125,6 +176,7 @@ struct Session {
 	state: SessionState,
 	generation: u64,
 	voice: Option<(u64, mpsc::UnboundedSender<VoiceCmd>)>,
+	voice_address: String,
 	voice_presence: Option<Presence>,
 	nickname: String,
 	gateway: Option<(u64, mpsc::UnboundedSender<GatewayCmd>)>,
@@ -168,6 +220,14 @@ struct Session {
 	avatars: HashMap<String, String>,
 	/// Icons reported or being fetched, voice only.
 	icons: HashSet<u32>,
+	/// Pictures on the web (banners) reported or being fetched, by address.
+	pictures: HashSet<String>,
+	image_epoch: u64,
+	images_enabled: bool,
+	image_retries: HashMap<ImageRequest, ImageRetry>,
+	/// The host banner's address and reload interval (seconds) while it has
+	/// one, and the timer that asks for the reloads.
+	banner_reload: Option<(String, u64, tokio::task::AbortHandle)>,
 	/// Contact volume and mute applied per client.
 	contact_audio: HashMap<u16, (f32, bool)>,
 	/// Friends' client ids, as last told to the streams.
@@ -194,6 +254,11 @@ impl Session {
 			contacts_rx,
 			avatars: HashMap::new(),
 			icons: HashSet::new(),
+			pictures: HashSet::new(),
+			image_epoch: 0,
+			images_enabled: settings.current().get(&CACHE_FETCH_IMAGES),
+			image_retries: HashMap::new(),
+			banner_reload: None,
 			contact_audio: HashMap::new(),
 			stream_friends: BTreeSet::new(),
 			details: None,
@@ -203,6 +268,7 @@ impl Session {
 			state: SessionState::default(),
 			generation: 0,
 			voice: None,
+			voice_address: String::new(),
 			voice_presence: None,
 			nickname: String::new(),
 			gateway: None,
@@ -250,6 +316,8 @@ impl Session {
 	async fn run(mut self, mut commands: mpsc::UnboundedReceiver<Command>) {
 		let mut sources = self.sources_rx.take().expect("receiver");
 		let mut contacts = self.contacts_rx.take().expect("contacts");
+		let mut image_tick = tokio::time::interval(Duration::from_secs(1));
+		image_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 		loop {
 			tokio::select! {
 				cmd = commands.recv() => match cmd {
@@ -258,6 +326,7 @@ impl Session {
 				},
 				Some(event) = sources.recv() => self.source_event(event),
 				Ok(()) = contacts.changed() => self.contacts_changed(),
+				_ = image_tick.tick() => self.retry_images(Instant::now()),
 			}
 		}
 		self.stop_all();
@@ -293,6 +362,8 @@ impl Session {
 				}
 				self.stop_streams("voice reconnecting");
 				let generation = self.next_generation();
+				self.voice_address = options.address.clone();
+				self.details = None;
 				self.nickname = options.nickname.clone();
 				self.stream_peer = options.stream_peer.clone();
 				if let Some(profiles) = &self.srtp_profiles {
@@ -590,7 +661,7 @@ impl Session {
 					.and_then(|p| p.client_by_uid(&client_uid))
 					.and_then(|c| c.avatar.clone());
 				if let Some(hash) = hash {
-					self.fetch_avatar(&client_uid, &hash);
+					self.fetch_avatar(&client_uid, &hash, true);
 				}
 			}
 			Command::ListOfflineMessages { request, .. } => {
@@ -739,8 +810,11 @@ impl Session {
 	/// Forget what was reported about avatars and icons (a new connection
 	/// reports them again).
 	fn forget_images(&mut self) {
+		self.image_epoch += 1;
+		self.image_retries.clear();
 		self.avatars.clear();
 		self.icons.clear();
+		self.pictures.clear();
 		self.contact_audio.clear();
 		self.stream_friends.clear();
 		self.details = None;
@@ -756,7 +830,7 @@ impl Session {
 		for c in p.clients.values() {
 			let (Some(uid), Some(hash)) = (&c.uid, &c.avatar) else { continue };
 			if self.avatars.get(uid) != Some(hash) {
-				self.fetch_avatar(uid, hash);
+				self.fetch_avatar(uid, hash, false);
 			}
 			avatars.insert(uid.clone(), hash.clone());
 		}
@@ -768,6 +842,7 @@ impl Session {
 			.chain(p.clients.values().map(|c| c.icon))
 			.filter(|id| *id >= files::FIRST_DOWNLOADABLE_ICON)
 			.collect::<BTreeSet<u32>>();
+		self.icons.retain(|id| icons.contains(id));
 		for id in icons {
 			if self.icons.insert(id) {
 				self.fetch_icon(id);
@@ -775,54 +850,236 @@ impl Session {
 		}
 	}
 
-	fn fetch_avatar(&self, uid: &str, hash: &str) {
+	fn image_waiter(&self, request: ImageRequest, requested: bool) -> Waiter {
+		let epoch = if requested {
+			self.voice.as_ref().map_or(0, |(generation, _)| *generation)
+		} else {
+			self.image_epoch
+		};
+		let sources = self.sources_tx.clone();
+		Box::new(move |result| {
+			let _ = sources.send(SourceEvent::ImageFinished(requested, epoch, request, result));
+		})
+	}
+
+	fn fetch_avatar(&self, uid: &str, hash: &str, requested: bool) {
 		let Some(key) = cache::avatar_key(hash) else { return };
-		let (session, events) = (self.id, self.events.clone());
-		let (client_uid, hash) = (uid.to_owned(), hash.to_owned());
-		let waiter: Waiter = Box::new(move |result| match result {
-			Ok(path) => {
-				let _ = events.send(Event::AvatarReady { session, client_uid, path, hash });
-			}
-			Err(e) => debug!(%client_uid, "no avatar: {e}"),
-		});
-		self.fetch_image(key, files::avatar_path(uid), waiter);
+		let waiter = self
+			.image_waiter(ImageRequest::Avatar { uid: uid.into(), hash: hash.into() }, requested);
+		self.fetch_image(key, files::avatar_path(uid).map(|path| (0, path)), false, waiter);
 	}
 
 	fn fetch_icon(&self, icon: u32) {
-		let (session, events) = (self.id, self.events.clone());
-		let waiter: Waiter = Box::new(move |result| match result {
-			Ok(path) => {
-				let _ = events.send(Event::IconReady { session, icon, path });
-			}
-			Err(e) => debug!(icon, "no icon: {e}"),
-		});
-		self.fetch_image(cache::icon_key(icon), Some(files::icon_path(icon)), waiter);
+		let waiter = self.image_waiter(ImageRequest::Icon(icon), false);
+		self.fetch_image(cache::icon_key(icon), Some((0, files::icon_path(icon))), false, waiter);
 	}
 
-	/// Get `key` from the cache, downloading `path` of channel 0 once.
-	fn fetch_image(&self, key: String, path: Option<String>, waiter: Waiter) {
+	fn wants_image(&self, request: &ImageRequest) -> bool {
+		match request {
+			ImageRequest::Avatar { uid, hash } => {
+				self.voice.is_some() && self.avatars.get(uid) == Some(hash)
+			}
+			ImageRequest::Icon(id) => self.voice.is_some() && self.icons.contains(id),
+			ImageRequest::Picture(url) => self.pictures.contains(url),
+		}
+	}
+
+	fn image_finished(
+		&mut self,
+		requested: bool,
+		epoch: u64,
+		request: ImageRequest,
+		result: Result<PathBuf, String>,
+	) {
+		let wanted = if requested {
+			matches!(&request, ImageRequest::Avatar { uid, hash }
+				if self.voice.is_some() && self.voice_presence.as_ref()
+					.and_then(|p| p.client_by_uid(uid)).and_then(|c| c.avatar.as_ref()) == Some(hash))
+		} else {
+			self.wants_image(&request)
+		};
+		let current = if requested {
+			self.is_current(Source::Voice, epoch)
+		} else {
+			epoch == self.image_epoch
+		};
+		if !current || !wanted {
+			return;
+		}
+		match result {
+			Ok(path) => {
+				self.image_retries.remove(&request);
+				if !requested && !self.settings.current().get(&CACHE_FETCH_IMAGES) {
+					return;
+				}
+				let session = self.id;
+				self.emit(match request {
+					ImageRequest::Avatar { uid: client_uid, hash } => {
+						Event::AvatarReady { session, client_uid, hash, path }
+					}
+					ImageRequest::Icon(icon) => Event::IconReady { session, icon, path },
+					ImageRequest::Picture(url) => Event::PictureReady { session, url, path },
+				});
+			}
+			Err(error) => {
+				debug!(?request, %error, "image download failed");
+				let retry = self
+					.image_retries
+					.entry(request)
+					.or_insert(ImageRetry { failures: 0, due: None });
+				retry.failures = retry.failures.saturating_add(1);
+				retry.due = match retry.failures {
+					1..=3 => {
+						Some(Instant::now() + Duration::from_secs(1 << (2 * (retry.failures - 1))))
+					}
+					_ => None,
+				};
+			}
+		}
+	}
+
+	fn retry_images(&mut self, now: Instant) {
+		let enabled = self.settings.current().get(&CACHE_FETCH_IMAGES);
+		if enabled != self.images_enabled {
+			self.images_enabled = enabled;
+			self.image_epoch += 1;
+			self.avatars.clear();
+			self.icons.clear();
+			self.pictures.clear();
+			self.image_retries.clear();
+			if let Some((.., timer)) = self.banner_reload.take() {
+				timer.abort();
+			}
+			if enabled {
+				if let Some(presence) = self.voice_presence.clone() {
+					self.fetch_images(&presence);
+				}
+				self.publish_presence();
+			}
+		}
+
+		let obsolete: Vec<_> =
+			self.image_retries.keys().filter(|r| !self.wants_image(r)).cloned().collect();
+		for request in obsolete {
+			self.image_retries.remove(&request);
+		}
+		if !self.settings.current().get(&CACHE_FETCH_IMAGES) {
+			return;
+		}
+		let ready: Vec<_> = self
+			.image_retries
+			.iter_mut()
+			.filter_map(|(request, retry)| {
+				if retry.due.is_some_and(|due| due <= now) {
+					retry.due = None;
+					Some(request.clone())
+				} else {
+					None
+				}
+			})
+			.collect();
+		for request in ready {
+			match request {
+				ImageRequest::Avatar { uid, hash } => self.fetch_avatar(&uid, &hash, false),
+				ImageRequest::Icon(icon) => self.fetch_icon(icon),
+				ImageRequest::Picture(url) => self.fetch_picture(&url, true),
+			}
+		}
+	}
+
+	/// Whether the picture at `url` can be fetched now: on the web, or in
+	/// the server's files (`ts3image://`) while connected with voice.
+	fn can_fetch_picture(&self, url: &str) -> bool {
+		cache::picture_key(url).is_some()
+			|| (self.voice_presence.is_some() && files::server_image(url).is_some())
+	}
+
+	/// Fetch the banners of the presence shown (any source) that are new,
+	/// and have the host banner reloaded as often as the server asks.
+	fn fetch_pictures(&mut self, p: &Presence) {
+		let enabled = self.settings.current().get(&CACHE_FETCH_IMAGES);
+		let reload = Some((&p.server.banner_gfx_url, p.server.banner_gfx_interval_s))
+			.filter(|(url, every)| enabled && self.can_fetch_picture(url) && *every > 0);
+		if self.banner_reload.as_ref().map(|(url, every, _)| (url, *every)) != reload {
+			if let Some((.., timer)) = self.banner_reload.take() {
+				timer.abort();
+			}
+			if let Some((url, every_s)) = reload {
+				let every = std::time::Duration::from_secs(every_s).max(web::MIN_RELOAD);
+				let tx = self.sources_tx.clone();
+				let address = url.clone();
+				// Aborted when the banner changes or the session closes.
+				let timer = tokio::spawn(async move {
+					let start = tokio::time::Instant::now() + every;
+					let mut tick = tokio::time::interval_at(start, every);
+					tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+					loop {
+						tick.tick().await;
+						if tx.send(SourceEvent::ReloadBanner(address.clone())).is_err() {
+							break;
+						}
+					}
+				});
+				self.banner_reload = Some((url.clone(), every_s, timer.abort_handle()));
+			}
+		}
+		if !enabled {
+			return;
+		}
+		let urls: HashSet<_> = std::iter::once(&p.server.banner_gfx_url)
+			.chain(p.channels.values().filter_map(|c| c.banner_gfx_url.as_ref()))
+			.filter(|u| self.can_fetch_picture(u))
+			.cloned()
+			.collect();
+		self.pictures.retain(|url| urls.contains(url));
+		for url in &urls {
+			if self.pictures.insert(url.clone()) {
+				self.fetch_picture(url, false);
+			}
+		}
+	}
+
+	/// Get the picture at `url` into the cache (again with `fresh`): from
+	/// the web, or from the server's files through the voice connection.
+	fn fetch_picture(&self, url: &str, fresh: bool) {
+		let waiter = self.image_waiter(ImageRequest::Picture(url.into()), false);
+		if let Some(file) = files::server_image(url) {
+			let server = self.state.server_uid.as_deref().unwrap_or(self.voice_address.as_str());
+			let key = cache::server_picture_key(server, url);
+			self.fetch_image(key, Some(file), fresh, waiter);
+		} else {
+			web::fetch(self.cache.current(), url, fresh, max_cache_bytes(&self.settings), waiter);
+		}
+	}
+
+	/// Get `key` from the cache, downloading `file` (channel and path) once
+	/// (again with `fresh`).
+	fn fetch_image(&self, key: String, file: Option<(u64, String)>, fresh: bool, waiter: Waiter) {
 		let cache = self.cache.current();
-		let Fetch::Download(temp) = cache.fetch(&key, waiter) else { return };
-		let settings = self.settings.clone();
-		let (Some(path), Some(_)) = (path, &self.voice) else {
-			cache.finish(&key, &temp, Err(NO_VOICE.into()), max_cache_bytes(&settings));
+		let Fetch::Download(temp) = cache.fetch(&key, fresh, waiter) else { return };
+		let download = ImageDownload {
+			cache,
+			key,
+			temp: temp.clone(),
+			settings: self.settings.clone(),
+			done: AtomicBool::new(false),
+		};
+		let (Some((channel, path)), Some((_, voice))) = (file, &self.voice) else {
+			download.finish(Err(NO_VOICE.into()));
 			return;
 		};
-		let finish = {
-			let temp = temp.clone();
-			move |result: Result<(), String>| {
-				cache.finish(&key, &temp, result, max_cache_bytes(&settings));
-			}
-		};
 		let report: Report = Arc::new(move |state| match state {
-			TransferState::Done { .. } => finish(Ok(())),
-			TransferState::Failed(e) => finish(Err(e)),
-			TransferState::Cancelled => finish(Err("cancelled".into())),
+			TransferState::Done { .. } => download.finish(Ok(())),
+			TransferState::Failed(e) => download.finish(Err(e)),
+			TransferState::Cancelled => download.finish(Err("cancelled".into())),
 			_ => {}
 		});
 		let sink = Sink::File { part: temp.clone(), dest: temp, append: false };
-		let file = Remote { channel: 0, password: None, path };
-		self.voice_cmd(VoiceCmd::Download { transfer: None, file, sink, report });
+		let file = Remote { channel, password: None, path };
+		let failed = report.clone();
+		if voice.send(VoiceCmd::Download { transfer: None, file, sink, report }).is_err() {
+			failed(TransferState::Failed(NO_VOICE.into()));
+		}
 	}
 
 	// Contacts
@@ -879,7 +1136,11 @@ impl Session {
 		if self.details.as_deref() != Some(&p.server) {
 			let details = Arc::new(p.server.clone());
 			self.details = Some(details.clone());
-			self.emit(Event::ServerDetails { session: self.id, details });
+			self.emit(Event::ServerDetails {
+				session: self.id,
+				address: self.voice_address.clone(),
+				details,
+			});
 		}
 		let sorted = |groups| -> Arc<Vec<GroupInfo>> {
 			Arc::new(Presence::sorted_groups(groups).into_iter().cloned().collect())
@@ -1227,6 +1488,10 @@ impl Session {
 	}
 
 	fn stop_all(&mut self) {
+		self.forget_images();
+		if let Some((.., timer)) = self.banner_reload.take() {
+			timer.abort();
+		}
 		self.stop_streams("session closed");
 		if let Some((_, tx)) = self.voice.take() {
 			let _ = tx.send(VoiceCmd::Disconnect);
@@ -1302,6 +1567,17 @@ impl Session {
 					self.emit(Event::RequestDone { session: self.id, request, result });
 				}
 			},
+			SourceEvent::ImageFinished(requested, epoch, request, result) => {
+				self.image_finished(requested, epoch, request, result);
+			}
+			SourceEvent::ReloadBanner(address) => {
+				if let Some((url, ..)) = &self.banner_reload
+					&& *url == address
+					&& self.settings.current().get(&CACHE_FETCH_IMAGES)
+				{
+					self.fetch_picture(url, true);
+				}
+			}
 			_ => debug!("event from a replaced source ignored"),
 		}
 	}
@@ -1613,8 +1889,356 @@ impl Session {
 			self.state.presence_source = source;
 			self.emit_state();
 		}
+		self.fetch_pictures(&presence);
 		let presence = Arc::new(presence);
 		self.contacts.presence(self.id, presence.clone());
 		self.emit(Event::Presence { session: self.id, presence });
+	}
+}
+
+#[cfg(test)]
+mod banner_tests {
+	use super::*;
+	use crate::cache::Cache;
+	use crate::settings::Settings;
+
+	fn session(tag: &str) -> (Session, broadcast::Receiver<Event>) {
+		let (events, receiver) = broadcast::channel(16);
+		let (frames, _) = broadcast::channel(1);
+		let history = SharedHistory::default();
+		let dir = std::env::temp_dir()
+			.join(format!("voelin-session-banner-{tag}-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&dir);
+		let shared = Shared {
+			settings: SharedSettings::new(Settings::default()),
+			history: history.clone(),
+			cache: SharedCache::new(Cache::new(dir)),
+			contacts: Contacts::new(events.clone(), history),
+		};
+		(Session::new(1, events, frames, AudioSettings::default(), shared), receiver)
+	}
+
+	#[tokio::test]
+	async fn server_details_keep_source_address_and_repeat_after_reconnect() {
+		let (mut session, mut events) = session("details-address");
+		let mut presence = Presence::default();
+		presence.server.icon = 1234;
+		// Tasks are never polled in this test; the test runtime drops them
+		// without opening any network connections.
+		for address in ["a.test", "b.test", "b.test"] {
+			let mut options = crate::VoiceOptions::new(address, "test");
+			options.audio = false;
+			session.command(Command::ConnectVoice { session: 1, options: Box::new(options) });
+			session.report_details(&presence);
+			let mut reported = Vec::new();
+			while let Ok(event) = events.try_recv() {
+				if let Event::ServerDetails { address, details, .. } = event {
+					reported.push((address, details.icon));
+				}
+			}
+			assert_eq!(reported, vec![(address.to_owned(), 1234)]);
+			session.report_details(&presence);
+			assert!(events.try_recv().is_err());
+		}
+		session.stop_all();
+	}
+
+	#[tokio::test]
+	async fn failed_picture_retries_without_presence_update() {
+		let (mut session, mut events) = session("retry");
+		let mut presence = Presence::default();
+		presence.server.banner_gfx_url = "https://example.com/banner.png".into();
+		let url = &presence.server.banner_gfx_url;
+		let key = cache::picture_key(url).unwrap();
+		let request = ImageRequest::Picture(url.clone());
+		let cache = session.cache.current();
+		// Own the download so this exercises session completion without network I/O.
+		let Fetch::Download(temp) = cache.fetch(&key, false, Box::new(|_| {})) else {
+			panic!("first download");
+		};
+		session.fetch_pictures(&presence);
+		cache.finish(&key, &temp, Err("temporary failure".into()), 0);
+		let failure = session.sources_rx.as_mut().unwrap().recv().await.unwrap();
+		session.source_event(failure);
+		let due = session.image_retries[&request].due.unwrap();
+		session.retry_images(due - Duration::from_millis(1));
+		assert_eq!(session.image_retries[&request].due, Some(due));
+
+		let Fetch::Download(temp) = cache.fetch(&key, false, Box::new(|_| {})) else {
+			panic!("retry download");
+		};
+		session.retry_images(due);
+		assert!(session.image_retries[&request].due.is_none());
+		std::fs::create_dir_all(temp.parent().unwrap()).unwrap();
+		std::fs::write(&temp, b"picture").unwrap();
+		cache.finish(&key, &temp, Ok(()), 0);
+		let success = session.sources_rx.as_mut().unwrap().recv().await.unwrap();
+		session.source_event(success);
+		assert!(
+			matches!(events.try_recv(), Ok(Event::PictureReady { url: ready, .. }) if ready == *url)
+		);
+		assert!(!session.image_retries.contains_key(&request));
+		std::fs::remove_dir_all(cache.dir()).unwrap();
+	}
+
+	#[tokio::test]
+	async fn avatar_and_icon_failures_retry_and_report_success() {
+		let (mut session, mut events) = session("avatar-icon");
+		let (tx, mut commands) = mpsc::unbounded_channel();
+		session.voice = Some((1, tx));
+		let uid = "Af4=";
+		let hash = "0123456789abcdef0123456789abcdef";
+		session.avatars.insert(uid.into(), hash.into());
+		session.icons.insert(1234);
+		for request in
+			[ImageRequest::Avatar { uid: uid.into(), hash: hash.into() }, ImageRequest::Icon(1234)]
+		{
+			session.image_finished(
+				false,
+				session.image_epoch,
+				request.clone(),
+				Err("temporarily unavailable".into()),
+			);
+			session.retry_images(session.image_retries[&request].due.unwrap());
+			let VoiceCmd::Download { file, sink: Sink::File { part, .. }, report, .. } =
+				commands.try_recv().unwrap()
+			else {
+				panic!("expected an image download");
+			};
+			assert_eq!(
+				file.path,
+				if matches!(request, ImageRequest::Icon(_)) {
+					"/icon_1234"
+				} else {
+					"/avatar_abpo"
+				}
+			);
+			std::fs::create_dir_all(part.parent().unwrap()).unwrap();
+			std::fs::write(&part, b"image").unwrap();
+			report(TransferState::Done { size: 5, path: Some(part), data: None });
+			let completion = session.sources_rx.as_mut().unwrap().recv().await.unwrap();
+			session.source_event(completion);
+			assert!(!session.image_retries.contains_key(&request));
+		}
+		assert!(matches!(events.try_recv(), Ok(Event::AvatarReady { .. })));
+		assert!(matches!(events.try_recv(), Ok(Event::IconReady { icon: 1234, .. })));
+		std::fs::remove_dir_all(session.cache.current().dir()).unwrap();
+	}
+
+	/// A banner in the server's files (`ts3image://`) comes through the
+	/// voice connection's file transfer, from its channel and path.
+	#[tokio::test]
+	async fn banners_in_the_server_files_come_through_voice() {
+		let (mut session, mut events) = session("server-files");
+		let url = "ts3image://ts.example.test?port=9987&channel=7&path=%2Fbanners&filename=raid%20night.png";
+		let mut presence = Presence::default();
+		let channel = voelin_model::ChannelInfo {
+			id: 7,
+			banner_gfx_url: Some(url.into()),
+			..Default::default()
+		};
+		presence.channels.insert(7, channel);
+		// Observed without voice: no file transfer to ask yet.
+		session.fetch_pictures(&presence);
+		assert!(session.pictures.is_empty());
+		let (tx, mut commands) = mpsc::unbounded_channel();
+		session.voice = Some((1, tx));
+		session.voice_presence = Some(presence.clone());
+		session.state.server_uid = Some("server-a".into());
+		session.fetch_pictures(&presence);
+		assert!(session.pictures.contains(url));
+		let VoiceCmd::Download { file, sink: Sink::File { part, .. }, report, .. } =
+			commands.try_recv().unwrap()
+		else {
+			panic!("expected a file download");
+		};
+		assert_eq!((file.channel, file.path.as_str()), (7, "/banners/raid night.png"));
+		std::fs::create_dir_all(part.parent().unwrap()).unwrap();
+		std::fs::write(&part, b"banner").unwrap();
+		report(TransferState::Done { size: 6, path: Some(part), data: None });
+		let completion = session.sources_rx.as_mut().unwrap().recv().await.unwrap();
+		session.source_event(completion);
+		let Ok(Event::PictureReady { url: ready, path, .. }) = events.try_recv() else {
+			panic!("expected the banner");
+		};
+		assert_eq!(ready, url);
+		// Named by the server too: the same address elsewhere is another file.
+		let key = cache::server_picture_key("server-a", url);
+		assert_eq!(path, session.cache.current().dir().join(key));
+		assert_eq!(std::fs::read(path).unwrap(), b"banner");
+		std::fs::remove_dir_all(session.cache.current().dir()).unwrap();
+	}
+
+	/// A request the voice connection drops unanswered (sent while it
+	/// closes) fails, instead of leaving the picture in flight for good.
+	#[tokio::test]
+	async fn a_dropped_image_request_fails_instead_of_waiting_forever() {
+		let (mut session, _events) = session("dropped");
+		let (tx, mut commands) = mpsc::unbounded_channel();
+		session.voice = Some((1, tx));
+		session.icons.insert(1234);
+		session.fetch_icon(1234);
+		drop(commands.try_recv().unwrap());
+		let Some(SourceEvent::ImageFinished(_, _, ImageRequest::Icon(1234), Err(_))) =
+			session.sources_rx.as_mut().unwrap().recv().await
+		else {
+			panic!("expected the icon to fail");
+		};
+		// The next fetch downloads again instead of waiting for the lost one.
+		let cache = session.cache.current();
+		let next = cache.fetch(&cache::icon_key(1234), false, Box::new(|_| {}));
+		assert!(matches!(next, Fetch::Download(_)));
+		let _ = std::fs::remove_dir_all(cache.dir());
+	}
+
+	#[tokio::test]
+	async fn retries_are_bounded_and_obey_policy_presence_and_epoch() {
+		let (mut session, mut events) = session("retry-guards");
+		let url = "https://example.com/banner.png";
+		let request = ImageRequest::Picture(url.into());
+		session.pictures.insert(url.into());
+		for failure in 1..=4 {
+			session.image_finished(
+				false,
+				session.image_epoch,
+				request.clone(),
+				Err("unavailable".into()),
+			);
+			let retry = &session.image_retries[&request];
+			assert_eq!(retry.failures, failure);
+			assert_eq!(retry.due.is_some(), failure <= 3);
+		}
+		assert!(events.try_recv().is_err());
+		// Disabling fetch invalidates pending retries and completions.
+		session.image_retries.get_mut(&request).unwrap().due = Some(Instant::now());
+		session.settings.current().set(&CACHE_FETCH_IMAGES, false).unwrap();
+		session.retry_images(Instant::now());
+		assert!(session.image_retries.is_empty());
+		// Replaced URLs must neither retry nor publish delayed successes.
+		session.pictures.clear();
+		session.settings.current().set(&CACHE_FETCH_IMAGES, true).unwrap();
+		session.retry_images(Instant::now());
+		assert!(session.image_retries.is_empty());
+		session.image_finished(false, session.image_epoch, request.clone(), Ok("obsolete".into()));
+		while let Ok(event) = events.try_recv() {
+			assert!(!matches!(event, Event::PictureReady { .. }));
+		}
+		let old_epoch = session.image_epoch;
+		session.forget_images();
+		session.pictures.insert(url.into());
+		session.image_finished(false, old_epoch, request.clone(), Err("old connection".into()));
+		session.image_finished(false, old_epoch, request, Ok("old connection".into()));
+		assert!(session.image_retries.is_empty());
+		assert!(events.try_recv().is_err());
+	}
+
+	#[tokio::test]
+	async fn explicit_avatar_request_works_with_automatic_fetching_disabled() {
+		let (mut session, mut events) = session("explicit-avatar");
+		session.settings.current().set(&CACHE_FETCH_IMAGES, false).unwrap();
+		session.retry_images(Instant::now());
+		let uid = "Af4=";
+		let hash = "0123456789abcdef0123456789abcdef";
+		let mut presence = Presence::default();
+		presence.clients.insert(
+			1,
+			voelin_model::ClientInfo {
+				id: 1,
+				uid: Some(uid.into()),
+				avatar: Some(hash.into()),
+				..Default::default()
+			},
+		);
+		session.voice_presence = Some(presence);
+		let (tx, _rx) = mpsc::unbounded_channel();
+		session.voice = Some((1, tx));
+		let cache = session.cache.current();
+		let key = cache::avatar_key(hash).unwrap();
+		let Fetch::Download(temp) = cache.fetch(&key, false, Box::new(|_| {})) else {
+			panic!("first download");
+		};
+		std::fs::create_dir_all(temp.parent().unwrap()).unwrap();
+		std::fs::write(&temp, b"avatar").unwrap();
+		cache.finish(&key, &temp, Ok(()), 0);
+		session.command(Command::FetchAvatar { session: 1, client_uid: uid.into() });
+		let completion = session.sources_rx.as_mut().unwrap().recv().await.unwrap();
+		session.source_event(completion);
+		assert!(
+			matches!(events.try_recv(), Ok(Event::AvatarReady { client_uid, .. }) if client_uid == uid)
+		);
+		// A policy change must invalidate automatic completions, not this explicit request.
+		session.command(Command::FetchAvatar { session: 1, client_uid: uid.into() });
+		let completion = session.sources_rx.as_mut().unwrap().recv().await.unwrap();
+		session.settings.current().set(&CACHE_FETCH_IMAGES, true).unwrap();
+		session.retry_images(Instant::now());
+		while events.try_recv().is_ok() {}
+		session.source_event(completion);
+		assert!(
+			matches!(events.try_recv(), Ok(Event::AvatarReady { client_uid, .. }) if client_uid == uid)
+		);
+		std::fs::remove_dir_all(cache.dir()).unwrap();
+	}
+
+	#[tokio::test]
+	async fn enabling_images_replays_current_presence_without_server_updates() {
+		let (mut session, mut events) = session("policy-enable");
+		let url = "https://example.com/banner.png";
+		let cache = session.cache.current();
+		let key = cache::picture_key(url).unwrap();
+		let Fetch::Download(temp) = cache.fetch(&key, false, Box::new(|_| {})) else {
+			panic!("first download");
+		};
+		std::fs::create_dir_all(temp.parent().unwrap()).unwrap();
+		std::fs::write(&temp, b"cached image").unwrap();
+		cache.finish(&key, &temp, Ok(()), 0);
+		let mut presence = Presence::default();
+		presence.server.banner_gfx_url = url.into();
+		session.gateway_presence = Some(presence);
+		session.settings.current().set(&CACHE_FETCH_IMAGES, false).unwrap();
+		session.retry_images(Instant::now());
+		session.settings.current().set(&CACHE_FETCH_IMAGES, true).unwrap();
+		session.retry_images(Instant::now());
+		let completion = session.sources_rx.as_mut().unwrap().recv().await.unwrap();
+		session.source_event(completion);
+		let mut ready = false;
+		while let Ok(event) = events.try_recv() {
+			if matches!(event, Event::PictureReady { url: address, .. } if address == url) {
+				ready = true;
+			}
+		}
+		assert!(ready);
+		std::fs::remove_dir_all(cache.dir()).unwrap();
+	}
+
+	#[tokio::test]
+	async fn reload_timer_obeys_policy_and_is_stopped_with_session() {
+		let (mut session, _) = session("timer");
+		let mut presence = Presence::default();
+		presence.server.banner_gfx_url = "https://example.com/banner.png".into();
+		presence.server.banner_gfx_interval_s = 60;
+		session.settings.current().set(&CACHE_FETCH_IMAGES, false).unwrap();
+		session.fetch_pictures(&presence);
+		assert!(session.banner_reload.is_none());
+		assert!(session.pictures.is_empty());
+
+		let cache = session.cache.current();
+		let key = cache::picture_key(&presence.server.banner_gfx_url).unwrap();
+		let _pending = cache.fetch(&key, false, Box::new(|_| {}));
+		session.settings.current().set(&CACHE_FETCH_IMAGES, true).unwrap();
+		session.fetch_pictures(&presence);
+		let timer = session.banner_reload.as_ref().unwrap().2.clone();
+		session.settings.current().set(&CACHE_FETCH_IMAGES, false).unwrap();
+		session.fetch_pictures(&presence);
+		assert!(session.banner_reload.is_none());
+		tokio::task::yield_now().await;
+		assert!(timer.is_finished());
+
+		session.settings.current().set(&CACHE_FETCH_IMAGES, true).unwrap();
+		session.fetch_pictures(&presence);
+		let timer = session.banner_reload.as_ref().unwrap().2.clone();
+		session.stop_all();
+		assert!(session.banner_reload.is_none());
+		tokio::task::yield_now().await;
+		assert!(timer.is_finished());
 	}
 }

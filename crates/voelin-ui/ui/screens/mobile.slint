@@ -44,6 +44,7 @@ export component MobileServers inherits VerticalLayout {
                     size: 46px;
                     square: true;
                     initials: server.initials;
+                    image: server.icon;
                     tint: server.tint;
                     status: server.status == "connected" ? Status.online : server.status == "observing" ? Status.info : Status.none;
                 }
@@ -129,12 +130,14 @@ export component YouPage inherits ScrollView {
                 Avatar {
                     size: 56px;
                     initials: "";
+                    image: Bridge.own-avatar;
                     tint: Theme.accent;
                     status: Bridge.voice-connected ? Status.online : Bridge.observing ? Status.info : Status.offline;
                     Icon {
                         source: Icons.user;
                         size: 28px;
                         tint: #ffffff;
+                        visible: Bridge.own-avatar.width == 0;
                     }
                 }
                 VerticalLayout {
