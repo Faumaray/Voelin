@@ -11,7 +11,7 @@
 //! | Field | Why | How it is found | Check |
 //! |---|---|---|---|
 //! | `AVFrame.pict_type`, `AVFrame.pts` | forcing a keyframe, timestamps | right after the leading fields: `key_frame` (removed in libavutil 60), `pict_type`, `sample_aspect_ratio`, `pts` | a fresh frame must read `pict_type` 0, `sample_aspect_ratio` {0, 1}, `pts` `AV_NOPTS_VALUE` in exactly one of the two layouts |
-//! | `AVCodecContext.hw_frames_ctx` | VA-API input frames | next to fields that have AVOptions, whose offsets `av_opt_find` reports: before `hw_device_ctx`, `hwaccel_flags` (libavcodec 61 and later, after `err_recognition`), or two fields before `max_pixels` (up to 60) | the neighbours' option offsets must match the layout, and the field must be NULL in a new context |
+//! | `AVCodecContext.hw_frames_ctx`, `hw_device_ctx` | VA-API input frames; the device of hardware decoders | next to fields that have AVOptions, whose offsets `av_opt_find` reports: `hw_frames_ctx`, `hw_device_ctx`, `hwaccel_flags` (libavcodec 61 and later, after `err_recognition`), or `hw_frames_ctx` two fields before `max_pixels` and `hw_device_ctx` right after it (up to 60) | the neighbours' option offsets must match the layout, and both fields must be NULL in a new context |
 //! | `AVHWFramesContext` `initial_pool_size`, `format`, `sw_format`, `width`, `height` | creating a frame pool | after seven pointers (eight up to libavutil 58: `internal`) | `device_ctx` must equal the device and both formats must be `AV_PIX_FMT_NONE` in a new context |
 //! | `AVFrame.buf[0]`, `AVFrame.hw_frames_ctx` | importing DMA-BUFs (zero-copy) | a table per libavutil major (56-61, 64-bit only; an unlisted major disables the import) | `buf[0]` of a frame from `av_frame_get_buffer` must hold that frame's `data[0]`; `hw_frames_ctx` of a frame from `av_hwframe_get_buffer` must reference the pool |
 //! | `AVHWDeviceContext.hwctx` | the `VADisplay`, for the GPU colour conversion of RGB DMA-BUFs | right after `type`, after one pointer (two up to libavutil 58: `internal`) | `type` must be the device's type in exactly that layout |
@@ -168,68 +168,74 @@ struct HwFields59 {
 	hwaccel_flags: c_int,
 }
 
-/// Where `hw_frames_ctx` is in `AVCodecContext`, from the offsets of
-/// neighbouring AVOptions, checked in a new context.
-pub fn codec_hw_frames(api: &Api) -> Result<usize, String> {
+/// Where `hw_frames_ctx` and `hw_device_ctx` are in `AVCodecContext`, from
+/// the offsets of neighbouring AVOptions, checked in a new context: the
+/// frame pool of VA-API encoders, and the device hardware decoders decode
+/// on.
+pub fn codec_hw_fields(api: &Api) -> Result<(usize, usize), String> {
 	// SAFETY: a generic context (no codec); freed below.
 	let mut ctx = unsafe { (api.avcodec_alloc_context3)(std::ptr::null_mut()) };
 	if ctx.is_null() {
 		return Err("avcodec_alloc_context3 failed".into());
 	}
-	let result = locate_hw_frames(api, ctx);
+	let result = locate_hw_fields(api, ctx);
 	// SAFETY: allocated above.
 	unsafe { (api.avcodec_free_context)(&mut ctx) };
 	result
 }
 
-fn locate_hw_frames(api: &Api, ctx: Ptr) -> Result<usize, String> {
+fn locate_hw_fields(api: &Api, ctx: Ptr) -> Result<(usize, usize), String> {
 	let offset = |name| option_offset(api, ctx, name);
 	let flags = offset("hwaccel_flags").ok_or("no hwaccel_flags option")?;
-	let found = 'found: {
+	let (found, device) = 'found: {
 		// libavcodec 61+: anchored at err_recognition and extra_hw_frames.
 		if let Some(err) = offset("err_detect")
 			&& let Some(base) = err.checked_sub(offset_of!(HwFieldsNew, err_recognition))
 			&& base + offset_of!(HwFieldsNew, hwaccel_flags) == flags
 			&& offset("extra_hw_frames") == Some(base + offset_of!(HwFieldsNew, extra_hw_frames))
 		{
-			break 'found base + offset_of!(HwFieldsNew, hw_frames_ctx);
+			break 'found (
+				base + offset_of!(HwFieldsNew, hw_frames_ctx),
+				base + offset_of!(HwFieldsNew, hw_device_ctx),
+			);
 		}
 		// Up to 60: anchored at max_pixels. `sub_text_format` (a field up to
 		// 59) only matters on 32-bit targets, where the version decides.
 		// SAFETY: no arguments.
 		let major = unsafe { (api.avcodec_version)() } >> 16;
 		if let Some(max_pixels) = offset("max_pixels") {
-			let (max_off, flags_off, frames_off) = if major < 60 {
+			let (max_off, flags_off, frames_off, device_off) = if major < 60 {
 				(
 					offset_of!(HwFields59, max_pixels),
 					offset_of!(HwFields59, hwaccel_flags),
 					offset_of!(HwFields59, hw_frames_ctx),
+					offset_of!(HwFields59, hw_device_ctx),
 				)
 			} else {
 				(
 					offset_of!(HwFields60, max_pixels),
 					offset_of!(HwFields60, hwaccel_flags),
 					offset_of!(HwFields60, hw_frames_ctx),
+					offset_of!(HwFields60, hw_device_ctx),
 				)
 			};
 			if let Some(base) = max_pixels.checked_sub(max_off)
 				&& base + flags_off == flags
 			{
-				break 'found base + frames_off;
+				break 'found (base + frames_off, base + device_off);
 			}
 		}
 		return Err(
 			"unknown AVCodecContext layout (hw_frames_ctx not next to hwaccel_flags)".into()
 		);
 	};
-	let device = found + size_of::<Ptr>();
 	// SAFETY: both offsets lie before `hwaccel_flags`, an option of this
 	// context, so inside it; pointer-aligned by construction.
-	let (frames, device) = unsafe { (read::<Ptr>(ctx, found), read::<Ptr>(ctx, device)) };
-	if !frames.is_null() || !device.is_null() {
+	let (frames, device_ref) = unsafe { (read::<Ptr>(ctx, found), read::<Ptr>(ctx, device)) };
+	if !frames.is_null() || !device_ref.is_null() {
 		return Err("AVCodecContext.hw_frames_ctx check failed (not NULL in a new context)".into());
 	}
-	Ok(found)
+	Ok((found, device))
 }
 
 /// Where `sample_fmt` is in `AVCodecContext`, from the offsets of the
@@ -578,6 +584,19 @@ mod tests {
 		assert_eq!(offset_of!(HwFields60, max_pixels) - offset_of!(HwFields60, hw_frames_ctx), 16);
 		assert_eq!(offset_of!(HwFields59, max_pixels) - offset_of!(HwFields59, hw_frames_ctx), 16);
 		assert_eq!(offset_of!(HwFields60, hwaccel_flags) - offset_of!(HwFields60, max_pixels), 16);
+		// `hw_device_ctx` right before `hwaccel_flags` in every layout.
+		assert_eq!(
+			offset_of!(HwFields60, hwaccel_flags) - offset_of!(HwFields60, hw_device_ctx),
+			8
+		);
+		assert_eq!(
+			offset_of!(HwFields59, hwaccel_flags) - offset_of!(HwFields59, hw_device_ctx),
+			8
+		);
+		assert_eq!(
+			offset_of!(HwFieldsNew, hwaccel_flags) - offset_of!(HwFieldsNew, hw_device_ctx),
+			8
+		);
 		// 7.1: err_recognition 528, hw_frames_ctx 552, hwaccel_flags 568.
 		assert_eq!(offset_of!(HwFieldsNew, hw_frames_ctx), 552 - 528);
 		assert_eq!(offset_of!(HwFieldsNew, hwaccel_flags), 568 - 528);

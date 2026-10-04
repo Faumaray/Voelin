@@ -12,7 +12,9 @@ use clap::{Args, Subcommand};
 use voelin_core::media::voelin_media::capture::SourceId;
 use voelin_core::media::voelin_media::capture::synthetic::Pattern;
 use voelin_core::media::voelin_media::{Codec, Codecs};
-use voelin_core::media::{EncoderPreference, MediaSink, Streamer, StreamerConfig, preferred_codec};
+use voelin_core::media::{
+	DecoderPreference, EncoderPreference, MediaSink, Streamer, StreamerConfig, preferred_codec,
+};
 use voelin_stream::{EncodedFrame, LayerId, LayerSet, LayerSpec, MediaKind};
 
 use crate::alloc;
@@ -29,9 +31,10 @@ enum StreamTool {
 	/// test pattern without a server; print per-stage and per-layer numbers
 	/// and heap allocations per frame.
 	Bench(BenchArgs),
-	/// List the video encoders: the FFmpeg libraries found, every backend
-	/// with its self-test result (or why it cannot be used), and the order
-	/// the streamer would use them in.
+	/// List the video encoders and decoders: the FFmpeg libraries found,
+	/// every backend with its self-test result (or why it cannot be used),
+	/// the order the streamer would use the encoders in, and each codec's
+	/// decoders in the order a viewer tries them.
 	Encoders(EncodersArgs),
 }
 
@@ -44,6 +47,12 @@ struct EncodersArgs {
 	/// Rank without hardware encoders (`stream.hardware_acceleration` off).
 	#[arg(long)]
 	no_hardware: bool,
+	/// Decoder choice to rank by (as the setting `stream.decoder_backend`).
+	#[arg(long, default_value = "auto")]
+	decoder: String,
+	/// Rank without hardware decoders (`stream.hardware_decoding` off).
+	#[arg(long)]
+	no_hardware_decoding: bool,
 	/// Cisco's OpenH264 library, to list it as well.
 	#[arg(long)]
 	openh264: Option<PathBuf>,
@@ -127,7 +136,11 @@ fn codecs_for(encoder: &str, no_hardware: bool, openh264: Option<&PathBuf>) -> R
 }
 
 fn encoders(args: EncodersArgs) -> Result<()> {
-	let codecs = codecs_for(&args.encoder, args.no_hardware, args.openh264.as_ref())?;
+	let codecs = codecs_for(&args.encoder, args.no_hardware, args.openh264.as_ref())?
+		.with_decoder_preference(DecoderPreference {
+			hardware: !args.no_hardware_decoding,
+			backend: args.decoder.parse().unwrap_or_default(),
+		});
 	let report = codecs.report();
 	match &report.ffmpeg {
 		Ok(text) => println!("{text}"),
@@ -160,6 +173,27 @@ fn encoders(args: EncodersArgs) -> Result<()> {
 	let order: Vec<String> =
 		codecs.encoders().iter().map(|(codec, backend)| format!("{codec} {backend}")).collect();
 	println!("\nstreamer order: {}", order.join(", "));
+	println!();
+	println!("{:<18} {:<5} {:<17} {:<8} {:<5} status", "decoder", "codec", "api", "kind", "rank");
+	let mut list = report.decoders.clone();
+	list.sort_by_key(|d| (d.status.is_err(), d.codec.name(), d.rank.unwrap_or(usize::MAX)));
+	for d in &list {
+		println!(
+			"{:<18} {:<5} {:<17} {:<8} {:<5} {}",
+			d.name,
+			d.codec.name(),
+			d.api,
+			if d.hardware { "hardware" } else { "software" },
+			d.rank.map_or("-".to_owned(), |r| r.to_string()),
+			d.status.as_ref().err().map_or("ok", String::as_str),
+		);
+	}
+	println!("\nviewer order (each codec's decoders, best first):");
+	for codec in codecs.decoders() {
+		let ladder: Vec<String> =
+			codecs.decoders_for(codec).iter().map(|b| b.to_string()).collect();
+		println!("  {codec}: {}", ladder.join(" > "));
+	}
 	Ok(())
 }
 
