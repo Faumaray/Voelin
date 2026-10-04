@@ -2513,6 +2513,52 @@ mod tests {
 		});
 	}
 
+	/// A picture in memory, BGRx (a screen) or RGBx (the studio's
+	/// composite), copied into a surface and converted on the GPU: the same
+	/// picture as the CPU's conversion, at full and half size.
+	#[test]
+	fn memory_pictures_are_converted_on_the_gpu() {
+		const SIZE: (u32, u32) = (1280, 720);
+		if !usable("h264_vaapi") {
+			eprintln!("no usable h264_vaapi, skipped");
+			return;
+		}
+		let screen = crate::capture::synthetic::SyntheticScreen::with_pattern(
+			SIZE.0,
+			SIZE.1,
+			crate::capture::synthetic::Pattern::Desktop,
+		);
+		let bgra = screen.frame(7, 30);
+		let FrameData::Bgra(pixels) = &bgra.data else { unreachable!() };
+		let mut swapped = pixels.data.clone();
+		for px in swapped.chunks_exact_mut(4) {
+			px.swap(0, 2);
+		}
+		let rgba = VideoFrame::from_rgba(SIZE.0, SIZE.1, pixels.stride, swapped).unwrap();
+		let cpu = convert::to_i420(&bgra).unwrap().into_owned();
+		let mut half = VideoFrame::black_i420(SIZE.0 / 2, SIZE.1 / 2);
+		let mut workers = crate::workers::Workers::new("voelin-test-scale", 1);
+		crate::scale::scale_i420(&mut workers, &cpu, &mut half).unwrap();
+		let mut converter = GpuConverter::new().expect("VA-API video processing");
+		let layers = [
+			GpuLayer { size: SIZE, alignment: (2, 2), due: true },
+			GpuLayer { size: (SIZE.0 / 2, SIZE.1 / 2), alignment: (2, 2), due: true },
+		];
+		for picture in [&bgra, &rgba] {
+			let mut out = [None, None];
+			assert!(converter.takes(&picture.view().pixels));
+			converter.convert_memory(&picture.view(), &layers, &mut out).expect("converted");
+			for (frame, reference) in out.iter().flatten().zip([&cpu, &half]) {
+				let psnr = convert::psnr(reference, &download(frame)).unwrap();
+				eprintln!("{}x{}: PSNR {psnr:.1} dB against the CPU's", frame.width, frame.height);
+				assert!(psnr > 30.0, "{}x{}: {psnr:.1} dB", frame.width, frame.height);
+			}
+		}
+		// Not RGB: the caller converts it.
+		let i420 = VideoFrame::black_i420(64, 64);
+		assert!(!converter.takes(&i420.view().pixels));
+	}
+
 	/// What the GPU path costs per captured frame: the DMA-BUF import alone,
 	/// and the whole conversion (import, VPP to NV12, the wait for the GPU),
 	/// from a buffer of the driver's own (video memory, tiled) and from a
@@ -2527,6 +2573,15 @@ mod tests {
 			eprintln!("no usable h264_vaapi, skipped");
 			return;
 		}
+		// CPU time of every thread of the process.
+		let cpu_time = || -> Duration {
+			let tasks = std::fs::read_dir("/proc/self/task").unwrap().flatten();
+			tasks
+				.filter_map(|t| std::fs::read_to_string(t.path().join("schedstat")).ok())
+				.filter_map(|s| s.split_whitespace().next()?.parse().ok())
+				.map(Duration::from_nanos)
+				.sum()
+		};
 		let ffmpeg = Ffmpeg::get().unwrap();
 		for size in [(1920, 1080), (3840, 2160), (7680, 4320)] {
 			let screen = crate::capture::synthetic::SyntheticScreen::with_pattern(
@@ -2579,6 +2634,21 @@ mod tests {
 					convert.as_secs_f64() * 1e3
 				);
 			}
+			// The same picture in memory, copied into a surface.
+			let view = picture.view();
+			converter.convert_memory(&view, &layer, &mut out).unwrap();
+			let (cpu, started) = (cpu_time(), Instant::now());
+			for _ in 0..50 {
+				converter.convert_memory(&view, &layer, &mut out).unwrap();
+			}
+			let (wall, cpu) = (started.elapsed() / 50, (cpu_time() - cpu) / 50);
+			eprintln!(
+				"{}x{} memory: {:.2} ms, {:.2} ms CPU per frame",
+				size.0,
+				size.1,
+				wall.as_secs_f64() * 1e3,
+				cpu.as_secs_f64() * 1e3
+			);
 		}
 	}
 

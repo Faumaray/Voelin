@@ -340,7 +340,8 @@ struct Sample {
 	layers: Vec<(LayerId, LayerSnapshot)>,
 	sent: u64,
 	captured: u64,
-	/// Captured frames converted on the GPU (never read by the CPU).
+	/// Captured frames converted on the GPU (DMA-BUFs, or pictures in memory
+	/// copied into a surface).
 	gpu: u64,
 	/// Frames the handoffs to the encoders dropped, per layer.
 	dropped: Vec<(LayerId, u64)>,
@@ -467,7 +468,7 @@ fn bench(args: BenchArgs) -> Result<()> {
 	let ms = |d: Duration| d.as_secs_f64() * 1000.0;
 	println!(
 		"capture: {:.1} fps; convert + scale: CPU {} frames, {:.2} ms per frame on {} threads; \
-		 GPU (DMA-BUF, never read by the CPU) {gpu} frames, {:.2} ms per frame",
+		 GPU {gpu} frames, {:.2} ms per frame",
 		captured as f64 / secs,
 		captured - gpu.min(captured),
 		ms(stats.convert_time),

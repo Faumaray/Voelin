@@ -707,11 +707,13 @@ pub struct StreamerStats {
 	/// Mean time to convert a captured frame to I420 and scale it for every
 	/// layer that is due, on the CPU.
 	pub convert_time: Duration,
-	/// Captured frames that never reached the CPU: DMA-BUFs converted to
-	/// NV12 and scaled for every layer on the GPU, for VA-API encoders.
+	/// Captured frames converted to NV12 and scaled for every layer on the
+	/// GPU, for VA-API encoders: DMA-BUFs, which the CPU never reads, and
+	/// pictures in memory, which it copies into a surface first.
 	pub gpu_frames: u64,
-	/// Mean time the capture thread spends on such a frame (it waits for
-	/// the GPU, so the buffer can go back to the compositor).
+	/// Mean time the capture thread spends on such a frame (the copy, if
+	/// any, and the wait for the GPU, so the buffer can go back to the
+	/// compositor).
 	pub gpu_convert_time: Duration,
 	/// Why the GPU path stopped (it fell back to the CPU), if it did.
 	pub gpu_error: Option<String>,
@@ -1646,6 +1648,15 @@ struct Ingest {
 	gpu: GpuStage,
 }
 
+/// What the GPU stage converts: a DMA-BUF, or a picture in memory, which
+/// it copies into a surface first.
+#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+#[derive(Clone, Copy)]
+enum GpuInput<'a, 'b> {
+	Dmabuf(&'a DmaBufRef),
+	Memory(&'a FrameRef<'b>),
+}
+
 /// The GPU stage of [`Ingest`].
 #[cfg(all(target_os = "linux", feature = "media-desktop"))]
 #[derive(Default)]
@@ -1705,33 +1716,36 @@ impl Ingest {
 		false
 	}
 
+	/// The GPU stage's converter, made for the first frame; `None` once
+	/// making it (or a conversion) failed.
+	#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+	fn gpu_converter(&mut self) -> Option<&mut voelin_media::ffmpeg::GpuConverter> {
+		if self.gpu.converter.is_none() {
+			match voelin_media::ffmpeg::GpuConverter::new() {
+				Ok(converter) => self.gpu.converter = Some(Ok(converter)),
+				Err(e) => {
+					warn!("no GPU conversion of captured frames, the CPU converts them: {e}");
+					*lock(&self.shared.gpu_error) = Some(e.to_string());
+					self.gpu.converter = Some(Err(()));
+				}
+			}
+		}
+		self.gpu.converter.as_mut()?.as_mut().ok()
+	}
+
 	/// Convert DMA-BUF `frame` on the GPU for every layer that is due; `None`
 	/// if it is not taken (the backend maps it for [`FrameSink::frame`]).
 	#[cfg(all(target_os = "linux", feature = "media-desktop"))]
 	fn gpu_frame(&mut self, frame: &DmaBufRef) -> Option<bool> {
-		use voelin_media::ffmpeg::{GpuConverter, GpuLayer};
-
 		if self.shared.stopped() {
 			return Some(false);
 		}
 		if !self.gpu_path() {
 			return None;
 		}
-		let shared = self.shared.clone();
-		let converter = match &mut self.gpu.converter {
-			Some(Ok(converter)) => converter,
-			Some(Err(())) => return None,
-			None => match GpuConverter::new() {
-				Ok(converter) => self.gpu.converter.insert(Ok(converter)).as_mut().ok()?,
-				Err(e) => {
-					warn!("no GPU conversion of captured frames, the CPU converts them: {e}");
-					*lock(&shared.gpu_error) = Some(e.to_string());
-					self.gpu.converter = Some(Err(()));
-					return None;
-				}
-			},
-		};
+		self.gpu_converter()?;
 		self.pacer.keep(frame.timestamp);
+		let shared = &self.shared;
 		shared.captured.fetch_add(1, Ordering::Relaxed);
 		shared
 			.size
@@ -1739,32 +1753,55 @@ impl Ingest {
 		if shared.sink().is_none() {
 			return Some(true);
 		}
+		self.gpu_convert(GpuInput::Dmabuf(frame));
+		Some(true)
+	}
+
+	/// Convert `input` on the GPU for every layer that is due, into their
+	/// GPU inboxes. A failure turns the GPU stage off: the frame is dropped
+	/// (its layers' pacing taken) and the next one takes the CPU path.
+	#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+	fn gpu_convert(&mut self, input: GpuInput<'_, '_>) {
+		use voelin_media::ffmpeg::GpuLayer;
+
+		let ((width, height), timestamp) = match input {
+			GpuInput::Dmabuf(f) => ((f.width, f.height), f.timestamp),
+			GpuInput::Memory(f) => ((f.width, f.height), f.timestamp),
+		};
 		let mut any = false;
 		self.gpu.layers.clear();
 		for l in &mut self.layers {
-			let due = !l.layer.stopped() && l.pacer.take(frame.timestamp);
+			let due = !l.layer.stopped() && l.pacer.take(timestamp);
 			any |= due;
 			let alignment = l.layer.gpu.load(Ordering::Relaxed);
 			self.gpu.layers.push(GpuLayer {
-				size: l.spec.output_size(frame.width, frame.height),
+				size: l.spec.output_size(width, height),
 				alignment: ((alignment >> 32) as u32, alignment as u32),
 				due,
 			});
 		}
 		if !any {
-			return Some(true);
+			return;
 		}
 		self.gpu.out.clear();
 		self.gpu.out.resize(self.layers.len(), None);
+		let Some(Ok(converter)) = &mut self.gpu.converter else { return };
 		let started = Instant::now();
-		if let Err(e) = converter.convert(frame, &self.gpu.layers, &mut self.gpu.out) {
+		let result = match input {
+			GpuInput::Dmabuf(frame) => {
+				converter.convert(frame, &self.gpu.layers, &mut self.gpu.out)
+			}
+			GpuInput::Memory(frame) => {
+				converter.convert_memory(frame, &self.gpu.layers, &mut self.gpu.out)
+			}
+		};
+		let shared = &self.shared;
+		if let Err(e) = result {
 			warn!("GPU conversion failed, the CPU converts captured frames from now on: {e}");
 			*lock(&shared.gpu_error) = Some(e.to_string());
 			self.gpu.converter = Some(Err(()));
 			self.gpu.out.clear();
-			// This frame is counted and its layers' pacing taken: it is
-			// dropped, and the next one takes the CPU path.
-			return Some(true);
+			return;
 		}
 		shared.gpu_convert_ns.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 		shared.gpu_converted.fetch_add(1, Ordering::Relaxed);
@@ -1773,7 +1810,6 @@ impl Ingest {
 				l.layer.gpu_inbox.put(frame);
 			}
 		}
-		Some(true)
 	}
 
 	/// Pick up layer and frame-rate changes.
@@ -1896,6 +1932,15 @@ impl FrameSink for Ingest {
 		if shared.sink().is_none() {
 			return true;
 		}
+		// While every encoder takes GPU frames, a picture in memory is
+		// copied into a surface and converted and scaled there.
+		#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+		if self.gpu_path()
+			&& self.gpu_converter().is_some_and(|converter| converter.takes(&frame.pixels))
+		{
+			self.gpu_convert(GpuInput::Memory(&frame));
+			return true;
+		}
 		let mut any = false;
 		for (i, l) in self.layers.iter_mut().enumerate() {
 			self.sizes[i] = l.spec.output_size(frame.width, frame.height);
@@ -1906,6 +1951,7 @@ impl FrameSink for Ingest {
 			return true;
 		}
 		let started = Instant::now();
+		let shared = &self.shared;
 		if let Err(e) = self.pyramid.process(&frame, &self.sizes, &self.due, &mut self.out) {
 			warn!("cannot convert a captured frame: {e}");
 			shared.set_error(e);
@@ -3853,6 +3899,53 @@ mod tests {
 			stats.gpu_frames - gpu
 		);
 		assert_eq!(stats.gpu_error, None, "a planned switch, not a failure");
+	}
+
+	/// Pictures in memory take the GPU path too while every encoder takes
+	/// GPU frames: copied into a surface and converted and scaled there, in
+	/// the right colours (a red-blue swap would turn the orange rectangle
+	/// blue). Skipped without `h264_vaapi` or an H.264 decoder.
+	#[cfg(all(target_os = "linux", feature = "media-desktop"))]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn memory_frames_take_the_gpu_path_too() {
+		let vaapi = voelin_media::ffmpeg::probe()
+			.iter()
+			.any(|s| s.spec.name == "h264_vaapi" && s.available.is_ok());
+		let codecs = Codecs::new();
+		if !vaapi || codecs.new_decoder(Codec::H264).is_err() {
+			eprintln!("no h264_vaapi or H.264 decoder, skipped");
+			return;
+		}
+		let config = StreamerConfig {
+			source: SourceId::Synthetic,
+			synthetic_size: (640, 360),
+			fps: 30,
+			audio: false,
+			codec: Codec::H264,
+			encoder: EncoderPreference { hardware: true, backend: "h264_vaapi".parse().unwrap() },
+			layers: vec![layer(0, 1.0, None, 1_000_000), layer(5, 0.5, Some(15), 300_000)],
+			..StreamerConfig::default()
+		};
+		let streamer = Streamer::start(&codecs, config).await.unwrap();
+		let mut source = EncodedSource::new(streamer);
+		let count = |frames: &[EncodedFrame], id| frames.iter().filter(|f| f.layer == id).count();
+		let frames = collect(&mut source, |f| count(f, 0) >= 20 && count(f, 5) >= 5).await;
+		let stats = source.streamer().stats();
+		assert_eq!(stats.gpu_error, None);
+		let on_cpu = stats.captured_frames - stats.gpu_frames;
+		assert!(on_cpu <= 1, "{on_cpu} of {} frames on the CPU", stats.captured_frames);
+		assert_eq!(decoded_size(Codec::H264, &frames, 5), ((320, 180), true));
+		let mut decoder = codecs.new_decoder(Codec::H264).unwrap();
+		let mut picture = None;
+		for f in frames.iter().filter(|f| f.layer == 0) {
+			picture = decoder.decode(&f.data).unwrap().or(picture);
+		}
+		let picture = picture.expect("pictures of layer 0");
+		assert_eq!((picture.width, picture.height), (640, 360));
+		let rgba = voelin_media::convert::to_rgba_vec(&picture).unwrap();
+		let middle = &rgba[180 * 640 * 4..181 * 640 * 4];
+		let orange = middle.chunks_exact(4).any(|p| p[0] > 180 && p[2] < 100);
+		assert!(orange, "no orange rectangle in the middle row");
 	}
 
 	/// Two layers at their own sizes and frame rates, keyframes per layer,

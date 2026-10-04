@@ -111,13 +111,20 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   the buffer goes straight back to the compositor; the CPU never reads it.
   Each layer's surface reaches its encoder thread through a second
   handoff (the thread waits on both) and is encoded as it is
-  (`encode_gpu`). Anything else takes the CPU path as before, and the
-  capture switches between the two by itself: an encoder that needs frames
-  in memory (libvpx, x264, or one made for a viewer of another codec)
-  makes the sink decline the next DMA-BUF, so the portal maps it, and a
-  conversion that fails turns the GPU path off for the capture
-  (`StreamerStats::gpu_error`). Nothing is allocated per frame on this
-  path either (the surfaces' frames are recycled).
+  (`encode_gpu`). A picture in memory (shared memory from the portal, X11,
+  wlroots, the studio's composite, the test pattern) takes the same path
+  while the encoders do: `GpuConverter::convert_memory` copies it into a
+  VA-API surface of its own (one copy on the capture thread, BGRx or RGBx
+  as it is) and converts and scales that, instead of converting it to
+  I420 on every core, scaling it, and uploading each layer on its encoder
+  thread. At 7680x4320 that was more than a frame at 30 fps has (see [the
+  measurements](#60-mbits-up-to-8k-and-320-fps-measured)). Anything else takes the
+  CPU path as before, and the capture switches between the two by itself:
+  an encoder that needs frames in memory (libvpx, x264, or one made for a
+  viewer of another codec) makes the sink decline the next DMA-BUF, so the
+  portal maps it, and a conversion that fails turns the GPU path off for
+  the capture (`StreamerStats::gpu_error`). Nothing is allocated per frame
+  on this path either (the surfaces' frames are recycled).
 - Simulcast: `StreamerConfig::layers` (`voelin_stream::LayerSpec`; empty:
   one layer 0 at `bitrate_kbps`) are all encoded, each with its own encoder
   at `output_size()` of the source, its own frame-rate cap (`max_fps`,

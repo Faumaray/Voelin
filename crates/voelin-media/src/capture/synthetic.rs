@@ -11,6 +11,7 @@ use crate::capture::{
 };
 use crate::frame::{AUDIO_SAMPLE_RATE, AudioBuffer, FrameRef, PixelsRef, PlaneRef, VideoFrame};
 use crate::queue::{FrameReceiver, frame_channel};
+use crate::workers::{Slots, Workers};
 use crate::{Error, Result};
 
 /// Background colour of the pattern (RGB).
@@ -205,13 +206,16 @@ impl Desktop {
 		Self { page, editor, document, document_rows }
 	}
 
-	/// The page with the document scrolled by `offset` rows.
-	fn draw(&self, out: &mut [u8], width: usize, offset: usize) {
-		out[..self.page.len()].copy_from_slice(&self.page);
+	/// Rows `first..` of the page with the document scrolled by `offset`
+	/// rows, into `out` (whole rows).
+	fn draw(&self, out: &mut [u8], width: usize, first: usize, offset: usize) {
+		let start = first * width * 4;
+		out.copy_from_slice(&self.page[start..start + out.len()]);
 		let (ex, ey, ew, eh) = self.editor;
-		for row in 0..eh {
-			let src = (offset + row) % self.document_rows * ew * 4;
-			let dst = ((ey + row) * width + ex) * 4;
+		let rows = first..first + out.len() / (width * 4);
+		for y in rows.start.max(ey)..rows.end.min(ey + eh) {
+			let src = (offset + y - ey) % self.document_rows * ew * 4;
+			let dst = ((y - first) * width + ex) * 4;
 			out[dst..dst + ew * 4].copy_from_slice(&self.document[src..src + ew * 4]);
 		}
 	}
@@ -298,28 +302,30 @@ impl SyntheticScreen {
 	/// its memory.
 	pub fn render(&self, n: u64, out: &mut Vec<u8>) {
 		out.resize(self.width as usize * self.height as usize * 4, 0);
-		self.draw(n, out);
+		self.draw(n, out, &mut Workers::new("voelin-synthetic", 1));
 	}
 
 	/// [`render`](Self::render) into the first `width * height * 4` bytes of
-	/// `out`.
-	fn draw(&self, n: u64, out: &mut [u8]) {
+	/// `out`, the background in bands of rows on `workers` (a 7680x4320
+	/// frame is 130 MB to write).
+	fn draw(&self, n: u64, out: &mut [u8], workers: &mut Workers) {
 		let (w, h) = (self.width as usize, self.height as usize);
 		let out = &mut out[..w * h * 4];
-		match &self.desktop {
-			Some(desktop) => desktop.draw(out, w, n as usize * 3),
-			None => {
-				// One row, then copies of it.
-				let px = bgra(BACKGROUND);
-				for d in out[..w * 4].chunks_exact_mut(4) {
-					d.copy_from_slice(&px);
-				}
-				let (first, rest) = out.split_at_mut(w * 4);
-				for row in rest.chunks_exact_mut(w * 4) {
-					row.copy_from_slice(first);
+		let tasks = workers.tasks(h);
+		let band = h.div_ceil(tasks);
+		let bands = Slots::new(out.chunks_mut(band * w * 4).enumerate());
+		let background = bgra(BACKGROUND);
+		workers.run(bands.len(), &|i| {
+			let Some((i, rows)) = bands.take(i) else { return };
+			match &self.desktop {
+				Some(desktop) => desktop.draw(rows, w, i * band, n as usize * 3),
+				None => {
+					for px in rows.chunks_exact_mut(4) {
+						px.copy_from_slice(&background);
+					}
 				}
 			}
-		}
+		});
 		let (rx, ry, rw, rh) = self.rect(n);
 		fill(out, w, (rx as usize, ry as usize, rw as usize, rh as usize), RECT_COLOR);
 		// Frame counter in the top-left corner.
@@ -386,6 +392,9 @@ impl ScreenCapture for SyntheticScreen {
 				let mut fps = sink.max_fps();
 				let mut ticker = Ticker::new(fps);
 				let mut buffer = Buffer::new(&pattern);
+				// A few threads: drawing is memory-bound, and many threads
+				// cost far more CPU for little time.
+				let mut workers = Workers::new("voelin-synthetic", 4);
 				let started = Instant::now();
 				let mut n = 0;
 				loop {
@@ -394,7 +403,7 @@ impl ScreenCapture for SyntheticScreen {
 						// Buffers in video memory are drawn in advance; memory
 						// only for a sink that declines them.
 						if !buffer.drawn_in_advance() {
-							pattern.draw(n, buffer.bytes());
+							pattern.draw(n, buffer.bytes(), &mut workers);
 						}
 						let taken = match buffer.dmabuf(&pattern, n, timestamp) {
 							Some(frame) if sink.accepts_dmabuf() => sink.dmabuf(&frame),
@@ -402,7 +411,7 @@ impl ScreenCapture for SyntheticScreen {
 						};
 						let more = taken.unwrap_or_else(|| {
 							if buffer.drawn_in_advance() {
-								pattern.draw(n, buffer.bytes());
+								pattern.draw(n, buffer.bytes(), &mut workers);
 							}
 							let plane = PlaneRef::new(buffer.bytes(), width as usize * 4);
 							sink.frame(FrameRef {
