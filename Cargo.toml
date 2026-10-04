@@ -2,7 +2,7 @@
 resolver = "3"
 # third_party: vendored crates patched in below (not workspace members, so
 # their own tests and dev-dependencies stay out of our builds).
-exclude = ["fuzz", "third_party"]
+exclude = ["fuzz", "third_party", "third_party/schema-api"]
 members = [
 	"crates/proto/tsproto-types",
 	"crates/proto/tsproto-structs",
@@ -17,6 +17,7 @@ members = [
 	"crates/voelin-gateway-proto",
 	"crates/voelin-media",
 	"crates/voelin-model",
+	"crates/voelin-myts",
 	"crates/voelin-observer",
 	"crates/voelin-platform",
 	"crates/voelin-query",
@@ -37,6 +38,7 @@ default-members = [
 	"crates/voelin-gateway",
 	"crates/voelin-gateway-proto",
 	"crates/voelin-model",
+	"crates/voelin-myts",
 	"crates/voelin-observer",
 	"crates/voelin-platform",
 	"crates/voelin-query",

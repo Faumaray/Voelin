@@ -6,6 +6,26 @@ use crate::app::{Bridge, MainWindow, with_app};
 
 pub(super) fn wire(ui: &MainWindow) {
 	let bridge = ui.global::<Bridge>();
+	#[cfg(not(target_os = "android"))]
+	{
+		bridge.on_myts_login(|email, password, otp| {
+			with_app(|app| {
+				app.myts_login(email.to_string(), password.to_string(), otp.to_string())
+			});
+		});
+		bridge.on_myts_logout(|| {
+			with_app(|app| app.myts_logout());
+		});
+		bridge.on_myts_dismiss(|| {
+			with_app(|app| app.myts_dismiss());
+		});
+		bridge.on_myts_retry(|| {
+			with_app(|app| app.myts_retry());
+		});
+		bridge.on_myts_portal(|action| {
+			with_app(|app| app.myts_portal(action));
+		});
+	}
 	bridge.on_open_settings(|| {
 		with_app(|app| app.open_settings());
 	});

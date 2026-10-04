@@ -49,6 +49,7 @@ tsclientlib = { path = "../proto/tsclientlib" }
 # Desktop: the keyring for passwords, stream media with libvpx, OpenH264, X11
 # and PipeWire, global hotkeys through the portal and X11.
 [target.'cfg(not(target_os = "android"))'.dependencies]
+voelin-myts = { path = "../voelin-myts" }
 slint = { version = "1.18", features = ["renderer-software"] }
 voelin-core = { path = "../voelin-core", default-features = false, features = ["media-desktop"] }
 voelin-platform = { path = "../voelin-platform" }

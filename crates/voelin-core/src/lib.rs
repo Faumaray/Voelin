@@ -63,6 +63,7 @@ pub mod settings;
 pub mod stream;
 #[cfg(feature = "media")]
 pub mod studio;
+pub mod versions;
 mod voice;
 mod web;
 
@@ -70,7 +71,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 pub use voelin_audio::settings::TransmitMode;
 pub use voelin_audio::{AudioSettings, ProcessingSettings, VadSettings};
 use voelin_model::{
@@ -101,6 +102,8 @@ pub type SessionId = u64;
 /// What the UI asks for.
 #[derive(Clone, Debug)]
 pub enum Command {
+	/// Main account proof for every current and future voice connection.
+	SetMytsIdentity(Option<Arc<tsproto::myts::Identity>>),
 	ConnectVoice {
 		session: SessionId,
 		options: Box<VoiceOptions>,
@@ -812,6 +815,7 @@ async fn run(
 	// Before any command: a contact set meanwhile would be lost.
 	contacts.load().await;
 	let mut sessions: HashMap<SessionId, session::SessionHandle> = HashMap::new();
+	let (myts_identity, _) = watch::channel(None);
 	let mut current = shared.current();
 	// Pruning: at start, then hourly (and when the setting changes).
 	let mut prune = tokio::time::interval(std::time::Duration::from_secs(3600));
@@ -856,6 +860,19 @@ async fn run(
 			},
 		};
 		let id = match command {
+			Command::SetMytsIdentity(identity) => {
+				// Still no account is no change: every notification restarts
+				// handshakes and sends `updatemytsid` on every connection. Any
+				// account is (each connection's proof is signed anew).
+				myts_identity.send_if_modified(|current| {
+					if current.is_none() && identity.is_none() {
+						return false;
+					}
+					*current = identity;
+					true
+				});
+				continue;
+			}
 			Command::SetAudioSettings(new) => {
 				settings = (*new).clone();
 				for s in sessions.values() {
@@ -931,6 +948,7 @@ async fn run(
 					frames.clone(),
 					settings.clone(),
 					engine.clone(),
+					myts_identity.subscribe(),
 				);
 				if let Some(profiles) = &srtp_profiles {
 					s.send(Command::SetSrtpProfiles(profiles.clone()));
@@ -1008,7 +1026,8 @@ fn command_session(command: &Command) -> SessionId {
 		| Command::DeleteOfflineMessage { session, .. }
 		| Command::SetOfflineMessageRead { session, .. }
 		| Command::CloseSession { session } => *session,
-		Command::SetAudioSettings(_)
+		Command::SetMytsIdentity(_)
+		| Command::SetAudioSettings(_)
 		| Command::SetSrtpProfiles(_)
 		| Command::TestMicrophone { .. }
 		| Command::SetSetting { .. }
@@ -1021,4 +1040,14 @@ fn command_session(command: &Command) -> SessionId {
 			unreachable!("engine-wide commands have no session")
 		}
 	}
+}
+
+/// The app has one rustls crypto provider. With two (aws-lc-rs and ring), a
+/// TLS client built without an explicit provider panics: `wss://` gateways
+/// did. This test's build has the app's TLS dependencies (reqwest here,
+/// tonic through the voelin-myts dev-dependency).
+#[cfg(test)]
+#[test]
+fn one_rustls_crypto_provider() {
+	let _ = rustls::ClientConfig::builder();
 }

@@ -1,0 +1,7 @@
+syntax = "proto3";
+
+package com.teamspeak.revocation_list;
+
+message RevocationList {
+    repeated bytes list = 1;
+}

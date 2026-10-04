@@ -1,0 +1,41 @@
+[package]
+name = "schema-api"
+version = "0.1.0"
+edition = "2021"
+description = "Complete Rust gRPC bindings and client utilities for the supplied API schemas"
+readme = "README.md"
+publish = false
+include = ["src/**", "proto/**", "build.rs", "Cargo.toml", "Cargo.lock", "README.md", "docs/**", "examples/**", "tests/**", "scripts/**"]
+
+[features]
+default = ["reflection"]
+reflection = ["dep:prost-reflect", "dep:serde_json"]
+server = []
+infrastructure = []
+gzip = ["tonic/gzip"]
+
+[dependencies]
+prost = "0.14"
+prost-types = "0.14"
+# Voelin: aws-lc-rs (was tls-ring), the one rustls provider of the app (VOELIN-PATCH.md).
+tonic = { version = "0.14", features = ["transport", "tls-aws-lc", "tls-native-roots"] }
+tonic-prost = "0.14"
+thiserror = "2"
+prost-reflect = { version = "0.16", features = ["serde"], optional = true }
+serde_json = { version = "1", optional = true }
+
+[build-dependencies]
+prost-build = "0.14"
+tonic-prost-build = "0.14"
+protoc-bin-vendored = "3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+
+[[example]]
+name = "inspect_schema"
+required-features = ["reflection"]
+
+# Voelin: keep this vendored package independent of enclosing workspaces.
+[workspace]

@@ -144,7 +144,8 @@ export component YouPage inherits ScrollView {
                     alignment: center;
                     horizontal-stretch: 1;
                     Text {
-                        text: Bridge.nickname != "" ? Bridge.nickname : Bridge.app-name;
+                        text: Bridge.primary-name;
+                        overflow: elide;
                         color: Theme.text;
                         font-size: Theme.font-lg;
                         font-weight: Theme.weight-semibold;

@@ -1,0 +1,467 @@
+syntax = "proto3";
+
+package com.teamspeak.myteamspeak.proto.user;
+
+import "google/protobuf/any.proto";
+import "myteamspeak_common.proto";
+import "myteamspeak_tschat.proto";
+import "myteamspeak_avatar_common.proto";
+import "myteamspeak_integration_user.proto";
+import "myteamspeak_namedserver_common.proto";
+import "synchronization_common.proto";
+
+option java_generic_services = true;
+option cc_generic_services = true;
+option optimize_for = SPEED;
+
+service UserAccountService {
+    rpc addUser(UserData) returns (ReturnCode);
+    rpc updateUser(UserData) returns (ReturnCode);
+    rpc getBackupKey(UserLogin) returns (BackupKeyData);
+    rpc getBadges(Session) returns (UserBadgesList);
+    rpc redeemBadgeCode(BadgeCode) returns (RedeemBadgeCodeResponse);
+    rpc setNewUserPublicKey(NewUserPublicKeyData) returns (NewUserPublicKeyDataResponse);
+    rpc requestContactsAvatar(RequestContactsAvatarInfoRequest) returns (RequestContactsAvatarInfoResponse);
+    rpc getSignedBadges(Session) returns (UserBadgesSignedResponse);
+    rpc requestVoiceServer(VoiceServerRequest) returns (VoiceServerResponse);
+    rpc requestVoiceServerLocation(SpawnVoiceServerLocationRequest) returns (SpawnVoiceServerLocationResponse);
+    rpc deleteSpawnedVoiceServer(VoiceServerRequest) returns (ReturnCode);
+    rpc listSpawnedVoiceServer(Session) returns (SpawnedVoiceServerListResponse);
+    rpc startVoiceServer(VoiceServerRequest) returns (VoiceServerResponse);
+    rpc stopVoiceServer(VoiceServerRequest) returns (VoiceServerResponse);
+    rpc readVoiceServerStatus(VoiceServerRequest) returns (VoiceServerResponse);
+    rpc requestAvatarSignedUrl(AvatarSignedUrlRequest) returns (AvatarSignedUrlResponse);
+    rpc requestUploadAvatar(RequestUploadAvatarRequest) returns (RequestUploadAvatarResponse);
+    rpc requestDeleteAvatar(RequestDeleteAvatarInfoRequest) returns (ReturnCode);
+    rpc changeEmail(EmailChange) returns (ReturnCode);
+    rpc resetAccount(ResetAccountRequest) returns (ReturnCode);
+    rpc updateUserDescription(UpdateUserDescriptionRequest) returns (ReturnCode);
+    rpc requestUploadFile(UploadFileRequest) returns (FileInfo);
+    rpc requestDownloadFile(DownloadFileRequest) returns (FileInfo);
+    rpc generateOtpSetupSecret(TwoFactorAuthTypeRequest) returns (OtpSecretResponse);
+    rpc updateTwoFactorAuthType(UpdateTwoFactorAuthTypeRequest) returns (ReturnCode);
+    rpc confirmTwoFactorAuthTypeOtp(TwoFactorAuthTypeOtpConfirmationRequest) returns (ReturnCode);
+    rpc removeTwoFactorAuthType(TwoFactorAuthTypeRequest) returns (ReturnCode);
+    rpc getTwoFactorAuthType(Session) returns (TwoFactorAuthTypeResponse);
+    rpc registerFirebasePush(RegisterFirebasePush) returns (ReturnCode);
+    rpc getAccountData(AccountDataRequest) returns (UserAccountData);
+}
+
+message BackupKeyData {
+    ReturnCode returncode = 1;
+    bytes backupkey = 2;
+}
+
+message UserData {
+    UserLogin login = 1;
+    string username = 2;
+    bytes key = 3;
+    bytes backupkey = 4;
+    UserImg image = 5;
+    UserLogin login_old = 6;
+    bool force_key_overwrite = 8;
+    bool delete_mytsid_data = 9;
+    string session = 10;
+    
+    reserved 7;
+}
+
+message UserLogin {
+    string email = 1;
+    string password = 2;
+}
+
+message UserImg {
+    
+}
+
+message Session {
+    string session = 1;
+}
+
+message BadgeCode {
+    string code = 1;
+    string session = 2;
+}
+
+message UserBadge {
+    string uuid = 1;
+    int64 received = 2;
+    string name = 3;
+    string description = 4;
+    string url = 5;
+}
+
+message SignedUserBadge {
+    UserBadge badge = 1;
+    bytes sign = 2;
+    uint64 sign_timestamp = 3;
+}
+
+message UserBadgesSignedResponse {
+    UserBadgesSignedList list = 1;
+    ErrorReturnCode error_code = 2;
+}
+
+message UserBadgesSignedList {
+    repeated SignedUserBadge badges = 1;
+}
+
+message UserBadgesList {
+    repeated UserBadge badges = 1;
+    ErrorReturnCode error_code = 2;
+}
+
+message RedeemBadgeCodeResponse {
+    bool success = 1;
+    string error = 2;
+    ErrorReturnCode error_code = 3;
+    string badge_uuid = 4;
+}
+
+message ReturnCode {
+    bool success = 1;
+    string error = 2;
+    ErrorReturnCode error_code = 3;
+    string client_id = 4;
+}
+
+message NewUserPublicKeyData {
+    Session session = 1;
+    bytes user_public_key = 2;
+    bytes proof = 3;
+    bytes encrypted_user_private_key = 4;
+}
+
+message NewUserPublicKeyDataResponse {
+    uint64 account_creation_time = 1;
+    bytes myts_id = 2;
+    bytes public_signature = 3;
+    ErrorReturnCode error = 4;
+}
+
+message AvatarRequestID {
+    google.protobuf.Any key = 1;
+    
+    message MYTSKey {
+        bytes id = 1;
+    }
+    
+    message KIDKey {
+        string id = 1;
+    }
+}
+
+message RequestContactsAvatarInfoRequest {
+    string session = 1;
+    repeated AvatarRequestID id = 2;
+}
+
+message RequestContactsAvatarInfoResponse {
+    repeated AvatarInfoMap data = 1;
+    message AvatarInfoMap {
+        AvatarRequestID id = 1;
+        AvatarData info = 2;
+    }
+    
+    ErrorReturnCode error_code = 2;
+}
+
+message SpawnVoiceServerLocationRequest {
+    string session = 1;
+    string ip_address = 2;
+}
+
+message SpawnVoiceServerLocationResponse {
+    ReturnCode return_code = 1;
+    repeated SpawnVoiceServerLocation possible_location = 2;
+}
+
+message SpawnVoiceServerLocation {
+    repeated string address = 1;
+    string status = 2;
+    int64 connected_clients = 3;
+    int64 used_slots = 4;
+    int64 used_channels = 5;
+    int64 used_server = 6;
+}
+
+message SpawnedVoiceServerListResponse {
+    ReturnCode return_code = 2;
+    repeated VoiceServerPayload payload = 3;
+    
+    reserved 1;
+}
+
+message SpawnedVoiceServer {
+    string server_uid = 1;
+    repeated string address = 2;
+}
+
+message VoiceServerRequest {
+    string session = 1;
+    VoiceServerPayload payload = 2;
+}
+
+message VoiceServerResponse {
+    ReturnCode return_code = 1;
+    VoiceServerPayload payload = 2;
+}
+
+message VoiceServerOperation {
+    string operation = 1;
+    VoiceServerPayload payload = 2;
+}
+
+message VoiceServerPayload {
+    string virtualserver_uuid = 1;
+    string virtualserver_name = 2;
+    string virtualserver_welcomemessage = 3;
+    uint32 virtualserver_maxclients = 4;
+    string virtualserver_password = 5;
+    string virtualserver_hostname = 6;
+    uint32 virtualserver_port = 7;
+    string virtualserver_token = 8;
+    string virtualserver_status = 9;
+    uint32 virtualserver_uptime = 10;
+    uint32 virtualserver_clientsonline = 11;
+    uint32 virtualserver_total_ping = 12;
+    string virtualserver_location = 13;
+    string virtualserver_unique_identifier = 14;
+}
+
+message RequestUploadAvatarRequest {
+    string session = 1;
+    
+    repeated AvatarImageMap image_names = 2;
+    message AvatarImageMap {
+        AvatarState state = 1;
+        string name = 2;
+    }
+}
+
+message RequestUploadAvatarResponse {
+    AvatarError error = 1;
+}
+
+message RequestDeleteAvatarInfoRequest {
+    string session = 1;
+    repeated AvatarState images = 2;
+}
+
+message AvatarSignedUrlRequest {
+    string session = 1;
+    repeated string file_names = 2;
+}
+
+message AvatarSignedUrlResponse {
+    ReturnCode return_code = 1;
+    
+    repeated SignedUrl signed_urls = 2;
+    message SignedUrl {
+        string file_name = 1;
+        string signed_url = 2;
+    }
+}
+
+message EmailChange {
+    string email = 1;
+    string session = 2;
+    string validationKey = 3;
+    bytes key = 4;
+    string newPw = 5;
+    string currentPw = 6;
+}
+
+message ResetAccountRequest {
+    string session = 1;
+    bytes key = 2;
+    bytes backup_key = 3;
+    NewUserPublicKeyData myts_id = 4;
+}
+
+message UpdateUserDescriptionRequest {
+    string session = 1;
+    string description = 2;
+}
+
+message UploadFileRequest {
+    string session = 1;
+    string user_id = 2;
+    string room_id = 3;
+}
+
+message DownloadFileRequest {
+    string session = 1;
+    string user_id = 2;
+    string room_id = 3;
+    string file_id = 4;
+}
+
+message FileInfo {
+    bool success = 1;
+    ErrorReturnCode error = 2;
+    string user_id = 3;
+    string room_id = 4;
+    string file_id = 5;
+    string signed_url = 6;
+}
+
+message OtpSecretResponse {
+    string otp_secret = 1;
+    bytes otp_qr_code_image = 2 [deprecated = true];
+    string otp_qr_code_mime_type = 3 [deprecated = true];
+    ReturnCode return_code = 4;
+}
+
+message UpdateTwoFactorAuthTypeRequest {
+    string session = 1;
+    AuthType auth_type = 2;
+}
+
+message TwoFactorAuthTypeRequest {
+    string session = 1;
+    AuthType auth_type = 2;
+    UserLogin user_login = 3;
+}
+
+message TwoFactorAuthTypeOtpConfirmationRequest {
+    string session = 1;
+    AuthType auth_type = 2;
+    UserLogin user_login = 3;
+    string otp = 4;
+}
+
+message TwoFactorAuthTypeResponse {
+    repeated AuthType auth_type = 1;
+    ReturnCode return_code = 2;
+}
+
+message RegisterFirebasePush {
+    string session = 1;
+    string deviceToken = 2;
+}
+
+message AuthenticatedDevice {
+    string device_id = 1;
+    string device_name = 2;
+    int64 first_login = 3;
+    int64 last_login = 4;
+    string region = 5;
+    int64 expiry = 6;
+}
+
+message UsernameChangeAllowance {
+    int64 last_free_change_at = 1;
+    int64 additional_allowance = 2;
+}
+
+message Community {
+    string entity_id = 1;
+    string client_id = 2;
+    string community_id = 3;
+    string stripe_customer_id = 4;
+    string stripe_subscription_id = 5;
+    int64 created = 6;
+    int64 updated = 7;
+    string state = 8;
+}
+
+message UserMetadata {
+    map<string, string> metadata = 1;
+}
+
+message UserAccountData {
+    ReturnCode return_code = 1;
+    string username = 2;
+    string email_address = 3;
+    string ts_chat_id = 4;
+    AvatarInfo avatarInfo = 5;
+    integration.IntegrationUserData integrations = 6;
+    int64 registration_date = 7;
+    string description = 8;
+    tschat.ContactList chat_contacts = 9;
+    tschat.TschatIdentifierList ts_chat_identifier_list_active = 10;
+    tschat.TschatIdentifierList ts_chat_identifier_list_allowed = 11;
+    repeated UserBadge badges = 12;
+    repeated namedserver.NamedServer namedservers = 13;
+    Permissions permissions = 14;
+    int64 last_login = 15;
+    int64 last_update = 16;
+    string author_name = 17;
+    string phone = 18;
+    EmailChange email_change = 19;
+    repeated AuthenticatedDevice authenticated_devices = 20;
+    int64 last_password_change = 21;
+    UsernameChangeAllowance usernameChangeAllowance = 22;
+    repeated Community communities = 23;
+    int64 last_username_change = 24;
+    synchronization.Sync_Reply_ItemClasses sync_items = 25;
+    UserMetadata user_metadata = 26;
+}
+
+message AccountDataRequest {
+    string session = 1;
+    repeated UserAccountDataSelector selector = 2;
+    string client_id = 3;
+}
+
+enum UserAccountDataSelector {
+    ALL = 0;
+    BASIC_INFO = 1;
+    TS_CHAT = 2;
+    AVATARS = 3;
+    INTEGRATIONS = 4;
+    DESCRIPTION = 5;
+    BADGES = 6;
+    NAMEDSERVER = 7;
+    PERMISSIONS = 8;
+    EMAIL_CHANGE = 9;
+    AUTHENTICATED_DEVICES = 10;
+    USERNAME_CHANGE_ALLOWANCE = 11;
+    COMMUNITIES = 12;
+    SYNC = 13;
+    METADATA = 14;
+}
+
+enum AuthType {
+    AUTH_TYPE_UNSPECIFIED = 0;
+    AUTH_TYPE_OTP = 1;
+}
+
+enum ErrorReturnCode {
+    UNKNOWN_ERRORRETURNCODE = 0;
+    ERROR_MISSING_REQUIRED_FIELD = 100;
+    ERROR_EMAIL_ALREADY_TAKEN = 101;
+    ERROR_UUID_COLLISION = 102;
+    ERROR_DATABASE = 103;
+    ERROR_LOGIN_FAILED = 104;
+    ERROR_EMPTY_KEY = 105;
+    ERROR_EMAIL_INVALID = 106;
+    ERROR_NOT_ALLOWED = 107;
+    ERROR_USERNAME_ALREADY_TAKEN = 108;
+    ERROR_SESSION_EXPIRED = 109;
+    ERROR_CODE_INVALID = 110;
+    ERROR_USERNAME_INVALID = 111;
+    ERROR_BADGE_ALREADY_PRESENT = 112;
+    ERROR_KEY_ALREADY_PRESENT = 113;
+    ERROR_INVALID_KEY = 114;
+    ERROR_INVALID_PROOF = 115;
+    ERROR_INTERNAL = 116;
+    ERROR_QUOTA_EXCEEDED = 117;
+    ERROR_CHANGE_EMAIL_FAILED = 118;
+    ERROR_CHANGE_EMAIL_FAILED_MISSING_FIELD = 119;
+    ERROR_CHANGE_EMAIL_FAILED_FUNCTIONAL_EMAIL_FORMAT = 120;
+    ERROR_CHANGE_EMAIL_FAILED_FUNCTIONAL_EQUAL_EMAIL = 121;
+    ERROR_CHANGE_EMAIL_FAILED_FUNCTIONAL_TARGET_EXISTS = 122;
+    ERROR_CHANGE_EMAIL_FAILED_FUNCTIONAL_ALREADY_PENDING = 123;
+    ERROR_GENERATE_OTP_SETUP_SECRET_FAILED = 124;
+    ERROR_GET_TWO_FACTOR_AUTH_TYPE_FAILED = 125;
+    ERROR_UPDATE_TWO_FACTOR_AUTH_TYPE_FAILED = 126;
+    ERROR_VOICE_SERVER_START_FAILED = 127;
+    ERROR_VOICE_SERVER_STOP_FAILED = 128;
+    ERROR_VOICE_SERVER_READ_FAILED = 129;
+    ERROR_VOICE_SERVER_TOO_MANY_REQUESTS = 130;
+    ERROR_VOICE_SERVER_CREATE_FAILED = 131;
+    ERROR_VOICE_SERVER_DELETE_FAILED = 132;
+}

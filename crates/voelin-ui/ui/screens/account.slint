@@ -1,0 +1,206 @@
+// Shared account form for first launch and Settings → My Account.
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Bridge } from "../bridge.slint";
+import { Button, TextField, Field, Card, ScrollView } from "../components/index.slint";
+
+component Note inherits Text {
+    // Keep wrapped account copy in the card’s layout bounds.
+    min-height: self.preferred-height;
+    color: Theme.text-secondary;
+    font-size: Theme.font-sm;
+    wrap: word-wrap;
+}
+
+component LoginForm inherits VerticalLayout {
+    spacing: Theme.space-3;
+    property <string> otp-text;
+    function submit() {
+        // The one-time code is asked for, never required to submit: another
+        // account needs none, and without it a 2FA account is asked again.
+        if !Bridge.myts.busy && email.text != "" && password.text != "" {
+            Bridge.myts-login(email.text, password.text, otp-text);
+            password.clear();
+            otp-text = "";
+        }
+    }
+    Field {
+        label: @tr("Email");
+        email := TextField {
+            text: Bridge.myts.email;
+            placeholder: @tr("Email");
+            enabled: !Bridge.myts.busy;
+            accepted(_) => { root.submit(); }
+        }
+    }
+    Field {
+        label: @tr("Password");
+        password := TextField {
+            placeholder: @tr("Password");
+            input-type: InputType.password;
+            enabled: !Bridge.myts.busy;
+            accepted(_) => { root.submit(); }
+        }
+    }
+    if Bridge.myts.otp-required: Field {
+        label: @tr("One-time code");
+        TextField {
+            text <=> root.otp-text;
+            placeholder: @tr("One-time code");
+            input-type: InputType.password;
+            enabled: !Bridge.myts.busy;
+            accepted(_) => { root.submit(); }
+        }
+    }
+    Button {
+        text: @tr("Sign in");
+        enabled: !Bridge.myts.busy && email.text != "" && password.text != "";
+        clicked => { root.submit(); }
+    }
+    Button {
+        text: @tr("Create account in browser");
+        enabled: !Bridge.myts.busy;
+        clicked => { Bridge.myts-portal(0); }
+    }
+    Button {
+        text: @tr("Forgot password?");
+        enabled: !Bridge.myts.busy;
+        clicked => { Bridge.myts-portal(1); }
+    }
+    Note { text: @tr("Registration and password recovery open the official myTeamSpeak website. Return here to sign in when finished."); }
+}
+
+export component AccountCard inherits Card {
+    title: @tr("myTeamSpeak");
+    icon: Icons.user;
+    property <string> account-status: Bridge.myts.status == 2 ? @tr("Saved session could not be validated. Your saved credentials were retained; sign in again or clear them.") :
+        Bridge.myts.status == 3 ? @tr("Enter your password again and the one-time code.") :
+        Bridge.myts.status == 4 ? @tr("Sign-in failed. Check your credentials and connection; the experimental service may be unavailable.") :
+        Bridge.myts.status == 7 ? @tr("Signed out.") :
+        Bridge.myts.status == 9 ? @tr("Signed out and saved credentials cleared. Remote session revocation failed.") :
+        Bridge.myts.status == 10 ? @tr("Could not open your browser. Visit myteamspeak.com to manage your account.") :
+        Bridge.myts.status == 11 ? @tr("Account website opened in your browser. When finished, return here and sign in again to apply changes.") :
+        Bridge.myts.status == 13 ? @tr("Your email address has not been verified. Activate your account using the link in your email, or request a new activation email.") :
+        Bridge.myts.status == 14 ? @tr("The one-time code was not accepted. Enter your password and a new code.") :
+        Bridge.myts.status == 15 ? @tr("Your saved session has expired. Sign in again.") :
+        Bridge.myts.status == 16 ? @tr("Email or password was not accepted. Check your details and try again.") :
+        Bridge.myts.status == 17 ? @tr("Too many requests. Wait a while before trying again.") : "";
+    if !Bridge.myts.available: Note { text: @tr("Account sign-in is available on desktop."); }
+    if Bridge.myts.available && !Bridge.myts.signed-in: LoginForm { }
+    if Bridge.myts.signed-in: VerticalLayout {
+        spacing: Theme.space-3;
+        Note { text: @tr("Primary account"); }
+        Text {
+            text: Bridge.primary-name;
+            color: Theme.text;
+            font-size: Theme.font-lg;
+            font-weight: Theme.weight-semibold;
+            wrap: word-wrap;
+        }
+        Note { text: Bridge.myts.email; }
+        if Bridge.myts.uuid != "": Field {
+            label: @tr("Account ID");
+            TextField {
+                text: Bridge.myts.uuid;
+                read-only: true;
+                label: @tr("Account ID");
+            }
+        }
+        if Bridge.myts.myts-id != "": Field {
+            label: @tr("myTS ID");
+            TextField {
+                text: Bridge.myts.myts-id;
+                read-only: true;
+                label: @tr("myTS ID");
+            }
+        }
+        if Bridge.myts.identity-status == 1: Note {
+            text: @tr("Your account identity is available for authentication on voice servers.");
+        }
+        if Bridge.myts.identity-status == 2: Note {
+            text: @tr("Sign out and sign in with your password to enable your myTS ID on voice servers.");
+        }
+        if Bridge.myts.identity-status == 3: Note {
+            text: @tr("Signed in, but the account identity could not be unlocked. Voice servers will not receive your myTS ID. Try signing in again; older account encryption may be unsupported.");
+        }
+        Note { text: @tr("This is your main app profile. Server identities and server nicknames are managed separately."); }
+        Note { text: @tr("Account management opens the official website. Check which account is signed in there. Sign in again here after making changes."); }
+        Button {
+            text: @tr("Manage account in browser");
+            enabled: !Bridge.myts.busy;
+            clicked => { Bridge.myts-portal(2); }
+        }
+        for action in [
+            { text: @tr("Change username"), portal: 4 },
+            { text: @tr("Change email"), portal: 5 },
+            { text: @tr("Change password"), portal: 6 },
+            { text: @tr("Two-factor authentication"), portal: 7 },
+            { text: @tr("Manage account deletion"), portal: 8 },
+            { text: @tr("Export account data"), portal: 9 },
+        ]: Button {
+            text: action.text;
+            small: true;
+            enabled: !Bridge.myts.busy;
+            clicked => { Bridge.myts-portal(action.portal); }
+        }
+    }
+    if Bridge.myts.busy: Note { text: @tr("Contacting account service…"); }
+    if root.account-status != "": Note { text: root.account-status; }
+    if Bridge.myts.persistence-status == 1: Note {
+        text: @tr("Saved account credentials could not be read. Unlock the keyring or clear the saved session.");
+    }
+    if Bridge.myts.persistence-status == 5: Note {
+        text: @tr("Account credentials could not be saved. This session will not be restored after restarting.");
+    }
+    if Bridge.myts.persistence-status == 6: Note {
+        text: @tr("Account credentials could not be saved, and older credentials could not be removed. Unlock your keyring and clear the saved session.");
+    }
+    if Bridge.myts.persistence-status == 8: Note {
+        text: @tr("Signed out locally, but saved credentials could not be removed. Unlock your keyring and clear the saved session again.");
+    }
+    if Bridge.myts.status == 13: Button {
+        text: @tr("Resend activation email in browser");
+        enabled: !Bridge.myts.busy;
+        clicked => { Bridge.myts-portal(3); }
+    }
+    if Bridge.myts.can-forget && !Bridge.myts.busy: Button {
+        text: Bridge.myts.signed-in ? @tr("Check session") : @tr("Retry saved session");
+        clicked => { Bridge.myts-retry(); }
+    }
+    if Bridge.myts.can-forget || Bridge.myts.busy: Button {
+        text: Bridge.myts.busy ? @tr("Cancel and clear session") : Bridge.myts.signed-in ? @tr("Sign out") : @tr("Clear saved session");
+        clicked => { Bridge.myts-logout(); }
+    }
+}
+
+export component LoginPage inherits ScrollView {
+    VerticalLayout {
+        width: root.visible-width;
+        padding: Theme.space-4;
+        spacing: Theme.space-5;
+        alignment: start;
+        HorizontalLayout {
+            Rectangle { horizontal-stretch: 1; }
+            VerticalLayout {
+                max-width: 480px;
+                horizontal-stretch: 1;
+                spacing: Theme.space-4;
+                Text {
+                    text: @tr("Welcome to {}", Bridge.app-name);
+                    color: Theme.text;
+                    font-size: Theme.font-xl;
+                    font-weight: Theme.weight-semibold;
+                    wrap: word-wrap;
+                }
+                Note { text: @tr("Sign in to make your myTeamSpeak account your main profile."); }
+                AccountCard { }
+                Button {
+                    text: @tr("Continue without an account");
+                    clicked => { Bridge.myts-dismiss(); }
+                }
+                Note { text: @tr("You can connect to servers without an account and sign in later in Settings → My Account."); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+    }
+}

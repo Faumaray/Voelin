@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package com.teamspeak.myteamspeak.proto.synchronization;
+
+import "synchronization_common.proto";
+
+option java_generic_services = true;
+option cc_generic_services = true;
+option optimize_for = SPEED;
+
+service SynchronizationService {
+    rpc requestServerItems(Sync_Request_ItemClasses) returns (Sync_Reply_ItemClasses);
+    rpc synchronizeItems(Sync_Request_ItemClasses) returns (Sync_Reply_ItemClasses);
+}

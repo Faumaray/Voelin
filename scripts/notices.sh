@@ -47,6 +47,10 @@ if grep -E "WARN|ERROR" "$tmp/log" >&2; then
 	exit 1
 fi
 cat about-assets.md >>"$tmp/$OUT"
+# Some upstream license texts contain trailing spaces. Keep the generated
+# Markdown clean without changing the words of those notices.
+sed 's/[[:blank:]]*$//' "$tmp/$OUT" >"$tmp/normalized"
+mv "$tmp/normalized" "$tmp/$OUT"
 
 if $check; then
 	if ! diff -u "$OUT" "$tmp/$OUT" >"$tmp/diff"; then

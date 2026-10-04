@@ -1,0 +1,30 @@
+[package]
+name = "voelin-myts"
+version = "0.1.0"
+description = "Bounded myTeamSpeak account HTTP client"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Reuse the workspace's existing crypto crates for the account wire credential.
+base64 = "0.22"
+aes = "0.9"
+aes-gcm = { version = "0.11", features = ["zeroize"] }
+ctr = "0.10"
+subtle = "2.6"
+zeroize = "1.9"
+tsproto = { path = "../proto/tsproto" }
+pbkdf2 = { version = "0.13", features = ["sha2"] }
+schema-api = { path = "../../third_party/schema-api", default-features = false }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"] }
+thiserror = "2.0.21"
+tokio = { version = "1.53.1", features = ["rt", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
+
+[lints]
+workspace = true

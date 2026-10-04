@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package com.teamspeak.push.proto;
+
+import "google/protobuf/empty.proto";
+
+service PushService {
+    rpc longPull(google.protobuf.Empty) returns (stream Message);
+}
+
+message Message {
+    bytes payload = 1;
+}

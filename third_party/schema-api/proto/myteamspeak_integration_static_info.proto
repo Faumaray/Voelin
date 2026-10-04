@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package com.teamspeak.myteamspeak.proto.integration;
+
+import "myteamspeak_integration_common.proto";
+
+message StaticIntegrationResponseInformation {
+    ResponseType type = 1;
+    string response_type_name = 2;
+    repeated string possible_values = 3;
+}
+
+message StaticIntegrationInformation {
+    string integration_name = 1;
+    string integration_icon = 2;
+    IntegrationType type = 3;
+    uint32 version = 4;
+    repeated StaticIntegrationResponseInformation available_responses = 5;
+}
+
+message StaticIntegrationInformationList {
+    repeated StaticIntegrationInformation static_integrations = 1;
+}
+
+enum ResponseType {
+    invalid = 0;
+    SUBSCRIPTION = 1;
+    RELATIONSHIP = 2;
+    TEST_RESPONSE = 100;
+    ANOTHER_TEST_RESPONSE = 101;
+}

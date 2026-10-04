@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package com.teamspeak.myteamspeak.proto.synchronization;
+
+option java_generic_services = true;
+option cc_generic_services = true;
+option optimize_for = SPEED;
+
+message Sync_Request_ItemClasses {
+    string session = 1;
+    repeated Sync_ItemClasses_Data classes = 2;
+    string globalversion = 3;
+    Sync_Version sync_version = 4;
+}
+
+message Sync_Reply_ItemClasses {
+    SyncStatus status = 1;
+    repeated Sync_ItemClasses_Data classes = 2;
+    string globalversion = 3;
+}
+
+message Sync_ItemClasses_Data {
+    Item_Class itemclass = 1;
+    string version = 2;
+    repeated Sync_ItemClasses_Data_Detail detail = 3;
+    bool not_in_db = 4;
+}
+
+message Sync_ItemClasses_Data_Detail {
+    string item_uuid = 1;
+    string item_version = 2;
+    bytes item_blob = 3;
+    bool item_delte_on_server = 4;
+}
+
+enum SyncStatus {
+    UNKNOWN_SYNCSTATUS = 0;
+    ERROR_FE_UNKNOWN_METHOD = 100;
+    ERROR_FE_UNKNOWN_DATA = 101;
+    ERROR_SESSION_EXPIRED = 102;
+    ERROR_CRITICAL = 103;
+    IN_SYNC = 300;
+    NOT_IN_SYNC = 301;
+    NOT_IN_DB = 302;
+    COLLISION = 303;
+    OVERLIMIT = 304;
+}
+
+enum Item_Class {
+    BOOKMARK = 0;
+    IDENTITY = 1;
+    WHISPER_LIST = 2;
+    HOTKEY_PROFILE = 3;
+    ADD_ON = 4;
+    CONFIG = 5;
+    ITEM_FOLDER = 6;
+    GROUP_CHATS = 7;
+    CONTACTS = 8;
+}
+
+enum Sync_Version {
+    DEFAULT = 0;
+    V1_1 = 1;
+}

@@ -1,0 +1,138 @@
+syntax = "proto3";
+
+package com.teamspeak.myteamspeak.proto.tschat;
+
+option java_generic_services = true;
+option cc_generic_services = true;
+option java_multiple_files = true;
+option optimize_for = SPEED;
+
+service ChatRequests {
+    rpc createAccount(AuthenticatedUser) returns (CreateAccountResponse);
+    rpc moveHome(MoveRequest) returns (ErrorHandling);
+    rpc getContactList(AuthenticatedUser) returns (ContactList);
+    rpc updateContact(ContactRequest) returns (ErrorHandling);
+    rpc updateContactList(ContactRequestList) returns (ErrorHandling);
+    rpc removeContact(ContactRequest) returns (ErrorHandling);
+    rpc setPrimaryIdentifier(IdentifierRequest) returns (TschatIdentifierList);
+    rpc addIdentifier(IdentifierRequest) returns (TschatIdentifierList);
+    rpc removeIdentifier(IdentifierRequest) returns (TschatIdentifierList);
+    rpc getActiveIdentifierList(AuthenticatedUser) returns (TschatIdentifierList);
+    rpc getAllowedIdentifierList(AuthenticatedUser) returns (TschatIdentifierList);
+    rpc getGroupSessionData(GroupSessionRequest) returns (GroupSessionResponse);
+    rpc uploadGroupSessionData(GroupSessionRequest) returns (ErrorHandling);
+    rpc clearAllGroupSessions(AuthenticatedUser) returns (ErrorHandling);
+    rpc clearGroupSessions(GroupSessionRequest) returns (ErrorHandling);
+    rpc requestSignedAllowedIdentifierList(AuthenticatedUser) returns (SignedAllowedIdentifier);
+}
+
+message GroupSessionRequest {
+    AuthenticatedUser user = 1;
+    repeated GroupSession group_sessions = 2;
+}
+
+message GroupSessionResponse {
+    ErrorHandling error = 1;
+    repeated GroupSession group_sessions = 2;
+}
+
+message GroupSession {
+    string room_id = 1;
+    string shared_session_id = 2;
+    string cipher_text = 3;
+}
+
+message AuthenticatedUser {
+    string session = 1;
+    string matrix_id = 2;
+}
+
+message Contact {
+    string ts_chat_identifier = 1;
+    string note = 2;
+    string matrix_id = 3;
+    repeated MxidHistory matrix_id_history = 4;
+}
+
+message MxidHistory {
+    string matrix_id = 1;
+    uint64 initiation_timestamp = 2;
+}
+
+message ContactList {
+    repeated Contact contacts = 1;
+    ErrorHandling error_handling = 2;
+}
+
+message ChatCredentials {
+    string domain = 1;
+    string username = 2;
+    string password = 3;
+}
+
+message CreateAccountResponse {
+    ErrorHandling error_handling = 1;
+    ChatCredentials chat_credentials = 2;
+}
+
+message MoveRequest {
+    AuthenticatedUser user = 1;
+    string new_matrix_id = 2;
+}
+
+message ContactRequest {
+    AuthenticatedUser user = 1;
+    Contact contact = 2;
+}
+
+message ContactRequestList {
+    AuthenticatedUser user = 1;
+    repeated Contact contacts = 2;
+}
+
+message IdentifierRequest {
+    AuthenticatedUser user = 1;
+    TschatIdentifierMapping ts_chat_identifier_mapping = 2;
+}
+
+message TschatIdentifierMapping {
+    string ts_chat_identifier = 1;
+    string matrix_id = 2;
+    bool primary = 3;
+}
+
+message TschatIdentifierList {
+    repeated TschatIdentifierMapping ts_chat_identifier_mapping = 1;
+    ErrorHandling error_handling = 2;
+}
+
+message TschatIdentifierTagList {
+    repeated string tag = 1;
+}
+
+message MatrixIdentifierToken {
+    bytes signature = 1;
+    bytes sign_certificate = 2;
+    uint64 timestamp = 3;
+    TschatIdentifierTagList tags = 4;
+}
+
+message SignedAllowedIdentifier {
+    MatrixIdentifierToken token = 1;
+    ErrorHandling error = 2;
+}
+
+message ErrorHandling {
+    ChatRequestReturnCode return_code = 1;
+    string message = 2;
+}
+
+enum ChatRequestReturnCode {
+    CHATREQUESTRETURNCODE_ERROR_UNKNOWN = 0;
+    CHATREQUESTRETURNCODE_SUCCESS = 1;
+    CHATREQUESTRETURNCODE_CONNECTION = 2;
+    CHATREQUESTRETURNCODE_INTERNAL = 3;
+    CHATREQUESTRETURNCODE_REQUEST = 4;
+    CHATREQUESTRETURNCODE_SESSION_EXPIRED = 5;
+    CHATREQUESTRETURNCODE_ACCOUNT_CREATION_DISABLED = 6;
+}

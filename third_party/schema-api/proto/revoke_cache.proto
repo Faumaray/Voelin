@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package com.teamspeak.proto.revocation;
+
+message RevokeListCachedData {
+    repeated bytes cache_entry = 1;
+    uint64 expiration_timestamp = 2;
+    uint64 last_download_success = 3;
+}

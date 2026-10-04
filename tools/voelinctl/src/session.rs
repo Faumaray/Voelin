@@ -19,12 +19,13 @@ use tsproto_packets::packets::{Direction, Flags, OutCommand, PacketType};
 use crate::{Action, ChatTarget, ConnectArgs, identity, tree, versions};
 
 pub async fn run(args: ConnectArgs) -> Result<()> {
+	let version =
+		versions::resolve(&args.client_version)?.map_or_else(versions::native_version, Ok)?;
 	let mut options = Connection::build(args.address.clone())
 		.name(args.nick.clone())
+		.version(version)
+		.metadata(versions::client_metadata())
 		.log_commands(args.log_commands);
-	if let Some(version) = versions::resolve(&args.client_version)? {
-		options = options.version(version);
-	}
 	if let Some(path) = &args.identity {
 		options = options.identity(identity::load(path)?);
 	}

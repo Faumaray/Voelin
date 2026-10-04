@@ -21,13 +21,16 @@ dependencies to their projects (tell us too if this client is affected).
 
 ## What the client stores
 
-Everything stays on the device; there is no telemetry and no account with
-us.
+There is no telemetry and no account with us. The only outside account is
+the optional myTeamSpeak sign-in (desktop), which talks to TeamSpeak's
+service at `clientapi.myteamspeak.com`: at sign-in, when a saved session is
+checked at start, and at sign-out.
 
 | What | Where | Protection |
 |---|---|---|
 | Identities (TeamSpeak private keys) | SQLite database `client.db` in the data directory (`~/.local/share/voelin`, Flatpak `~/.var/app/<app id>/data/voelin`, `%APPDATA%\voelin`, Android app storage) | File permissions of the user account only; not encrypted. An identity is the account on every server that knows it: back it up, do not share the file |
 | Server and ServerQuery passwords | OS keyring (Secret Service, Windows Credential Manager, Android Keystore), service `voelin` | Keyring; kept in memory for the session only when there is no keyring |
+| myTeamSpeak account (optional sign-in, desktop): session, renewal and one-time-code renewal tokens, device id, email, username, account id and the account's private signing key | OS keyring, service `voelin`, item `myts/session` | Keyring only: without one the sign-in is not kept, not even in memory. Passwords and one-time codes are never stored. Signing out deletes the item and ends the session at TeamSpeak |
 | Bookmarks, settings, chat history | `client.db` | File permissions; history stays until deleted |
 | Crash reports (opt-in) | `crash-reports` in the state directory (`~/.local/state/voelin`, `%LOCALAPPDATA%\voelin`) | Local only, never uploaded. They contain the panic message and a backtrace, which may include server addresses or names; review before attaching one to an issue |
 | OpenH264 (opt-in) | Downloaded from Cisco into the app's directories | Loaded only if its SHA-256 matches a known Cisco build |
@@ -37,6 +40,10 @@ us.
 - **Voice connections** use the TeamSpeak protocol's encryption. The server
   and its admins see what any client sees: your nickname, identity, IP
   address, channel and messages.
+- **Signed in to myTeamSpeak**, every voice server you join also gets your
+  account's myTeamSpeak id with a proof signed by the account, which links
+  your visits to different servers to one account. Signing out clears it on
+  the servers you are on.
 - **Streams (TeamSpeak 6)** are peer-to-peer WebRTC (DTLS-SRTP). Viewers and
   streamers exchange ICE candidates, so **they learn each other's IP
   addresses**, including local network addresses. Only watch and share
