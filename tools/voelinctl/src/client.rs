@@ -476,6 +476,10 @@ impl Runner<'_> {
 				println!("icon {icon} {}", path.display());
 				return Ok(self.expected(&format!("icon {icon}")));
 			}
+			Event::PictureReady { url, path, .. } => {
+				println!("picture {url} {}", path.display());
+				return Ok(self.expected(&format!("picture {url}")));
+			}
 			Event::OfflineMessages { result, .. } => {
 				let list = result.map_err(|e| anyhow::anyhow!("messagelist: {e}"))?;
 				println!("offline inbox n={}", list.len());

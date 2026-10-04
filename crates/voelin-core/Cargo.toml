@@ -29,6 +29,8 @@ futures = "0.3"
 # Finding a server's gateway in DNS (the voice resolver's version).
 hickory-resolver = "0.26"
 md5 = "0.8"
+# Banners on the web; the client the workspace has (voelin-query, voelin-media).
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
 # Reading the official clients' settings.db when importing identities.
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

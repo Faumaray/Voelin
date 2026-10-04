@@ -38,6 +38,7 @@ use crate::stream::{
 	StreamInput, StreamKind, kind_name, parse_kind,
 };
 use crate::voice::{self, Remote, VoiceCmd, VoiceEvent, VoiceLink};
+use crate::web;
 use crate::{Command, Event, ObserveState, SessionId, SessionState, Shared, Source, VoiceState};
 
 const NO_VOICE: &str = "not connected with voice";
@@ -108,6 +109,8 @@ enum SourceEvent {
 	KnownServer(String),
 	/// Our avatar file is uploaded (its MD5) or failed: announce it.
 	AvatarUploaded(u64, RequestId, Result<String, String>),
+	/// Time to fetch the host banner again (`banner_gfx_interval_s`).
+	ReloadBanner,
 }
 
 /// Our live stream, for the gateway's directory.
@@ -168,6 +171,11 @@ struct Session {
 	avatars: HashMap<String, String>,
 	/// Icons reported or being fetched, voice only.
 	icons: HashSet<u32>,
+	/// Pictures on the web (banners) reported or being fetched, by address.
+	pictures: HashSet<String>,
+	/// The host banner's address and reload interval (seconds) while it has
+	/// one, and the timer that asks for the reloads.
+	banner_reload: Option<(String, u64, tokio::task::AbortHandle)>,
 	/// Contact volume and mute applied per client.
 	contact_audio: HashMap<u16, (f32, bool)>,
 	/// Friends' client ids, as last told to the streams.
@@ -194,6 +202,8 @@ impl Session {
 			contacts_rx,
 			avatars: HashMap::new(),
 			icons: HashSet::new(),
+			pictures: HashSet::new(),
+			banner_reload: None,
 			contact_audio: HashMap::new(),
 			stream_friends: BTreeSet::new(),
 			details: None,
@@ -741,6 +751,7 @@ impl Session {
 	fn forget_images(&mut self) {
 		self.avatars.clear();
 		self.icons.clear();
+		self.pictures.clear();
 		self.contact_audio.clear();
 		self.stream_friends.clear();
 		self.details = None;
@@ -799,10 +810,60 @@ impl Session {
 		self.fetch_image(cache::icon_key(icon), Some(files::icon_path(icon)), waiter);
 	}
 
+	/// Fetch the banners of the presence shown (any source) that are new,
+	/// and have the host banner reloaded as often as the server asks.
+	fn fetch_pictures(&mut self, p: &Presence) {
+		let reload = Some((&p.server.banner_gfx_url, p.server.banner_gfx_interval_s))
+			.filter(|(url, every)| !url.is_empty() && *every > 0);
+		if self.banner_reload.as_ref().map(|(url, every, _)| (url, *every)) != reload {
+			if let Some((.., timer)) = self.banner_reload.take() {
+				timer.abort();
+			}
+			if let Some((url, every_s)) = reload {
+				let every = std::time::Duration::from_secs(every_s).max(web::MIN_RELOAD);
+				let tx = self.sources_tx.clone();
+				// Ends with the session (nobody receives).
+				let timer = tokio::spawn(async move {
+					let start = tokio::time::Instant::now() + every;
+					let mut tick = tokio::time::interval_at(start, every);
+					loop {
+						tick.tick().await;
+						if tx.send(SourceEvent::ReloadBanner).is_err() {
+							break;
+						}
+					}
+				});
+				self.banner_reload = Some((url.clone(), every_s, timer.abort_handle()));
+			}
+		}
+		if !self.settings.current().get(&CACHE_FETCH_IMAGES) {
+			return;
+		}
+		let urls = std::iter::once(&p.server.banner_gfx_url)
+			.chain(p.channels.values().filter_map(|c| c.banner_gfx_url.as_ref()));
+		for url in urls.filter(|u| !u.is_empty()) {
+			if self.pictures.insert(url.clone()) {
+				self.fetch_picture(url, false);
+			}
+		}
+	}
+
+	/// Get the picture at `url` into the cache (again with `fresh`).
+	fn fetch_picture(&self, url: &str, fresh: bool) {
+		let (session, events, address) = (self.id, self.events.clone(), url.to_owned());
+		let waiter: Waiter = Box::new(move |result| match result {
+			Ok(path) => {
+				let _ = events.send(Event::PictureReady { session, url: address, path });
+			}
+			Err(e) => debug!(url = %address, "no picture: {e}"),
+		});
+		web::fetch(self.cache.current(), url, fresh, max_cache_bytes(&self.settings), waiter);
+	}
+
 	/// Get `key` from the cache, downloading `path` of channel 0 once.
 	fn fetch_image(&self, key: String, path: Option<String>, waiter: Waiter) {
 		let cache = self.cache.current();
-		let Fetch::Download(temp) = cache.fetch(&key, waiter) else { return };
+		let Fetch::Download(temp) = cache.fetch(&key, false, waiter) else { return };
 		let settings = self.settings.clone();
 		let (Some(path), Some(_)) = (path, &self.voice) else {
 			cache.finish(&key, &temp, Err(NO_VOICE.into()), max_cache_bytes(&settings));
@@ -1302,6 +1363,13 @@ impl Session {
 					self.emit(Event::RequestDone { session: self.id, request, result });
 				}
 			},
+			SourceEvent::ReloadBanner => {
+				if let Some((url, ..)) = &self.banner_reload
+					&& self.settings.current().get(&CACHE_FETCH_IMAGES)
+				{
+					self.fetch_picture(url, true);
+				}
+			}
 			_ => debug!("event from a replaced source ignored"),
 		}
 	}
@@ -1613,6 +1681,7 @@ impl Session {
 			self.state.presence_source = source;
 			self.emit_state();
 		}
+		self.fetch_pictures(&presence);
 		let presence = Arc::new(presence);
 		self.contacts.presence(self.id, presence.clone());
 		self.emit(Event::Presence { session: self.id, presence });
