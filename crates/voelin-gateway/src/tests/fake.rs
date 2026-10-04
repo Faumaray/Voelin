@@ -130,11 +130,6 @@ impl FakeServer {
 		s.posters.iter().cloned().zip(s.posted.iter().map(|p| p.2.clone())).collect()
 	}
 
-	/// The nickname a query connection has now.
-	pub fn nickname_of(&self, clid: u16) -> Option<String> {
-		self.state.lock().unwrap().names.get(&clid).cloned()
-	}
-
 	async fn connection(self, stream: tokio::net::TcpStream) {
 		let (r, mut w) = stream.into_split();
 		let mut lines = BufReader::new(r).lines();
