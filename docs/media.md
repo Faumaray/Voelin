@@ -733,8 +733,13 @@ Notes:
   and end; if that is slower than 1 ns per pixel over the first 30 frames
   (uncached VRAM), the stream renegotiates to shared memory.
   `VOELIN_PORTAL_DMABUF=0` or `with_dmabuf(false)` skips DMA-BUFs. The frame rate
-  asked of the compositor is the sink's cap, renegotiated when it changes;
-  compositors send frames only when the screen changes. Without a session
+  asked of the compositor is the sink's cap, renegotiated when it changes:
+  `framerate` up to it and `maxFramerate` preferably it. Compositors offer
+  their screen's refresh rate as the most (Mutter, KWin,
+  xdg-desktop-portal-hyprland, which also caps at its `screencopy:max_fps`,
+  120 unless configured), so a capture runs at the lower of the cap and
+  what the compositor can, and the compositor sends no frame the sink
+  would drop. Compositors send frames only when the screen changes. Without a session
   bus or portal, `start` returns `Error::CaptureUnavailable`; a cancelled
   dialog returns `Error::Cancelled`.
 - wlroots: `WlrootsCapture::new()` (`$WAYLAND_DISPLAY`) or `with_display`;
@@ -752,6 +757,11 @@ Notes:
   stream of ours ([Stream audio](#stream-audio)). Without a PipeWire daemon,
   both return `Error::CaptureUnavailable`.
 - Windows process loopback needs Windows 10 2004 or later.
+- Windows Graphics Capture is given a minimum update interval of 1 ms where
+  Windows has the setting (Windows 11): left alone, or below 1 ms, it is
+  reported to deliver about 60 frames a second (robmikh/Win32CaptureSample
+  issue 82), and the sink's frame-rate cap decides instead. Not run on
+  Windows yet.
 
 ## Performance and benchmarks
 

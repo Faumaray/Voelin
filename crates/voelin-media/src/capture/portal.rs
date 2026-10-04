@@ -388,17 +388,26 @@ fn size_range() -> Property {
 	)
 }
 
-/// Up to `fps`, as the compositor can (it sends frames on damage only).
-fn framerate_range(fps: u32) -> Property {
-	property!(
-		FormatProperties::VideoFramerate,
-		Choice,
-		Range,
-		Fraction,
-		Fraction { num: fps, denom: 1 },
-		Fraction { num: 0, denom: 1 },
-		Fraction { num: fps, denom: 1 }
-	)
+/// Up to `fps`, as the compositor can (it sends frames on damage only):
+/// the frame rate (compositors offer 0, variable) and the most frames it
+/// may send, preferably `fps`. Compositors offer their screen's refresh rate
+/// as the maximum (Mutter, KWin, xdg-desktop-portal-hyprland, whose
+/// `screencopy:max_fps` defaults to 120), so the intersection is the
+/// lower of the two: the compositor neither sends frames the sink would
+/// drop nor fewer than its screen shows.
+fn framerate_range(fps: u32) -> [Property; 2] {
+	let up_to = |key: FormatProperties, min: u32| {
+		property!(
+			key,
+			Choice,
+			Range,
+			Fraction,
+			Fraction { num: fps, denom: 1 },
+			Fraction { num: min, denom: 1 },
+			Fraction { num: fps, denom: 1 }
+		)
+	};
+	[up_to(FormatProperties::VideoFramerate, 0), up_to(FormatProperties::VideoMaxFramerate, 1)]
 }
 
 /// The modifiers we take, best first: the sink's tiled ones, then LINEAR,
@@ -471,7 +480,7 @@ fn enum_formats(
 			properties.push(property!(FormatProperties::VideoFormat, Id, format));
 			properties.push(modifier_property(&modifiers, false));
 			properties.push(size_range());
-			properties.push(framerate_range(fps));
+			properties.extend(framerate_range(fps));
 			formats.push(serialize(format_object(properties))?);
 		}
 	}
@@ -488,7 +497,7 @@ fn enum_formats(
 		FORMATS[3]
 	));
 	properties.push(size_range());
-	properties.push(framerate_range(fps));
+	properties.extend(framerate_range(fps));
 	formats.push(serialize(format_object(properties))?);
 	Ok(formats)
 }
@@ -543,7 +552,7 @@ fn format_changed(
 					Rectangle { width: size.width, height: size.height }
 				),
 			];
-			properties.push(framerate_range(state.fps));
+			properties.extend(framerate_range(state.fps));
 			let fixed = serialize(format_object(properties))?;
 			stream.update_params(&mut [pod(&fixed)?]).map_err(|e| e.to_string())?;
 			return Ok(());
@@ -806,6 +815,27 @@ mod tests {
 				assert_eq!(offered.last(), Some(&MODIFIER_LINEAR));
 			} else {
 				assert!(modifier.is_none(), "shared memory has no modifier");
+			}
+		}
+		// The frame rate and the most frames a second: 320 preferred, as
+		// much as the compositor can.
+		for bytes in enum_formats(320, true, &[]).unwrap() {
+			let object = pod(&bytes).unwrap().as_object().unwrap();
+			for (key, min) in
+				[(FormatProperties::VideoFramerate, 0), (FormatProperties::VideoMaxFramerate, 1)]
+			{
+				use pw::spa::pod::deserialize::PodDeserializer;
+				let prop = object.find_prop(Id(key.as_raw())).expect("a frame rate");
+				let value =
+					PodDeserializer::deserialize_any_from(prop.value().as_bytes()).unwrap().1;
+				let Value::Choice(ChoiceValue::Fraction(Choice(
+					_,
+					ChoiceEnum::Range { default, min: low, max },
+				))) = value
+				else {
+					panic!("{value:?}");
+				};
+				assert_eq!((default.num, low.num, max.num), (320, min, 320));
 			}
 		}
 		let linear_only = enum_formats(60, true, &[]).unwrap();
