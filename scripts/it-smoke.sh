@@ -201,11 +201,14 @@ stream_elsewhere_check() {
 presence_check() {
 	local addr=$1 query=$2 out="$STATE_DIR/observe.log"
 	# shellcheck disable=SC2086
+	# A loaded TeamSpeak 6 dev server takes 4 to 13 s to let a client in, so
+	# the observer waits long (it ends as soon as it sees the client) and the
+	# client stays a while.
 	"$VOELINCTL" observe $query --secret "$QUERY_SECRET" --allowlisted --poll 2 \
-		--seconds 20 --expect-client presence-probe >"$out" 2>&1 &
+		--seconds 45 --expect-client presence-probe >"$out" 2>&1 &
 	local observer=$!
 	sleep 2
-	"$VOELINCTL" connect "$addr" --nick presence-probe listen --timeout 4 >/dev/null 2>&1 || true
+	"$VOELINCTL" connect "$addr" --nick presence-probe listen --timeout 8 >/dev/null 2>&1 || true
 	if ! wait "$observer"; then
 		cat "$out"
 		fail "observer did not see the voice client"
@@ -224,7 +227,13 @@ relay_check() {
 	"$VOELINCTL" connect "$addr" --nick relay-listener listen --expect "from-relay-$token" \
 		--timeout 20 >"$heard" 2>&1 &
 	local listener=$!
-	sleep 4
+	# Talk once the relay relays and the listener is in (it prints the
+	# clients it sees): a fixed pause lost the message whenever the dev
+	# server was slow to let clients in.
+	for _ in $(seq 1 120); do
+		grep -q "relaying channel" "$out" 2>/dev/null && [[ -s "$heard" ]] && break
+		sleep 0.25
+	done
 	"$VOELINCTL" connect "$addr" --nick relay-talker chat channel "to-relay-$token"
 	# shellcheck disable=SC2086
 	"$VOELINCTL" relay $query --secret "$QUERY_SECRET" --allowlisted --channel 1 --nick Alice \
@@ -268,7 +277,13 @@ gateway_check() {
 	"$VOELINCTL" connect "$addr" --nick gateway-listener listen --expect "from-gateway-$token" \
 		--timeout 20 >"$STATE_DIR/gateway-heard.log" 2>&1 &
 	local listener=$!
-	sleep 4
+	# Talk once the gateway user is logged in and sees the listener (in its
+	# presence or as it joins): a fixed pause lost the message whenever the
+	# dev server was slow to let clients in.
+	for _ in $(seq 1 120); do
+		grep -q "gateway-listener" "$out" 2>/dev/null && break
+		sleep 0.25
+	done
 	"$VOELINCTL" connect "$addr" --nick gateway-talker chat channel "to-gateway-$token"
 	"$VOELINCTL" gateway "$url" --identity "$user" --send "channel:1=from-gateway-$token" --seconds 3 >/dev/null
 	if ! wait "$reader"; then

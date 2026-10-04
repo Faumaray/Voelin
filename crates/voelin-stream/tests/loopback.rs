@@ -1,10 +1,14 @@
 //! Two peers on loopback: offer/answer, then video and audio frames flow;
-//! the SRTP profile DTLS negotiates; bandwidth estimates at the streamer.
+//! the SRTP profile DTLS negotiates; bandwidth estimates at the streamer;
+//! losses repaired by retransmission; bursts of a high-bitrate stream.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::time::timeout;
 use voelin_stream::{MediaKind, MediaTime, Peer, PeerConfig, PeerEvent, SrtpProfile};
+
+mod relay;
+use relay::{Relay, Rule};
 
 /// Bytes that look like a VP8 keyframe (frame tag + start code), then filler.
 pub fn fake_vp8_keyframe(seq: u8, len: usize) -> Vec<u8> {
@@ -123,4 +127,161 @@ async fn srtp_profile_order() {
 	// A peer without AES_CM_128_HMAC_SHA1_80 still connects with GCM.
 	let gcm_only = PeerConfig { srtp_profiles: vec![AeadAes128Gcm], ..PeerConfig::loopback() };
 	assert_eq!(negotiate(&gcm_only, &default).await, [Some(AeadAes128Gcm); 2]);
+}
+
+/// The payload types of the first video section of `sdp` with `name`.
+fn video_pts<'a>(sdp: &'a str, name: &str) -> Vec<&'a str> {
+	let video = sdp.split("m=").find(|s| s.starts_with("video")).unwrap();
+	video
+		.lines()
+		.filter_map(|l| l.strip_prefix("a=rtpmap:"))
+		.filter(|l| l.contains(&format!(" {name}/")))
+		.filter_map(|l| l.split(' ').next())
+		.collect()
+}
+
+/// Our answer to a libwebrtc offer (headless Chromium 152, H.264 first, as
+/// the official client streams) keeps what repairs losses and paces the
+/// sender: NACK with retransmissions (RTX), PLI, transport-cc.
+#[tokio::test]
+async fn answers_keep_loss_repair_and_feedback() {
+	let offer = include_str!("data/chromium-152-h264-offer.sdp");
+	let (_viewer, answer) = Peer::answer(&PeerConfig::loopback(), offer).await.unwrap();
+	let h264 = video_pts(&answer, "H264");
+	assert!(!h264.is_empty(), "{answer}");
+	for pt in h264 {
+		for fb in ["nack", "nack pli", "transport-cc"] {
+			let line = format!("a=rtcp-fb:{pt} {fb}\r\n");
+			assert!(answer.contains(&line), "no {line:?} in\n{answer}");
+		}
+		assert!(answer.contains(&format!(" apt={pt}")), "no retransmissions for {pt}:\n{answer}");
+	}
+	assert!(answer.contains("transport-wide-cc"), "{answer}");
+}
+
+/// Video frames of `size` bytes that look like VP8 to the depacketizer
+/// (keyframe tag on `keyframe`), the rest pseudo-random: nothing on the
+/// path compresses or repeats.
+fn noise_frame(seq: u64, size: usize, keyframe: bool) -> Vec<u8> {
+	let mut state = seq.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+	let mut frame = fake_vp8_keyframe(seq as u8, 0);
+	frame[0] |= u8::from(!keyframe);
+	frame.extend((0..size).map(|_| {
+		state ^= state << 13;
+		state ^= state >> 7;
+		state ^= state << 17;
+		state as u8
+	}));
+	frame
+}
+
+/// Connect `streamer` and `viewer` configurations, through `relay` if given.
+async fn connect(
+	streamer: &PeerConfig,
+	viewer: &PeerConfig,
+	relay: Option<&Relay>,
+) -> (Peer, Peer) {
+	let (mut s, offer) = Peer::offer(streamer, "loss").await.unwrap();
+	let offer = relay.map_or(offer.clone(), |r| r.offer(&offer));
+	let (mut v, answer) = Peer::answer(viewer, &offer).await.unwrap();
+	let answer = relay.map_or(answer.clone(), |r| r.answer(&answer));
+	s.accept_answer(&answer).await.unwrap();
+	tokio::join!(wait_connected(&mut s), wait_connected(&mut v));
+	(s, v)
+}
+
+/// What the viewer got of a stream: frames, and those after a gap.
+#[derive(Debug, Default)]
+struct Received {
+	frames: u64,
+	gaps: u64,
+}
+
+/// Send `frames` video frames at `fps` (a keyframe of `keyframe_size`
+/// every `keyframe_every`, else `size`); count what the viewer receives
+/// until a second of silence.
+async fn stream_noise(
+	streamer: Peer,
+	viewer: &mut Peer,
+	(frames, fps, size): (u64, u64, usize),
+	(keyframe_every, keyframe_size): (u64, usize),
+) -> Received {
+	let sender = tokio::spawn(async move {
+		let start = Instant::now();
+		for i in 0..frames {
+			let keyframe = i % keyframe_every == 0;
+			let data = noise_frame(i, if keyframe { keyframe_size } else { size }, keyframe);
+			streamer.write(MediaKind::Video, MediaTime::from_90khz(i * 90_000 / fps), data);
+			let next = start + Duration::from_micros((i + 1) * 1_000_000 / fps);
+			tokio::time::sleep_until(next.into()).await;
+		}
+		streamer
+	});
+	let mut received = Received::default();
+	while let Ok(Some(event)) = timeout(Duration::from_secs(1), viewer.next_event()).await {
+		if let PeerEvent::Media(f) = event
+			&& f.kind == MediaKind::Video
+		{
+			received.frames += 1;
+			received.gaps += u64::from(!f.contiguous);
+		}
+	}
+	drop(sender.await.unwrap());
+	received
+}
+
+/// One media packet in 25 lost on the way to the viewer: the viewer asks
+/// again (NACK) and the streamer retransmits (RTX) before the depacketizer
+/// gives up, so every frame arrives whole and in order.
+#[tokio::test(flavor = "multi_thread")]
+async fn losses_are_repaired_by_retransmission() {
+	let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
+	let relay = Relay::new(Rule::LoseEvery(25)).await;
+	let config = PeerConfig { bandwidth_estimation: false, ..PeerConfig::loopback() };
+	let (streamer, mut viewer) = connect(&config, &config, Some(&relay)).await;
+	// 3 s at 30 fps, 12 KB frames (about 10 packets each), keyframes of 60 KB.
+	let received = stream_noise(streamer, &mut viewer, (90, 30, 12_000), (30, 60_000)).await;
+	let (media, lost) = relay.media();
+	eprintln!("{received:?}; relay: {lost} of {media} media packets lost");
+	assert!(lost >= 30, "the relay lost too little: {lost} of {media}");
+	assert_eq!(received.frames, 90, "{received:?}");
+	assert_eq!(received.gaps, 0, "a loss reached the viewer: {received:?}");
+}
+
+/// UDP receive errors of this host so far (`RcvbufErrors` in
+/// `/proc/net/snmp`: datagrams dropped because a socket's buffer was full).
+fn receive_buffer_errors() -> Option<u64> {
+	let snmp = std::fs::read_to_string("/proc/net/snmp").ok()?;
+	let mut udp = snmp.lines().filter(|l| l.starts_with("Udp: "));
+	let (names, values) = (udp.next()?, udp.next()?);
+	let column = names.split_whitespace().position(|n| n == "RcvbufErrors")?;
+	values.split_whitespace().nth(column)?.parse().ok()
+}
+
+/// A 9 Mbit/s stream at 60 fps with a 400 KB keyframe every second, sent
+/// without pacing (the worst case of a 1440p stream), over loopback with
+/// the system's socket buffers, with what Linux's default `rmem_max`
+/// (212992) lets us ask for, and with ours: datagrams the kernel dropped
+/// (host-wide counter), frames that arrived, and those after a gap. A
+/// measurement, not a check: `-- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "a measurement (about 20 s)"]
+async fn high_bitrate_bursts() {
+	let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
+	for buffer in [0, 212_992, voelin_stream::peer::DEFAULT_UDP_BUFFER] {
+		let config = PeerConfig {
+			bandwidth_estimation: false,
+			udp_buffer: buffer,
+			..PeerConfig::loopback()
+		};
+		let (streamer, mut viewer) = connect(&config, &config, None).await;
+		let before = receive_buffer_errors();
+		let received = stream_noise(streamer, &mut viewer, (300, 60, 18_750), (60, 400_000)).await;
+		let dropped = before.zip(receive_buffer_errors()).map(|(a, b)| b - a);
+		eprintln!(
+			"socket buffers asked: {buffer} bytes; datagrams dropped by the kernel: \
+			 {dropped:?}; frames received: {} of 300, after a gap: {}",
+			received.frames, received.gaps
+		);
+	}
 }

@@ -21,9 +21,9 @@ use voelin_core::media::{
 };
 use voelin_model::ServerFlavor;
 use voelin_stream::{
-	ClientState, EndReason, FrameSource, H264Profile, LayerId, LayerSpec, MediaKind, Output,
-	PeerConfig, Request, SrtpProfile, StreamEvent, StreamInfo, StreamNotification, StreamSetup,
-	StreamerEvent, StreamerOptions, Streams, SyntheticSource, VideoCodec, ViewerInfo, WatchEvent,
+	ClientState, EndReason, FrameSource, LayerId, LayerSpec, MediaKind, Output, PeerConfig,
+	Request, SrtpProfile, StreamEvent, StreamInfo, StreamNotification, StreamSetup, StreamerEvent,
+	StreamerOptions, Streams, SyntheticSource, VideoCodec, ViewerInfo, WatchEvent,
 };
 
 #[derive(Args, Debug, Clone)]
@@ -195,7 +195,7 @@ pub async fn run(con: &mut Connection, args: &StreamArgs) -> Result<()> {
 			if *synthetic {
 				let (w, h) = parse_size(size)?;
 				let bitrate = u64::from(*bitrate) * 1000;
-				config.set_h264_format(H264Profile::ConstrainedHigh, w, h, *fps, bitrate);
+				config.set_h264_format(w, h, *fps, bitrate);
 			}
 		}
 	}
@@ -207,8 +207,10 @@ pub async fn run(con: &mut Connection, args: &StreamArgs) -> Result<()> {
 	};
 	if matches!(args.command, StreamCommand::Start { .. }) {
 		// Frames go out through a `FrameSource`, which does not tell codecs
-		// apart: offer the stream codec alone.
+		// apart: offer the stream codec alone, H.264 in the profile it is
+		// encoded in (Constrained High).
 		config.video_codecs.truncate(1);
+		config.h264_profile_level_ids.truncate(1);
 	}
 	let codec = stream_codec(&codecs, &config);
 	let mut driver = Driver { streams: Streams::new(own, config), pending: HashMap::new() };
