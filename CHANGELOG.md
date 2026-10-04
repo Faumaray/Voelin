@@ -6,9 +6,23 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
 
 ## [Unreleased]
 
-The first release is in preparation.
+## [0.0.1-alpha] - 2026-10-04
+
+The first alpha.
 
 ### Added
+
+- myTeamSpeak account sign-in (desktop): sign in with the account's email,
+  password and one-time code; the session is kept in the system keyring and
+  checked at start. Voice connections present the account to servers (its
+  id with a proof signed by the account) and follow sign-in and sign-out
+  live. The account screen links to the account website for creating an
+  account, resetting the password and managing it.
+- Banners: the host banner and TeamSpeak 6 channel banners, behind the
+  server card, the channel rows and the chat and voice headers. Banners on
+  the web (http, https) and in the server's own files (`ts3image://`) are
+  downloaded, up to 64 MiB, retried after failures and reloaded as often as
+  the server asks; server and channel icons and avatars are retried too.
 
 - Desktop app (Linux Wayland/X11, Windows): servers and bookmarks, channel
   tree with talking indicators, server and channel chat, voice with
@@ -56,3 +70,8 @@ The first release is in preparation.
   through the gateway) is shown once. Settings: `chat.store_history`,
   `chat.history_page`, `chat.dedupe_tolerance_ms`, `chat.retention_days`.
 - Opt-in local crash reports; third-party notices in the About page.
+
+### Known issues
+
+- Account keyring access runs on the UI thread: a locked keyring's unlock
+  prompt holds the window until it is answered.

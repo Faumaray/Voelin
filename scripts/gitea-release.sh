@@ -131,7 +131,7 @@ def main():
         release = request("GET", base + "/tags/" + quote(tag, safe=""), missing=True)
         if release is not_found:
             release = request("POST", base, payload={"tag_name": tag, "target_commitish": sha,
-                "name": tag, "draft": True, "prerelease": False,
+                "name": tag, "draft": True, "prerelease": "-" in tag,
                 "body": "Packages and SHA256 checksums. Review before publishing."})
         if not isinstance(release, dict) or release.get("tag_name") != tag or release.get("draft") is not True:
             fail("refusing to modify a published or mismatched release")

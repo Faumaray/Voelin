@@ -1,6 +1,6 @@
 [package]
 name = "voelin-android"
-version = "0.1.0"
+version = "0.0.1-alpha"
 description = "Android app library: native activity entry point, engine kept for the whole process, JNI bridge to the Kotlin services (voice, screen share), Android Keystore secrets."
 edition.workspace = true
 rust-version.workspace = true

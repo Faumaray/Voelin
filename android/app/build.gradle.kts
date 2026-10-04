@@ -46,8 +46,9 @@ android {
         minSdk = 29
         targetSdk = 36
         versionName = crateVersion
-        // major * 1000000 + minor * 1000 + patch (docs/release.md).
-        versionCode = crateVersion.split('.').map(String::toInt)
+        // major * 1000000 + minor * 1000 + patch (docs/release.md); a
+        // pre-release (0.0.1-alpha) counts as its version.
+        versionCode = crateVersion.substringBefore('-').split('.').map(String::toInt)
             .let { (major, minor, patch) -> major * 1_000_000 + minor * 1_000 + patch }
     }
 
