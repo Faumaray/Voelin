@@ -163,7 +163,11 @@ sizes using synthetic account data.
 ### Client reporting
 
 The voice engine chooses an unchanged signed compatibility tuple for the
-actual operating system. A bookmark's explicit compatibility-version override
+actual operating system: the newest TeamSpeak 6 client build signed for it
+(`6.0.0-beta4.1 [Build: 1779880475]` on Linux, captured from the official
+Linux client's `clientinit`; `6.0.0-beta2` on Windows, from upstream
+tsdeclarations), else the generic `3.?.? [Build: 5680278000]`. Every row of
+`Versions.csv` verifies against TeamSpeak's version-signing key. A bookmark's explicit compatibility-version override
 is honored and validated. `client_meta_data` identifies `Voelin`, its package
 version and native OS. The CLI uses the same catalogue and native default.
 TeamSpeak signs compatibility versions: replacing the signed version with an
