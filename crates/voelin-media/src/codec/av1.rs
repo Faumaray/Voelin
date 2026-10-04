@@ -21,9 +21,7 @@ impl Dav1dDecoder {
 	pub fn new() -> Result<Self> {
 		let mut settings = Settings::new();
 		settings.set_max_frame_delay(1);
-		settings.set_n_threads(
-			std::thread::available_parallelism().map_or(1, |n| n.get().min(4) as u32),
-		);
+		settings.set_n_threads(crate::codec::dav1d_threads() as u32);
 		let decoder = dav1d::Decoder::with_settings(&settings).map_err(|e| {
 			Error::CodecUnavailable { codec: Codec::Av1, reason: format!("dav1d: {e}") }
 		})?;

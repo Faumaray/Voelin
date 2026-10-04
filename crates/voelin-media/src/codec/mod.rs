@@ -25,6 +25,15 @@ use std::sync::Arc;
 use crate::frame::VideoFrame;
 use crate::{Error, Result};
 
+/// dav1d's threads with a frame delay of one (ours and FFmpeg's `libdav1d`):
+/// a quarter of the cores, 1 to 4. They wait on each other where cores are
+/// few (on 4 cores, 1080p: 211 fps on one thread, 155-166 on 3 or 4) and
+/// help where there are many (32 cores, 1440p: 412 fps on 8).
+#[cfg_attr(not(any(feature = "av1", feature = "ffmpeg")), allow(dead_code))]
+pub(crate) fn dav1d_threads() -> usize {
+	std::thread::available_parallelism().map_or(1, |n| (n.get() / 4).clamp(1, 4))
+}
+
 #[cfg(feature = "av1")]
 pub mod av1;
 #[cfg(feature = "openh264")]

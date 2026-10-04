@@ -2,10 +2,11 @@
 //! into Slint images when we watch, and the optional OpenH264 library
 //! (desktop; Android decodes H.264 with the device's MediaCodec).
 
+use std::collections::VecDeque;
 use std::path::Path;
 #[cfg(not(target_os = "android"))]
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 use tokio::runtime::Handle;
@@ -357,17 +358,116 @@ impl Video {
 }
 
 /// Converts decoded frames into Slint pixel buffers, keeping the newest.
+///
+/// The decoder only hands its newest frame over: a converter thread turns
+/// it into RGBA, so decoding never waits for the conversion (at 1440p it
+/// took a third of a 60 fps frame's time on the decode thread, and a
+/// decoder that falls behind drops its queue and waits for a keyframe),
+/// and frames the window could not show anyway are never converted. The
+/// converter reuses the buffers of earlier pictures, which the window has
+/// let go of by then, instead of a new zeroed buffer per frame. Without a
+/// thread, frames are converted on the decoder's.
 fn deliver(
 	pictures: Arc<Latest<Picture>>,
 	wake: impl Fn() + Send + Sync + 'static,
 ) -> impl FnMut(Arc<VideoFrame>) + Send + 'static {
-	move |frame: Arc<VideoFrame>| {
-		let mut buffer = Picture::new(frame.width, frame.height);
-		let stride = frame.width as usize * 4;
-		if let Err(e) = convert::to_rgba(&frame, buffer.make_mut_bytes(), stride) {
+	let slot = Arc::new(FrameSlot::default());
+	let wake = Arc::new(wake);
+	let thread = {
+		let (slot, pictures, wake) = (slot.clone(), pictures.clone(), wake.clone());
+		std::thread::Builder::new().name("voelin-picture".into()).spawn(move || {
+			let mut buffers = Buffers::default();
+			while let Some(frame) = slot.wait() {
+				buffers.show(&frame, &pictures, &*wake);
+			}
+		})
+	};
+	let mut inline = match thread {
+		Ok(_) => None,
+		Err(e) => {
+			warn!("no picture thread, converting on the decoder's: {e}");
+			Some(Buffers::default())
+		}
+	};
+	let handoff = Handoff(slot);
+	move |frame: Arc<VideoFrame>| match &mut inline {
+		Some(buffers) => buffers.show(&frame, &pictures, &*wake),
+		None => handoff.0.put(frame),
+	}
+}
+
+/// The newest decoded frame, waiting for the converter thread.
+#[derive(Default)]
+struct FrameSlot {
+	/// The frame, and whether the decoder is gone.
+	state: Mutex<(Option<Arc<VideoFrame>>, bool)>,
+	ready: Condvar,
+}
+
+impl FrameSlot {
+	/// Replace the waiting frame (an older one is never converted).
+	fn put(&self, frame: Arc<VideoFrame>) {
+		self.state.lock().unwrap_or_else(PoisonError::into_inner).0 = Some(frame);
+		self.ready.notify_one();
+	}
+
+	fn close(&self) {
+		self.state.lock().unwrap_or_else(PoisonError::into_inner).1 = true;
+		self.ready.notify_one();
+	}
+
+	/// The next frame; `None` once the decoder is gone.
+	fn wait(&self) -> Option<Arc<VideoFrame>> {
+		let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+		loop {
+			if state.1 {
+				return None;
+			}
+			if let Some(frame) = state.0.take() {
+				return Some(frame);
+			}
+			state = self.ready.wait(state).unwrap_or_else(PoisonError::into_inner);
+		}
+	}
+}
+
+/// The decoder's side of a [`FrameSlot`]: dropped with the decoder's
+/// callback, it ends the converter thread.
+struct Handoff(Arc<FrameSlot>);
+
+impl Drop for Handoff {
+	fn drop(&mut self) {
+		self.0.close();
+	}
+}
+
+/// Pictures between a buffer's use and its reuse: the window shows one and
+/// may still be drawing the one before.
+const REUSE_AFTER: usize = 3;
+
+/// The pixel buffers of the last pictures, reused when they come round.
+#[derive(Default)]
+struct Buffers {
+	recent: VecDeque<Picture>,
+}
+
+impl Buffers {
+	fn show(&mut self, frame: &VideoFrame, pictures: &Latest<Picture>, wake: &dyn Fn()) {
+		let (width, height) = (frame.width, frame.height);
+		if self.recent.front().is_some_and(|b| (b.width(), b.height()) != (width, height)) {
+			self.recent.clear();
+		}
+		let mut buffer = if self.recent.len() >= REUSE_AFTER {
+			self.recent.pop_front().expect("a buffer")
+		} else {
+			Picture::new(width, height)
+		};
+		// A buffer the window still holds copies itself here first.
+		if let Err(e) = convert::to_rgba(frame, buffer.make_mut_bytes(), width as usize * 4) {
 			warn!("cannot show a picture: {e}");
 			return;
 		}
+		self.recent.push_back(buffer.clone());
 		if pictures.put(buffer) {
 			wake();
 		}
@@ -544,6 +644,51 @@ impl Decoder {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::sync::atomic::{AtomicUsize, Ordering};
+
+	/// The converter thread shows the newest frame, wakes the window once
+	/// per picture it waits for, and ends with the decoder's callback.
+	#[test]
+	fn frames_reach_the_window_through_the_converter() {
+		let pictures = Arc::new(Latest::new());
+		let wakes = Arc::new(AtomicUsize::new(0));
+		let counted = wakes.clone();
+		let mut on_frame = deliver(pictures.clone(), move || {
+			counted.fetch_add(1, Ordering::SeqCst);
+		});
+		on_frame(Arc::new(VideoFrame::black_i420(8, 6)));
+		let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+		let picture = loop {
+			if let Some(picture) = pictures.take() {
+				break picture;
+			}
+			assert!(std::time::Instant::now() < deadline, "no picture");
+			std::thread::sleep(std::time::Duration::from_millis(5));
+		};
+		assert_eq!((picture.width(), picture.height()), (8, 6));
+		assert_eq!(wakes.load(Ordering::SeqCst), 1);
+		drop(on_frame);
+	}
+
+	/// Buffers come round again after [`REUSE_AFTER`] pictures; a new size
+	/// starts over.
+	#[test]
+	fn picture_buffers_are_reused() {
+		let pictures = Latest::new();
+		let mut buffers = Buffers::default();
+		let frame = VideoFrame::black_i420(4, 4);
+		for _ in 0..REUSE_AFTER + 2 {
+			buffers.show(&frame, &pictures, &|| {});
+			pictures.take();
+		}
+		assert_eq!(buffers.recent.len(), REUSE_AFTER);
+		buffers.show(&VideoFrame::black_i420(2, 2), &pictures, &|| {});
+		assert_eq!(buffers.recent.len(), 1);
+		let picture = pictures.take().unwrap();
+		assert_eq!((picture.width(), picture.height()), (2, 2));
+		// Black, opaque.
+		assert_eq!(picture.as_bytes()[3], 255);
+	}
 
 	/// "Choose via system dialog" never passes the restore token, so the
 	/// portal always asks; with a token the last choice gets its own row.

@@ -16,7 +16,8 @@
 //! Every decoder is set up for live video: slice threads only (frame
 //! threads hold one frame per thread before the first picture comes out),
 //! dav1d with a frame delay of one, so each frame's picture comes out of
-//! the call that decoded it.
+//! the call that decoded it. VP8 decodes on one thread: its slice threads
+//! split frames by token partitions and wait on each other ([`decoder_threads`]).
 //!
 //! [`probe`] runs every decoder once per process (in parallel) on a short
 //! clip of its codec: three frames of a test picture encoded by this crate's
@@ -196,9 +197,18 @@ fn hw_device(ffmpeg: &Ffmpeg, kind: &'static str) -> std::result::Result<Ptr, St
 }
 
 /// Threads of a software decoder: slice (or dav1d's tile and row) threads,
-/// which add no delay.
-fn decoder_threads() -> usize {
-	std::thread::available_parallelism().map_or(1, |n| n.get().min(8))
+/// which add no delay. Except for VP8, whose slice threads work on the
+/// frame's token partitions and wait on each other: a stream of 4 or 8
+/// partitions (ours, from a sender with 6 cores or more) decoded 40-80 %
+/// slower on 4 threads than on one, too slow for 1440p at 60 fps. dav1d
+/// ([`crate::codec::dav1d_threads`]) gets a quarter of the cores.
+fn decoder_threads(codec: Codec, decoder: &str) -> usize {
+	let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+	match (codec, decoder) {
+		(Codec::Vp8, _) => 1,
+		(_, "libdav1d") => crate::codec::dav1d_threads(),
+		_ => cores.min(8),
+	}
 }
 
 /// A decoder of one [`DecoderSpec`]; see the [module docs](self).
@@ -258,7 +268,8 @@ impl FfmpegDecoder {
 		// private options object (NULL if the decoder has none).
 		let private = unsafe { (api.av_opt_child_next)(this.ctx, std::ptr::null_mut()) };
 		// A hardware decoder's work is on the GPU.
-		let threads = if spec.is_hardware() { 1 } else { decoder_threads() };
+		let threads =
+			if spec.is_hardware() { 1 } else { decoder_threads(spec.codec, spec.decoder) };
 		this.set(this.ctx, "threads", &threads.to_string());
 		this.set(this.ctx, "thread_type", "slice");
 		if spec.decoder == "libdav1d"
