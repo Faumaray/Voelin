@@ -1365,6 +1365,20 @@ fn codec_of(i: i32) -> CodecChoice {
 	}
 }
 
+/// Where the logs go, for the Advanced page.
+fn log_text() -> String {
+	match voelin_platform::logs::current() {
+		Some(path) => format!(
+			"This run logs to {} (the previous runs' next to it, the last as voelin.1.log). \
+			 VOELIN_LOG=voelin_core=debug,voelin_ui=debug logs more; warnings also go to the terminal.",
+			path.display()
+		),
+		None => "Logs go to the terminal the app was started from (standard error); \
+			 RUST_LOG=voelin_core=debug,voelin_ui=debug shows more."
+			.into(),
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1426,19 +1440,5 @@ mod tests {
 		let rule = PermRule { everyone: false, server_groups: vec![6], channel_groups: vec![] };
 		assert_eq!(rule_text(&rule), "server groups 6");
 		assert_eq!(rule_text(&PermRule::default()), "nobody");
-	}
-}
-
-/// Where the logs go, for the Advanced page.
-fn log_text() -> String {
-	match voelin_platform::logs::current() {
-		Some(path) => format!(
-			"This run logs to {} (the previous runs' next to it, the last as voelin.1.log). \
-			 VOELIN_LOG=voelin_core=debug,voelin_ui=debug logs more; warnings also go to the terminal.",
-			path.display()
-		),
-		None => "Logs go to the terminal the app was started from (standard error); \
-			 RUST_LOG=voelin_core=debug,voelin_ui=debug shows more."
-			.into(),
 	}
 }
