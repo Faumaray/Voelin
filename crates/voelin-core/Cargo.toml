@@ -23,24 +23,40 @@ media-desktop = ["media", "voelin-media/default"]
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
+dirs = "6"
 futures = "0.3"
+# Finding a server's gateway in DNS (the voice resolver's version).
+hickory-resolver = "0.26"
+md5 = "0.8"
+# Reading the official clients' settings.db when importing identities.
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = "0.30"
+toml = "1.1.6"
 tracing = "0.1"
 voelin-audio = { path = "../voelin-audio", default-features = false }
-voelin-gateway-proto = { path = "../voelin-gateway-proto" }
-voelin-media = { path = "../voelin-media", default-features = false, features = ["str0m"], optional = true }
+voelin-gateway-proto = { path = "../voelin-gateway-proto", features = ["client"] }
+voelin-media = { path = "../voelin-media", default-features = false, features = ["str0m", "whip"], optional = true }
 voelin-model = { path = "../voelin-model" }
 voelin-observer = { path = "../voelin-observer" }
+# Paths only (the cache directory).
+voelin-platform = { path = "../voelin-platform", default-features = false }
 voelin-query = { path = "../voelin-query" }
+voelin-store = { path = "../voelin-store" }
 voelin-stream = { path = "../voelin-stream" }
 tsclientlib = { path = "../proto/tsclientlib" }
+# The hash cash level, for raising an identity's security level.
+tsproto = { path = "../proto/tsproto" }
 tsproto-packets = { path = "../proto/tsproto-packets" }
+tsproto-types = { path = "../proto/tsproto-types" }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+# `process`: the browser interop test drives Chromium through Node.js.
+tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "test-util"] }
 
 [lints]
 workspace = true

@@ -37,19 +37,23 @@ Done so far (milestones M0–M4 and the first part of M5 of [the plan](docs/arch
   with their TeamSpeak identity and get presence, channel chat and history without joining voice,
   limited by their server permissions ([admin guide](docs/gateway-admin.md))
 - `crates/voelin-core`: client engine; sessions merge voice, gateway and query sources, route chat, run audio;
-  the media pipeline for streams (capture → VP8 + Opus → stream, stream → decoder)
+  chat history (stored on the device, synced with the gateway when a chat opens); the gateway's pins,
+  reactions, topics, events, stream directory and administration; the media pipeline for streams
+  (capture → VP8 + Opus → stream, stream → decoder)
 - `crates/voelin-ui` (`voelin`): Slint desktop app: servers, channel tree with talking indicators,
   chat tabs (own channel via voice, other channels via relay), connect / observe invisibly, mute, push-to-talk
   (in the window and as a global hotkey), audio settings with a level meter, per-client volume, and on
-  TeamSpeak 6 streams: watch in a viewer, share the screen with sound
+  TeamSpeak 6 streams: watch in a viewer, share the screen with sound. Desktop and phone layouts
+  from one design system, dark and light themes, text size, emoji ([docs/ui.md](docs/ui.md))
 - `crates/voelin-stream`: TeamSpeak 6 streams: stream commands and notifications, JSON signalling,
   WebRTC peers (str0m) with host and STUN candidates. A live test streams VP8 + Opus between two
   clients through a TS6 server
 - `tools/voelinctl`: headless CLI: channel tree, chat, voice send/record, raw commands, stream events,
   `query`, `observe` (invisible presence), `relay` (channel chat without joining) and `gateway`
+  (also through the engine with `--engine`: chat history, gateway requests, stream directory)
 - `dev/`: TeamSpeak 3.13 and TeamSpeak 6 (6.0.0-beta13.1) servers; `scripts/it-smoke.sh`
   checks tree, server chat, channel chat, a voice tone round-trip, invisible presence,
-  relay chat and the gateway on both
+  relay chat, the gateway, chat history sync, pins/reactions/topics and the stream directory
 - `fuzz/`: cargo-fuzz targets for packets, commands and the license chain
 - `android/` + `crates/voelin-android`: the Android app (the same Slint UI in a NativeActivity,
   voice in a foreground service, screen sharing through MediaProjection, MediaCodec, Keystore
@@ -58,11 +62,14 @@ Done so far (milestones M0–M4 and the first part of M5 of [the plan](docs/arch
 Screen sharing works between our clients through a TeamSpeak 6 server (VP8 video, Opus audio);
 interop with the official TeamSpeak 6 client is not verified yet.
 
-| Connected with voice | Observing invisibly through the gateway |
+The UI (design system, desktop and phone layouts, emoji, how to add a screen) is described in
+[docs/ui.md](docs/ui.md). Screenshots with sample data (`VOELIN_DEMO_UI=1`):
+
+| Server, chat and people in the channel | Watching a stream |
 |---|---|
-| ![voice](docs/screenshots/desktop-voice.png) | ![observe](docs/screenshots/desktop-observe.png) |
-| **Watching a stream** | **Sharing the screen** |
-| ![viewer](docs/screenshots/desktop-stream-viewer.png) | ![share](docs/screenshots/desktop-share-dialog.png) |
+| ![server](docs/screenshots/desktop-server.png) | ![viewer](docs/screenshots/desktop-stream-viewer.png) |
+| **Settings** | **Phone layout** |
+| ![settings](docs/screenshots/desktop-settings-voice.png) | ![phone](docs/screenshots/mobile-chat.png) |
 
 ## Try it
 
@@ -82,6 +89,9 @@ cargo run -p voelinctl -- connect 127.0.0.1:9988 --nick ear voice record out.wav
 # Streams (TeamSpeak 6): share the test pattern (or --source x11), watch and decode it
 cargo run -p voelinctl -- connect 127.0.0.1:9988 --nick eye stream watch --save-frame shot.png &
 cargo run -p voelinctl -- connect 127.0.0.1:9988 --nick me stream start --synthetic --auto-accept
+# Simulcast layers without an encoder; prints each viewer's layer, estimate and SRTP profile
+cargo run -p voelinctl -- connect 127.0.0.1:9988 --nick me stream start --placeholder --auto-accept \
+  --layer 1.0:6000k --layer 0.5:1500k:min=800k
 
 # ServerQuery (dev password voelin-dev-admin): invisible presence and relay chat
 cargo run -p voelinctl -- observe ssh 127.0.0.1:10022 --secret voelin-dev-admin --allowlisted
@@ -90,6 +100,9 @@ cargo run -p voelinctl -- relay ssh 127.0.0.1:10022 --secret voelin-dev-admin --
 # Gateway: users without voice, logging in with their identity
 cargo run -p voelin-gateway -- --config dev/tsgw-ts6.toml &
 cargo run -p voelinctl -- gateway ws://127.0.0.1:7788/v1 --identity <file> --presence --open channel:1
+# ... through the engine: stored history synced with the gateway, then a request
+cargo run -p voelinctl -- gateway ws://127.0.0.1:7788/v1 --identity <file> --engine \
+  --db /tmp/chat.db --chat channel:1 --older 1 --request '{"pins":{"target":{"kind":"channel","id":1}}}'
 
 scripts/it-smoke.sh   # all of the above, on both servers
 ```
@@ -99,8 +112,10 @@ Other commands: `voelinctl identity new`, `voelinctl versions`, `voelinctl conne
 
 Development switches of the desktop app (environment variables): `VOELIN_DATA_DIR` (database),
 `VOELIN_AUTOCONNECT=voice|observe`, `VOELIN_SCREENSHOT=<png>` (with `VOELIN_SCREENSHOT_DELAY`),
-`VOELIN_DEMO_STREAM=1` (a local test stream in the viewer, no server needed),
-`VOELIN_OPEN=share|settings[:<tab>]|about|client`, `VOELIN_AUTOWATCH=1`, `VOELIN_AUTOSHARE=test-pattern`.
+`VOELIN_WINDOW_SIZE=<w>x<h>`, `VOELIN_DEMO_UI=1` (sample servers and chat, no server needed),
+`VOELIN_DEMO_STREAM=1` (a local test stream in the viewer),
+`VOELIN_OPEN=home|settings[:<section>]|about|share|bookmark|emoji|client|tab:<tab>` (comma-separated),
+`VOELIN_AUTOWATCH=1`, `VOELIN_AUTOSHARE=test-pattern`; details in [docs/ui.md](docs/ui.md).
 
 Ready-made packages (Linux `.tar.gz`/`.deb`/Flatpak, Windows zip and installer, Android APK,
 and the `tsgw` gateway for Linux servers) come from the release workflow (version tags, or run by
@@ -120,6 +135,7 @@ the same terms in `Cargo.toml`.
 Third-party notices: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), generated from
 `Cargo.lock` by `scripts/notices.sh` and shown in the app's About page. The UI toolkit,
 Slint, is used under its royalty-free license, which requires an attribution in the
-About page.
+About page. The UI bundles the Inter font (SIL OFL 1.1), Lucide icons (ISC) and Twemoji
+graphics (CC-BY 4.0); `scripts/notices.sh` appends their notices from `about-assets.md`.
 
 Security issues: see [SECURITY.md](SECURITY.md). Releases: [docs/release.md](docs/release.md).

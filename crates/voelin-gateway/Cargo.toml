@@ -37,4 +37,8 @@ voelin-query = { path = "../voelin-query" }
 workspace = true
 
 [dev-dependencies]
+futures-util = "0.3.34"
 tokio-tungstenite = "0.30.0"
+tsproto-types = { path = "../proto/tsproto-types" }
+# The typed client drives the in-process and live tests.
+voelin-gateway-proto = { path = "../voelin-gateway-proto", features = ["client"] }

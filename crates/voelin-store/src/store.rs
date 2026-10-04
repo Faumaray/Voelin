@@ -2,15 +2,44 @@
 
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tsclientlib::Identity;
 
 use crate::{Error, Result};
 
-/// Schema migrations; entry `i` upgrades from version `i` to `i + 1`.
-const MIGRATIONS: &[&str] = &[r#"
+/// A schema migration: SQL, or code for what SQL alone cannot do.
+enum Migration {
+	Sql(&'static str),
+	Code(fn(&rusqlite::Transaction) -> rusqlite::Result<()>),
+}
+
+/// Schema migrations; entry `i` upgrades from version `i` to `i + 1`
+/// (`PRAGMA user_version`). Add new ones at the end; never change one that
+/// shipped.
+const MIGRATIONS: &[Migration] = &[
+	Migration::Sql(SCHEMA_1),
+	Migration::Code(crate::chat::migrate_2),
+	Migration::Sql(crate::contacts::SCHEMA_3),
+	Migration::Sql(SCHEMA_4),
+];
+
+/// Version 4: where each identity came from ([`IdentityOrigin`]) and which
+/// one is the default. Until now the app created an identity named
+/// `Default` when it had none, and the only other way in was an import;
+/// the default was the first identity.
+const SCHEMA_4: &str = r#"
+	ALTER TABLE identities ADD COLUMN origin TEXT NOT NULL DEFAULT 'user';
+	ALTER TABLE identities ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0;
+	UPDATE identities SET origin = 'imported';
+	UPDATE identities SET origin = 'created'
+		WHERE id = (SELECT MIN(id) FROM identities) AND name = 'Default';
+	UPDATE identities SET is_default = 1 WHERE id = (SELECT MIN(id) FROM identities);
+"#;
+
+/// Version 1: identities, bookmarks, settings and a first chat cache.
+pub(crate) const SCHEMA_1: &str = r#"
 	CREATE TABLE identities (
 		id INTEGER PRIMARY KEY,
 		name TEXT NOT NULL,
@@ -38,7 +67,7 @@ const MIGRATIONS: &[&str] = &[r#"
 		text TEXT NOT NULL
 	);
 	CREATE INDEX messages_by_target ON messages (server_uid, target, id);
-"#];
+"#;
 
 /// A stored identity, without its private key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +76,39 @@ pub struct IdentityEntry {
 	pub name: String,
 	pub uid: String,
 	pub level: u8,
+	pub origin: IdentityOrigin,
+	/// The identity the app connects with.
+	pub is_default: bool,
+}
+
+/// Where an identity came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentityOrigin {
+	/// Made by the app on its own because it had none; nobody chose it, so
+	/// the official client's identity may take its place as the default.
+	Created,
+	/// From another client (`voelin_core::identity`).
+	Imported,
+	/// Made or chosen as the default by the user.
+	User,
+}
+
+impl IdentityOrigin {
+	fn as_str(self) -> &'static str {
+		match self {
+			Self::Created => "created",
+			Self::Imported => "imported",
+			Self::User => "user",
+		}
+	}
+
+	fn parse(text: &str) -> Self {
+		match text {
+			"created" => Self::Created,
+			"imported" => Self::Imported,
+			_ => Self::User,
+		}
+	}
 }
 
 /// How to reach a server's ServerQuery for invisible presence and relay chat.
@@ -104,42 +166,8 @@ impl Bookmark {
 	}
 }
 
-/// Where a chat message was posted.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ChatTarget {
-	Server,
-	Channel(u64),
-	/// Private chat with the client of this unique id.
-	Private(String),
-}
-
-impl ChatTarget {
-	fn key(&self) -> String {
-		match self {
-			ChatTarget::Server => "server".into(),
-			ChatTarget::Channel(cid) => format!("channel/{cid}"),
-			ChatTarget::Private(uid) => format!("private/{uid}"),
-		}
-	}
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StoredMessage {
-	/// Assigned by the store; used for paging.
-	pub id: i64,
-	pub server_uid: String,
-	pub target: ChatTarget,
-	/// Unix timestamp in seconds.
-	pub ts: i64,
-	pub author_uid: Option<String>,
-	pub author_name: String,
-	/// Received through a gateway/query relay instead of our own connection.
-	pub via_relay: bool,
-	pub text: String,
-}
-
 pub struct Store {
-	db: Connection,
+	pub(crate) db: Connection,
 }
 
 impl Store {
@@ -155,7 +183,11 @@ impl Store {
 			use std::os::unix::fs::PermissionsExt;
 			std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
 		}
+		// WAL: readers do not block the writer (the settings service writes
+		// from its own connection). NORMAL is durable with WAL except for
+		// the last transactions on a power loss, and avoids an fsync per write.
 		db.pragma_update(None, "journal_mode", "WAL")?;
+		db.pragma_update(None, "synchronous", "NORMAL")?;
 		Self::init(db)
 	}
 
@@ -163,38 +195,100 @@ impl Store {
 		Self::init(Connection::open_in_memory()?)
 	}
 
-	fn init(db: Connection) -> Result<Self> {
+	fn init(mut db: Connection) -> Result<Self> {
+		// Statements run through `prepare_cached` are parsed once per connection.
+		db.set_prepared_statement_cache_capacity(64);
 		db.pragma_update(None, "foreign_keys", true)?;
-		let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-		for (i, migration) in MIGRATIONS.iter().enumerate().skip(version as usize) {
-			db.execute_batch(migration)?;
-			db.pragma_update(None, "user_version", i as i64 + 1)?;
+		// Each migration with its version bump in one write transaction: a
+		// second connection that opens the file at the same time (the
+		// settings writer, the chat history) waits, then sees the new version.
+		loop {
+			let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+			let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+			let Some(migration) = MIGRATIONS.get(version as usize) else { break };
+			match migration {
+				Migration::Sql(sql) => tx.execute_batch(sql)?,
+				Migration::Code(migrate) => migrate(&tx)?,
+			}
+			tx.pragma_update(None, "user_version", version + 1)?;
+			tx.commit()?;
 		}
 		Ok(Self { db })
 	}
 
+	/// The schema version (number of migrations applied).
+	pub fn schema_version(&self) -> Result<i64> {
+		Ok(self.db.pragma_query_value(None, "user_version", |r| r.get(0))?)
+	}
+
+	/// The number of schema migrations this version knows.
+	pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
+
 	// Identities
 
-	pub fn add_identity(&self, name: &str, identity: &Identity) -> Result<i64> {
+	/// Store an identity; it is the default when no other one is.
+	pub fn add_identity(
+		&self,
+		name: &str,
+		identity: &Identity,
+		origin: IdentityOrigin,
+	) -> Result<i64> {
 		let uid = identity.key().to_pub().get_uid();
 		self.db.execute(
-			"INSERT INTO identities (name, uid, data) VALUES (?1, ?2, ?3)",
-			params![name, uid, serde_json::to_string(identity)?],
+			"INSERT INTO identities (name, uid, data, origin, is_default)
+			 VALUES (?1, ?2, ?3, ?4, NOT EXISTS (SELECT 1 FROM identities WHERE is_default))",
+			params![name, uid, serde_json::to_string(identity)?, origin.as_str()],
 		)?;
 		Ok(self.db.last_insert_rowid())
 	}
 
 	pub fn identities(&self) -> Result<Vec<IdentityEntry>> {
-		let mut stmt = self.db.prepare("SELECT id, name, uid, data FROM identities ORDER BY id")?;
+		let mut stmt = self.db.prepare(
+			"SELECT id, name, uid, data, origin, is_default FROM identities ORDER BY id",
+		)?;
 		let rows = stmt.query_map([], |r| {
-			Ok((r.get::<_, i64>(0)?, r.get(1)?, r.get(2)?, r.get::<_, String>(3)?))
+			Ok((
+				r.get::<_, i64>(0)?,
+				r.get(1)?,
+				r.get(2)?,
+				r.get::<_, String>(3)?,
+				r.get::<_, String>(4)?,
+				r.get(5)?,
+			))
 		})?;
 		rows.map(|row| {
-			let (id, name, uid, data) = row?;
+			let (id, name, uid, data, origin, is_default) = row?;
 			let identity: Identity = serde_json::from_str(&data)?;
-			Ok(IdentityEntry { id, name, uid, level: identity.level() })
+			let origin = IdentityOrigin::parse(&origin);
+			Ok(IdentityEntry { id, name, uid, level: identity.level(), origin, is_default })
 		})
 		.collect()
+	}
+
+	/// The identity the app connects with: the one marked as the default,
+	/// else the first.
+	pub fn default_identity(&self) -> Result<Option<IdentityEntry>> {
+		let identities = self.identities()?;
+		Ok(identities.iter().find(|i| i.is_default).or(identities.first()).cloned())
+	}
+
+	/// Make `id` the default identity. `by_user`: the user chose it, so one
+	/// the app created on its own becomes theirs ([`IdentityOrigin::User`])
+	/// and is never replaced by an import again.
+	pub fn set_default_identity(&self, id: i64, by_user: bool) -> Result<()> {
+		let tx = self.db.unchecked_transaction()?;
+		if tx.execute("UPDATE identities SET is_default = 1 WHERE id = ?1", [id])? == 0 {
+			return Err(Error::NotFound("identity", id));
+		}
+		tx.execute("UPDATE identities SET is_default = 0 WHERE id <> ?1", [id])?;
+		if by_user {
+			tx.execute(
+				"UPDATE identities SET origin = 'user' WHERE id = ?1 AND origin = 'created'",
+				[id],
+			)?;
+		}
+		tx.commit()?;
+		Ok(())
 	}
 
 	pub fn identity(&self, id: i64) -> Result<Identity> {
@@ -267,75 +361,61 @@ impl Store {
 	pub fn setting<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
 		let value: Option<String> = self
 			.db
-			.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0))
+			.prepare_cached("SELECT value FROM settings WHERE key = ?1")?
+			.query_row([key], |r| r.get(0))
 			.optional()?;
 		value.map(|v| serde_json::from_str(&v).map_err(Error::from)).transpose()
 	}
 
 	pub fn set_setting<T: Serialize>(&self, key: &str, value: &T) -> Result<()> {
-		self.db.execute(
-			"INSERT INTO settings (key, value) VALUES (?1, ?2)
-			 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-			params![key, serde_json::to_string(value)?],
-		)?;
+		self.set_setting_json(key, &serde_json::to_string(value)?)
+	}
+
+	/// Store a setting that is already JSON text.
+	pub fn set_setting_json(&self, key: &str, json: &str) -> Result<()> {
+		self.db
+			.prepare_cached(
+				"INSERT INTO settings (key, value) VALUES (?1, ?2)
+				 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+			)?
+			.execute(params![key, json])?;
 		Ok(())
 	}
 
-	// Chat cache
-
-	pub fn add_message(&self, msg: &StoredMessage) -> Result<i64> {
-		self.db.execute(
-			"INSERT INTO messages (server_uid, target, ts, author_uid, author_name, via_relay, text)
-			 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-			params![
-				msg.server_uid,
-				msg.target.key(),
-				msg.ts,
-				msg.author_uid,
-				msg.author_name,
-				msg.via_relay,
-				msg.text
-			],
-		)?;
-		Ok(self.db.last_insert_rowid())
+	/// Remove a setting; `true` if it was there.
+	pub fn delete_setting(&self, key: &str) -> Result<bool> {
+		Ok(self.db.prepare_cached("DELETE FROM settings WHERE key = ?1")?.execute([key])? > 0)
 	}
 
-	/// Up to `limit` messages older than `before` (message id), oldest first.
-	pub fn history(
-		&self,
-		server_uid: &str,
-		target: &ChatTarget,
-		before: Option<i64>,
-		limit: usize,
-	) -> Result<Vec<StoredMessage>> {
-		let mut stmt = self.db.prepare(
-			"SELECT id, ts, author_uid, author_name, via_relay, text FROM messages
-			 WHERE server_uid = ?1 AND target = ?2 AND id < ?3
-			 ORDER BY id DESC LIMIT ?4",
-		)?;
-		let rows = stmt.query_map(
-			params![server_uid, target.key(), before.unwrap_or(i64::MAX), limit as i64],
-			|r| {
-				Ok(StoredMessage {
-					id: r.get(0)?,
-					server_uid: server_uid.to_string(),
-					target: target.clone(),
-					ts: r.get(1)?,
-					author_uid: r.get(2)?,
-					author_name: r.get(3)?,
-					via_relay: r.get(4)?,
-					text: r.get(5)?,
-				})
-			},
-		)?;
-		let mut messages = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-		messages.reverse();
-		Ok(messages)
+	/// All settings as `(key, JSON text)`, ordered by key.
+	pub fn settings_json(&self) -> Result<Vec<(String, String)>> {
+		let mut stmt = self.db.prepare_cached("SELECT key, value FROM settings ORDER BY key")?;
+		let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+		Ok(rows.collect::<rusqlite::Result<_>>()?)
 	}
 
-	/// Delete cached messages older than `ts` (Unix seconds).
-	pub fn prune_messages(&self, ts: i64) -> Result<usize> {
-		Ok(self.db.execute("DELETE FROM messages WHERE ts < ?1", [ts])?)
+	/// Store (`Some(JSON text)`) or remove (`None`) several settings in one
+	/// transaction.
+	pub fn write_settings<'a>(
+		&mut self,
+		changes: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+	) -> Result<()> {
+		let tx = self.db.transaction()?;
+		{
+			let mut put = tx.prepare_cached(
+				"INSERT INTO settings (key, value) VALUES (?1, ?2)
+				 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+			)?;
+			let mut delete = tx.prepare_cached("DELETE FROM settings WHERE key = ?1")?;
+			for (key, json) in changes {
+				match json {
+					Some(json) => put.execute(params![key, json])?,
+					None => delete.execute([key])?,
+				};
+			}
+		}
+		tx.commit()?;
+		Ok(())
 	}
 }
 
@@ -347,20 +427,84 @@ mod tests {
 	fn identities() {
 		let store = Store::open_in_memory().unwrap();
 		let identity = Identity::create();
-		let id = store.add_identity("main", &identity).unwrap();
+		let id = store.add_identity("main", &identity, IdentityOrigin::Imported).unwrap();
 		let list = store.identities().unwrap();
 		assert_eq!(list.len(), 1);
 		assert_eq!(list[0].name, "main");
 		assert_eq!(list[0].uid, identity.key().to_pub().get_uid());
 		assert!(list[0].level >= 8);
+		assert_eq!(list[0].origin, IdentityOrigin::Imported);
 		let loaded = store.identity(id).unwrap();
 		assert_eq!(loaded.counter(), identity.counter());
 		// The same key twice is rejected (uid is unique).
-		assert!(store.add_identity("dup", &identity).is_err());
+		assert!(store.add_identity("dup", &identity, IdentityOrigin::User).is_err());
 		store.rename_identity(id, "renamed").unwrap();
 		assert_eq!(store.identities().unwrap()[0].name, "renamed");
 		store.delete_identity(id).unwrap();
 		assert!(matches!(store.identity(id), Err(Error::NotFound(..))));
+	}
+
+	#[test]
+	fn the_default_identity() {
+		let store = Store::open_in_memory().unwrap();
+		assert_eq!(store.default_identity().unwrap(), None);
+		let made = store.add_identity("Default", &Identity::create(), IdentityOrigin::Created);
+		let made = made.unwrap();
+		let other = store.add_identity("Other", &Identity::create(), IdentityOrigin::Imported);
+		let other = other.unwrap();
+		// The first one is the default.
+		let default = store.default_identity().unwrap().unwrap();
+		assert_eq!((default.id, default.origin), (made, IdentityOrigin::Created));
+		// An import moves the default without making the old one the user's.
+		store.set_default_identity(other, false).unwrap();
+		assert_eq!(store.default_identity().unwrap().unwrap().id, other);
+		assert_eq!(store.identities().unwrap()[0].origin, IdentityOrigin::Created);
+		// The user's choice makes the created one theirs.
+		store.set_default_identity(made, true).unwrap();
+		let list = store.identities().unwrap();
+		assert_eq!((list[0].is_default, list[0].origin), (true, IdentityOrigin::User));
+		assert_eq!((list[1].is_default, list[1].origin), (false, IdentityOrigin::Imported));
+		assert!(matches!(store.set_default_identity(99, true), Err(Error::NotFound(..))));
+		assert_eq!(store.default_identity().unwrap().unwrap().id, made);
+	}
+
+	/// A database of version 3 learns where its identities came from: the
+	/// first one, named `Default`, is the one the app made; the others were
+	/// imported; the first stays the default.
+	#[test]
+	fn migrates_version_3_identities() {
+		let dir = std::env::temp_dir().join(format!("voelin-store-v3-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&dir);
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("client.db");
+		let (made, imported) = (Identity::create(), Identity::create());
+		{
+			let mut db = rusqlite::Connection::open(&path).unwrap();
+			db.execute_batch(SCHEMA_1).unwrap();
+			let tx = db.transaction().unwrap();
+			crate::chat::migrate_2(&tx).unwrap();
+			tx.commit().unwrap();
+			db.execute_batch(crate::contacts::SCHEMA_3).unwrap();
+			db.pragma_update(None, "user_version", 3).unwrap();
+			for (name, identity) in [("Default", &made), ("Main", &imported)] {
+				let uid = identity.key().to_pub().get_uid();
+				let data = serde_json::to_string(identity).unwrap();
+				db.execute(
+					"INSERT INTO identities (name, uid, data) VALUES (?1, ?2, ?3)",
+					params![name, uid, data],
+				)
+				.unwrap();
+			}
+		}
+		let store = Store::open(&path).unwrap();
+		assert_eq!(store.schema_version().unwrap(), Store::SCHEMA_VERSION);
+		let list = store.identities().unwrap();
+		assert_eq!((list[0].origin, list[0].is_default), (IdentityOrigin::Created, true));
+		assert_eq!((list[1].origin, list[1].is_default), (IdentityOrigin::Imported, false));
+		// The keys are untouched.
+		assert_eq!(store.identity(list[1].id).unwrap().counter(), imported.counter());
+		drop(store);
+		std::fs::remove_dir_all(dir).unwrap();
 	}
 
 	#[test]
@@ -396,38 +540,16 @@ mod tests {
 
 	#[test]
 	fn settings() {
-		let store = Store::open_in_memory().unwrap();
+		let mut store = Store::open_in_memory().unwrap();
 		assert_eq!(store.setting::<u32>("volume").unwrap(), None);
 		store.set_setting("volume", &80u32).unwrap();
 		store.set_setting("volume", &90u32).unwrap();
 		assert_eq!(store.setting::<u32>("volume").unwrap(), Some(90));
-	}
-
-	#[test]
-	fn chat_history_pages() {
-		let store = Store::open_in_memory().unwrap();
-		let target = ChatTarget::Channel(5);
-		for i in 0..10 {
-			store
-				.add_message(&StoredMessage {
-					id: 0,
-					server_uid: "srv".into(),
-					target: target.clone(),
-					ts: 1000 + i,
-					author_uid: None,
-					author_name: "a".into(),
-					via_relay: i % 2 == 0,
-					text: format!("m{i}"),
-				})
-				.unwrap();
-		}
-		let last = store.history("srv", &target, None, 3).unwrap();
-		let texts: Vec<_> = last.iter().map(|m| m.text.as_str()).collect();
-		assert_eq!(texts, ["m7", "m8", "m9"]);
-		let older = store.history("srv", &target, Some(last[0].id), 3).unwrap();
-		assert_eq!(older.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), ["m4", "m5", "m6"]);
-		assert!(store.history("srv", &ChatTarget::Server, None, 3).unwrap().is_empty());
-		assert_eq!(store.prune_messages(1005).unwrap(), 5);
+		store.write_settings([("a", Some("1")), ("volume", None), ("b", Some("\"x\""))]).unwrap();
+		let all = store.settings_json().unwrap();
+		assert_eq!(all, [("a".to_owned(), "1".to_owned()), ("b".to_owned(), "\"x\"".to_owned())]);
+		assert!(store.delete_setting("a").unwrap());
+		assert!(!store.delete_setting("a").unwrap());
 	}
 
 	#[test]

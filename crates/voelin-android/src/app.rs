@@ -14,10 +14,11 @@ use voelin_core::Command;
 
 use crate::foreground::Foreground;
 use crate::host::EngineHost;
-use crate::{bridge, capture, egl, secrets};
+use crate::{bridge, camera, capture, egl, secrets};
 
-/// Store setting (`bool`): the user's opt-in to local crash reports.
-pub const CRASH_REPORTS_SETTING: &str = "crash_reports";
+/// Store setting (`bool`): the user's opt-in to local crash reports (read
+/// before the settings service starts, straight from the database).
+pub const CRASH_REPORTS_SETTING: &str = voelin_core::settings::CRASH_REPORTS_KEY;
 
 static HOST: OnceLock<EngineHost> = OnceLock::new();
 static FOREGROUND: Mutex<Option<Foreground>> = Mutex::new(None);
@@ -76,6 +77,7 @@ fn run(app: AndroidApp) -> anyhow::Result<()> {
 		// Before Slint creates the first window surface.
 		egl::reserve_skia_extension_slots();
 		capture::register();
+		camera::register();
 		watch_voice(host);
 	});
 	if let Err(e) = bridge::request_permissions() {
@@ -92,6 +94,7 @@ fn run(app: AndroidApp) -> anyhow::Result<()> {
 			runtime: attached.runtime,
 			events: attached.events,
 		}),
+		setting_overrides: Vec::new(),
 	})
 }
 
@@ -106,17 +109,24 @@ fn install_crash_reports(data_dir: &Path) {
 	voelin_platform::crash::install(data_dir.join(voelin_platform::crash::DIR_NAME), enabled);
 }
 
-/// Keep the voice foreground service in step with the voice connections.
+/// Keep the voice foreground service, and the screen-sharing service's
+/// notification, in step with the voice connections and our stream.
 fn watch_voice(host: &'static EngineHost) {
 	let mut events = host.engine().subscribe();
 	host.runtime().spawn(async move {
 		loop {
 			match events.recv().await {
 				Ok(event) => {
-					if let Some(notice) = with_foreground(|f| f.update(&event))
+					let changes = with_foreground(|f| f.update(&event));
+					if let Some(notice) = changes.voice
 						&& let Err(e) = bridge::set_voice_notification(notice.as_ref())
 					{
 						warn!("voice service: {e}");
+					}
+					if let Some(notice) = changes.screen
+						&& let Err(e) = bridge::set_screen_notification(notice.as_ref())
+					{
+						warn!("screen sharing notification: {e}");
 					}
 				}
 				Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -146,5 +156,17 @@ pub fn toggle_mute() {
 		with_foreground(|f| (f.voice_sessions(), f.notice().is_some_and(|n| n.muted)));
 	for session in sessions {
 		host.engine().send(Command::SetInputMuted { session, muted: !muted });
+	}
+}
+
+/// "Deafen" / "Undeafen" in the voice notification, as Mute does.
+pub fn toggle_deafen() {
+	let Some(host) = HOST.get() else {
+		return;
+	};
+	let (sessions, deafened) =
+		with_foreground(|f| (f.voice_sessions(), f.notice().is_some_and(|n| n.deafened)));
+	for session in sessions {
+		host.engine().send(Command::SetOutputMuted { session, muted: !deafened });
 	}
 }

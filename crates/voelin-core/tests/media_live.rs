@@ -14,7 +14,7 @@ use voelin_core::media::voelin_media::capture::SourceId;
 use voelin_core::media::voelin_media::capture::synthetic::RECT_COLOR;
 use voelin_core::media::voelin_media::{Codec, Codecs, convert};
 use voelin_core::media::{Streamer, StreamerConfig, Viewer, peer_config, stream_codec};
-use voelin_core::stream::{PeerConfig, StreamSetup};
+use voelin_core::stream::{PeerConfig, StreamSetup, VideoCodec};
 use voelin_core::{Command, Engine, Event, StreamState, VoiceOptions, VoiceState, WatchState};
 
 fn live() -> bool {
@@ -159,7 +159,11 @@ async fn ts6_test_pattern_decoded() {
 	assert!(widths.iter().all(|w| (120..=136).contains(w)), "{widths:?}");
 	let stats = viewer.stats();
 	assert!(stats.error.is_none(), "{stats:?}");
-	eprintln!("decoded {stats:?}, sent {:?}", streamer.stats());
+	// The mixed test tone went out as 20 ms Opus frames all along.
+	let sent = streamer.stats();
+	eprintln!("decoded {stats:?}, sent {sent:?}");
+	assert!(sent.audio_frames >= 50, "{sent:?}");
+	assert!(sent.audio_sources.iter().all(|s| s.error.is_none()), "{sent:?}");
 
 	engine.send(Command::StopStream { session: 1 });
 	wait_for(&mut events, "stream ended", |e| match e {
@@ -167,6 +171,83 @@ async fn ts6_test_pattern_decoded() {
 		_ => None,
 	})
 	.await;
+	drop(viewer);
+	drop(streamer);
+	engine.send(Command::CloseSession { session: 1 });
+	engine.send(Command::CloseSession { session: 2 });
+	tokio::time::sleep(Duration::from_millis(500)).await;
+}
+
+/// The streamer's offer lists VP9 (its stream codec) and VP8; a viewer that
+/// only decodes VP8 answers VP8 and gets VP8 pictures from an encoder made
+/// for it, while the VP9 encoder, wanted by nobody, idles.
+#[tokio::test(flavor = "multi_thread")]
+async fn ts6_viewer_gets_the_codec_it_chose() {
+	if !live() {
+		eprintln!("skipped: set VOELIN_LIVE=1 with the dev servers running");
+		return;
+	}
+	let engine = Engine::start();
+	let mut events = engine.subscribe();
+	let codecs = Arc::new(Codecs::builtin());
+	let vp9_first = PeerConfig { video_codecs: vec![VideoCodec::Vp9], ..PeerConfig::loopback() };
+	let streamer_peer = peer_config(&codecs, vp9_first);
+	assert_eq!(streamer_peer.video_codecs, [VideoCodec::Vp9, VideoCodec::Vp8]);
+	let codec = stream_codec(&codecs, &streamer_peer).expect("an encoder");
+	assert_eq!(codec, Codec::Vp9);
+	let viewer_peer =
+		PeerConfig { accept_video_codecs: vec![VideoCodec::Vp8], ..PeerConfig::loopback() };
+	let tag = std::process::id() % 10_000;
+	connect(&engine, &mut events, 1, &format!("c-streamer-{tag}"), streamer_peer).await;
+	connect(&engine, &mut events, 2, &format!("c-viewer-{tag}"), viewer_peer).await;
+
+	let config = StreamerConfig {
+		source: SourceId::Synthetic,
+		synthetic_size: (320, 180),
+		bitrate_kbps: 1000,
+		codec,
+		..StreamerConfig::default()
+	};
+	let streamer = Streamer::start(&codecs, config).await.unwrap();
+	let setup = StreamSetup { name: format!("codecs {tag}"), ..Default::default() };
+	engine.send(Command::StartStream { session: 1, setup, auto_accept: true });
+	let mut live = None;
+	let mut listed = Vec::new();
+	let (id, sink) = wait_for(&mut events, "stream live and in the viewer's list", |e| {
+		match e {
+			Event::StreamState { session: 1, state: StreamState::Live { id, sink } } => {
+				live = Some((id.clone(), sink.clone()));
+			}
+			Event::StreamsChanged { session: 2, streams } => {
+				listed = streams.iter().map(|s| s.id.clone()).collect();
+			}
+			_ => {}
+		}
+		live.clone().filter(|(id, _)| listed.contains(id))
+	})
+	.await;
+	streamer.attach(Arc::new(sink));
+	let (tx, pictures) = std_mpsc::channel();
+	let viewer = Viewer::start(&engine, 2, &id, codecs, move |picture| {
+		let _ = tx.send(picture);
+	});
+	engine.send(Command::WatchStream { session: 2, stream_id: id.clone() });
+	let decoded = tokio::task::spawn_blocking(move || {
+		let mut decoded = 0;
+		while decoded < 30 {
+			let picture = pictures.recv_timeout(Duration::from_secs(15)).expect("no picture");
+			assert_eq!((picture.width, picture.height), (320, 180));
+			decoded += 1;
+		}
+		decoded
+	})
+	.await
+	.unwrap();
+	let sent = streamer.stats();
+	eprintln!("decoded {decoded}, sent {sent:?}");
+	assert_eq!(sent.layers[0].codecs, [Codec::Vp8], "only the codec a viewer chose");
+	assert!(viewer.stats().error.is_none());
+	engine.send(Command::StopStream { session: 1 });
 	drop(viewer);
 	drop(streamer);
 	engine.send(Command::CloseSession { session: 1 });

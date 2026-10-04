@@ -11,10 +11,30 @@
 #   6. relay chat: a query relay reads channel chat and posts into the channel
 #   7. gateway (tsgw): login with a TeamSpeak identity, presence, channel chat
 #      both ways, refusal of an identity the server does not know
-#   8. stream (TeamSpeak 6 only): a viewer watches a synthetic VP8 + Opus stream
+#   8. chat history through the engine (voelinctl gateway --engine): an admin
+#      sets a runtime gateway setting; messages sent while a user is offline
+#      reach the user's stored history when it connects again
+#   9. pins, reactions and topics through the engine: post, pin (allowed by
+#      a permission rule the admin sets), react, start a topic from the post,
+#      post into it, read the topic and the pins back
+#  10. stream directory (TeamSpeak 6 only): an engine session's stream
+#      registers itself in the gateway's directory; a viewer that connects
+#      later finds it there and watches it
+#  11. stream (TeamSpeak 6 only): a viewer watches a synthetic VP8 + Opus stream
+#  12. late stream (TeamSpeak 6 only): a viewer that connects after the stream
+#      started finds it (requeststreaminfo) and watches it; a viewer in the
+#      default channel finds and watches a stream in another channel
+#  13. the engine's voice features (voelinctl engine): upload a file and
+#      post its link in chat, another client lists the channel's files and
+#      downloads the linked file (compared byte for byte), the file is
+#      deleted; an avatar set by one client is fetched by another (MD5
+#      checked); poke, private message and offline message round trips; a
+#      friend is seen online; a blocked contact's poke arrives flagged
 #
 # Usage: scripts/it-smoke.sh [ts3|ts6]...   (default: both)
-# Env:   VOELINCTL=path/to/voelinctl (default: builds target/debug/voelinctl)
+# Env:   VOELINCTL=path/to/voelinctl, TSGW=path/to/tsgw (default: builds both
+#        into $CARGO_TARGET_DIR or target)
+#        TSGW_PORT_TS3, TSGW_PORT_TS6: gateway ports (default 7787, 7788)
 #        COMPOSE_FILE=dev/docker-compose.yml
 set -euo pipefail
 
@@ -27,16 +47,17 @@ mkdir -p "$STATE_DIR"
 # Never leave background clients behind.
 trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
 
+BUILD_DIR="${CARGO_TARGET_DIR:-target}/debug"
 if [[ -z "${VOELINCTL:-}" ]]; then
 	cargo build --quiet -p voelinctl -p voelin-gateway
-	VOELINCTL=target/debug/voelinctl
+	VOELINCTL=$BUILD_DIR/voelinctl
 fi
-TSGW="${TSGW:-target/debug/tsgw}"
+TSGW="${TSGW:-$BUILD_DIR/tsgw}"
 
 declare -A PORTS=([ts3]=9987 [ts6]=9988)
 # ServerQuery transport and address per server (dev/docker-compose.yml).
 declare -A QUERY=([ts3]="raw 127.0.0.1:10011" [ts6]="ssh 127.0.0.1:10022")
-declare -A GATEWAY=([ts3]=7787 [ts6]=7788)
+declare -A GATEWAY=([ts3]=${TSGW_PORT_TS3:-7787} [ts6]=${TSGW_PORT_TS6:-7788})
 QUERY_SECRET=voelin-dev-admin
 SERVERS=("$@")
 [[ ${#SERVERS[@]} -eq 0 ]] && SERVERS=(ts3 ts6)
@@ -130,15 +151,64 @@ stream_check() {
 	grep -E "first video frame|received" "$out"
 }
 
+# TeamSpeak 6: the stream is live before the viewer connects. The server does
+# not announce running streams to newcomers; the viewer looks it up.
+stream_late_check() {
+	local addr=$1 out="$STATE_DIR/stream-late-watch.log" streamer_out="$STATE_DIR/stream-late-start.log"
+	local streamer="early-$$-$RANDOM"
+	"$VOELINCTL" connect "$addr" --nick "$streamer" stream --loopback start --synthetic \
+		--auto-accept --seconds 30 >"$streamer_out" 2>&1 &
+	local streamer_pid=$!
+	for _ in $(seq 1 60); do grep -q "is live" "$streamer_out" 2>/dev/null && break; sleep 0.25; done
+	grep -q "is live" "$streamer_out" || { cat "$streamer_out"; fail "late-join streamer did not go live"; }
+	if ! "$VOELINCTL" connect "$addr" --nick "late-$$" stream --loopback watch --streamer-nick "$streamer" \
+		--expect-frames 60 --timeout 25 >"$out" 2>&1; then
+		cat "$out" "$streamer_out"
+		fail "late viewer did not receive the running stream"
+	fi
+	# SIGINT: the streamer stops its stream properly.
+	kill -INT "$streamer_pid" 2>/dev/null || true
+	wait "$streamer_pid" 2>/dev/null || true
+	grep -E "watching|received" "$out"
+}
+
+# TeamSpeak 6: the stream runs in another channel. The server announces a
+# stream only in its channel; a viewer elsewhere looks it up and watches it
+# from where it is, as the official client can.
+stream_elsewhere_check() {
+	local addr=$1 admin=$2 out="$STATE_DIR/stream-elsewhere-watch.log"
+	local streamer_out="$STATE_DIR/stream-elsewhere-start.log" streamer="far-$$-$RANDOM"
+	# Semi-permanent, so it outlives this command; it already exists after the first run.
+	# shellcheck disable=SC2086
+	"$VOELINCTL" connect "$addr" $admin --nick admin raw \
+		"channelcreate channel_name=smoke-elsewhere channel_flag_semi_permanent=1" >/dev/null 2>&1 || true
+	"$VOELINCTL" connect "$addr" --nick "$streamer" --channel smoke-elsewhere stream --loopback start \
+		--synthetic --auto-accept --seconds 30 >"$streamer_out" 2>&1 &
+	local streamer_pid=$!
+	for _ in $(seq 1 60); do grep -q "is live" "$streamer_out" 2>/dev/null && break; sleep 0.25; done
+	grep -q "is live" "$streamer_out" || { cat "$streamer_out"; fail "streamer in another channel did not go live"; }
+	if ! "$VOELINCTL" connect "$addr" --nick "elsewhere-$$" stream --loopback watch --streamer-nick "$streamer" \
+		--expect-frames 60 --timeout 25 >"$out" 2>&1; then
+		cat "$out" "$streamer_out"
+		fail "viewer in the default channel did not receive the stream in another channel"
+	fi
+	kill -INT "$streamer_pid" 2>/dev/null || true
+	wait "$streamer_pid" 2>/dev/null || true
+	grep -E "watching|received" "$out"
+}
+
 # An observer over ServerQuery must see a voice client join.
 presence_check() {
 	local addr=$1 query=$2 out="$STATE_DIR/observe.log"
 	# shellcheck disable=SC2086
+	# A loaded TeamSpeak 6 dev server takes 4 to 13 s to let a client in, so
+	# the observer waits long (it ends as soon as it sees the client) and the
+	# client stays a while.
 	"$VOELINCTL" observe $query --secret "$QUERY_SECRET" --allowlisted --poll 2 \
-		--seconds 20 --expect-client presence-probe >"$out" 2>&1 &
+		--seconds 45 --expect-client presence-probe >"$out" 2>&1 &
 	local observer=$!
 	sleep 2
-	"$VOELINCTL" connect "$addr" --nick presence-probe listen --timeout 4 >/dev/null 2>&1 || true
+	"$VOELINCTL" connect "$addr" --nick presence-probe listen --timeout 8 >/dev/null 2>&1 || true
 	if ! wait "$observer"; then
 		cat "$out"
 		fail "observer did not see the voice client"
@@ -157,7 +227,13 @@ relay_check() {
 	"$VOELINCTL" connect "$addr" --nick relay-listener listen --expect "from-relay-$token" \
 		--timeout 20 >"$heard" 2>&1 &
 	local listener=$!
-	sleep 4
+	# Talk once the relay relays and the listener is in (it prints the
+	# clients it sees): a fixed pause lost the message whenever the dev
+	# server was slow to let clients in.
+	for _ in $(seq 1 120); do
+		grep -q "relaying channel" "$out" 2>/dev/null && [[ -s "$heard" ]] && break
+		sleep 0.25
+	done
 	"$VOELINCTL" connect "$addr" --nick relay-talker chat channel "to-relay-$token"
 	# shellcheck disable=SC2086
 	"$VOELINCTL" relay $query --secret "$QUERY_SECRET" --allowlisted --channel 1 --nick Alice \
@@ -178,7 +254,8 @@ relay_check() {
 gateway_check() {
 	local svc=$1 addr=$2 port=${GATEWAY[$svc]} out="$STATE_DIR/gateway.log"
 	local url="ws://127.0.0.1:$port/v1" token="gw-$RANDOM$RANDOM"
-	"$TSGW" --config "dev/tsgw-$svc.toml" >"$STATE_DIR/tsgw-$svc.log" 2>&1 &
+	"$TSGW" --config "dev/tsgw-$svc.toml" --set "listen.bind=127.0.0.1:$port" \
+		--set "history.path=$STATE_DIR/tsgw-$svc.db" >"$STATE_DIR/tsgw-$svc.log" 2>&1 &
 	local gateway=$!
 	for _ in $(seq 1 40); do
 		grep -q "listening" "$STATE_DIR/tsgw-$svc.log" 2>/dev/null && break
@@ -200,7 +277,13 @@ gateway_check() {
 	"$VOELINCTL" connect "$addr" --nick gateway-listener listen --expect "from-gateway-$token" \
 		--timeout 20 >"$STATE_DIR/gateway-heard.log" 2>&1 &
 	local listener=$!
-	sleep 4
+	# Talk once the gateway user is logged in and sees the listener (in its
+	# presence or as it joins): a fixed pause lost the message whenever the
+	# dev server was slow to let clients in.
+	for _ in $(seq 1 120); do
+		grep -q "gateway-listener" "$out" 2>/dev/null && break
+		sleep 0.25
+	done
 	"$VOELINCTL" connect "$addr" --nick gateway-talker chat channel "to-gateway-$token"
 	"$VOELINCTL" gateway "$url" --identity "$user" --send "channel:1=from-gateway-$token" --seconds 3 >/dev/null
 	if ! wait "$reader"; then
@@ -213,8 +296,215 @@ gateway_check() {
 	fi
 	grep -E "presence:|to-gateway-$token" "$out"
 	grep "from-gateway-$token" "$STATE_DIR/gateway-heard.log"
+
+	history_check "$svc" "$addr" "$url" "$user"
+	features_check "$svc" "$url" "$user"
+	if [[ $svc == ts6 ]]; then
+		directory_check "$svc" "$addr" "$url" "$user"
+	fi
 	kill "$gateway"
 	wait "$gateway" 2>/dev/null || true
+}
+
+# An engine session through the gateway: voelinctl gateway --engine.
+engine() {
+	local url=$1 identity=$2
+	shift 2
+	"$VOELINCTL" gateway "$url" --identity "$identity" --engine "$@"
+}
+
+# A gateway request as the server's admin; the answer must contain $expect.
+admin_request() {
+	local svc=$1 url=$2 request=$3 expect=$4 out="$STATE_DIR/admin-request.log"
+	if ! engine "$url" "$STATE_DIR/$svc-admin.json" --request "$request" --expect "$expect" \
+		--seconds 15 >"$out" 2>&1; then
+		cat "$out"
+		fail "gateway request $request was not answered with $expect"
+	fi
+	grep -F "$expect" "$out" | cut -c1-200
+}
+
+# Messages sent while a user is offline reach the user's stored history
+# through the gateway when the user connects again.
+history_check() {
+	local svc=$1 addr=$2 url=$3 user=$4 token="offline-$RANDOM$RANDOM"
+	local db="$STATE_DIR/$svc-history-$$.db" out="$STATE_DIR/history.log"
+	rm -f "$db"*
+	# The gateway reads channel 1 even while nobody has it open (runtime setting).
+	admin_request "$svc" "$url" '{"config_set":{"key":"relay.pinned_channels","value":[1]}}' \
+		'"config_value":{"entry":{"key":"relay.pinned_channels","value":[1]'
+	# First visit: the chat is synced and stored.
+	if ! engine "$url" "$user" --db "$db" --chat channel:1 --expect "history gateway channel:1 batch" \
+		--seconds 15 >"$out" 2>&1; then
+		cat "$out"
+		fail "first chat history sync failed"
+	fi
+	# Away: someone talks in the channel.
+	sleep 2
+	"$VOELINCTL" connect "$addr" --nick history-talker chat channel "$token-1"
+	"$VOELINCTL" connect "$addr" --nick history-talker chat channel "$token-2"
+	sleep 1
+	# Back: the stored history at once, then what was missed, from the gateway.
+	if ! engine "$url" "$user" --db "$db" --chat channel:1 --expect "$token-2" \
+		--seconds 15 >"$out" 2>&1; then
+		cat "$out" "$STATE_DIR/tsgw-$svc.log"
+		fail "messages sent while offline did not arrive"
+	fi
+	grep -E "^history gateway channel:1 .*$token-1" "$out" || { cat "$out"; fail "$token-1 not from the gateway"; }
+	grep -E "^history gateway channel:1 .*$token-2" "$out" || { cat "$out"; fail "$token-2 not from the gateway"; }
+	# And stored: the next visit shows them from the database first.
+	if ! engine "$url" "$user" --db "$db" --chat channel:1 --expect "history gateway channel:1 batch" \
+		--seconds 15 >"$out" 2>&1; then
+		cat "$out"
+		fail "third chat history sync failed"
+	fi
+	grep -E "^history local channel:1 .*$token-2" "$out" || { cat "$out"; fail "$token-2 was not stored"; }
+	admin_request "$svc" "$url" '{"config_reset":{"key":"relay.pinned_channels"}}' '"config_value"' >/dev/null
+	rm -f "$db"*
+}
+
+# Post, pin, react, topic and topic post through the engine as a normal user;
+# pinning is allowed by a permission rule the admin sets for the test.
+features_check() {
+	local svc=$1 url=$2 user=$3 out="$STATE_DIR/roundtrip.log"
+	admin_request "$svc" "$url" '{"perm_set":{"action":"pin","rule":{"everyone":true}}}' '"perm_rules"' >/dev/null
+	if ! engine "$url" "$user" --roundtrip channel:1 --seconds 20 >"$out" 2>&1; then
+		cat "$out"
+		admin_request "$svc" "$url" '{"perm_reset":{"action":"pin"}}' '"perm_rules"' >/dev/null || true
+		fail "pin/react/topic round trip failed"
+	fi
+	admin_request "$svc" "$url" '{"perm_reset":{"action":"pin"}}' '"perm_rules"' >/dev/null
+	grep -E "^roundtrip|\"pinned\":\{|\"reaction\":\{" "$out" | cut -c1-160
+}
+
+# TeamSpeak 6: an engine session streams; its stream registers in the
+# gateway's directory; a viewer that connects later finds it and watches it.
+directory_check() {
+	local svc=$1 addr=$2 url=$3 user=$4 streamer="dir-$$-$RANDOM" title="directory-$RANDOM"
+	local out="$STATE_DIR/directory-stream.log" viewer_out="$STATE_DIR/directory-watch.log"
+	engine "$url" "$STATE_DIR/$svc-admin.json" --voice "$addr" --nick "$streamer" --loopback \
+		--stream-seconds 30 --stream-title "$title" --seconds 45 >"$out" 2>&1 &
+	local streamer_pid=$!
+	for _ in $(seq 1 80); do grep -q '"stream_registered"' "$out" 2>/dev/null && break; sleep 0.25; done
+	grep -q '"stream_registered"' "$out" || { cat "$out"; fail "the stream did not register in the directory"; }
+	if ! engine "$url" "$user" --voice "$addr" --nick "late-dir-$$" --loopback \
+		--watch-streamer "$streamer" --expect-frames 30 --seconds 25 >"$viewer_out" 2>&1; then
+		cat "$viewer_out" "$out"
+		fail "late viewer did not watch the stream from the directory"
+	fi
+	grep -qF "\"title\":\"$title\"" "$viewer_out" || { cat "$viewer_out"; fail "the directory did not list the stream"; }
+	kill -INT "$streamer_pid" 2>/dev/null || true
+	wait "$streamer_pid" 2>/dev/null || true
+	grep -E '"stream_registered"' "$out" | cut -c1-160
+	grep -E "^watching|^received" "$viewer_out"
+}
+
+# A voice session through the engine: voelinctl engine <addr> <args>.
+eng() {
+	local addr=$1
+	shift
+	"$VOELINCTL" engine "$addr" "$@"
+}
+
+# The unique id the server knows an identity by (TeamSpeak 6: another hash).
+server_uid() {
+	local svc=$1 id=$2 field=uid
+	[[ $svc == ts6 ]] && field=uid6
+	"$VOELINCTL" identity show --identity "$id" | awk -v f="$field:" '$1 == f { print $2 }'
+}
+
+# Run a background listener, then the action; both must succeed.
+roundtrip() {
+	local what=$1 listen_log=$2 listener_cmd=$3 action_cmd=$4
+	eval "$listener_cmd" >"$listen_log" 2>&1 &
+	local listener=$!
+	sleep 3
+	if ! eval "$action_cmd" >"$STATE_DIR/action.log" 2>&1; then
+		cat "$STATE_DIR/action.log" "$listen_log"
+		fail "$what: the action failed"
+	fi
+	if ! wait "$listener"; then
+		cat "$listen_log" "$STATE_DIR/action.log"
+		fail "$what: not received"
+	fi
+}
+
+# Files, avatars, pokes, private and offline messages, contacts through the
+# engine (voelinctl engine).
+engine_voice_check() {
+	local svc=$1 addr=$2 admin_id="$STATE_DIR/$svc-admin.json"
+	local user="$STATE_DIR/voice-user.json" other="$STATE_DIR/voice-other.json"
+	[[ -f "$user" ]] || "$VOELINCTL" identity new --out "$user" >/dev/null
+	[[ -f "$other" ]] || "$VOELINCTL" identity new --out "$other" >/dev/null
+	local t="$$-$RANDOM" dir="$STATE_DIR/files-$svc"
+	rm -rf "$dir" && mkdir -p "$dir/in"
+
+	# Files: the admin uploads (guests may not) and links the file in chat;
+	# a reader downloads it from the link; a guest lists it; it is deleted.
+	head -c 1500000 /dev/urandom >"$dir/smoke-$t.bin"
+	roundtrip "file link" "$dir/reader.log" \
+		"eng $addr --nick file-reader --seconds 25 listen --fetch-links $dir/in" \
+		"eng $addr --identity $admin_id --nick file-sharer --seconds 20 files upload $dir/smoke-$t.bin --share --overwrite"
+	cmp "$dir/smoke-$t.bin" "$dir/in/smoke-$t.bin" || fail "the downloaded file differs"
+	grep -E "^file link|^transfer 7 done" "$dir/reader.log"
+	if ! eng "$addr" --nick file-lister --seconds 20 files ls --channel 1 --path / \
+		--expect "smoke-$t.bin" >"$dir/ls.log" 2>&1; then
+		cat "$dir/ls.log"
+		fail "the file is not listed"
+	fi
+	grep "smoke-$t.bin" "$dir/ls.log"
+	eng "$addr" --identity "$admin_id" --nick file-sharer --seconds 20 files rm --channel 1 \
+		"/smoke-$t.bin" >/dev/null || fail "could not delete the file"
+
+	# Avatar: set by one client (kept by the server), fetched by another.
+	printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==' |
+		base64 -d >"$dir/avatar.png"
+	local md5
+	md5=$(md5sum "$dir/avatar.png" | cut -d' ' -f1)
+	eng "$addr" --identity "$user" --nick avatar-owner-$t --seconds 20 avatar set "$dir/avatar.png" \
+		>"$dir/avatar-set.log" 2>&1 || { cat "$dir/avatar-set.log"; fail "could not set the avatar"; }
+	roundtrip "avatar" "$dir/avatar-owner.log" \
+		"eng $addr --identity $user --nick avatar-owner-$t --seconds 10 listen --expect never-$t || true" \
+		"eng $addr --nick avatar-fetcher --seconds 12 avatar wait --nick avatar-owner-$t --md5 $md5"
+	grep "^avatar avatar-owner-$t" "$STATE_DIR/action.log"
+
+	# Poke and private message from one guest to another.
+	roundtrip "poke" "$dir/poke.log" \
+		"eng $addr --identity $user --nick poke-target-$t --seconds 15 listen --expect poke-$t" \
+		"eng $addr --nick poker --seconds 10 poke --to poke-target-$t --message poke-$t"
+	grep "^poke from" "$dir/poke.log"
+	roundtrip "private message" "$dir/dm.log" \
+		"eng $addr --identity $user --nick dm-target-$t --seconds 15 listen --expect dm-$t" \
+		"eng $addr --nick dm-sender --seconds 10 dm --to dm-target-$t --message dm-$t"
+	grep "^chat private" "$dir/dm.log"
+
+	# Offline message: the admin writes (guests may not), the user reads
+	# and deletes it.
+	local uid
+	uid=$(server_uid "$svc" "$user")
+	eng "$addr" --identity "$admin_id" --nick mailer --seconds 15 offline send --to-uid "$uid" \
+		--subject "smoke $t" --message "offline-$t" >"$dir/offline-send.log" 2>&1 ||
+		{ cat "$dir/offline-send.log"; fail "could not send the offline message"; }
+	if ! eng "$addr" --identity "$user" --nick mail-reader --seconds 15 offline read \
+		--expect "offline-$t" --delete >"$dir/offline-read.log" 2>&1; then
+		cat "$dir/offline-read.log"
+		fail "the offline message did not arrive"
+	fi
+	grep "offline-$t" "$dir/offline-read.log"
+
+	# Contacts: a friend seen online; a blocked contact's poke flagged.
+	local db="$dir/contacts.db"
+	eng "$addr" --db "$db" contacts set "$uid" --relation friend --nickname friend >/dev/null
+	eng "$addr" --db "$db" contacts set "$(server_uid "$svc" "$other")" --relation blocked >/dev/null
+	roundtrip "friend presence" "$dir/friend.log" \
+		"eng $addr --identity $user --nick friend-$t --seconds 10 listen --expect never-$t || true" \
+		"eng $addr --db $db --nick friend-watcher --seconds 10 contacts ls --expect-online $uid"
+	grep "^friend" "$STATE_DIR/action.log" | tail -1
+	roundtrip "blocked poke" "$dir/blocked.log" \
+		"eng $addr --db $db --set privacy.block_mode=flag --nick blocker-$t --seconds 15 listen --expect '(blocked)'" \
+		"eng $addr --identity $other --nick blocked-poker --seconds 10 poke --to blocker-$t --message blocked-$t"
+	grep "^poke from" "$dir/blocked.log"
+	rm -rf "$dir"
 }
 
 for svc in "${SERVERS[@]}"; do
@@ -235,8 +525,11 @@ for svc in "${SERVERS[@]}"; do
 	presence_check "$addr" "${QUERY[$svc]}"
 	relay_check "$addr" "${QUERY[$svc]}"
 	gateway_check "$svc" "$addr"
+	engine_voice_check "$svc" "$addr"
 	if [[ $svc == ts6 ]]; then
 		stream_check "$addr"
+		stream_late_check "$addr"
+		stream_elsewhere_check "$addr" "$admin"
 	fi
 done
 

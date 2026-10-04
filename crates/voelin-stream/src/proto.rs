@@ -76,12 +76,19 @@ impl LeaveReason {
 	}
 }
 
+/// The most `setupstream` announces, in kbit/s: TeamSpeak 6 servers keep
+/// the bitrate in 16 bits and wrap anything above (6.0.0-beta13.1 announced
+/// 100000 as 34464), but enforce nothing, so a stream sends its real rate
+/// peer to peer whatever the announcement says.
+pub const MAX_ANNOUNCED_BITRATE: u32 = u16::MAX as u32;
+
 /// Parameters of `setupstream`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamSetup {
 	pub name: String,
 	pub kind: StreamKind,
-	/// kbit/s; the server caps streams at 10 Mbit/s.
+	/// The stream's video bitrate in kbit/s (the single layer's without
+	/// simulcast); announced as at most [`MAX_ANNOUNCED_BITRATE`].
 	pub bitrate: u32,
 	/// `accessibility`: the official client and ts6-manager send 1.
 	pub accessibility: u8,
@@ -116,6 +123,11 @@ pub struct StreamInfo {
 	pub bitrate: u32,
 	pub viewer_limit: u32,
 	pub audio: bool,
+	/// How many watch it: `viewer` of `notifystreaminfo`, 0 for a stream
+	/// that just started, then kept current from the viewers joining and
+	/// leaving (see [`StreamDirectory`](crate::session::StreamDirectory)).
+	/// `None` where nothing told (e.g. a gateway's directory entry).
+	pub viewers: Option<u32>,
 }
 
 /// Stream notifications, decoded from [`InMessage`].
@@ -126,7 +138,18 @@ pub enum StreamNotification {
 		info: StreamInfo,
 		return_code: Option<String>,
 	},
+	/// A stream in our channel, or the answer to [`stream_info`].
 	Info(StreamInfo),
+	/// The streamer changed its stream (`updatestream`); only the changed fields.
+	Updated {
+		id: String,
+		streamer: ClientId,
+		name: Option<String>,
+		kind: Option<StreamKind>,
+		bitrate: Option<u32>,
+		viewer_limit: Option<u32>,
+		audio: Option<bool>,
+	},
 	Stopped {
 		id: String,
 		streamer: Option<ClientId>,
@@ -179,22 +202,38 @@ impl StreamNotification {
 						bitrate: p.bitrate.unwrap_or(0),
 						viewer_limit: p.viewer_limit.unwrap_or(0),
 						audio: p.audio.unwrap_or(false),
+						viewers: Some(0),
 					},
 					return_code: p.return_code.clone(),
 				})
 				.collect(),
+			// The answer for a client without streams has no parts but
+			// `return_code`.
 			InMessage::StreamInfo(m) => m
 				.iter()
 				.filter_map(|p| {
 					Some(Self::Info(StreamInfo {
-						id: p.stream_id.clone(),
+						id: p.stream_id.clone().filter(|id| !id.is_empty())?,
 						streamer: p.client_id?,
 						name: p.stream_name.clone().unwrap_or_default(),
 						kind: StreamKind::from_u8(p.stream_type.unwrap_or(3)),
 						bitrate: p.bitrate.unwrap_or(0),
 						viewer_limit: p.viewer_limit.unwrap_or(0),
 						audio: p.audio.unwrap_or(false),
+						viewers: p.viewers,
 					}))
+				})
+				.collect(),
+			InMessage::StreamUpdated(m) => m
+				.iter()
+				.map(|p| Self::Updated {
+					id: p.stream_id.clone(),
+					streamer: p.client_id,
+					name: p.stream_name.clone(),
+					kind: p.stream_type.map(StreamKind::from_u8),
+					bitrate: p.bitrate,
+					viewer_limit: p.viewer_limit,
+					audio: p.audio,
 				})
 				.collect(),
 			InMessage::StreamStopped(m) => m
@@ -252,7 +291,8 @@ impl StreamNotification {
 	pub fn stream_id(&self) -> &str {
 		match self {
 			Self::Started { info, .. } | Self::Info(info) => &info.id,
-			Self::Stopped { id, .. }
+			Self::Updated { id, .. }
+			| Self::Stopped { id, .. }
 			| Self::JoinRequest { id, .. }
 			| Self::JoinResponse { id, .. }
 			| Self::Signaling { id, .. }
@@ -268,7 +308,7 @@ pub fn setup(setup: &StreamSetup) -> OutCommand {
 	c2s::OutSetupStreamMessage::new(&mut iter::once(c2s::OutSetupStreamPart {
 		stream_name: Cow::Borrowed(&setup.name),
 		stream_type: setup.kind.to_u8(),
-		bitrate: setup.bitrate,
+		bitrate: setup.bitrate.min(MAX_ANNOUNCED_BITRATE),
 		access: setup.accessibility,
 		stream_mode: setup.mode,
 		viewer_limit: setup.viewer_limit,
@@ -320,6 +360,17 @@ pub fn signaling(id: &str, peer: ClientId, json: &str) -> OutCommand {
 	))
 }
 
+/// `requeststreaminfo`: ask for the streams of `streamer`, also one in
+/// another channel. The server answers with `notifystreaminfo` (one part per
+/// stream; none if the client does not stream). This is how a client learns
+/// about streams that started before it joined the server or the channel:
+/// the server announces streams only to those in the channel when they start.
+pub fn stream_info(streamer: ClientId) -> OutCommand {
+	c2s::OutRequestStreamInfoMessage::new(&mut iter::once(c2s::OutRequestStreamInfoPart {
+		client_id: streamer,
+	}))
+}
+
 /// `removeclientfromstream`: end a viewer's session (`reason` is usually
 /// [`LeaveReason::Kicked`]; the viewer gets `notifystreamclientleft` with it).
 pub fn remove_viewer(id: &str, viewer: ClientId, reason: LeaveReason) -> OutCommand {
@@ -340,6 +391,56 @@ mod tests {
 		String::from_utf8(cmd.0.content().to_vec()).unwrap()
 	}
 
+	/// The stream notifications in a command as the server sends it.
+	fn parse(command: &str) -> Vec<StreamNotification> {
+		use tsproto_packets::packets::{Direction, Flags, InPacket, PacketType};
+		let out = OutCommand::new(Direction::S2C, Flags::empty(), PacketType::Command, command);
+		let packet = InPacket::new(Direction::S2C, out.0.data());
+		let msg = InMessage::new(packet.header(), packet.content()).unwrap();
+		StreamNotification::from_message(&msg)
+	}
+
+	#[test]
+	fn stream_info_answers() {
+		// As the server answered `requeststreaminfo` (6.0.0-beta13.1).
+		let answer = parse(
+			"notifystreaminfo return_code=0 clid=6 id=6b5158dd name=renamed\\sagain type=3 \
+			 accessibility=1 mode=1 viewer=0 bitrate=4000 viewer_limit=0 audio=1|clid=6 \
+			 id=069ba23c name=second type=3 accessibility=1 mode=1 viewer=2 bitrate=4608 \
+			 viewer_limit=0 audio=0",
+		);
+		let infos: Vec<_> = answer
+			.iter()
+			.map(|n| match n {
+				StreamNotification::Info(i) => {
+					(i.id.as_str(), i.streamer, i.name.as_str(), i.audio, i.viewers)
+				}
+				other => panic!("{other:?}"),
+			})
+			.collect();
+		assert_eq!(
+			infos,
+			[
+				("6b5158dd", ClientId(6), "renamed again", true, Some(0)),
+				("069ba23c", ClientId(6), "second", false, Some(2))
+			]
+		);
+		// A client without streams.
+		assert!(parse("notifystreaminfo return_code=1").is_empty());
+		assert_eq!(
+			parse("notifystreamupdated clid=6 id=6b5158dd name=renamed bitrate=4000"),
+			[StreamNotification::Updated {
+				id: "6b5158dd".into(),
+				streamer: ClientId(6),
+				name: Some("renamed".into()),
+				kind: None,
+				bitrate: Some(4000),
+				viewer_limit: None,
+				audio: None,
+			}]
+		);
+	}
+
 	#[test]
 	fn commands() {
 		let s = StreamSetup { name: "my screen".into(), ..Default::default() };
@@ -348,6 +449,11 @@ mod tests {
 			"setupstream name=my\\sscreen type=3 bitrate=4608 accessibility=1 mode=1 viewer_limit=0 \
 			 audio=1"
 		);
+		// 60 Mbit/s is announced as it is; beyond 16 bits, the most the
+		// server keeps instead of a wrapped value.
+		let fast = |bitrate| text(setup(&StreamSetup { bitrate, ..s.clone() }));
+		assert!(fast(60_000).contains(" bitrate=60000 "));
+		assert!(fast(100_000).contains(" bitrate=65535 "));
 		assert_eq!(
 			text(join_request("u-1", ClientId(5), "", false)),
 			"joinstreamrequest id=u-1 clid=5 msg is_remove=0"
@@ -361,6 +467,7 @@ mod tests {
 			text(remove_viewer("u-1", ClientId(7), LeaveReason::Kicked)),
 			"removeclientfromstream id=u-1 clid=7 reason=5"
 		);
+		assert_eq!(text(stream_info(ClientId(6))), "requeststreaminfo clid=6");
 		let r = text(respond("u-1", ClientId(7), Some("v=0"), true));
 		assert!(r.starts_with("respondjoinstreamrequest id=u-1 clid=7"), "{r}");
 		assert!(r.contains("offer=v=0") && r.contains("decision=1"), "{r}");

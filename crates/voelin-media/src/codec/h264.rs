@@ -9,7 +9,9 @@
 //! disable it (see docs/media.md).
 //!
 //! TeamSpeak clients only decode H.264 Constrained High; OpenH264 encodes
-//! without B-frames, so its High profile output qualifies.
+//! without B-frames, so its High profile output qualifies. The official
+//! client decodes H.264 only once it downloaded OpenH264 itself, so streams
+//! prefer codecs it always decodes (`voelin_core::media::decoded_everywhere`).
 
 use std::path::{Path, PathBuf};
 
@@ -21,7 +23,8 @@ use openh264::encoder::{
 use openh264::formats::{YUVSlices, YUVSource};
 
 use crate::codec::{
-	Codec, ContentHint, EncodedFrame, EncoderBackend, EncoderConfig, VideoDecoder, VideoEncoder,
+	Codec, ContentHint, EncodedChunk, EncodedFrame, EncoderBackend, EncoderConfig, VideoDecoder,
+	VideoEncoder,
 };
 use crate::convert;
 use crate::frame::{FrameData, Plane, VideoFrame};
@@ -172,14 +175,7 @@ impl OpenH264 {
 	}
 }
 
-/// H.264 profile of the encoder output.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum H264Profile {
-	/// Constrained High (what TeamSpeak clients decode).
-	#[default]
-	ConstrainedHigh,
-	ConstrainedBaseline,
-}
+pub use super::H264Profile;
 
 /// OpenH264 encoder.
 pub struct OpenH264Encoder {
@@ -187,11 +183,19 @@ pub struct OpenH264Encoder {
 	config: EncoderConfig,
 	profile: H264Profile,
 	encoder: Option<Encoder>,
+	/// The last frame's bitstream (reused).
+	output: Vec<u8>,
 }
 
 impl OpenH264Encoder {
 	fn new(library: OpenH264, config: EncoderConfig) -> Result<Self> {
-		let mut encoder = Self { library, config, profile: H264Profile::default(), encoder: None };
+		let mut encoder = Self {
+			library,
+			profile: config.h264_profile,
+			config,
+			encoder: None,
+			output: Vec::new(),
+		};
 		encoder.encoder = Some(encoder.create()?);
 		Ok(encoder)
 	}
@@ -244,6 +248,24 @@ impl VideoEncoder for OpenH264Encoder {
 	}
 
 	fn encode(&mut self, frame: &VideoFrame, force_keyframe: bool) -> Result<Vec<EncodedFrame>> {
+		let mut frames = Vec::new();
+		self.encode_with(frame, force_keyframe, &mut |f| {
+			frames.push(EncodedFrame {
+				data: f.data.to_vec(),
+				keyframe: f.keyframe,
+				pts_90khz: f.pts_90khz,
+			});
+		})?;
+		Ok(frames)
+	}
+
+	/// Writes the NAL units into a buffer kept across frames.
+	fn encode_with(
+		&mut self,
+		frame: &VideoFrame,
+		force_keyframe: bool,
+		out: &mut dyn FnMut(EncodedChunk<'_>),
+	) -> Result<()> {
 		let i420 = convert::to_i420(frame)?;
 		let FrameData::I420 { y, u, v } = &i420.data else {
 			unreachable!("to_i420 returns I420");
@@ -263,11 +285,15 @@ impl VideoEncoder for OpenH264Encoder {
 			Err(e) => return Err(Error::Encoder { codec: Codec::H264, message: e.to_string() }),
 		};
 		let keyframe = matches!(bitstream.frame_type(), FrameType::IDR | FrameType::I);
-		let data = bitstream.to_vec();
-		if data.is_empty() || matches!(bitstream.frame_type(), FrameType::Skip) {
-			return Ok(Vec::new());
+		if matches!(bitstream.frame_type(), FrameType::Skip) {
+			return Ok(());
 		}
-		Ok(vec![EncodedFrame { data, keyframe, pts_90khz: i420.pts_90khz() }])
+		self.output.clear();
+		bitstream.write_vec(&mut self.output);
+		if !self.output.is_empty() {
+			out(EncodedChunk { data: &self.output, keyframe, pts_90khz: i420.pts_90khz() });
+		}
+		Ok(())
 	}
 
 	/// The `openh264` crate has no safe way to change the bitrate of a

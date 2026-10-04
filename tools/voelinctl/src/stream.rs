@@ -11,19 +11,19 @@ use clap::{Args, Subcommand};
 use futures::prelude::*;
 use tokio::io::{AsyncBufReadExt, BufReader, Lines, Stdin};
 use tokio::time::{Instant, Interval, sleep_until};
-use tsclientlib::events::{Event, PropertyId};
 use tsclientlib::prelude::*;
 use tsclientlib::{ClientId, Connection, MessageHandle, StreamItem};
 use voelin_core::media::voelin_media::capture::SourceId;
-use voelin_core::media::voelin_media::{Codecs, VideoFrame, convert};
+use voelin_core::media::voelin_media::{Codec, Codecs, VideoFrame, convert};
 use voelin_core::media::{
-	CaptureBackend, EncodedSource, Latest, Streamer, StreamerConfig, VideoPipeline, peer_config,
-	stream_codec,
+	CaptureBackend, EncodedSource, EncoderPreference, Latest, Pattern, Streamer, StreamerConfig,
+	VideoPipeline, auto_bitrate, peer_config, preferred_codec, stream_codec, video_codec,
 };
 use voelin_model::ServerFlavor;
 use voelin_stream::{
-	EndReason, FrameSource, MediaKind, Output, PeerConfig, Request, StreamEvent, StreamInfo,
-	StreamNotification, StreamSetup, StreamerEvent, StreamerOptions, Streams, WatchEvent,
+	ClientState, EndReason, FrameSource, LayerId, LayerSpec, MediaKind, Output, PeerConfig,
+	Request, SrtpProfile, StreamEvent, StreamInfo, StreamNotification, StreamSetup, StreamerEvent,
+	StreamerOptions, Streams, SyntheticSource, VideoCodec, ViewerInfo, WatchEvent,
 };
 
 #[derive(Args, Debug, Clone)]
@@ -39,6 +39,15 @@ pub struct StreamArgs {
 	/// Do not use STUN.
 	#[arg(long, global = true, conflicts_with = "stun")]
 	no_stun: bool,
+	/// SRTP profiles in order of preference, comma separated
+	/// (`AES_CM_128_HMAC_SHA1_80`, `AEAD_AES_128_GCM`, `AEAD_AES_256_GCM`)
+	/// [default: in this order].
+	#[arg(long, global = true, value_delimiter = ',')]
+	srtp: Vec<String>,
+	/// No bandwidth estimation: a streamer sends its bitrate as it is,
+	/// unpaced, whatever the path takes (for measuring the path).
+	#[arg(long, global = true)]
+	no_bwe: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -61,6 +70,11 @@ pub enum StreamCommand {
 		/// Size of the test pattern.
 		#[arg(long, default_value = "1280x720")]
 		size: String,
+		/// What the test pattern shows: `simple` (a flat background, cheap to
+		/// encode) or `desktop` (a scrolling code editor, about as costly as
+		/// real screen content).
+		#[arg(long, default_value = "simple")]
+		pattern: String,
 		/// Accept every viewer.
 		#[arg(long)]
 		auto_accept: bool,
@@ -70,12 +84,44 @@ pub enum StreamCommand {
 		/// Video frames per second.
 		#[arg(long, default_value_t = 30)]
 		fps: u32,
-		/// Video bitrate in kbit/s (announced in `setupstream` too).
-		#[arg(long, default_value_t = 4608)]
+		/// Video bitrate in kbit/s (announced in `setupstream` too, up to the
+		/// 65535 a server keeps); 0: automatic, from the size and frame rate
+		/// (up to 60 Mbit/s).
+		#[arg(long, default_value_t = 0)]
 		bitrate: u32,
 		/// No audio track.
 		#[arg(long)]
 		no_audio: bool,
+		/// A simulcast layer, repeatable: `<scale or WxH>:<bitrate>[:<option>...]`
+		/// with options `min=<bitrate>` (estimate a viewer needs; default half
+		/// the bitrate), `max=<bitrate>`, `fps=<n>`, `rid=<id>`, `id=<n>`
+		/// (default: position). Bitrates in bit/s with optional k or M, e.g.
+		/// `--layer 1.0:6000k --layer 0.5:1500k:min=800k`.
+		#[arg(long = "layer", value_parser = parse_layer)]
+		layers: Vec<LayerSpec>,
+		/// Offer RID simulcast (the layers' `rid`s) to viewers. Only for peers
+		/// that support it; official TeamSpeak clients do not.
+		#[arg(long)]
+		simulcast: bool,
+		/// Send placeholder frames (tiny VP8 keyframes padded to each layer's
+		/// bitrate, no encoder) instead of capturing.
+		#[arg(long, conflicts_with_all = ["source", "synthetic"])]
+		placeholder: bool,
+		/// Video codec: vp8, vp9, h264, av1 [default: VP8, which every client
+		/// decodes; with --encoder, that encoder's codec]. One codec is offered.
+		#[arg(long)]
+		codec: Option<String>,
+		/// Encoder: `auto`, `software` or a backend name from `voelinctl
+		/// stream encoders`.
+		#[arg(long, default_value = "auto")]
+		encoder: String,
+		/// No hardware encoders unless named with --encoder.
+		#[arg(long)]
+		no_hardware: bool,
+		/// Print what the encoder makes once a second (per layer: size, fps,
+		/// kbit/s, encode time) while live.
+		#[arg(long)]
+		stats: bool,
 	},
 	/// List the streams in our channel.
 	List {
@@ -101,6 +147,14 @@ pub enum StreamCommand {
 		/// Save the last decoded picture as PNG.
 		#[arg(long)]
 		save_frame: Option<PathBuf>,
+		/// Ask for this simulcast layer (by id) once the streamer's offer
+		/// lists its layers (Voelin streamers with several do).
+		#[arg(long)]
+		layer: Option<u16>,
+		/// Print what arrives and decodes once a second (fps, kbit/s, size,
+		/// decoder, frames skipped).
+		#[arg(long)]
+		stats: bool,
 	},
 }
 
@@ -112,17 +166,75 @@ pub async fn run(con: &mut Connection, args: &StreamArgs) -> Result<()> {
 	if !ServerFlavor::from_version_string(&version).capabilities().streams {
 		bail!("streams need a TeamSpeak 6 server (this one is {version})");
 	}
+	// Every channel, as the app does: a stream can be watched from any
+	// channel, and the server shows a streamer only in subscribed channels.
+	con.get_state()?.server.set_subscribed(true).send(con)?;
 	let mut config = if args.loopback { PeerConfig::loopback() } else { PeerConfig::default() };
 	if !args.stun.is_empty() {
 		config.stun_servers = args.stun.clone();
 	} else if args.no_stun {
 		config.stun_servers.clear();
 	}
+	if !args.srtp.is_empty() {
+		config.srtp_profiles = parse_srtp(&args.srtp)?;
+	}
+	config.bandwidth_estimation = !args.no_bwe;
+	let mut codecs = Codecs::new();
+	if let StreamCommand::Start {
+		simulcast,
+		placeholder,
+		codec,
+		encoder,
+		no_hardware,
+		synthetic,
+		size,
+		fps,
+		bitrate,
+		..
+	} = &args.command
+	{
+		config.simulcast = *simulcast;
+		codecs.set_preference(EncoderPreference {
+			hardware: !no_hardware,
+			backend: encoder.parse().unwrap_or_default(),
+		});
+		if *placeholder {
+			// The placeholder frames are VP8.
+			config.video_codecs = vec![VideoCodec::Vp8];
+		} else {
+			let configured = match codec {
+				Some(codec) => Some(codec.parse().map_err(|e| anyhow::anyhow!("{e}"))?),
+				// One codec is offered (below): by default the one every
+				// client decodes. A named encoder brings its own codec.
+				None if encoder == "auto" => Some(Codec::Vp8),
+				None => None,
+			};
+			if let Some(codec) = preferred_codec(&codecs, configured) {
+				config.video_codecs = vec![video_codec(codec)];
+			}
+			if *synthetic {
+				let (w, h) = parse_size(size)?;
+				let bitrate = u64::from(pattern_kbps(size, *fps, *bitrate)?) * 1000;
+				config.set_h264_format(w, h, *fps, bitrate);
+			}
+		}
+	}
 	// Offer the codec we encode, accept what we decode.
-	let codecs = Arc::new(Codecs::new());
-	let config = peer_config(&codecs, config);
+	let codecs = Arc::new(codecs);
+	let mut config = match &args.command {
+		StreamCommand::Start { placeholder: true, .. } => config,
+		_ => peer_config(&codecs, config),
+	};
+	if matches!(args.command, StreamCommand::Start { .. }) {
+		// Frames go out through a `FrameSource`, which does not tell codecs
+		// apart: offer the stream codec alone, H.264 in the profile it is
+		// encoded in (Constrained High).
+		config.video_codecs.truncate(1);
+		config.h264_profile_level_ids.truncate(1);
+	}
 	let codec = stream_codec(&codecs, &config);
 	let mut driver = Driver { streams: Streams::new(own, config), pending: HashMap::new() };
+	driver.sync_clients(con)?;
 	let result = match &args.command {
 		StreamCommand::Start {
 			name,
@@ -134,44 +246,105 @@ pub async fn run(con: &mut Connection, args: &StreamArgs) -> Result<()> {
 			fps,
 			bitrate,
 			no_audio,
+			layers,
+			placeholder,
+			stats,
+			pattern,
+			..
 		} => {
-			let source = if *synthetic { "synthetic" } else { source.as_str() };
-			let (source, backend) = parse_source(source)?;
-			let Some(codec) = codec else { bail!("no video encoder in this build") };
-			let config = StreamerConfig {
-				source,
-				backend,
-				fps: *fps,
-				bitrate_kbps: *bitrate,
-				codec,
-				audio: !no_audio,
-				synthetic_size: parse_size(size)?,
-				..StreamerConfig::default()
+			let pattern = match pattern.as_str() {
+				"simple" => Pattern::Simple,
+				"desktop" => Pattern::Desktop,
+				other => bail!("unknown pattern {other:?}: simple or desktop"),
 			};
-			let streamer = Streamer::start(&codecs, config).await.context("capture")?;
-			println!("capturing with {} ({codec})", streamer.backend());
-			if let Some(e) = streamer.audio_error() {
-				println!("no system audio: {e}");
+			let mut layers = layers.clone();
+			number_layers(&mut layers);
+			let layers = &layers;
+			for l in layers {
+				println!(
+					"layer {}: {}, {}, needs {}{}",
+					l.id,
+					l.size.map_or(format!("scale {}", l.scale), |(w, h)| format!("{w}x{h}")),
+					rate(l.bitrate),
+					rate(l.min_bitrate),
+					l.rid.as_ref().map(|r| format!(", rid {r}")).unwrap_or_default()
+				);
 			}
-			let setup = StreamSetup {
-				name: name.clone(),
-				bitrate: *bitrate,
-				audio: streamer.has_audio(),
+			// The test pattern's (and the placeholder's) automatic bitrate is
+			// known now; a capture's once it captures.
+			let wanted = *bitrate;
+			let mut bitrate = pattern_kbps(size, *fps, wanted)?;
+			let (source, audio) = if *placeholder {
+				let source = SyntheticSource::with_layers(
+					*fps,
+					(u64::from(bitrate) * 1000 / 8 / u64::from((*fps).max(1))) as usize,
+					!no_audio,
+					layers,
+				);
+				(Source::Placeholder(source), !no_audio)
+			} else {
+				let source = if *synthetic { "synthetic" } else { source.as_str() };
+				let (source, backend) = parse_source(source)?;
+				let config_source = source.clone();
+				let Some(codec) = codec else { bail!("no video encoder in this build") };
+				let config = StreamerConfig {
+					source,
+					backend,
+					fps: *fps,
+					bitrate_kbps: wanted,
+					codec,
+					encoder: codecs.preference().clone(),
+					audio: !no_audio,
+					synthetic_size: parse_size(size)?,
+					synthetic_pattern: pattern,
+					layers: layers.clone(),
+					..StreamerConfig::default()
+				};
+				let streamer = Streamer::start(&codecs, config).await.context("capture")?;
+				if wanted == 0 && !matches!(config_source, SourceId::Synthetic) {
+					bitrate = streamer.bitrate_kbps();
+				}
+				let backend = streamer.stats().layers.first().and_then(|l| l.backend);
+				let backend = backend.map_or("?".to_owned(), |b| b.to_string());
+				println!("capturing with {} ({codec} through {backend})", streamer.backend());
+				if let Some(e) = streamer.audio_error() {
+					println!("audio: {e}");
+				}
+				let audio = streamer.has_audio();
+				(Source::Encoded(EncodedSource::new(streamer)), audio)
+			};
+			println!("bitrate: {}", rate(u64::from(bitrate) * 1000));
+			let setup = StreamSetup { name: name.clone(), bitrate, audio, ..Default::default() };
+			let options = StreamerOptions {
+				setup,
+				auto_accept: *auto_accept,
+				layers: layers.clone(),
 				..Default::default()
 			};
-			let options = StreamerOptions { setup, auto_accept: *auto_accept };
-			let source = EncodedSource::new(streamer);
-			start(con, &mut driver, options, source, seconds.map(Duration::from_secs)).await
+			let length = seconds.map(Duration::from_secs);
+			start(con, &mut driver, options, source, length, *stats).await
 		}
 		StreamCommand::List { settle_ms } => {
 			list(con, &mut driver, Duration::from_millis(*settle_ms)).await
 		}
-		StreamCommand::Watch { id, streamer_nick, expect_frames, timeout, save_frame } => {
-			let target = Target { id: id.clone(), streamer_nick: streamer_nick.clone() };
-			let timeout = timeout.map(Duration::from_secs);
-			let expect = *expect_frames;
-			let save = save_frame.as_deref();
-			watch(con, &mut driver, codecs, &target, expect, timeout, save).await
+		StreamCommand::Watch {
+			id,
+			streamer_nick,
+			expect_frames,
+			timeout,
+			save_frame,
+			layer,
+			stats,
+		} => {
+			let target =
+				Target { id: id.clone(), streamer_nick: streamer_nick.clone(), layer: *layer };
+			let until = Until {
+				frames: *expect_frames,
+				timeout: timeout.map(Duration::from_secs),
+				save: save_frame.as_deref(),
+				stats: *stats,
+			};
+			watch(con, &mut driver, codecs, &target, until).await
 		}
 	};
 	driver.finish(con).await;
@@ -198,10 +371,133 @@ fn parse_source(spec: &str) -> Result<(SourceId, CaptureBackend)> {
 	})
 }
 
+/// `wanted` kbit/s, or for 0 (automatic) the automatic bitrate of a test
+/// pattern of `size` at `fps`.
+fn pattern_kbps(size: &str, fps: u32, wanted: u32) -> Result<u32> {
+	if wanted > 0 {
+		return Ok(wanted);
+	}
+	let (w, h) = parse_size(size)?;
+	Ok(u32::try_from(auto_bitrate(w, h, fps) / 1000).unwrap_or(u32::MAX))
+}
+
 /// `<width>x<height>`.
 fn parse_size(size: &str) -> Result<(u32, u32)> {
 	let parsed = size.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
 	parsed.with_context(|| format!("bad size {size:?}, expected e.g. 1280x720"))
+}
+
+/// A bitrate in bit/s: `1500000`, `1500k`, `1.5M`.
+fn parse_rate(rate: &str) -> Result<u64, String> {
+	let (number, factor) = match rate.trim().char_indices().last() {
+		Some((i, 'k' | 'K')) => (&rate[..i], 1e3),
+		Some((i, 'm' | 'M')) => (&rate[..i], 1e6),
+		_ => (rate, 1.0),
+	};
+	match number.trim().parse::<f64>() {
+		Ok(n) if n.is_finite() && n >= 0.0 => Ok((n * factor).round() as u64),
+		_ => Err(format!("bad bitrate {rate:?}, expected e.g. 1500k")),
+	}
+}
+
+/// `--layer <scale or WxH>:<bitrate>[:min=..][:max=..][:fps=..][:rid=..][:id=..]`;
+/// the id defaults to the position in the list (fixed up by the caller).
+fn parse_layer(spec: &str) -> Result<LayerSpec, String> {
+	let mut parts = spec.split(':');
+	let (Some(size), Some(bitrate)) = (parts.next(), parts.next()) else {
+		return Err(format!("bad layer {spec:?}, expected e.g. 0.5:1500k:min=800k"));
+	};
+	let bitrate = parse_rate(bitrate)?;
+	let mut layer =
+		LayerSpec { min_bitrate: bitrate / 2, id: LayerId::MAX, ..LayerSpec::single(bitrate) };
+	match parse_size(size) {
+		Ok(size) => layer.size = Some(size),
+		Err(_) => {
+			layer.scale = size.parse().map_err(|_| format!("bad scale or size {size:?}"))?;
+			if !(layer.scale > 0.0 && layer.scale.is_finite()) {
+				return Err(format!("bad scale {size:?}"));
+			}
+		}
+	}
+	for option in parts {
+		let (key, value) = option.split_once('=').ok_or(format!("bad layer option {option:?}"))?;
+		let number = || value.parse().map_err(|_| format!("bad number in {option:?}"));
+		match key {
+			"min" => layer.min_bitrate = parse_rate(value)?,
+			"max" => layer.max_bitrate = Some(parse_rate(value)?),
+			"fps" => layer.max_fps = Some(number()?),
+			"rid" => layer.rid = Some(value.to_owned()),
+			"id" => layer.id = number()? as LayerId,
+			_ => return Err(format!("unknown layer option {key:?} (min, max, fps, rid, id)")),
+		}
+	}
+	Ok(layer)
+}
+
+/// Layer ids not given are the layers' positions.
+fn number_layers(layers: &mut [LayerSpec]) {
+	for (i, layer) in layers.iter_mut().enumerate() {
+		if layer.id == LayerId::MAX {
+			layer.id = i as LayerId;
+		}
+	}
+}
+
+fn parse_srtp(names: &[String]) -> Result<Vec<SrtpProfile>> {
+	names
+		.iter()
+		.map(|n| {
+			SrtpProfile::from_name(n).with_context(|| {
+				format!(
+					"unknown SRTP profile {n:?}: {}",
+					SrtpProfile::ALL.map(SrtpProfile::name).join(", ")
+				)
+			})
+		})
+		.collect()
+}
+
+/// A bitrate for people.
+fn rate(bitrate: u64) -> String {
+	if bitrate >= 1_000_000 {
+		format!("{:.2} Mbit/s", bitrate as f64 / 1e6)
+	} else {
+		format!("{} kbit/s", bitrate / 1000)
+	}
+}
+
+/// What the streamer sends.
+enum Source {
+	/// Captured and encoded.
+	Encoded(EncodedSource),
+	/// Placeholder frames, no encoder.
+	Placeholder(SyntheticSource),
+}
+
+impl Source {
+	fn frames(&mut self) -> &mut dyn FrameSource {
+		match self {
+			Self::Encoded(s) => s,
+			Self::Placeholder(s) => s,
+		}
+	}
+}
+
+/// A viewer as the streamer's output lists it.
+fn viewer_text(con: &Connection, v: &ViewerInfo) -> String {
+	let mut text = format!("{} (clid {}, {:?}", nick(con, v.client), v.client.0, v.state);
+	match v.layer {
+		Some(layer) => text += &format!(", layer {layer}"),
+		None if v.state == voelin_stream::ViewerState::Connected => text += ", all layers (RID)",
+		None => {}
+	}
+	if let Some(estimate) = v.estimate {
+		text += &format!(", estimate {}", rate(estimate));
+	}
+	if let Some(profile) = v.srtp_profile {
+		text += &format!(", {profile}");
+	}
+	text + ")"
 }
 
 /// What woke the driver.
@@ -278,21 +574,23 @@ impl Driver {
 					self.streams.request_failed(&request, &e.to_string());
 				}
 			}
-			StreamItem::BookEvents(events) => {
-				let state = con.get_state()?;
-				for e in &events {
-					if let Event::PropertyChanged {
-						id: PropertyId::ClientIsStreaming(clid), ..
-					} = e && let Some(streaming) =
-						state.clients.get(clid).and_then(|c| c.is_streaming)
-					{
-						self.streams.set_client_streaming(*clid, streaming);
-					}
-				}
-				self.streams.retain_streamers(|c| state.clients.contains_key(&c));
-			}
+			StreamItem::BookEvents(_) => self.sync_clients(con)?,
 			_ => {}
 		}
+		Ok(())
+	}
+
+	/// Tell the sessions the clients on the server: streams of clients that
+	/// left, stopped or are not in our channel are dropped; streams that
+	/// started before we came are looked up.
+	fn sync_clients(&mut self, con: &Connection) -> Result<()> {
+		let state = con.get_state()?;
+		let clients = state
+			.clients
+			.values()
+			.map(|c| (c.id.0, ClientState { channel: c.channel.0, streaming: c.is_streaming }))
+			.collect();
+		self.streams.update_clients(clients);
 		Ok(())
 	}
 
@@ -352,13 +650,15 @@ async fn start(
 	con: &mut Connection,
 	driver: &mut Driver,
 	options: StreamerOptions,
-	mut source: EncodedSource,
+	mut source: Source,
 	length: Option<Duration>,
+	stats: bool,
 ) -> Result<()> {
 	let auto_accept = options.auto_accept;
+	let mut stats_at = Instant::now();
 	driver.streams.start(options)?;
 	let deadline = length.map(|l| Instant::now() + l);
-	let mut tick = tokio::time::interval(source.interval());
+	let mut tick = tokio::time::interval(source.frames().interval());
 	tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 	let mut lines = (!auto_accept).then(|| BufReader::new(tokio::io::stdin()).lines());
 	let (mut live, mut video, mut audio) = (false, 0u64, 0u64);
@@ -368,7 +668,7 @@ async fn start(
 		match wake {
 			Wake::Stream => {}
 			Wake::Tick => {
-				source.poll_frames(std::time::Instant::now(), &mut frames);
+				source.frames().poll_frames(std::time::Instant::now(), &mut frames);
 				let connected =
 					driver.streams.streamer().is_some_and(|s| s.has_connected_viewers());
 				for frame in frames.drain(..) {
@@ -379,6 +679,30 @@ async fn start(
 						}
 					}
 					driver.streams.write_frame(&frame);
+				}
+				if stats
+					&& stats_at.elapsed() >= Duration::from_secs(1)
+					&& let Source::Encoded(source) = &source
+				{
+					stats_at = Instant::now();
+					let s = source.streamer().stats();
+					let layers: Vec<String> = s
+						.layers
+						.iter()
+						.map(|l| {
+							format!(
+								"L{} {}x{} {:.1} fps {:.0} kbit/s target {} enc {:.2} ms",
+								l.id,
+								l.width,
+								l.height,
+								l.fps,
+								l.kbps,
+								rate(l.bitrate),
+								l.encode_time.as_secs_f64() * 1e3
+							)
+						})
+						.collect();
+					println!("encoder: capture {:.1} fps; {}", s.capture_fps, layers.join("; "));
 				}
 			}
 			Wake::Line(None) => lines = None,
@@ -408,19 +732,21 @@ async fn start(
 					);
 				}
 				StreamerEvent::Viewers(viewers) => {
-					let list: Vec<String> = viewers
-						.iter()
-						.map(|v| {
-							format!("{} (clid {}, {:?})", nick(con, v.client), v.client.0, v.state)
-						})
-						.collect();
+					let list: Vec<String> = viewers.iter().map(|v| viewer_text(con, v)).collect();
 					println!("viewers: [{}]", list.join(", "));
 				}
-				StreamerEvent::KeyframeRequest => source.request_keyframe(),
+				StreamerEvent::KeyframeRequest { layer } => {
+					source.frames().request_layer_keyframe(layer);
+				}
+				StreamerEvent::LayerBitrate { layer, bitrate } => {
+					println!("layer {layer}: target {}", rate(bitrate));
+					source.frames().set_layer_bitrate(layer, bitrate);
+				}
 				StreamerEvent::Ended(reason) => {
 					println!("sent {video} video / {audio} audio frames to connected viewers");
-					let stats = source.streamer().stats();
-					if let Some(e) = &stats.error {
+					if let Source::Encoded(source) = &source
+						&& let Some(e) = &source.streamer().stats().error
+					{
 						println!("last encoder error: {e}");
 					}
 					return match reason {
@@ -462,21 +788,27 @@ async fn list(con: &mut Connection, driver: &mut Driver, settle: Duration) -> Re
 	let streams: Vec<&StreamInfo> = driver.streams.directory().iter().collect();
 	for s in &streams {
 		println!(
-			"{}  {:?} by {} (clid {}), {} kbit/s{}",
+			"{}  {:?} by {} (clid {}), {} kbit/s{}{}",
 			s.id,
 			s.name,
 			nick(con, s.streamer),
 			s.streamer.0,
 			s.bitrate,
-			if s.audio { ", audio" } else { "" }
+			if s.audio { ", audio" } else { "" },
+			s.viewers.map(|n| format!(", {n} watching")).unwrap_or_default()
 		);
 	}
-	// Streams that started before we connected are only known by the flag.
+	// Streamers in our channel known only by the flag: the lookup failed or
+	// did not answer in time.
 	let state = con.get_state()?;
+	let channel = state.clients.get(&state.own_client).map(|c| c.channel);
 	let mut unannounced = 0;
 	for c in state.clients.values() {
-		if c.is_streaming == Some(true) && !streams.iter().any(|s| s.streamer == c.id) {
-			println!("?  {} (clid {}) is streaming; id not announced to us", c.name, c.id.0);
+		if c.is_streaming == Some(true)
+			&& Some(c.channel) == channel
+			&& !streams.iter().any(|s| s.streamer == c.id)
+		{
+			println!("?  {} (clid {}) is streaming; id not known", c.name, c.id.0);
 			unannounced += 1;
 		}
 	}
@@ -489,6 +821,8 @@ async fn list(con: &mut Connection, driver: &mut Driver, settle: Duration) -> Re
 struct Target {
 	id: Option<String>,
 	streamer_nick: Option<String>,
+	/// The simulcast layer to ask for.
+	layer: Option<u16>,
 }
 
 impl Target {
@@ -535,16 +869,27 @@ fn save_png(picture: &VideoFrame, path: &Path) -> Result<()> {
 	Ok(())
 }
 
+/// How long [`watch`] runs and what it reports.
+struct Until<'a> {
+	/// Exit once this many pictures were decoded.
+	frames: Option<u64>,
+	timeout: Option<Duration>,
+	/// Save the last picture here.
+	save: Option<&'a Path>,
+	/// Print the decoder's numbers once a second.
+	stats: bool,
+}
+
 async fn watch(
 	con: &mut Connection,
 	driver: &mut Driver,
 	codecs: Arc<Codecs>,
 	target: &Target,
-	expect: Option<u64>,
-	timeout: Option<Duration>,
-	save: Option<&Path>,
+	until: Until<'_>,
 ) -> Result<()> {
+	let Until { frames: expect, timeout, save, stats: print_stats } = until;
 	let deadline = timeout.map(|t| Instant::now() + t);
+	let mut stats_at = Instant::now();
 	let mut watching: Option<String> = None;
 	let (mut video, mut audio) = (0u64, 0u64);
 	let mut codec = None;
@@ -567,7 +912,7 @@ async fn watch(
 	);
 	let mut tick = tokio::time::interval(Duration::from_millis(100));
 	let mut first_picture = true;
-	let mut last_picture: Option<VideoFrame> = None;
+	let mut last_picture: Option<Arc<VideoFrame>> = None;
 	let summary = |video: u64, audio: u64, decoder: &VideoPipeline| {
 		let stats = decoder.stats();
 		println!(
@@ -576,7 +921,7 @@ async fn watch(
 			stats.error.map(|e| format!(" (last error: {e})")).unwrap_or_default()
 		);
 	};
-	let save_last = |last: &Option<VideoFrame>| -> Result<()> {
+	let save_last = |last: &Option<Arc<VideoFrame>>| -> Result<()> {
 		match (save, last) {
 			(Some(path), Some(picture)) => {
 				save_png(picture, path)?;
@@ -604,6 +949,21 @@ async fn watch(
 			summary(video, audio, &decoder);
 			return save_last(&last_picture);
 		}
+		if print_stats && watching.is_some() && stats_at.elapsed() >= Duration::from_secs(1) {
+			stats_at = Instant::now();
+			let s = decoder.stats();
+			println!(
+				"decoded {} fps, received {}, {}x{} {}, {} decoded, {} skipped, {} keyframe requests",
+				s.fps,
+				rate(s.bitrate),
+				s.width,
+				s.height,
+				s.decoder.map_or("-".to_owned(), |d| d.to_string()),
+				s.decoded,
+				s.skipped,
+				s.keyframe_requests
+			);
+		}
 		if watching.is_none() {
 			if let Some((id, streamer)) = target.find(con, &driver.streams) {
 				println!("watching {id} of {} (clid {})", nick(con, streamer), streamer.0);
@@ -621,6 +981,16 @@ async fn watch(
 			}
 			match event {
 				WatchEvent::Accepted => println!("accepted, connecting"),
+				WatchEvent::Layers(layers) => {
+					println!(
+						"layers offered: {:?}",
+						layers.iter().map(|l| l.id).collect::<Vec<_>>()
+					);
+					if let Some(layer) = target.layer {
+						driver.streams.set_watch_layer(&id, Some(layer))?;
+						println!("asked for layer {layer}");
+					}
+				}
 				WatchEvent::Connected => println!("connected"),
 				WatchEvent::Frame(f) => {
 					match f.kind {
@@ -654,5 +1024,49 @@ async fn watch(
 			}
 			_ => {}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn layers() {
+		let mut layers = vec![
+			parse_layer("1.0:6000k").unwrap(),
+			parse_layer("0.5:1.5M:min=800k:max=2M:fps=15:rid=h:id=7").unwrap(),
+			parse_layer("640x360:300000:min=0").unwrap(),
+		];
+		number_layers(&mut layers);
+		let [full, half, small] = &layers[..] else { unreachable!() };
+		assert_eq!(
+			(full.id, full.scale, full.bitrate, full.min_bitrate),
+			(0, 1.0, 6_000_000, 3_000_000)
+		);
+		assert_eq!(
+			(half.id, half.scale, half.bitrate, half.min_bitrate),
+			(7, 0.5, 1_500_000, 800_000)
+		);
+		assert_eq!(
+			(half.max_bitrate, half.max_fps, half.rid.as_deref()),
+			(Some(2_000_000), Some(15), Some("h"))
+		);
+		assert_eq!((small.id, small.size, small.min_bitrate), (2, Some((640, 360)), 0));
+		for bad in ["1.0", "x:1k", "0:1k", "1.0:fast", "1.0:1k:min", "1.0:1k:color=red"] {
+			assert!(parse_layer(bad).is_err(), "{bad}");
+		}
+	}
+
+	#[test]
+	fn srtp_names() {
+		let names = ["aes_cm_128_hmac_sha1_80".to_owned(), "AEAD_AES_256_GCM".to_owned()];
+		assert_eq!(
+			parse_srtp(&names).unwrap(),
+			[SrtpProfile::Aes128CmSha1_80, SrtpProfile::AeadAes256Gcm]
+		);
+		assert!(parse_srtp(&["rot13".to_owned()]).is_err());
+		assert_eq!(rate(1_500_000), "1.50 Mbit/s");
+		assert_eq!(rate(300_000), "300 kbit/s");
 	}
 }

@@ -14,7 +14,7 @@ pub(crate) enum QueryCmd {
 }
 
 pub(crate) enum QueryEvent {
-	Presence(Presence),
+	Presence(Box<Presence>),
 	Chat(ChatMessage),
 	Error(String),
 	Disconnected,
@@ -35,7 +35,7 @@ pub(crate) async fn run(
 			e = observed.recv() => match e {
 				Ok(ObserverEvent::Snapshot(_)) | Ok(ObserverEvent::Delta(_)) | Err(broadcast::error::RecvError::Lagged(_)) => {
 					let presence = observer.presence().read().unwrap().clone();
-					let _ = events.send(QueryEvent::Presence(presence));
+					let _ = events.send(QueryEvent::Presence(Box::new(presence)));
 				}
 				Ok(ObserverEvent::Chat(msg)) => {
 					if open.contains(&msg.target) {

@@ -1,7 +1,12 @@
 //! Screen and system-audio capture.
 //!
-//! Backends deliver frames on a [`FrameReceiver`] from their own thread; the
-//! queue drops the oldest frame when the consumer falls behind.
+//! Screen backends hand each frame to a [`FrameSink`] on their own thread,
+//! with the pixels still in the capture buffer (a PipeWire buffer, the X11
+//! shared-memory segment, a Windows staging texture), so the sink converts
+//! straight from it ([`ScreenCapture::start_sink`]). [`ScreenCapture::start`]
+//! instead copies frames into a [`FrameReceiver`]; the queue drops the oldest
+//! frame when the consumer falls behind. Audio backends use a
+//! [`FrameReceiver`].
 //!
 //! | Backend | Screen | System audio |
 //! |---|---|---|
@@ -18,20 +23,27 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::frame::{AudioBuffer, VideoFrame};
-use crate::queue::FrameReceiver;
+use crate::frame::{AudioBuffer, FrameRef, VideoFrame};
+use crate::queue::{FrameReceiver, FrameSender, frame_channel};
 use crate::{Error, Result};
 
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+pub(crate) mod dmabuf;
 pub mod external;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod pipewire_audio;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
+pub mod pipewire_links;
+pub mod playback;
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod portal;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
-mod pw;
+pub(crate) mod pw;
 pub mod synthetic;
 #[cfg(windows)]
 pub mod windows;
+#[cfg(all(target_os = "linux", feature = "wlroots"))]
+pub mod wlroots;
 #[cfg(all(target_os = "linux", feature = "x11"))]
 pub mod x11;
 
@@ -48,6 +60,8 @@ pub enum SourceId {
 	Portal,
 	/// The synthetic test pattern.
 	Synthetic,
+	/// The Stream Studio's composite ([`crate::studio::StudioCapture`]).
+	Studio,
 }
 
 /// A source as shown in a picker.
@@ -64,7 +78,8 @@ pub struct CaptureSource {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CaptureOptions {
-	/// Maximum frame rate.
+	/// Maximum frame rate for [`ScreenCapture::start`] (with
+	/// [`ScreenCapture::start_sink`], [`FrameSink::max_fps`] decides).
 	pub fps: u32,
 	/// Draw the mouse cursor into the frames.
 	pub cursor: bool,
@@ -78,6 +93,206 @@ impl Default for CaptureOptions {
 	}
 }
 
+/// Receives captured frames on the capture backend's thread; see
+/// [`ScreenCapture::start_sink`].
+pub trait FrameSink: Send {
+	/// The highest frame rate wanted now. Backends that pace themselves
+	/// (X11, the test pattern) capture at this rate; it may change while
+	/// capturing.
+	fn max_fps(&self) -> u32;
+
+	/// Whether a frame captured at `timestamp` would be used. Backends that
+	/// get frames pushed (PipeWire, Windows, wlroots) ask before they map or
+	/// copy anything, and give unwanted buffers straight back.
+	fn wants(&mut self, timestamp: Duration) -> bool {
+		let _ = timestamp;
+		true
+	}
+
+	/// One frame. Its pixels are only valid during the call. Returns
+	/// `false` when no more frames are wanted; the backend then stops.
+	fn frame(&mut self, frame: FrameRef<'_>) -> bool;
+
+	/// Whether the sink takes frames that are still in a DMA-BUF (GPU
+	/// memory) through [`dmabuf`](Self::dmabuf), e.g. for a VA-API encoder
+	/// that imports them without a copy
+	/// (`ffmpeg::FfmpegEncoder::encode_dmabuf`). Backends that capture into
+	/// DMA-BUFs (the portal) then offer the buffer before mapping it.
+	fn accepts_dmabuf(&self) -> bool {
+		false
+	}
+
+	/// A frame in a DMA-BUF, valid during the call. `None`: not taken, the
+	/// backend maps it and calls [`frame`](Self::frame); `Some(more)` as the
+	/// result of `frame`.
+	fn dmabuf(&mut self, frame: &DmaBufRef) -> Option<bool> {
+		let _ = frame;
+		None
+	}
+
+	/// Whether the sink takes pictures the platform puts straight into the
+	/// encoder ([`gpu`](Self::gpu)), because every encoder it feeds takes
+	/// them. Android's screen capture then renders into MediaCodec's input
+	/// surface instead of handing over pixels.
+	fn accepts_gpu(&self) -> bool {
+		false
+	}
+
+	/// Such a picture: only its size and time
+	/// ([`GpuFrame::rendered`](crate::GpuFrame::rendered)). Returns `false`
+	/// when no more frames are wanted.
+	fn gpu(&mut self, frame: crate::GpuFrame) -> bool {
+		let _ = frame;
+		true
+	}
+
+	/// Tiled DRM format modifiers of RGB buffers the sink takes now
+	/// ([`accepts_dmabuf`](Self::accepts_dmabuf)), best first; backends that
+	/// negotiate buffers (the portal) offer them ahead of LINEAR, and offer
+	/// again when this changes. The CPU cannot read tiled buffers, so a sink
+	/// lists only what it imports.
+	fn dmabuf_modifiers(&self) -> &[u64] {
+		&[]
+	}
+}
+
+/// `fourcc_code(a, b, c, d)` of `drm_fourcc.h`.
+pub const fn drm_fourcc(code: &[u8; 4]) -> u32 {
+	code[0] as u32 | (code[1] as u32) << 8 | (code[2] as u32) << 16 | (code[3] as u32) << 24
+}
+
+/// `DRM_FORMAT_MOD_LINEAR`.
+pub const DRM_MOD_LINEAR: u64 = 0;
+/// `DRM_FORMAT_MOD_INVALID`: the driver's implicit layout.
+pub const DRM_MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
+
+/// A captured frame still in a DMA-BUF: one buffer object (a file
+/// descriptor borrowed for the call) with one plane per `planes` entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DmaBufRef {
+	pub width: u32,
+	pub height: u32,
+	/// As [`VideoFrame::timestamp`].
+	pub timestamp: Duration,
+	/// DRM format (`drm_fourcc(b"XR24")` for BGRx, `b"NV12"`, ...).
+	pub fourcc: u32,
+	/// DRM format modifier (tiling); [`DRM_MOD_LINEAR`] for rows in memory
+	/// order.
+	pub modifier: u64,
+	pub fd: i32,
+	/// Size of the buffer object in bytes.
+	pub size: usize,
+	/// `(offset, stride)` of each plane in the buffer object.
+	pub planes: [(usize, usize); 4],
+	pub plane_count: usize,
+}
+
+/// Keeps frames of a source for a frame-rate cap, by their timestamps, so
+/// the kept frames are evenly spaced at the cap (or at the source's rate if
+/// that is lower).
+#[derive(Clone, Debug)]
+pub struct FramePacer {
+	interval: Duration,
+	next: Option<Duration>,
+}
+
+impl FramePacer {
+	/// At most `fps` frames per second; `None` (or 0) keeps every frame.
+	pub fn new(fps: Option<u32>) -> Self {
+		let mut pacer = Self { interval: Duration::ZERO, next: None };
+		pacer.set_fps(fps);
+		pacer
+	}
+
+	pub fn set_fps(&mut self, fps: Option<u32>) {
+		self.interval = match fps {
+			Some(fps) if fps > 0 => Duration::from_secs(1) / fps,
+			_ => Duration::ZERO,
+		};
+	}
+
+	/// Whether a frame at `timestamp` is due. A frame up to an eighth of
+	/// the interval early still counts, so jitter does not halve the rate;
+	/// a timestamp far before the expected one means the clock started
+	/// over.
+	pub fn due(&self, timestamp: Duration) -> bool {
+		self.next.is_none_or(|next| {
+			timestamp + self.interval / 8 >= next || timestamp + 2 * self.interval <= next
+		})
+	}
+
+	/// Record that the frame at `timestamp` was kept.
+	pub fn keep(&mut self, timestamp: Duration) {
+		let iv = self.interval;
+		self.next = Some(match self.next {
+			// On time: keep the average rate exact.
+			Some(next) if timestamp < next + iv && timestamp + 2 * iv > next => next + iv,
+			// Late (or the clock jumped): start over from this frame.
+			_ => timestamp + iv,
+		});
+	}
+
+	/// [`due`](Self::due), and [`keep`](Self::keep) if so.
+	pub fn take(&mut self, timestamp: Duration) -> bool {
+		let due = self.due(timestamp);
+		if due {
+			self.keep(timestamp);
+		}
+		due
+	}
+}
+
+/// Copies frames into a queue: [`ScreenCapture::start`] of backends that
+/// deliver into a [`FrameSink`].
+pub(crate) struct QueueSink {
+	tx: FrameSender<VideoFrame>,
+	fps: u32,
+	pacer: FramePacer,
+}
+
+impl QueueSink {
+	pub fn new(options: &CaptureOptions) -> (Self, FrameReceiver<VideoFrame>) {
+		let (tx, rx) = frame_channel(options.queue);
+		let fps = options.fps.max(1);
+		(Self { tx, fps, pacer: FramePacer::new(Some(fps)) }, rx)
+	}
+}
+
+impl FrameSink for QueueSink {
+	fn max_fps(&self) -> u32 {
+		self.fps
+	}
+
+	fn wants(&mut self, timestamp: Duration) -> bool {
+		!self.tx.is_closed() && self.pacer.due(timestamp)
+	}
+
+	fn frame(&mut self, frame: FrameRef<'_>) -> bool {
+		self.pacer.keep(frame.timestamp);
+		self.tx.send(frame.to_frame())
+	}
+}
+
+/// Hand frames of `frames` to `sink` on a thread of their own, until either
+/// side stops ([`ScreenCapture::start_sink`] of backends that only have
+/// [`ScreenCapture::start`]).
+pub fn forward(mut frames: FrameReceiver<VideoFrame>, mut sink: Box<dyn FrameSink>) -> Result<()> {
+	std::thread::Builder::new().name("voelin-capture-forward".into()).spawn(move || {
+		loop {
+			match frames.recv_timeout(Duration::from_millis(100)) {
+				Some(frame) => {
+					if sink.wants(frame.timestamp) && !sink.frame(frame.view()) {
+						break;
+					}
+				}
+				None if frames.is_closed() => break,
+				None => {}
+			}
+		}
+	})?;
+	Ok(())
+}
+
 /// A screen / window capture backend.
 pub trait ScreenCapture: Send {
 	/// Short name for logs (`"x11"`, `"portal"`, ...).
@@ -87,14 +302,37 @@ pub trait ScreenCapture: Send {
 	/// returns a single [`SourceId::Portal`] entry: its dialog picks.
 	fn sources(&mut self) -> Result<Vec<CaptureSource>>;
 
-	/// Start capturing (stopping a previous capture). Async because the
-	/// portal asks the user. Frames stop when [`ScreenCapture::stop`] is
-	/// called, the backend is dropped, or the receiver is dropped.
+	/// Start capturing (stopping a previous capture), copying every frame
+	/// into a queue. Async because the portal asks the user. Frames stop
+	/// when [`ScreenCapture::stop`] is called, the backend is dropped, or the
+	/// receiver is dropped.
 	fn start(
 		&mut self,
 		source: &SourceId,
 		options: &CaptureOptions,
 	) -> BoxFuture<'_, Result<FrameReceiver<VideoFrame>>>;
+
+	/// Start capturing into `sink` (stopping a previous capture): the
+	/// backend calls it on its own thread with the pixels still in the
+	/// capture buffer, and drops it when the capture ends (stopped, the
+	/// source went away, or the sink returned `false`). `options.fps` is
+	/// ignored in favour of [`FrameSink::max_fps`].
+	///
+	/// The default forwards the frames of [`ScreenCapture::start`] from a
+	/// thread of its own.
+	fn start_sink(
+		&mut self,
+		source: &SourceId,
+		options: &CaptureOptions,
+		sink: Box<dyn FrameSink>,
+	) -> BoxFuture<'_, Result<()>> {
+		let source = source.clone();
+		let options = CaptureOptions { fps: sink.max_fps(), ..options.clone() };
+		Box::pin(async move {
+			let frames = self.start(&source, &options).await?;
+			forward(frames, sink)
+		})
+	}
 
 	fn stop(&mut self);
 }
@@ -196,6 +434,11 @@ impl Ticker {
 		Self { interval: Duration::from_secs(1) / fps.max(1), next: Instant::now() }
 	}
 
+	/// Change the rate from the next tick on.
+	pub fn set_fps(&mut self, fps: u32) {
+		self.interval = Duration::from_secs(1) / fps.max(1);
+	}
+
 	/// Sleep until the next tick. Returns `false` if `stop` got set.
 	pub fn wait(&mut self, stop: &AtomicBool) -> bool {
 		self.next += self.interval;
@@ -231,5 +474,33 @@ mod tests {
 		std::thread::sleep(Duration::from_millis(20));
 		worker.stop();
 		assert!(started.elapsed() < Duration::from_millis(900));
+	}
+
+	fn kept(pacer: &mut FramePacer, source_fps: f64, jitter_ms: f64, seconds: u32) -> usize {
+		let frames = (source_fps * f64::from(seconds)) as usize;
+		(0..frames)
+			.filter(|&n| {
+				let jitter = if n % 2 == 0 { jitter_ms } else { -jitter_ms };
+				let t = (n as f64 * 1000.0 / source_fps + jitter).max(0.0);
+				pacer.take(Duration::from_secs_f64(t / 1000.0))
+			})
+			.count()
+	}
+
+	#[test]
+	fn pacer_caps_the_rate() {
+		// 60 Hz source, 30 fps cap: every other frame, even with jitter.
+		assert_eq!(kept(&mut FramePacer::new(Some(30)), 60.0, 1.5, 10), 300);
+		// 144 Hz to 60: close to 60.
+		let n = kept(&mut FramePacer::new(Some(60)), 144.0, 0.5, 10);
+		assert!((580..=610).contains(&n), "{n}");
+		// A cap above the source rate keeps everything.
+		assert_eq!(kept(&mut FramePacer::new(Some(120)), 30.0, 2.0, 10), 300);
+		assert_eq!(kept(&mut FramePacer::new(None), 60.0, 0.0, 1), 60);
+		// A clock that jumps back starts over.
+		let mut pacer = FramePacer::new(Some(10));
+		assert!(pacer.take(Duration::from_secs(100)));
+		assert!(!pacer.take(Duration::from_millis(100_050)));
+		assert!(pacer.take(Duration::from_secs(1)));
 	}
 }

@@ -1,11 +1,17 @@
 //! `voelinctl`: headless TeamSpeak 3/6 client for development and integration tests.
 
+mod alloc;
+mod bench;
+mod client;
+mod engine;
 mod gateway;
 mod identity;
 mod observe;
+mod probe;
 mod query;
 mod session;
 mod stream;
+mod studio;
 mod tree;
 mod versions;
 mod voice;
@@ -16,6 +22,10 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
+
+/// Counts heap allocations for `stream bench` and `studio bench`.
+#[global_allocator]
+static ALLOCATOR: alloc::Counting = alloc::Counting;
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -44,8 +54,21 @@ enum Command {
 	Observe(observe::ObserveArgs),
 	/// Read and write a channel's chat through an invisible query relay.
 	Relay(observe::RelayArgs),
-	/// Use a tsgw gateway as a user: presence, chat, history.
+	/// Use a tsgw gateway as a user: presence, chat, history; with
+	/// `--engine` through the client engine (chat history sync, pins,
+	/// reactions, topics, events, stream directory, administration).
 	Gateway(gateway::GatewayArgs),
+	/// A voice session through the client engine: files, avatars, pokes,
+	/// private and offline messages, contacts.
+	Engine(client::EngineArgs),
+	/// TeamSpeak 6: probe how a client that arrives after a stream started
+	/// can learn about it; prints every command both clients exchange.
+	ProbeStream(probe::ProbeStreamArgs),
+	/// Stream tools that need no server (`bench`).
+	Stream(bench::StreamToolArgs),
+	/// The Stream Studio headless: run a scene file (preview picture,
+	/// recording, replay clip, WHIP), bench the compositor, list cameras.
+	Studio(studio::StudioArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -66,6 +89,38 @@ enum IdentityCommand {
 	Show {
 		#[arg(long)]
 		identity: Option<PathBuf>,
+	},
+	/// List the identities in the client database, with the id `export` takes.
+	List {
+		/// Client database [default: <data dir>/voelin/client.db].
+		#[arg(long)]
+		store: Option<PathBuf>,
+	},
+	/// Import identities from the official TeamSpeak 3 and 6 clients. Their
+	/// files are only read, never changed.
+	Import {
+		/// A TeamSpeak 3 `.ini` export, or a client's `settings.db`.
+		#[arg(long, conflicts_with = "auto", required_unless_present = "auto")]
+		from: Option<PathBuf>,
+		/// Look in the usual locations of both clients instead (see
+		/// `docs/identity.md`).
+		#[arg(long)]
+		auto: bool,
+		/// List what was found and store nothing.
+		#[arg(long)]
+		dry_run: bool,
+		#[arg(long)]
+		store: Option<PathBuf>,
+	},
+	/// Write an identity from the client database to a TeamSpeak 3 `.ini`
+	/// export, which the official client imports.
+	Export {
+		/// Identity id, from `identity list`.
+		id: i64,
+		/// File to write; on Unix it is created readable only by you.
+		path: PathBuf,
+		#[arg(long)]
+		store: Option<PathBuf>,
 	},
 }
 
@@ -135,7 +190,7 @@ pub enum Action {
 		command: VoiceCommand,
 	},
 	/// TeamSpeak 6 streams (screen sharing): start, list or watch.
-	Stream(stream::StreamArgs),
+	Stream(Box<stream::StreamArgs>),
 	/// Interactive session. Type `/help` for commands.
 	Repl,
 }
@@ -208,6 +263,10 @@ fn main() -> Result<()> {
 		Command::Observe(args) => tokio::runtime::Runtime::new()?.block_on(observe::observe(args)),
 		Command::Relay(args) => tokio::runtime::Runtime::new()?.block_on(observe::relay(args)),
 		Command::Gateway(args) => tokio::runtime::Runtime::new()?.block_on(gateway::run(args)),
+		Command::Engine(args) => tokio::runtime::Runtime::new()?.block_on(client::run(args)),
+		Command::ProbeStream(args) => tokio::runtime::Runtime::new()?.block_on(probe::run(args)),
+		Command::Stream(args) => bench::run(args),
+		Command::Studio(args) => studio::run(args),
 	}
 }
 
@@ -230,9 +289,19 @@ fn run_identity(command: IdentityCommand) -> Result<()> {
 			let id = identity::load(&path)?;
 			println!("uid:   {}", identity::uid(&id));
 			println!("level: {}", id.level());
-			println!("omega: {}", id.key().to_pub().to_ts());
+			let omega = id.key().to_pub().to_ts();
+			// TeamSpeak 6 servers know the identity by another unique id.
+			let ids = voelin_gateway_proto::UniqueIds::from_omega(&omega);
+			println!("uid6:  {}", ids.ts6);
+			println!("omega: {omega}");
 			Ok(())
 		}
+		IdentityCommand::List { store } => identity::list(store),
+		// `--auto` only means "no --from"; clap has already required one.
+		IdentityCommand::Import { from, auto: _, dry_run, store } => {
+			identity::import(from, dry_run, store)
+		}
+		IdentityCommand::Export { id, path, store } => identity::export(id, &path, store),
 	}
 }
 

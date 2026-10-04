@@ -1,0 +1,94 @@
+import { Theme } from "../theme.slint";
+import { Icon } from "icon.slint";
+
+// A red count bubble (unread, requests).
+export component CountBadge inherits Rectangle {
+    in property <int> count;
+    in property <color> fill: Theme.live;
+    width: max(18px, label.preferred-width + 10px);
+    height: 18px;
+    border-radius: 9px;
+    background: fill;
+    accessible-role: AccessibleRole.text;
+    accessible-label: count;
+    HorizontalLayout {
+        padding-left: 5px;
+        padding-right: 5px;
+        label := Text {
+            text: root.count > 99 ? "99+" : root.count;
+            color: #ffffff;
+            font-size: Theme.font-xs;
+            font-weight: Theme.weight-bold;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// The red LIVE tag.
+export component LiveBadge inherits Rectangle {
+    in property <string> text: @tr("LIVE");
+    in property <bool> large;
+    height: large ? 26px : 18px;
+    width: label.preferred-width + (large ? 16px : 10px);
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    border-radius: Theme.radius-xs;
+    background: Theme.live;
+    accessible-role: AccessibleRole.text;
+    accessible-label: text;
+    label := Text {
+        text: root.text;
+        color: #ffffff;
+        font-size: root.large ? Theme.font-body : Theme.font-xs;
+        font-weight: Theme.weight-bold;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// A small rounded label: tags, stream facts ("1080p"), roles ("Moderator").
+export component Chip inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <color> tint: Theme.text-secondary;
+    in property <brush> fill: Theme.surface-3;
+    in property <bool> outlined;
+    height: 22px;
+    width: row.preferred-width;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    border-radius: Theme.radius-pill;
+    background: fill;
+    border-width: outlined ? 1px : 0px;
+    border-color: Theme.border-strong;
+    accessible-role: AccessibleRole.text;
+    accessible-label: text;
+    row := HorizontalLayout {
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-3;
+        spacing: Theme.space-2;
+        if root.icon.width > 0: Icon {
+            source: root.icon;
+            size: 12px;
+            tint: root.tint;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: root.text;
+            color: root.tint;
+            font-size: Theme.font-xs;
+            font-weight: Theme.weight-medium;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// A coloured dot (online, connection state).
+export component Dot inherits Rectangle {
+    in property <length> size: 8px;
+    width: size;
+    height: size;
+    border-radius: size / 2;
+    background: Theme.success;
+}

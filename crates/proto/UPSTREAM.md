@@ -67,3 +67,42 @@ against or offered back to upstream.
    required `reason`; `notifyjoinstreamrequest` carries `is_remove`,
    `notifystreamstopped` and `notifystreamclientleft` carry `reason`, the latter also
    `return_code`.
+8. **File transfer fixes** (`tsclientlib/src/lib.rs`, marked "Voelin patch").
+   A server that refuses `ftinitdownload`/`ftinitupload` (file not found, no
+   permission, quota) answers with an `error` for the command's return code, which
+   came out as a `MessageResult` the caller cannot match to its
+   `FiletransferHandle`; it now fails the transfer (`FiletransferFailed`). A
+   transfer address of `0.0.0.0`/`::` means the server's own address. The return
+   code and transfer id counters wrap instead of overflowing.
+9. **TeamSpeak 6 times in milliseconds** (`ts-bookkeeping/build/message_parser.rs`,
+   "Voelin patch"). TeamSpeak 6 sends some times, e.g. `datetime` of `notifyfilelist`,
+   in milliseconds, which failed to parse and dropped the whole message (empty file
+   lists). Values from 10^11 on (year 5138 in seconds) are taken as milliseconds.
+10. **Test logger** (`tsclientlib/src/tests.rs`, "Voelin patch"). The tests' shared
+   tracing setup used `init`, which panics when quickcheck (`use_logging`) has
+   already installed a `log` logger; the panic poisoned the `Lazy` and failed every
+   later test of the binary, depending on test order. It uses `try_init` now.
+11. **TSDNS without an SRV record, as the official client resolves**
+   (`tsclientlib/src/resolver.rs`). Without an SRV record at `_tsdns._tcp.<domain>`
+   the official client asks a TSDNS server directly on TCP 41144 at the address's
+   parent domains (`A/AAAA DNS resolve for possible TSDNS successful, "example.com"`,
+   `TSDNS found at <ip>:41144 and queried successfully` in its log); upstream went
+   straight to the address on port 9987, so servers published only through TSDNS
+   (on another port) could not be reached without typing the port. Now: SRV
+   `_ts3._udp.<address>`, then TSDNS (the servers `_tsdns._tcp` names, else the
+   ones at each parent domain down to the last two labels), then A/AAAA on 9987.
+   The steps start at once and come out in that order; each is given up after
+   10 s, a TSDNS server after 3 s (connect and answer), so a port a firewall drops
+   does not stall connecting. A port typed with the address now overrides the port
+   of every result (the `_ts3._udp` one too). The TSDNS query sends the host
+   without the port, and the answer is trimmed. SRV records of weight 0, the
+   common weight, were dropped by the weighted ordering; they are kept now
+   (RFC 2782 order). A CNAME among the SRV answers no longer panics. The lookups
+   are injectable inside the module, and the tests use a fake TSDNS server and
+   fake names; the upstream tests that need DNS and the internet are `#[ignore]`d.
+12. **Private keys with leading zero bytes** (`tsproto-types/src/crypto.rs`,
+   "Voelin patch"). The TeamSpeak export stores the private scalar as a DER
+   integer, which drops leading zero bytes, and `EccKeyPrivP256::from_tomcrypt`
+   handed those fewer than 32 bytes to `from_short`, which refused them: one
+   identity in 256 (the official client's ones included) could not be imported.
+   The scalar is padded to 32 bytes now; a test round-trips such keys.

@@ -2,12 +2,26 @@
 //! viewer. The engine runs the stream sessions; `video.rs` captures,
 //! encodes and decodes.
 
+use std::time::Duration;
+
 use slint::{ComponentHandle, Model};
-use voelin_core::stream::{EndReason, LeaveReason, StreamSetup, ViewerInfo, ViewerState};
+use tracing::warn;
+use voelin_core::media::{Streamer, audio_source_specs};
+use voelin_core::settings::{
+	AudioSourceSetting, STREAM_AUDIO_SOURCES, STREAM_BITRATE_KBPS, STREAM_FPS,
+};
+use voelin_core::stream::{
+	EndReason, LayerId, LayerSpec, LeaveReason, StreamKind, StreamSetup, ViewerInfo, ViewerState,
+};
 use voelin_core::{Command, Event, StreamState, WatchState};
 
-use crate::app::{App, Bridge, ShareForm, SourceItem, StreamItem, ViewerItem, later, model};
-use crate::settings::{BITRATE_CHOICES, FPS_CHOICES, ShareDefaults};
+use crate::app::{
+	App, Bridge, ShareForm, SourceItem, StreamItem, ViewerItem, later, model, with_app,
+};
+use crate::settings::{
+	BITRATE_CHOICES, FPS_CHOICES, LEGACY_BITRATE_CHOICES, LEGACY_FPS_CHOICES, ShareDefaults,
+	nearest_choice, parse_positive,
+};
 use crate::video::{self, Capture, CaptureRequest, Decoder};
 
 /// Our stream.
@@ -20,6 +34,46 @@ pub(crate) struct Share {
 	viewers: Vec<ViewerInfo>,
 	/// The capture ended by itself and the stream is being stopped.
 	stopping: bool,
+	/// The audio mixer's meters (the studio's rows), about 15 times a second.
+	_meters: slint::Timer,
+}
+
+/// What the share dialog asks of the capture: the audio mixer's `sources`
+/// (`stream.audio_sources`) while "Share system audio" is on; off, or with
+/// no sources, no audio at all.
+fn capture_request(
+	fps: u32,
+	bitrate_kbps: u32,
+	audio: bool,
+	sources: &[AudioSourceSetting],
+	restore_token: Option<String>,
+) -> CaptureRequest {
+	let audio_sources = if audio { audio_source_specs(sources) } else { Vec::new() };
+	CaptureRequest {
+		fps,
+		bitrate_kbps,
+		audio: !audio_sources.is_empty(),
+		audio_sources,
+		restore_token,
+	}
+}
+
+/// The viewers of the sample share (VOELIN_DEMO_UI): two watch, one asks.
+fn demo_viewers() -> Vec<ViewerInfo> {
+	let viewer = |id, state, message: &str| ViewerInfo {
+		client: tsclientlib::ClientId(id),
+		state,
+		message: message.into(),
+		layer: None,
+		estimate: None,
+		srtp_profile: None,
+		codec: None,
+	};
+	vec![
+		viewer(3, ViewerState::Connected, ""),
+		viewer(5, ViewerState::Connected, ""),
+		viewer(4, ViewerState::Requested, "Can I watch?"),
+	]
 }
 
 /// The stream in the viewer.
@@ -35,8 +89,45 @@ pub(crate) struct Watch {
 	ended: bool,
 	has_frame: bool,
 	/// Shown instead of the chat.
-	shown: bool,
+	pub(crate) shown: bool,
 	decoder: Option<Decoder>,
+	/// When the picture started, for the elapsed time.
+	since: Option<std::time::Instant>,
+	/// The simulcast layers the streamer offers, largest first.
+	layers: Vec<LayerSpec>,
+	/// The layer chosen by hand; `None` follows the bandwidth estimate.
+	layer: Option<LayerId>,
+}
+
+impl Watch {
+	/// "12:34" since the picture started.
+	fn elapsed(&self) -> String {
+		let Some(since) = self.since else { return String::new() };
+		let seconds = since.elapsed().as_secs();
+		match seconds / 3600 {
+			0 => format!("{:02}:{:02}", seconds / 60, seconds % 60),
+			hours => format!("{hours}:{:02}:{:02}", (seconds / 60) % 60, seconds % 60),
+		}
+	}
+
+	/// "Auto" and one entry per layer the streamer offers.
+	fn qualities(&self) -> Vec<slint::SharedString> {
+		if self.layers.len() < 2 {
+			return Vec::new();
+		}
+		let mut names = vec![slint::SharedString::from("Auto")];
+		names.extend(self.layers.iter().map(|l| layer_name(l).into()));
+		names
+	}
+}
+
+/// "720p · 2.4 Mbit/s", or the scale when the size is not fixed.
+fn layer_name(layer: &LayerSpec) -> String {
+	let size = match layer.size {
+		Some((_, h)) => format!("{h}p"),
+		None => format!("{:.0}%", layer.scale * 100.0),
+	};
+	format!("{size} · {:.1} Mbit/s", layer.bitrate as f64 / 1_000_000.0)
 }
 
 fn end_text(reason: &EndReason, streamer: &str) -> String {
@@ -59,6 +150,23 @@ fn share_end_text(reason: &EndReason) -> String {
 	}
 }
 
+/// How many watch stream `id`: the server's count (TeamSpeak 6 tells it),
+/// else the gateway directory's.
+fn viewer_count(view: &crate::app::SessionView, id: &str) -> Option<u32> {
+	let native = view.streams.iter().find(|s| s.id == id).and_then(|s| s.viewers);
+	native.or_else(|| view.stream_viewers.get(id).copied())
+}
+
+/// "8 Mbit/s", "640 kbit/s" (the stream's announced bitrate, kbit/s); "" for 0.
+fn bitrate_text(kbps: u32) -> String {
+	match kbps {
+		0 => String::new(),
+		1..=999 => format!("{kbps} kbit/s"),
+		_ if kbps.is_multiple_of(1000) => format!("{} Mbit/s", kbps / 1000),
+		_ => format!("{:.1} Mbit/s", f64::from(kbps) / 1000.0),
+	}
+}
+
 impl App {
 	pub(crate) fn stream_event(&mut self, event: Event) {
 		match event {
@@ -72,9 +180,19 @@ impl App {
 					.iter()
 					.find(|s| view.state.own_client != Some(s.streamer.0))
 					.map(|s| s.id.clone());
+				// A client whose stream was asked for while it was looked up.
+				let pending = self
+					.pending_watch
+					.filter(|(s, _)| *s == session as i64)
+					.and_then(|(_, client)| streams.iter().find(|s| s.streamer.0 == client))
+					.map(|s| s.id.clone());
 				view.streams = streams;
 				self.refresh_streams();
-				if autowatch && let Some(id) = first {
+				self.refresh_servers();
+				if let Some(id) = pending {
+					self.pending_watch = None;
+					self.watch_stream(id);
+				} else if autowatch && let Some(id) = first {
 					self.watch_stream(id);
 				}
 			}
@@ -91,6 +209,17 @@ impl App {
 			}
 			Event::WatchState { session, stream_id, state } => {
 				self.watch_state(session as i64, &stream_id, state);
+			}
+			Event::WatchLayers { session, stream_id, layers, layer } => {
+				if let Some(watch) = self
+					.watch
+					.as_mut()
+					.filter(|w| w.session == Some(session as i64) && w.stream_id == stream_id)
+				{
+					watch.layers = layers;
+					watch.layer = layer;
+					self.refresh_viewer();
+				}
 			}
 			// Also flagged on the sink, which the encoder reads.
 			Event::StreamKeyframeRequest { .. } => {}
@@ -116,6 +245,7 @@ impl App {
 				} else {
 					share_end_text(&reason)
 				});
+				self.mixer_refresh();
 			}
 		}
 		self.refresh_streams();
@@ -160,7 +290,12 @@ impl App {
 		let current = self.current;
 		let mut items: Vec<StreamItem> = Vec::new();
 		if let Some(view) = view.filter(|v| v.streams_available()) {
-			for s in &view.streams {
+			// Every channel's streams (they can be watched from anywhere),
+			// ours first.
+			let own_channel = view.state.own_channel;
+			let mut streams: Vec<_> = view.streams.iter().collect();
+			streams.sort_by_key(|s| view.channel_of(s.streamer.0) != own_channel);
+			for s in streams {
 				let watching = self
 					.watch
 					.as_ref()
@@ -169,23 +304,34 @@ impl App {
 					id: s.id.clone().into(),
 					name: s.name.clone().into(),
 					streamer: view.nickname(s.streamer.0).into(),
+					channel: view.other_channel_name(s.streamer.0).into(),
+					streamer_id: i32::from(s.streamer.0),
+					viewers: viewer_count(view, &s.id).unwrap_or(0) as i32,
 					audio: s.audio,
 					watching,
 					own: view.state.own_client == Some(s.streamer.0),
+					kind: match s.kind {
+						StreamKind::Screen => "Screen",
+						StreamKind::Window => "Window",
+						StreamKind::Camera => "Camera",
+						StreamKind::Other(_) => "",
+					}
+					.into(),
+					bitrate: bitrate_text(s.bitrate).into(),
 				});
 			}
-			// Streams that started before we joined are only known by the
-			// streaming flag: the server does not tell their ids.
-			let channel = view.state.own_channel;
+			// Streams that started before we joined, or in another channel:
+			// the server did not announce them, and the engine is looking
+			// them up (they arrive in `StreamsChanged` like the others).
+			// Until then only the streaming flag is known.
 			for c in view.presence.clients.values() {
 				let announced = view.streams.iter().any(|s| s.streamer.0 == c.id);
-				if c.streaming == Some(true)
-					&& Some(c.channel) == channel
-					&& !announced && view.state.own_client != Some(c.id)
-				{
+				if c.streaming == Some(true) && !announced && view.state.own_client != Some(c.id) {
 					items.push(StreamItem {
 						name: c.nickname.clone().into(),
 						streamer: c.nickname.clone().into(),
+						channel: view.other_channel_name(c.id).into(),
+						streamer_id: i32::from(c.id),
 						..StreamItem::default()
 					});
 				}
@@ -199,10 +345,11 @@ impl App {
 				audio: false,
 				watching: self.watch.as_ref().is_some_and(|w| w.session.is_none() && !w.ended),
 				own: false,
+				..StreamItem::default()
 			});
 		}
 		bridge.set_streams_available(self.demo || view.is_some_and(|v| v.streams_available()));
-		bridge.set_streams(model(items));
+		crate::vm::list::sync(&self.models.streams, &items);
 		bridge.set_can_share(video::AVAILABLE);
 
 		let share = self.share.as_ref().filter(|s| Some(s.session) == current);
@@ -215,6 +362,7 @@ impl App {
 		bridge.set_share_state(state.into());
 		bridge.set_share_busy(self.share_busy);
 		bridge.set_share_error(self.share_error.clone().into());
+		bridge.set_share_audio(share.is_some_and(|s| s.capture.has_audio()));
 		let viewers: Vec<ViewerItem> = share
 			.map(|s| {
 				s.viewers
@@ -237,7 +385,7 @@ impl App {
 			.unwrap_or_default();
 		let requests = viewers.iter().filter(|v| v.state == "requested").count();
 		bridge.set_share_requests(requests as i32);
-		bridge.set_share_viewers(model(viewers));
+		crate::vm::list::sync(&self.models.viewers, &viewers);
 		let status = match share {
 			Some(s) if s.live => s.capture.status(),
 			Some(s) => format!("Starting the stream of {}…", s.capture.source_name()),
@@ -247,7 +395,7 @@ impl App {
 		bridge.set_share_status(status.into());
 	}
 
-	fn refresh_viewer(&self) {
+	pub(crate) fn refresh_viewer(&self) {
 		let Some(ui) = self.ui.upgrade() else { return };
 		let bridge = ui.global::<Bridge>();
 		let Some(watch) = &self.watch else {
@@ -264,13 +412,60 @@ impl App {
 		bridge.set_viewer_ended(watch.ended);
 		bridge.set_viewer_has_frame(watch.has_frame);
 		bridge.set_viewer_volume(self.stream_volume);
-		let info = watch.decoder.as_ref().map(Decoder::info).unwrap_or_default();
-		let info = [format!("by {}", watch.streamer), info]
+		let decoded = watch.decoder.as_ref().map(Decoder::info).unwrap_or_default();
+		let info = [format!("by {}", watch.streamer), decoded.clone()]
 			.into_iter()
 			.filter(|s| !s.is_empty())
 			.collect::<Vec<_>>()
 			.join(" · ");
 		bridge.set_viewer_info(info.into());
+		bridge.set_viewer_streamer(watch.streamer.clone().into());
+		let streamer = self
+			.view()
+			.and_then(|v| v.streams.iter().find(|s| s.id == watch.stream_id))
+			.map_or(-1, |s| i32::from(s.streamer.0));
+		bridge.set_viewer_streamer_id(streamer);
+		let members = &self.models.members;
+		bridge.set_viewer_streamer_admin(
+			(0..members.row_count())
+				.filter_map(|i| members.row_data(i))
+				.any(|m| m.id == streamer && m.admin),
+		);
+		let channel = u16::try_from(streamer).ok().and_then(|id| {
+			let view = self.view()?;
+			view.presence.channels.get(&view.channel_of(id)?).map(|c| c.name.clone())
+		});
+		bridge.set_viewer_channel(channel.unwrap_or_default().into());
+		bridge.set_viewer_elapsed(watch.elapsed().into());
+		let viewers = self.view().and_then(|v| viewer_count(v, &watch.stream_id));
+		bridge.set_viewer_count(viewers.unwrap_or(0) as i32);
+		let qualities = watch.qualities();
+		let chosen = watch
+			.layer
+			.and_then(|id| watch.layers.iter().position(|l| l.id == id))
+			.map_or(0, |i| i as i32 + 1);
+		crate::vm::list::sync(&self.models.qualities, &qualities);
+		if bridge.get_viewer_quality() != chosen {
+			bridge.set_viewer_quality(chosen);
+		}
+		bridge.set_viewer_quality_detail(decoded.into());
+	}
+
+	/// A simulcast layer of the watched stream (0: follow the bandwidth
+	/// estimate), asked of the streamer; the engine confirms with
+	/// `WatchLayers`.
+	pub(crate) fn set_stream_quality(&mut self, index: i32) {
+		let Some(watch) = &mut self.watch else { return };
+		watch.layer =
+			usize::try_from(index - 1).ok().and_then(|i| watch.layers.get(i)).map(|l| l.id);
+		if let Some(session) = watch.session {
+			self.engine.send(Command::SetWatchLayer {
+				session: session as u64,
+				stream_id: watch.stream_id.clone(),
+				layer: watch.layer,
+			});
+		}
+		self.refresh_viewer();
 	}
 
 	/// Once a second: statistics, a capture that ended, decoder problems.
@@ -297,6 +492,8 @@ impl App {
 		if self.share.is_some() {
 			self.refresh_streams();
 		}
+		// The share dialog's audio mixer (studio.rs).
+		self.mixer_tick();
 		if self.watch.is_some() {
 			self.refresh_viewer();
 		}
@@ -309,7 +506,8 @@ impl App {
 		let test_pattern = cfg!(debug_assertions)
 			|| self.demo
 			|| std::env::var("VOELIN_TEST_PATTERN").is_ok_and(|v| v == "1");
-		let sources = match self.video.sources(test_pattern) {
+		let restorable = self.settings.portal_restore_token.is_some();
+		let sources = match self.video.sources(test_pattern, restorable) {
 			Ok(sources) => {
 				if self.share.is_none() {
 					self.share_error.clear();
@@ -329,19 +527,36 @@ impl App {
 			ui.global::<Bridge>().set_share_sources(model(items));
 		}
 		self.refresh_streams();
+		// Its audio: the Stream Studio's mixer rows and picker.
+		self.mixer_show();
 		let defaults = &self.settings.share;
 		let nickname = self.current.and_then(|id| self.bookmark(id)).map(|b| b.nickname.clone());
+		let (fps, bitrate) = (self.prefs.get(&STREAM_FPS), self.prefs.get(&STREAM_BITRATE_KBPS));
 		ShareForm {
 			source: 0,
 			name: match nickname {
 				Some(nick) if !nick.is_empty() => format!("{nick}'s screen").into(),
 				_ => "Screen".into(),
 			},
-			fps_index: defaults.fps_index.min(FPS_CHOICES.len() - 1) as i32,
-			bitrate_index: defaults.bitrate_index.min(BITRATE_CHOICES.len() - 1) as i32,
+			fps_index: nearest_choice(&FPS_CHOICES, fps) as i32,
+			fps: fps.to_string().into(),
+			bitrate_index: nearest_choice(&BITRATE_CHOICES, bitrate) as i32,
+			// Automatic (0): the field stays empty.
+			bitrate: if bitrate == 0 { String::new() } else { bitrate.to_string() }.into(),
 			audio: defaults.audio,
 			auto_accept: defaults.auto_accept,
 		}
+	}
+
+	/// The share dialog's form with the test pattern chosen.
+	fn test_pattern_form(&mut self) -> Option<ShareForm> {
+		let mut form = self.open_share();
+		let ui = self.ui.upgrade()?;
+		let sources = ui.global::<Bridge>().get_share_sources();
+		let pattern = (0..sources.row_count())
+			.find(|&i| sources.row_data(i).is_some_and(|s| s.name == "Test pattern"))?;
+		form.source = pattern as i32;
+		Some(form)
 	}
 
 	/// Development switch `VOELIN_AUTOSHARE`: share the test pattern once.
@@ -350,15 +565,17 @@ impl App {
 			return;
 		}
 		self.autoshare = false;
-		let mut form = self.open_share();
-		let Some(ui) = self.ui.upgrade() else { return };
-		let sources = ui.global::<Bridge>().get_share_sources();
-		let pattern = (0..sources.row_count())
-			.find(|&i| sources.row_data(i).is_some_and(|s| s.name == "Test pattern"));
-		let Some(index) = pattern else { return };
-		form.source = index as i32;
-		form.auto_accept = true;
-		self.start_share(form);
+		if let Some(form) = self.test_pattern_form() {
+			self.start_share(ShareForm { auto_accept: true, ..form });
+		}
+	}
+
+	/// `VOELIN_OPEN=share:live` with sample data: the test pattern shared
+	/// with the sample mixer's sources (live at once, `capture_ready`).
+	pub(crate) fn demo_share(&mut self) {
+		if let Some(form) = self.test_pattern_form() {
+			self.start_share(ShareForm { audio: true, ..form });
+		}
 	}
 
 	pub(crate) fn start_share(&mut self, form: ShareForm) {
@@ -366,20 +583,37 @@ impl App {
 		if self.share_busy || self.share.is_some() {
 			return;
 		}
-		let index = |i: i32, len: usize| usize::try_from(i).unwrap_or(0).min(len - 1);
+		if self.studio_streams_to(session) {
+			self.share_error = "The Stream Studio is live here: end that stream first.".into();
+			self.refresh_streams();
+			return;
+		}
+		// Typed values (no maximum), else the chosen presets (bitrate 0:
+		// automatic).
+		let choice = |i: i32, choices: &[u32]| {
+			choices[usize::try_from(i).unwrap_or(0).min(choices.len() - 1)]
+		};
+		let fps = parse_positive(&form.fps).unwrap_or_else(|| choice(form.fps_index, &FPS_CHOICES));
+		let bitrate = parse_positive(&form.bitrate)
+			.unwrap_or_else(|| choice(form.bitrate_index, &BITRATE_CHOICES));
+		// The next share starts from these.
+		for result in
+			[self.prefs.set(&STREAM_FPS, fps), self.prefs.set(&STREAM_BITRATE_KBPS, bitrate)]
+		{
+			if let Err(e) = result {
+				warn!(%e, "could not store the share settings");
+			}
+		}
 		let defaults = ShareDefaults {
-			fps_index: index(form.fps_index, FPS_CHOICES.len()),
-			bitrate_index: index(form.bitrate_index, BITRATE_CHOICES.len()),
+			fps_index: nearest_choice(&LEGACY_FPS_CHOICES, fps),
+			bitrate_index: nearest_choice(&LEGACY_BITRATE_CHOICES, bitrate),
 			audio: form.audio,
 			auto_accept: form.auto_accept,
 		};
-		let request = CaptureRequest {
-			fps: FPS_CHOICES[defaults.fps_index],
-			bitrate_kbps: BITRATE_CHOICES[defaults.bitrate_index],
-			audio: form.audio,
-			restore_token: self.settings.portal_restore_token.clone(),
-		};
-		let bitrate = request.bitrate_kbps;
+		// The mixer's sources (the sample studio's with VOELIN_DEMO_UI).
+		let sources = self.studio_settings().get(&STREAM_AUDIO_SOURCES);
+		let token = self.settings.portal_restore_token.clone();
+		let request = capture_request(fps, bitrate, form.audio, &sources, token);
 		self.settings.share = defaults;
 		self.store_settings();
 		self.share_busy = true;
@@ -388,7 +622,7 @@ impl App {
 		let setup = StreamSetup {
 			name: form.name.trim().to_owned(),
 			bitrate,
-			audio: form.audio,
+			audio: request.audio,
 			..StreamSetup::default()
 		};
 		let auto_accept = form.auto_accept;
@@ -419,33 +653,73 @@ impl App {
 					self.settings.portal_restore_token = Some(token);
 					self.store_settings();
 				}
+				if setup.bitrate == 0 {
+					// Automatic: what it comes to for the size captured.
+					setup.bitrate = capture.streamer().bitrate_kbps();
+				}
 				if setup.audio && !capture.has_audio() {
 					setup.audio = false;
 					let reason = capture.audio_error().unwrap_or_default();
 					self.set_status(format!("Sharing without sound: {reason}"));
 				}
-				self.engine.send(Command::StartStream {
-					session: session as u64,
-					setup,
-					auto_accept,
+				// Sample data has no server: live at once, with viewers.
+				let (live, viewers) = if self.demo_ui {
+					(true, demo_viewers())
+				} else {
+					let session = session as u64;
+					// One layer, whatever a studio stream had before.
+					self.engine.send(Command::SetStreamLayers { session, layers: Vec::new() });
+					self.engine.send(Command::StartStream { session, setup, auto_accept });
+					(false, Vec::new())
+				};
+				let meters = slint::Timer::default();
+				meters.start(slint::TimerMode::Repeated, Duration::from_millis(66), || {
+					with_app(|app| app.studio_meters());
 				});
 				self.share = Some(Share {
 					session,
 					capture,
-					live: false,
-					viewers: Vec::new(),
+					live,
+					viewers,
 					stopping: false,
+					_meters: meters,
 				});
+				// The mixer's rows follow this capture's sources.
+				self.mixer_refresh();
 			}
 		}
 		self.refresh_streams();
 	}
 
 	pub(crate) fn stop_share(&mut self) {
-		if let Some(share) = &mut self.share {
-			share.stopping = true;
-			self.engine.send(Command::StopStream { session: share.session as u64 });
+		let Some(share) = &mut self.share else { return };
+		share.stopping = true;
+		let session = share.session;
+		if self.demo_ui {
+			self.share_state(session, StreamState::Ended(EndReason::Local));
+		} else {
+			self.engine.send(Command::StopStream { session: session as u64 });
 		}
+	}
+
+	/// The running share's streamer (the mixer's rows, studio.rs).
+	pub(crate) fn share_streamer(&self) -> Option<&Streamer> {
+		self.share.as_ref().map(|s| s.capture.streamer())
+	}
+
+	/// `stream.audio_sources` changed (the mixer, the settings, another
+	/// window): a running share mixes the new sources.
+	pub(crate) fn share_audio_changed(&mut self) {
+		if self.share.is_none() {
+			return;
+		}
+		let sources = audio_source_specs(&self.studio_settings().get(&STREAM_AUDIO_SOURCES));
+		let codecs = self.video.codecs();
+		let Some(share) = &self.share else { return };
+		if let Err(e) = share.capture.follow_audio(&codecs, sources) {
+			self.set_status(format!("Stream audio: {e}"));
+		}
+		self.mixer_refresh();
 	}
 
 	pub(crate) fn respond_viewer(&mut self, viewer: u16, accept: bool) {
@@ -497,9 +771,48 @@ impl App {
 			has_frame: false,
 			shown: true,
 			decoder: Some(decoder),
+			since: None,
+			layers: Vec::new(),
+			layer: None,
 		});
 		self.refresh_viewer();
 		self.refresh_streams();
+		// The people in our channel lead the members panel beside the viewer.
+		self.refresh_tree();
+	}
+
+	/// Watch the stream of `client` (a click on a streaming user in the
+	/// channel tree or the members): at once if it is known, else as soon as
+	/// the lookup brings it (it may have started in another channel or
+	/// before we joined).
+	pub(crate) fn watch_client(&mut self, client: u16) {
+		let Some(session) = self.current else { return };
+		let Some(view) = self.sessions.get(&session) else { return };
+		if view.state.own_client == Some(client) {
+			return;
+		}
+		if let Some(id) = view.streams.iter().find(|s| s.streamer.0 == client).map(|s| s.id.clone())
+		{
+			self.pending_watch = None;
+			self.watch_stream(id);
+		} else if view.presence.clients.get(&client).is_some_and(|c| c.streaming == Some(true)) {
+			let name = view.nickname(client);
+			self.pending_watch = Some((session, client));
+			self.set_status(format!("Looking up {name}'s stream…"));
+		}
+	}
+
+	/// `VOELIN_OPEN=watch`: watch the first stream of our channel.
+	pub(crate) fn watch_first_stream(&mut self) {
+		let Some(id) = self.view().and_then(|v| {
+			v.streams
+				.iter()
+				.find(|s| v.state.own_client != Some(s.streamer.0))
+				.map(|s| s.id.clone())
+		}) else {
+			return;
+		};
+		self.watch_stream(id);
 	}
 
 	/// The local test stream in the viewer (`VOELIN_DEMO_STREAM`).
@@ -516,6 +829,9 @@ impl App {
 			has_frame: false,
 			shown: true,
 			decoder: None,
+			since: None,
+			layers: Vec::new(),
+			layer: None,
 		});
 		let runtime = self.engine.runtime().clone();
 		let wake = || later(|app| app.show_picture());
@@ -533,6 +849,21 @@ impl App {
 		});
 		self.refresh_viewer();
 		self.refresh_streams();
+		// The people in our channel lead the members panel beside the viewer.
+		self.refresh_tree();
+	}
+
+	/// `VOELIN_OPEN=watch` with sample data: the local test pattern in the
+	/// viewer, dressed as the first stream of our channel.
+	pub(crate) fn demo_watch(&mut self) {
+		let sample = self.view().and_then(|v| {
+			v.streams.first().map(|s| (s.id.clone(), s.name.clone(), v.nickname(s.streamer.0)))
+		});
+		self.start_demo();
+		if let (Some(watch), Some((id, title, streamer))) = (&mut self.watch, sample) {
+			(watch.stream_id, watch.title, watch.streamer) = (id, title, streamer);
+		}
+		self.refresh_viewer();
 	}
 
 	/// A decoded picture is waiting.
@@ -543,6 +874,7 @@ impl App {
 		watch.has_frame = true;
 		if first {
 			watch.status.clear();
+			watch.since = Some(std::time::Instant::now());
 		}
 		if let Some(ui) = self.ui.upgrade() {
 			let bridge = ui.global::<Bridge>();
@@ -562,6 +894,8 @@ impl App {
 		}
 		self.refresh_viewer();
 		self.refresh_streams();
+		// The people in our channel lead the members panel beside the viewer.
+		self.refresh_tree();
 	}
 
 	/// Stop watching and close the viewer.
@@ -576,6 +910,8 @@ impl App {
 		self.set_fullscreen(false);
 		self.refresh_viewer();
 		self.refresh_streams();
+		// The people in our channel lead the members panel beside the viewer.
+		self.refresh_tree();
 	}
 
 	pub(crate) fn set_stream_volume(&mut self, percent: f32) {
@@ -605,5 +941,46 @@ impl App {
 		}
 		bridge.set_viewer_fullscreen(full);
 		ui.window().set_fullscreen(full);
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	#[test]
+	fn bitrates() {
+		assert_eq!(super::bitrate_text(0), "");
+		assert_eq!(super::bitrate_text(640), "640 kbit/s");
+		assert_eq!(super::bitrate_text(8000), "8 Mbit/s");
+		assert_eq!(super::bitrate_text(4608), "4.6 Mbit/s");
+	}
+
+	/// What the share dialog's mixer holds goes to the capture, with each
+	/// source's gain and mute; "Share system audio" off (or nothing picked)
+	/// shares no audio at all.
+	#[test]
+	fn the_share_carries_the_picked_audio() {
+		use voelin_core::media::{AppMatch, AudioSourceKind};
+		use voelin_core::settings::{AudioSourceKindSetting, AudioSourceSetting};
+		let app = AudioSourceKindSetting::App { name: Some("firefox".into()), pid: None };
+		let picked = [
+			AudioSourceSetting { gain: 0.5, ..AudioSourceSetting::new(app) },
+			AudioSourceSetting {
+				muted: true,
+				..AudioSourceSetting::new(AudioSourceKindSetting::Microphone)
+			},
+		];
+		let request = super::capture_request(30, 4608, true, &picked, None);
+		assert!(request.audio);
+		let kinds: Vec<_> = request.audio_sources.iter().map(|s| s.kind.clone()).collect();
+		let firefox = AudioSourceKind::App(AppMatch::Name("firefox".into()));
+		assert_eq!(kinds, [firefox, AudioSourceKind::Microphone]);
+		let mix: Vec<_> = request.audio_sources.iter().map(|s| (s.gain, s.muted)).collect();
+		assert_eq!(mix, [(0.5, false), (1.0, true)]);
+		assert_eq!((request.fps, request.bitrate_kbps), (30, 4608));
+
+		let off = super::capture_request(30, 4608, false, &picked, None);
+		assert!(!off.audio && off.audio_sources.is_empty());
+		let none = super::capture_request(30, 4608, true, &[], None);
+		assert!(!none.audio && none.audio_sources.is_empty());
 	}
 }

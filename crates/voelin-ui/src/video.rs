@@ -10,12 +10,14 @@ use std::sync::Arc;
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 use tokio::runtime::Handle;
 use tracing::warn;
-use voelin_core::media::voelin_media::capture::SourceId;
-use voelin_core::media::voelin_media::{Codecs, VideoFrame, convert};
+use voelin_core::media::voelin_media::capture::{CaptureSource, SourceId};
+use voelin_core::media::voelin_media::{Codec, Codecs, VideoFrame, convert};
 use voelin_core::media::{
-	self, Latest, LocalPreview, Streamer, StreamerConfig, Viewer, peer_config, stream_codec,
+	self, AudioSourceSpec, DecoderPreference, EncoderPreference, Latest, LocalPreview, Streamer,
+	StreamerConfig, StreamerConfigUpdate, Viewer, peer_config, preferred_codec, stream_codec,
 };
-use voelin_core::stream::PeerConfig;
+use voelin_core::stream::{LayerSpec, PeerConfig};
+use voelin_core::studio::Studio;
 use voelin_core::{Engine, StreamSink};
 
 /// Whether this build can share and decode video.
@@ -56,8 +58,15 @@ pub(crate) struct Video {
 	openh264_dir: PathBuf,
 	#[cfg(not(target_os = "android"))]
 	h264: openh264::State,
+	/// Which encoders to use and the configured stream codec (`None`:
+	/// automatic), from the settings.
+	encoder: EncoderPreference,
+	codec: Option<Codec>,
+	/// Which decoders to use (`stream.hardware_decoding`,
+	/// `stream.decoder_backend`).
+	decoder: DecoderPreference,
 	/// Sources of the share dialog, by index.
-	sources: Vec<(SourceId, String)>,
+	sources: Vec<ShareEntry>,
 }
 
 impl Video {
@@ -67,6 +76,9 @@ impl Video {
 		#[allow(unused_mut, reason = "set_h264 does nothing on Android")]
 		let mut video = Self {
 			codecs: Arc::new(Codecs::new()),
+			encoder: EncoderPreference::default(),
+			codec: None,
+			decoder: DecoderPreference::default(),
 			#[cfg(not(target_os = "android"))]
 			openh264_dir: data_dir.join("openh264"),
 			#[cfg(not(target_os = "android"))]
@@ -78,9 +90,36 @@ impl Video {
 		video
 	}
 
-	/// `base` with the codecs this machine can encode and decode.
-	pub fn peer_config(&self, base: PeerConfig) -> PeerConfig {
+	/// `base` with the codecs this machine can encode and decode: the stream
+	/// codec (configured, or the encoder preference's first) offered first.
+	pub fn peer_config(&self, mut base: PeerConfig) -> PeerConfig {
+		if let Some(codec) = preferred_codec(&self.codecs, self.codec) {
+			base.video_codecs = vec![media::video_codec(codec)];
+		}
 		peer_config(&self.codecs, base)
+	}
+
+	/// Use other encoders (`stream.hardware_acceleration`,
+	/// `stream.encoder_backend`) and stream codec (`stream.codec`, `None`:
+	/// automatic). A running share follows through
+	/// `Streamer::reconfigure` with `StreamerConfigUpdate::encoder`.
+	pub fn set_encoder_preference(&mut self, encoder: EncoderPreference, codec: Option<Codec>) {
+		let mut codecs = (*self.codecs).clone();
+		codecs.set_preference(encoder.clone());
+		self.codecs = Arc::new(codecs);
+		self.encoder = encoder;
+		self.codec = codec;
+	}
+
+	/// Decode with other decoders (`stream.hardware_decoding`,
+	/// `stream.decoder_backend`): streams watched from now on.
+	pub fn set_decoder_preference(&mut self, decoder: DecoderPreference) {
+		if decoder != self.decoder {
+			let mut codecs = (*self.codecs).clone();
+			codecs.set_decoder_preference(decoder.clone());
+			self.codecs = Arc::new(codecs);
+			self.decoder = decoder;
+		}
 	}
 
 	/// Whether H.264 works, and a line for the settings page.
@@ -109,7 +148,11 @@ impl Video {
 			use openh264::State;
 			if !enabled {
 				self.h264 = State::Off;
-				self.codecs = Arc::new(Codecs::new());
+				self.codecs = Arc::new(
+					Codecs::new()
+						.with_preference(self.encoder.clone())
+						.with_decoder_preference(self.decoder.clone()),
+				);
 				return;
 			}
 			if matches!(self.h264, State::Loaded(_) | State::Downloading) {
@@ -125,7 +168,12 @@ impl Video {
 	#[cfg(not(target_os = "android"))]
 	fn loaded(&mut self, library: openh264::OpenH264) {
 		self.h264 = openh264::State::Loaded(library.path().to_owned());
-		self.codecs = Arc::new(Codecs::new().with_openh264(library));
+		self.codecs = Arc::new(
+			Codecs::new()
+				.with_openh264(library)
+				.with_preference(self.encoder.clone())
+				.with_decoder_preference(self.decoder.clone()),
+		);
 	}
 
 	/// Download Cisco's OpenH264 (only on the user's request). `done` runs
@@ -167,8 +215,14 @@ impl Video {
 	}
 
 	/// Screens and windows to share, as (name, detail); the test pattern too
-	/// when asked for.
-	pub fn sources(&mut self, test_pattern: bool) -> Result<Vec<(String, String)>, String> {
+	/// when asked for. With `restorable` (a portal restore token from an
+	/// earlier share) the portal comes twice: its dialog, which always asks,
+	/// and the last choice again without the dialog.
+	pub fn sources(
+		&mut self,
+		test_pattern: bool,
+		restorable: bool,
+	) -> Result<Vec<(String, String)>, String> {
 		let mut error = None;
 		let mut sources = match media::screen_sources() {
 			Ok(list) => list,
@@ -183,26 +237,9 @@ impl Video {
 		if sources.is_empty() {
 			return Err(error.unwrap_or_else(|| "Nothing to share was found.".into()));
 		}
-		self.sources = sources.iter().map(|s| (s.id.clone(), s.name.clone())).collect();
-		Ok(sources
-			.iter()
-			.map(|s| {
-				let name = match s.id {
-					SourceId::Portal => "Choose via system dialog".to_owned(),
-					_ => s.name.clone(),
-				};
-				let detail = match (&s.id, s.primary) {
-					(SourceId::Monitor(_), true) => {
-						format!("{} · primary", size_text(s.width, s.height))
-					}
-					(SourceId::Window(_), _) => {
-						format!("window {}", size_text(s.width, s.height)).trim().to_owned()
-					}
-					_ => size_text(s.width, s.height),
-				};
-				(name, detail)
-			})
-			.collect())
+		let (rows, entries) = share_rows(&sources, restorable);
+		self.sources = entries;
+		Ok(rows)
 	}
 
 	/// Start capturing source `index` of [`Video::sources`]; `done` runs on
@@ -214,7 +251,7 @@ impl Video {
 		options: CaptureRequest,
 		done: impl FnOnce(Result<Capture, String>) + Send + 'static,
 	) {
-		let Some((source, name)) = self.sources.get(index).cloned() else {
+		let Some((source, name, restore)) = self.sources.get(index).cloned() else {
 			done(Err("Pick something to share.".into()));
 			return;
 		};
@@ -229,13 +266,55 @@ impl Video {
 			fps: options.fps,
 			bitrate_kbps: options.bitrate_kbps,
 			codec,
+			encoder: self.encoder.clone(),
 			audio: options.audio,
-			restore_token: options.restore_token,
+			audio_sources: options.audio_sources,
+			// The portal skips its dialog with a token: only when asked to.
+			restore_token: options.restore_token.filter(|_| restore),
 			..StreamerConfig::default()
 		};
 		runtime.spawn(async move {
 			let result = Streamer::start(&codecs, config).await;
 			done(result.map(|streamer| Capture { streamer, name }).map_err(|e| e.to_string()));
+		});
+	}
+
+	/// The codecs, for reconfiguring a running streamer.
+	pub fn codecs(&self) -> Arc<Codecs> {
+		self.codecs.clone()
+	}
+
+	/// Encode the Stream Studio's composite ([`Streamer::start_studio`]):
+	/// from the start, so its recording and replay buffer work before it
+	/// goes live, and a stream attaches to it like to a capture. `done` runs
+	/// on the runtime.
+	pub fn start_studio(
+		&self,
+		runtime: &Handle,
+		studio: Arc<Studio>,
+		options: CaptureRequest,
+		layers: Vec<LayerSpec>,
+		done: impl FnOnce(Result<Streamer, String>) + Send + 'static,
+	) {
+		let peer = self.peer_config(PeerConfig::default());
+		let Some(codec) = stream_codec(&self.codecs, &peer) else {
+			done(Err("No video encoder is available.".into()));
+			return;
+		};
+		let codecs = self.codecs.clone();
+		let config = StreamerConfig {
+			fps: options.fps,
+			bitrate_kbps: options.bitrate_kbps,
+			codec,
+			encoder: self.encoder.clone(),
+			audio: options.audio,
+			audio_sources: options.audio_sources,
+			layers,
+			..StreamerConfig::default()
+		};
+		runtime.spawn(async move {
+			let result = Streamer::start_studio(&codecs, config, studio).await;
+			done(result.map_err(|e| e.to_string()));
 		});
 	}
 
@@ -281,8 +360,8 @@ impl Video {
 fn deliver(
 	pictures: Arc<Latest<Picture>>,
 	wake: impl Fn() + Send + Sync + 'static,
-) -> impl FnMut(VideoFrame) + Send + 'static {
-	move |frame: VideoFrame| {
+) -> impl FnMut(Arc<VideoFrame>) + Send + 'static {
+	move |frame: Arc<VideoFrame>| {
 		let mut buffer = Picture::new(frame.width, frame.height);
 		let stride = frame.width as usize * 4;
 		if let Err(e) = convert::to_rgba(&frame, buffer.make_mut_bytes(), stride) {
@@ -295,11 +374,47 @@ fn deliver(
 	}
 }
 
+/// What a row of the share dialog starts: the source, its name, and whether
+/// to restore the portal's last choice instead of asking.
+type ShareEntry = (SourceId, String, bool);
+
+/// The share dialog's rows (name, detail) for `sources`, and what each row
+/// starts (restoring only in the extra portal row with `restorable`).
+fn share_rows(
+	sources: &[CaptureSource],
+	restorable: bool,
+) -> (Vec<(String, String)>, Vec<ShareEntry>) {
+	let mut rows = Vec::with_capacity(sources.len() + 1);
+	let mut entries = Vec::with_capacity(sources.len() + 1);
+	for s in sources {
+		let name = match s.id {
+			SourceId::Portal => "Choose via system dialog".to_owned(),
+			_ => s.name.clone(),
+		};
+		let detail = match (&s.id, s.primary) {
+			(SourceId::Monitor(_), true) => format!("{} · primary", size_text(s.width, s.height)),
+			(SourceId::Window(_), _) => {
+				format!("window {}", size_text(s.width, s.height)).trim().to_owned()
+			}
+			_ => size_text(s.width, s.height),
+		};
+		rows.push((name, detail));
+		entries.push((s.id.clone(), s.name.clone(), false));
+		if s.id == SourceId::Portal && restorable {
+			rows.push(("Same as last time".to_owned(), "without the dialog".to_owned()));
+			entries.push((s.id.clone(), s.name.clone(), true));
+		}
+	}
+	(rows, entries)
+}
+
 /// Share settings from the dialog.
 pub(crate) struct CaptureRequest {
 	pub fps: u32,
 	pub bitrate_kbps: u32,
 	pub audio: bool,
+	/// Mixed into the stream's audio (`stream.audio_sources`).
+	pub audio_sources: Vec<AudioSourceSpec>,
 	pub restore_token: Option<String>,
 }
 
@@ -324,7 +439,29 @@ impl Capture {
 	}
 
 	pub fn audio_error(&self) -> Option<String> {
-		self.streamer.audio_error().map(str::to_owned)
+		self.streamer.audio_error()
+	}
+
+	/// For the audio mixer's rows: its levels and errors.
+	pub fn streamer(&self) -> &Streamer {
+		&self.streamer
+	}
+
+	/// Mix `sources` from now on (`stream.audio_sources` changed while
+	/// sharing): a source whose kind stays keeps capturing with the new
+	/// gain and mute, new ones start, removed ones stop. True if anything
+	/// changed. A capture without sound stays so: its stream has no audio
+	/// track to carry them.
+	pub fn follow_audio(
+		&self,
+		codecs: &Codecs,
+		sources: Vec<AudioSourceSpec>,
+	) -> Result<bool, String> {
+		if !self.has_audio() || self.streamer.audio_sources() == sources {
+			return Ok(false);
+		}
+		let update = StreamerConfigUpdate { audio_sources: Some(sources), ..Default::default() };
+		self.streamer.reconfigure(codecs, update).map(|()| true).map_err(|e| e.to_string())
 	}
 
 	/// The portal's token for this choice, to keep.
@@ -376,7 +513,8 @@ impl Decoder {
 		}
 	}
 
-	/// One line about the video: codec, size, problems.
+	/// One line about the video: codec, size, decoded frame rate, received
+	/// bitrate, problems.
 	pub fn info(&self) -> String {
 		let stats = self.stats();
 		let mut parts = Vec::new();
@@ -385,6 +523,10 @@ impl Decoder {
 		}
 		if stats.width > 0 {
 			parts.push(size_text(stats.width, stats.height));
+		}
+		if stats.decoded > 0 {
+			parts.push(format!("{} fps", stats.fps));
+			parts.push(format!("{:.1} Mbit/s", stats.bitrate as f64 / 1_000_000.0));
 		}
 		if let Some(e) = stats.error {
 			parts.push(e);
@@ -396,5 +538,69 @@ impl Decoder {
 	pub fn error(&self) -> Option<String> {
 		let stats = self.stats();
 		stats.error.filter(|_| stats.decoded == 0)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// "Choose via system dialog" never passes the restore token, so the
+	/// portal always asks; with a token the last choice gets its own row.
+	#[test]
+	fn the_portal_dialog_always_asks() {
+		let portal = CaptureSource {
+			id: SourceId::Portal,
+			name: "Screen".into(),
+			width: 0,
+			height: 0,
+			primary: false,
+		};
+		let (rows, entries) = share_rows(std::slice::from_ref(&portal), false);
+		assert_eq!(rows.len(), 1);
+		assert_eq!(rows[0].0, "Choose via system dialog");
+		assert!(!entries[0].2);
+		let (rows, entries) = share_rows(&[portal], true);
+		let names: Vec<_> = rows.iter().map(|(name, _)| name.as_str()).collect();
+		assert_eq!(names, ["Choose via system dialog", "Same as last time"]);
+		let restore: Vec<_> = entries.iter().map(|e| e.2).collect();
+		assert_eq!(restore, [false, true]);
+	}
+
+	/// A running share mixes what `stream.audio_sources` says now; one
+	/// started without sound has no audio track to change.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_share_follows_its_audio_sources() {
+		use voelin_core::media::AudioSourceKind;
+		let codecs = Codecs::new();
+		let tone = |hz| AudioSourceSpec::new(AudioSourceKind::Synthetic { hz });
+		let start = async |audio| {
+			let config = StreamerConfig {
+				source: SourceId::Synthetic,
+				synthetic_size: (64, 48),
+				audio,
+				audio_sources: vec![tone(440)],
+				..StreamerConfig::default()
+			};
+			let streamer = Streamer::start(&codecs, config).await.unwrap();
+			Capture { streamer, name: "Test pattern".into() }
+		};
+		let share = start(true).await;
+		let mixed = vec![
+			AudioSourceSpec { muted: true, ..tone(440) },
+			AudioSourceSpec { gain: 0.5, ..tone(660) },
+		];
+		assert_eq!(share.follow_audio(&codecs, mixed.clone()), Ok(true));
+		assert_eq!(share.streamer().audio_sources(), mixed);
+		assert_eq!(share.follow_audio(&codecs, mixed), Ok(false), "nothing changed");
+		// Every source taken out: silence, the track stays for new ones.
+		assert_eq!(share.follow_audio(&codecs, Vec::new()), Ok(true));
+		assert!(share.has_audio() && share.streamer().audio_sources().is_empty());
+		assert_eq!(share.follow_audio(&codecs, vec![tone(330)]), Ok(true));
+		assert_eq!(share.streamer().audio_sources(), [tone(330)]);
+
+		let silent = start(false).await;
+		assert_eq!(silent.follow_audio(&codecs, vec![tone(660)]), Ok(false));
+		assert!(!silent.has_audio());
 	}
 }

@@ -1,0 +1,1312 @@
+// Settings sections: My Account, Profiles (identities), Streaming,
+// Integrations (gateways, gateway administration, encoders) and Advanced
+// (encoding, SRTP, history, cache, logs, every setting); and the rows the
+// sections share.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Bridge, IdentityItem, LayerItem, AudioSourceItem, ConfigItem, PermItem, SettingItem, EncoderItem } from "../bridge.slint";
+import { Nav, SettingsSection } from "../nav.slint";
+import { Icon, Button, ButtonKind, IconButton, TextField, Field, Select, Toggle, ToggleRow, Slider, SegmentedTabs, Card, Divider, Chip, Banner, Spinner, SearchBox, ScrollView } from "../components/index.slint";
+
+// A label, a control (@children) and a value at the right.
+export component SliderRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    spacing: Theme.space-4;
+    min-height: Theme.control-height;
+    Text {
+        text: root.label;
+        color: Theme.text;
+        vertical-alignment: center;
+        min-width: 110px;
+        wrap: word-wrap;
+    }
+    @children
+    Text {
+        text: root.value;
+        color: Theme.text-secondary;
+        width: 64px;
+        vertical-alignment: center;
+        horizontal-alignment: right;
+    }
+}
+
+// Small print under a control.
+export component Hint inherits Text {
+    font-size: Theme.font-sm;
+    color: Theme.text-muted;
+    wrap: word-wrap;
+}
+
+// A label and a choice among a few (SegmentedTabs) on one row; on the
+// phone the choice goes under the label, across the card.
+export component ChoiceRow inherits VerticalLayout {
+    in property <string> text;
+    in property <string> description;
+    in property <[string]> model;
+    in-out property <int> current;
+    in property <length> choice-width: 280px;
+    callback selected(int);
+    spacing: Theme.space-2;
+    HorizontalLayout {
+        spacing: Theme.space-4;
+        padding-top: Nav.narrow ? 0px : 4px;
+        padding-bottom: self.padding-top;
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.text;
+                color: Theme.text;
+                wrap: word-wrap;
+            }
+            if root.description != "": Text {
+                text: root.description;
+                color: Theme.text-muted;
+                font-size: Theme.font-sm;
+                wrap: word-wrap;
+            }
+        }
+        if !Nav.narrow: SegmentedTabs {
+            width: root.choice-width;
+            y: (parent.height - self.height) / 2;
+            model: root.model;
+            current-index <=> root.current;
+            label: root.text;
+            selected(i) => { root.selected(i); }
+        }
+    }
+    if Nav.narrow: SegmentedTabs {
+        model: root.model;
+        current-index <=> root.current;
+        label: root.text;
+        selected(i) => { root.selected(i); }
+    }
+}
+
+// The number field of a NumberRow and its unit.
+component NumberField inherits HorizontalLayout {
+    in property <string> value;
+    in property <string> unit;
+    in property <string> label;
+    callback accepted(string);
+    spacing: Theme.space-4;
+    alignment: start;
+    horizontal-stretch: 0;
+    TextField {
+        width: 120px;
+        y: (parent.height - self.height) / 2;
+        text: root.value;
+        input-type: number;
+        label: root.label;
+        accepted(t) => { root.accepted(t); }
+    }
+    Text {
+        width: 52px;
+        text: root.unit;
+        color: Theme.text-muted;
+        font-size: Theme.font-sm;
+        vertical-alignment: center;
+    }
+}
+
+// A label and a number typed in (no built-in limits); Enter applies. On
+// the phone the field goes under the label.
+export component NumberRow inherits VerticalLayout {
+    in property <string> text;
+    in property <string> description;
+    in property <string> value;
+    in property <string> unit;
+    callback accepted(string);
+    spacing: Theme.space-2;
+    HorizontalLayout {
+        spacing: Theme.space-4;
+        padding-top: Nav.narrow ? 0px : 4px;
+        padding-bottom: self.padding-top;
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.text;
+                color: Theme.text;
+                wrap: word-wrap;
+            }
+            if root.description != "": Text {
+                text: root.description;
+                color: Theme.text-muted;
+                font-size: Theme.font-sm;
+                wrap: word-wrap;
+            }
+        }
+        if !Nav.narrow: NumberField {
+            value: root.value;
+            unit: root.unit;
+            label: root.text;
+            accepted(t) => { root.accepted(t); }
+        }
+    }
+    if Nav.narrow: NumberField {
+        value: root.value;
+        unit: root.unit;
+        label: root.text;
+        accepted(t) => { root.accepted(t); }
+    }
+}
+
+// A value that can be selected and copied (unique ids).
+component CopyField inherits Field {
+    in property <string> value;
+    TextField {
+        text: root.value;
+        read-only: true;
+        icon: Icons.copy;
+        label: root.label;
+    }
+}
+
+export component AccountSection inherits VerticalLayout {
+    alignment: start;
+    spacing: Theme.space-5;
+    Card {
+        title: @tr("Identity in use");
+        icon: Icons.id-card;
+        subtitle: Bridge.account.server != "" ? @tr("On {}", Bridge.account.server) : @tr("The default identity");
+        HorizontalLayout {
+            spacing: Theme.space-4;
+            Rectangle {
+                width: 64px;
+                height: 64px;
+                border-radius: 32px;
+                background: Theme.accent;
+                Icon {
+                    source: Icons.user;
+                    size: 30px;
+                    tint: #ffffff;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                Text {
+                    text: Bridge.account.nickname != "" ? Bridge.account.nickname : Bridge.account.identity;
+                    color: Theme.text;
+                    font-size: Theme.font-xl;
+                    font-weight: Theme.weight-semibold;
+                }
+                Text {
+                    text: @tr("Identity “{}” · security level {}", Bridge.account.identity, Bridge.account.level);
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                }
+            }
+            Button {
+                icon: Icons.user-cog;
+                text: @tr("Manage identities");
+                y: (parent.height - self.height) / 2;
+                clicked => { Nav.open-settings(SettingsSection.profiles); }
+            }
+        }
+        CopyField {
+            label: @tr("Unique id on TeamSpeak 3 servers");
+            value: Bridge.account.uid;
+        }
+        CopyField {
+            label: @tr("Unique id on TeamSpeak 6 servers");
+            value: Bridge.account.uid6;
+        }
+        Hint {
+            text: @tr("Servers know you by this id: your groups and permissions belong to it. Your nickname is set per server, in the server's bookmark.");
+        }
+    }
+    Card {
+        title: @tr("myTeamSpeak");
+        icon: Icons.info;
+        Hint {
+            text: @tr("{} does not sign in to myTeamSpeak, TeamSpeak's account service: it has no public API, and its terms do not allow using the private one. To use identities synchronised there, sign in once with the official client, then import them under Profiles: they are read from its settings, never written.", Bridge.app-name);
+        }
+        HorizontalLayout {
+            alignment: start;
+            Button {
+                icon: Icons.download;
+                text: @tr("Import identities");
+                clicked => { Nav.open-settings(SettingsSection.profiles); }
+            }
+        }
+    }
+}
+
+// Use as default, export, delete.
+component IdentityActions inherits HorizontalLayout {
+    in property <IdentityItem> item;
+    spacing: Theme.space-3;
+    if !root.item.default: Button {
+        small: true;
+        text: @tr("Use as default");
+        y: (parent.height - self.height) / 2;
+        clicked => { Bridge.use-identity(root.item.id); }
+    }
+    Button {
+        small: true;
+        icon: Icons.upload;
+        text: @tr("Export");
+        y: (parent.height - self.height) / 2;
+        clicked => { Bridge.identity-action(root.item.id, "export"); }
+    }
+    IconButton {
+        icon: Icons.trash-2;
+        label: @tr("Delete {}", root.item.name);
+        size: 30px;
+        icon-size: Theme.icon-sm;
+        tint: Theme.danger;
+        enabled: !root.item.default;
+        y: (parent.height - self.height) / 2;
+        clicked => { Bridge.identity-action(root.item.id, "delete"); }
+    }
+}
+
+// One identity: name, ids, level, what can be done with it.
+component IdentityRow inherits Rectangle {
+    in property <IdentityItem> item;
+    property <string> target: "24";
+    border-radius: Theme.radius-md;
+    background: Theme.surface-2;
+    border-width: 1px;
+    border-color: item.default ? Theme.accent : Theme.border;
+    VerticalLayout {
+        padding: Theme.space-4;
+        spacing: Theme.space-3;
+        HorizontalLayout {
+            spacing: Theme.space-3;
+            Icon {
+                source: Icons.key-round;
+                tint: root.item.default ? Theme.accent-text : Theme.text-secondary;
+                y: (parent.height - self.height) / 2;
+            }
+            TextField {
+                max-width: 260px;
+                text: root.item.name;
+                label: @tr("Name of the identity");
+                accepted(t) => { Bridge.rename-identity(root.item.id, t); }
+            }
+            if root.item.default: Chip {
+                text: @tr("Default");
+                icon: Icons.check;
+                tint: Theme.accent-text;
+                y: (parent.height - self.height) / 2;
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+            if !Nav.narrow: IdentityActions {
+                item: root.item;
+            }
+        }
+        // The phone: the buttons under the name.
+        if Nav.narrow: IdentityActions {
+            item: root.item;
+            alignment: start;
+        }
+        Text {
+            text: @tr("TeamSpeak 3: {}", root.item.uid);
+            color: Theme.text-muted;
+            font-size: Theme.font-xs;
+            overflow: elide;
+        }
+        Text {
+            text: @tr("TeamSpeak 6: {}", root.item.uid6);
+            color: Theme.text-muted;
+            font-size: Theme.font-xs;
+            overflow: elide;
+        }
+        HorizontalLayout {
+            spacing: Theme.space-3;
+            Text {
+                text: root.item.improving > 0
+                    ? @tr("{} · security level {}; raising it to {} on every core (best so far: {})…", root.item.origin, root.item.level, root.item.improving, root.item.reached)
+                    : @tr("{} · security level {}", root.item.origin, root.item.level);
+                color: root.item.improving > 0 ? Theme.accent-text : Theme.text-secondary;
+                font-size: Theme.font-sm;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                wrap: word-wrap;
+            }
+            if root.item.improving > 0: Spinner {
+                size: 18px;
+                y: (parent.height - self.height) / 2;
+            }
+            if root.item.improving == 0: TextField {
+                width: 70px;
+                text <=> root.target;
+                input-type: number;
+                label: @tr("Level to reach");
+            }
+            Button {
+                small: true;
+                icon: root.item.improving > 0 ? Icons.x : Icons.zap;
+                text: root.item.improving > 0 ? @tr("Stop") : @tr("Raise");
+                y: (parent.height - self.height) / 2;
+                clicked => {
+                    if root.item.improving > 0 {
+                        Bridge.identity-action(root.item.id, "stop");
+                    } else if root.target.is-float() {
+                        Bridge.improve-target(root.item.id, round(root.target.to-float()));
+                    }
+                }
+            }
+        }
+        if root.item.used-by != "": Text {
+            text: @tr("Used by {}", root.item.used-by);
+            color: Theme.text-muted;
+            font-size: Theme.font-xs;
+            wrap: word-wrap;
+        }
+    }
+}
+
+export component ProfilesSection inherits VerticalLayout {
+    alignment: start;
+    spacing: Theme.space-5;
+    Card {
+        title: @tr("Identities");
+        icon: Icons.key-round;
+        subtitle: @tr("Each identity is a unique id on every server. Keys never leave this device unless you export them.");
+        for item in Bridge.identities: IdentityRow {
+            item: item;
+        }
+        if Bridge.identity-status != "": Text {
+            text: Bridge.identity-status;
+            color: Theme.text-secondary;
+            font-size: Theme.font-sm;
+            wrap: word-wrap;
+        }
+        Hint {
+            text: @tr("Servers know you by the default identity's unique id, from the next connection on, unless a server names another below. The security level is hash cash: servers may require a minimum (often 8). Each level takes about twice as long as the one before. Exported identities are written as TeamSpeak 3 .ini files into your downloads folder; they hold the private key.");
+        }
+    }
+    Card {
+        title: @tr("Import from TeamSpeak");
+        icon: Icons.download;
+        subtitle: @tr("From the official clients' settings and .ini exports on this device; their files are only read.");
+        ToggleRow {
+            text: @tr("Import identities from TeamSpeak on start");
+            description: @tr("While you use the identity Voelin made for you, the one TeamSpeak uses becomes your default, once.");
+            checked <=> Bridge.identity-import;
+            toggled => { Bridge.set-identity-import(Bridge.identity-import); }
+        }
+        HorizontalLayout {
+            alignment: start;
+            spacing: Theme.space-3;
+            Button {
+                icon: Icons.search;
+                text: @tr("Find identities");
+                clicked => { Bridge.find-identities(); }
+            }
+            if Bridge.found-identities.length > 0: Button {
+                kind: ButtonKind.primary;
+                icon: Icons.download;
+                text: @tr("Import the chosen ones");
+                clicked => { Bridge.import-identities(); }
+            }
+        }
+        for found[i] in Bridge.found-identities: HorizontalLayout {
+            spacing: Theme.space-3;
+            Toggle {
+                checked: found.picked;
+                enabled: !found.known;
+                label: found.name;
+                y: (parent.height - self.height) / 2;
+                toggled(on) => { Bridge.pick-found(i, on); }
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                Text {
+                    text: found.known ? @tr("{} (already here)", found.name) : @tr("{} · level {}", found.name, found.level);
+                    color: found.known ? Theme.text-muted : Theme.text;
+                    overflow: elide;
+                }
+                Text {
+                    text: found.uid + " · " + found.source;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    overflow: elide;
+                }
+            }
+        }
+    }
+    Card {
+        title: @tr("Identity per server");
+        icon: Icons.server;
+        if Bridge.bookmark-identities.length == 0: Hint {
+            text: @tr("Add a server first.");
+        }
+        for b in Bridge.bookmark-identities: HorizontalLayout {
+            spacing: Theme.space-4;
+            Text {
+                text: b.name;
+                color: Theme.text;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            Select {
+                max-width: 280px;
+                model: Bridge.identity-names;
+                current-index: b.identity;
+                icon: Icons.key-round;
+                label: @tr("Identity for {}", b.name);
+                selected => { Bridge.bookmark-identity(b.id, self.current-index); }
+            }
+        }
+    }
+}
+
+// One simulcast layer, numbers as typed.
+// The fields wrap onto more lines on narrow cards.
+component LayerRow inherits FlexboxLayout {
+    in property <LayerItem> layer;
+    in property <int> index;
+    spacing: Theme.space-2;
+    for field[f] in [
+        { label: @tr("Size or scale"), value: root.layer.size, width: 110px },
+        { label: @tr("Max fps"), value: root.layer.fps, width: 70px },
+        { label: @tr("kbit/s"), value: root.layer.bitrate, width: 80px },
+        { label: @tr("Min kbit/s"), value: root.layer.min-bitrate, width: 80px },
+        { label: @tr("Max kbit/s"), value: root.layer.max-bitrate, width: 80px },
+    ]: Field {
+        label: field.label;
+        width: field.width;
+        TextField {
+            text: field.value;
+            label: field.label;
+            accepted(t) => {
+                Bridge.layer-changed(root.index, {
+                    size: f == 0 ? t : root.layer.size,
+                    fps: f == 1 ? t : root.layer.fps,
+                    bitrate: f == 2 ? t : root.layer.bitrate,
+                    min-bitrate: f == 3 ? t : root.layer.min-bitrate,
+                    max-bitrate: f == 4 ? t : root.layer.max-bitrate,
+                });
+            }
+        }
+    }
+    VerticalLayout {
+        alignment: end;
+        IconButton {
+            icon: Icons.trash-2;
+            label: @tr("Remove the layer");
+            size: 32px;
+            icon-size: Theme.icon-sm;
+            tint: Theme.danger;
+            clicked => { Bridge.remove-layer(root.index); }
+        }
+    }
+}
+
+// The gain of an audio source and its value.
+component GainSlider inherits HorizontalLayout {
+    in property <AudioSourceItem> source;
+    in property <int> index;
+    spacing: Theme.space-3;
+    Slider {
+        y: (parent.height - self.height) / 2;
+        minimum: 0;
+        maximum: 400;
+        step: 5;
+        value: root.source.gain;
+        enabled: !root.source.muted;
+        label: @tr("Gain of {}", root.source.name);
+        released(v) => {
+            Bridge.audio-source-changed(root.index, { kind: root.source.kind, name: root.source.name, detail: root.source.detail, gain: round(v), muted: root.source.muted });
+        }
+    }
+    Text {
+        width: 48px;
+        text: @tr("{}%", round(root.source.gain));
+        color: Theme.text-secondary;
+        font-size: Theme.font-sm;
+        vertical-alignment: center;
+        horizontal-alignment: right;
+    }
+}
+
+// One audio source of our stream; on the phone its gain goes on a second
+// line.
+component SourceRow inherits VerticalLayout {
+    in property <AudioSourceItem> source;
+    in property <int> index;
+    spacing: Theme.space-2;
+    HorizontalLayout {
+        spacing: Theme.space-3;
+        Rectangle {
+            width: 34px;
+            height: 34px;
+            y: (parent.height - self.height) / 2;
+            border-radius: Theme.radius-md;
+            background: Theme.surface-4;
+            Icon {
+                source: root.source.kind == "microphone" ? Icons.mic : root.source.kind == "desktop" ? Icons.monitor : root.source.kind == "window" ? Icons.layout-grid : root.source.kind == "synthetic" ? Icons.audio-lines : Icons.music;
+                size: Theme.icon-sm;
+                tint: Theme.accent-text;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            // 180px beside the gain; on the phone what the buttons leave.
+            preferred-width: 180px;
+            min-width: Nav.narrow ? 40px : 180px;
+            horizontal-stretch: Nav.narrow ? 1 : 0;
+            Text {
+                text: root.source.name;
+                color: Theme.text;
+                overflow: elide;
+            }
+            Text {
+                text: root.source.detail;
+                color: Theme.text-muted;
+                font-size: Theme.font-xs;
+                overflow: elide;
+            }
+        }
+        if !Nav.narrow: GainSlider {
+            source: root.source;
+            index: root.index;
+        }
+        IconButton {
+            icon: root.source.muted ? Icons.volume-x : Icons.volume-2;
+            label: root.source.muted ? @tr("Unmute") : @tr("Mute");
+            checked: root.source.muted;
+            danger: true;
+            size: 32px;
+            icon-size: Theme.icon-sm;
+            y: (parent.height - self.height) / 2;
+            clicked => {
+                Bridge.audio-source-changed(root.index, { kind: root.source.kind, name: root.source.name, detail: root.source.detail, gain: root.source.gain, muted: !root.source.muted });
+            }
+        }
+        IconButton {
+            icon: Icons.trash-2;
+            label: @tr("Remove {}", root.source.name);
+            size: 32px;
+            icon-size: Theme.icon-sm;
+            tint: Theme.danger;
+            y: (parent.height - self.height) / 2;
+            clicked => { Bridge.remove-audio-source(root.index); }
+        }
+    }
+    if Nav.narrow: GainSlider {
+        source: root.source;
+        index: root.index;
+    }
+}
+
+export component StreamingSection inherits VerticalLayout {
+    alignment: start;
+    spacing: Theme.space-5;
+    property <int> app: 0;
+    Card {
+        title: @tr("Stream defaults");
+        icon: Icons.radio;
+        NumberRow {
+            text: @tr("Frame rate");
+            description: @tr("The most frames a second; the source may give fewer.");
+            value: Bridge.streaming.fps;
+            unit: "fps";
+            accepted(t) => {
+                Bridge.streaming.fps = t;
+                Bridge.streaming-changed(Bridge.streaming);
+            }
+        }
+        NumberRow {
+            text: @tr("Video bitrate");
+            description: @tr("Of the single layer, when no layers are set below. 0: automatic, from the size and frame rate, up to 60 Mbit/s.");
+            value: Bridge.streaming.bitrate;
+            unit: "kbit/s";
+            accepted(t) => {
+                Bridge.streaming.bitrate = t;
+                Bridge.streaming-changed(Bridge.streaming);
+            }
+        }
+        ChoiceRow {
+            text: @tr("Video codec");
+            choice-width: 340px;
+            model: [@tr("Auto"), "VP8", "VP9", "H.264", "AV1"];
+            current: Bridge.streaming.codec;
+            selected(i) => {
+                Bridge.streaming.codec = i;
+                Bridge.streaming-changed(Bridge.streaming);
+            }
+        }
+        ChoiceRow {
+            text: @tr("Screen capture");
+            choice-width: 340px;
+            model: [@tr("Auto"), @tr("Portal"), "wlroots", "X11"];
+            current: Bridge.streaming.capture;
+            selected(i) => {
+                Bridge.streaming.capture = i;
+                Bridge.streaming-changed(Bridge.streaming);
+            }
+        }
+    }
+    Card {
+        title: @tr("Simulcast layers");
+        icon: Icons.layers;
+        subtitle: @tr("Copies of the stream at other sizes and bitrates; each viewer gets the one their connection carries. None: one layer.");
+        for layer[i] in Bridge.layers: LayerRow {
+            layer: layer;
+            index: i;
+        }
+        HorizontalLayout {
+            alignment: start;
+            Button {
+                icon: Icons.plus;
+                text: @tr("Add a layer");
+                clicked => { Bridge.add-layer(); }
+            }
+        }
+        Hint {
+            text: @tr("Size is WIDTHxHEIGHT (1280x720) or a scale of the source (0.5). Changes apply to a live stream at once.");
+        }
+    }
+    Card {
+        title: @tr("Audio sources");
+        icon: Icons.audio-lines;
+        subtitle: @tr("Mixed into the stream's sound; none: the stream is silent.");
+        for source[i] in Bridge.audio-sources: SourceRow {
+            source: source;
+            index: i;
+        }
+        FlexboxLayout {
+            spacing: Theme.space-2;
+            Button {
+                small: true;
+                icon: Icons.monitor;
+                text: @tr("Desktop without {}", Bridge.app-name);
+                clicked => { Bridge.add-audio-source("desktop", ""); }
+            }
+            Button {
+                small: true;
+                icon: Icons.mic;
+                text: @tr("Microphone");
+                clicked => { Bridge.add-audio-source("microphone", ""); }
+            }
+            Button {
+                small: true;
+                icon: Icons.layout-grid;
+                text: @tr("The shared window's app");
+                clicked => { Bridge.add-audio-source("window", ""); }
+            }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            Select {
+                model: Bridge.audio-apps;
+                current-index <=> root.app;
+                icon: Icons.music;
+                placeholder: @tr("No application plays audio now");
+                label: @tr("Application");
+            }
+            Button {
+                small: true;
+                icon: Icons.plus;
+                text: @tr("Add the application");
+                enabled: Bridge.audio-apps.length > 0;
+                y: (parent.height - self.height) / 2;
+                clicked => { Bridge.add-audio-source("app", Bridge.audio-apps[root.app]); }
+            }
+        }
+    }
+    if Bridge.has-studio: Card {
+        title: @tr("Recording and replay");
+        icon: Icons.film;
+        NumberRow {
+            text: @tr("Replay buffer");
+            description: @tr("Seconds kept for saving a clip after the fact (0: off).");
+            value: Bridge.streaming.replay-seconds;
+            unit: "s";
+            accepted(t) => {
+                Bridge.streaming.replay-seconds = t;
+                Bridge.streaming-changed(Bridge.streaming);
+            }
+        }
+        NumberRow {
+            text: @tr("Replay memory");
+            description: @tr("Kept in memory; older parts go to a temporary file.");
+            value: Bridge.streaming.replay-memory;
+            unit: "MB";
+            accepted(t) => {
+                Bridge.streaming.replay-memory = t;
+                Bridge.streaming-changed(Bridge.streaming);
+            }
+        }
+        Field {
+            label: @tr("Recordings and clips go to");
+            hint: @tr("Empty: Videos/{}. Press Enter to apply.", Bridge.app-name);
+            TextField {
+                text: Bridge.streaming.recording-dir;
+                icon: Icons.folder;
+                label: @tr("Recording folder");
+                accepted(t) => {
+                    Bridge.streaming.recording-dir = t;
+                    Bridge.streaming-changed(Bridge.streaming);
+                }
+            }
+        }
+    }
+}
+
+// A gateway configuration key.
+component ConfigRow inherits VerticalLayout {
+    in property <ConfigItem> item;
+    spacing: Theme.space-1;
+    padding-bottom: Theme.space-2;
+    HorizontalLayout {
+        spacing: Theme.space-3;
+        Text {
+            text: root.item.key;
+            color: Theme.text;
+            font-weight: Theme.weight-medium;
+            vertical-alignment: center;
+            width: 240px;
+            overflow: elide;
+        }
+        TextField {
+            text: root.item.value;
+            read-only: root.item.bootstrap;
+            label: root.item.key;
+            accepted(t) => { Bridge.config-set(root.item.key, t); }
+        }
+        Chip {
+            text: root.item.source;
+            outlined: true;
+            y: (parent.height - self.height) / 2;
+        }
+        IconButton {
+            icon: Icons.rotate-ccw;
+            label: @tr("Reset {}", root.item.key);
+            size: 30px;
+            icon-size: Theme.icon-sm;
+            enabled: root.item.source == "set at runtime";
+            y: (parent.height - self.height) / 2;
+            clicked => { Bridge.config-reset(root.item.key); }
+        }
+    }
+    Text {
+        text: root.item.bootstrap ? root.item.description + " " + @tr("(read at start only)") : root.item.description;
+        color: Theme.text-muted;
+        font-size: Theme.font-xs;
+        wrap: word-wrap;
+    }
+}
+
+// A gateway permission rule.
+component PermRow inherits HorizontalLayout {
+    in property <PermItem> item;
+    property <bool> everyone: item.everyone;
+    property <string> server-groups: item.server-groups;
+    property <string> channel-groups: item.channel-groups;
+    spacing: Theme.space-3;
+    VerticalLayout {
+        alignment: center;
+        width: 150px;
+        Text {
+            text: root.item.action;
+            color: Theme.text;
+            font-weight: Theme.weight-medium;
+        }
+        Text {
+            text: root.item.rule;
+            color: Theme.text-muted;
+            font-size: Theme.font-xs;
+            wrap: word-wrap;
+        }
+    }
+    Toggle {
+        checked <=> root.everyone;
+        label: @tr("Everyone may {}", root.item.action);
+        y: (parent.height - self.height) / 2;
+    }
+    TextField {
+        text <=> root.server-groups;
+        placeholder: @tr("server groups");
+        label: @tr("Server groups for {}", root.item.action);
+    }
+    TextField {
+        text <=> root.channel-groups;
+        placeholder: @tr("channel groups");
+        label: @tr("Channel groups for {}", root.item.action);
+    }
+    Button {
+        small: true;
+        text: @tr("Set");
+        y: (parent.height - self.height) / 2;
+        clicked => { Bridge.perm-set(root.item.action, root.everyone, root.server-groups, root.channel-groups); }
+    }
+    IconButton {
+        icon: Icons.rotate-ccw;
+        label: @tr("Reset {}", root.item.action);
+        size: 30px;
+        icon-size: Theme.icon-sm;
+        y: (parent.height - self.height) / 2;
+        clicked => { Bridge.perm-reset(root.item.action); }
+    }
+}
+
+// An encoder or decoder: works or not, its codec, name and why.
+component CodecRow inherits HorizontalLayout {
+    in property <EncoderItem> item;
+    spacing: Theme.space-3;
+    Icon {
+        source: root.item.ok ? Icons.circle-check : Icons.circle-x;
+        size: Theme.icon-sm;
+        tint: root.item.ok ? Theme.success : Theme.text-disabled;
+        y: (parent.height - self.height) / 2;
+    }
+    Text {
+        width: Nav.narrow ? 54px : 90px;
+        text: root.item.codec;
+        color: Theme.text;
+        font-weight: Theme.weight-medium;
+        vertical-alignment: center;
+    }
+    Text {
+        width: Nav.narrow ? 110px : 170px;
+        text: root.item.name + (root.item.hardware ? " · GPU" : "");
+        color: Theme.text-secondary;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    Text {
+        text: root.item.status;
+        color: root.item.ok ? Theme.text-secondary : Theme.text-muted;
+        font-size: Theme.font-sm;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+        overflow: elide;
+    }
+}
+
+export component IntegrationsSection inherits VerticalLayout {
+    alignment: start;
+    spacing: Theme.space-5;
+    Card {
+        title: @tr("Gateways");
+        icon: Icons.plug;
+        subtitle: @tr("A gateway gives a server invisible presence, chat without joining, history, pins, reactions, topics, events and the stream directory.");
+        if Bridge.gateways.length == 0: Hint {
+            text: @tr("None of your servers has a gateway. Add its URL to a server's bookmark (Edit server).");
+        }
+        for gw in Bridge.gateways: VerticalLayout {
+            spacing: Theme.space-2;
+            HorizontalLayout {
+                spacing: Theme.space-3;
+                Rectangle {
+                    width: 10px;
+                    height: 10px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 5px;
+                    background: gw.status == "connected" ? Theme.success : gw.status == "connecting" ? Theme.warning : Theme.offline;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: gw.server;
+                        color: Theme.text;
+                        font-weight: Theme.weight-medium;
+                    }
+                    Text {
+                        text: gw.url;
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        overflow: elide;
+                    }
+                }
+                if gw.admin: Button {
+                    small: true;
+                    icon: Icons.settings;
+                    text: @tr("Administer");
+                    checked: Bridge.admin-session == gw.session;
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Bridge.gateway-admin(gw.session); }
+                }
+            }
+            FlexboxLayout {
+                spacing: Theme.space-2;
+                for feature in gw.features: Chip {
+                    text: feature;
+                    outlined: true;
+                }
+            }
+            Divider { }
+        }
+    }
+    if Bridge.admin-session >= 0: Card {
+        title: @tr("Gateway administration");
+        icon: Icons.settings;
+        subtitle: @tr("The gateway's settings and who may do what. Values are JSON; Enter applies.");
+        HorizontalLayout {
+            alignment: start;
+            spacing: Theme.space-3;
+            Button {
+                icon: Icons.refresh-cw;
+                text: @tr("Reload its file");
+                clicked => { Bridge.config-reload(); }
+            }
+            Button {
+                icon: Icons.x;
+                text: @tr("Close");
+                clicked => { Bridge.gateway-admin(-1); }
+            }
+        }
+        for item in Bridge.gateway-config: ConfigRow {
+            item: item;
+        }
+        Divider { }
+        Text {
+            text: @tr("Permissions");
+            color: Theme.text;
+            font-weight: Theme.weight-semibold;
+        }
+        for item in Bridge.gateway-perms: PermRow {
+            item: item;
+        }
+        Hint {
+            text: @tr("Groups are TeamSpeak group ids, separated by commas.");
+        }
+    }
+    Card {
+        title: @tr("Video encoders and decoders");
+        icon: Icons.cpu;
+        HorizontalLayout {
+            spacing: Theme.space-3;
+            Text {
+                text: Bridge.ffmpeg-status;
+                color: Theme.text-secondary;
+                font-size: Theme.font-sm;
+                horizontal-stretch: 1;
+                wrap: word-wrap;
+            }
+            if Bridge.encoders-loading: Spinner {
+                size: 18px;
+            }
+            Button {
+                small: true;
+                icon: Icons.refresh-cw;
+                text: @tr("Check again");
+                enabled: !Bridge.encoders-loading;
+                clicked => { Bridge.refresh-encoders(); }
+            }
+        }
+        if Bridge.zero-copy-status != "": Text {
+            text: Bridge.zero-copy-status;
+            color: Theme.text-muted;
+            font-size: Theme.font-sm;
+            wrap: word-wrap;
+        }
+        Text {
+            text: @tr("Encoders");
+            color: Theme.text;
+            font-weight: Theme.weight-semibold;
+        }
+        for e in Bridge.encoders: CodecRow {
+            item: e;
+        }
+        Text {
+            text: @tr("Decoders");
+            color: Theme.text;
+            font-weight: Theme.weight-semibold;
+        }
+        Hint {
+            text: @tr("Each codec's decoders in the order they are tried: when one fails the next takes over.");
+        }
+        for e in Bridge.decoders: CodecRow {
+            item: e;
+        }
+    }
+}
+
+// Any registered setting, as JSON.
+component SettingRow inherits VerticalLayout {
+    in property <SettingItem> item;
+    spacing: Theme.space-1;
+    padding-bottom: Theme.space-2;
+    // The phone: the key above its value.
+    if Nav.narrow: Text {
+        text: root.item.key;
+        color: Theme.text;
+        font-weight: Theme.weight-medium;
+        overflow: elide;
+    }
+    HorizontalLayout {
+        spacing: Theme.space-3;
+        if !Nav.narrow: Text {
+            text: root.item.key;
+            color: Theme.text;
+            font-weight: Theme.weight-medium;
+            vertical-alignment: center;
+            width: 220px;
+            overflow: elide;
+        }
+        TextField {
+            text: root.item.value;
+            label: root.item.key;
+            accepted(t) => {
+                let error = Bridge.setting-set(root.item.key, t);
+                if error != "" {
+                    self.text = root.item.value;
+                }
+            }
+        }
+        Chip {
+            text: root.item.source;
+            outlined: true;
+            y: (parent.height - self.height) / 2;
+        }
+        IconButton {
+            icon: Icons.rotate-ccw;
+            label: @tr("Reset {}", root.item.key);
+            size: 30px;
+            icon-size: Theme.icon-sm;
+            enabled: root.item.source == "set here";
+            y: (parent.height - self.height) / 2;
+            clicked => { Bridge.setting-reset(root.item.key); }
+        }
+    }
+    Text {
+        text: root.item.doc;
+        color: Theme.text-muted;
+        font-size: Theme.font-xs;
+        wrap: word-wrap;
+    }
+}
+
+export component AdvancedSection inherits VerticalLayout {
+    alignment: start;
+    spacing: Theme.space-5;
+    Card {
+        title: @tr("Video encoding and decoding");
+        icon: Icons.cpu;
+        Field {
+            label: @tr("Encoder");
+            hint: @tr("auto, software, or the name of an encoder from Integrations. Press Enter to apply.");
+            TextField {
+                text: Bridge.advanced.encoder;
+                label: @tr("Encoder backend");
+                accepted(t) => {
+                    Bridge.advanced.encoder = t;
+                    Bridge.advanced-changed(Bridge.advanced);
+                }
+            }
+        }
+        ToggleRow {
+            text: @tr("Hardware acceleration");
+            description: @tr("GPU encoders where available");
+            checked: Bridge.advanced.hardware;
+            toggled(on) => {
+                Bridge.advanced.hardware = on;
+                Bridge.advanced-changed(Bridge.advanced);
+            }
+        }
+        Field {
+            label: @tr("Decoder");
+            hint: @tr("auto, software, or the name of a decoder from Integrations; for streams watched from now on. Press Enter to apply.");
+            TextField {
+                text: Bridge.advanced.decoder;
+                label: @tr("Decoder backend");
+                accepted(t) => {
+                    Bridge.advanced.decoder = t;
+                    Bridge.advanced-changed(Bridge.advanced);
+                }
+            }
+        }
+        ToggleRow {
+            text: @tr("Hardware decoding");
+            description: @tr("GPU decoders where available, before the software ones");
+            checked: Bridge.advanced.hardware-decoding;
+            toggled(on) => {
+                Bridge.advanced.hardware-decoding = on;
+                Bridge.advanced-changed(Bridge.advanced);
+            }
+        }
+    }
+    Card {
+        title: @tr("Stream encryption");
+        icon: Icons.lock;
+        subtitle: @tr("SRTP profiles offered for stream media, most preferred first.");
+        for profile[i] in Bridge.srtp-profiles: HorizontalLayout {
+            spacing: Theme.space-3;
+            Text {
+                text: (i + 1) + ".  " + profile;
+                color: Theme.text;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            IconButton {
+                icon: Icons.arrow-up;
+                label: @tr("Earlier");
+                size: 30px;
+                icon-size: Theme.icon-sm;
+                enabled: i > 0;
+                clicked => { Bridge.srtp-move(i, -1); }
+            }
+            IconButton {
+                icon: Icons.arrow-down;
+                label: @tr("Later");
+                size: 30px;
+                icon-size: Theme.icon-sm;
+                enabled: i < Bridge.srtp-profiles.length - 1;
+                clicked => { Bridge.srtp-move(i, 1); }
+            }
+            IconButton {
+                icon: Icons.x;
+                label: @tr("Do not offer {}", profile);
+                size: 30px;
+                icon-size: Theme.icon-sm;
+                enabled: Bridge.srtp-profiles.length > 1;
+                clicked => { Bridge.srtp-toggle(profile); }
+            }
+        }
+        for profile in Bridge.srtp-unused: HorizontalLayout {
+            spacing: Theme.space-3;
+            Text {
+                text: profile;
+                color: Theme.text-muted;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Button {
+                small: true;
+                icon: Icons.plus;
+                text: @tr("Offer");
+                clicked => { Bridge.srtp-toggle(profile); }
+            }
+        }
+    }
+    Card {
+        title: @tr("Chat history");
+        icon: Icons.messages-square;
+        ToggleRow {
+            text: @tr("Keep chat history on this device");
+            description: @tr("Off: messages are kept in memory for this run only");
+            checked: Bridge.advanced.store-history;
+            toggled(on) => {
+                Bridge.advanced.store-history = on;
+                Bridge.advanced-changed(Bridge.advanced);
+            }
+        }
+        NumberRow {
+            text: @tr("Messages per page");
+            description: @tr("Shown when a chat opens and per step back (0: all).");
+            value: Bridge.advanced.history-page;
+            accepted(t) => {
+                Bridge.advanced.history-page = t;
+                Bridge.advanced-changed(Bridge.advanced);
+            }
+        }
+        NumberRow {
+            text: @tr("Delete messages after");
+            description: @tr("Pinned ones stay (0: keep all).");
+            value: Bridge.advanced.retention-days;
+            unit: @tr("days");
+            accepted(t) => {
+                Bridge.advanced.retention-days = t;
+                Bridge.advanced-changed(Bridge.advanced);
+            }
+        }
+        NumberRow {
+            text: @tr("Same message within");
+            description: @tr("Two copies from different sources this close are one.");
+            value: Bridge.advanced.dedupe-ms;
+            unit: "ms";
+            accepted(t) => {
+                Bridge.advanced.dedupe-ms = t;
+                Bridge.advanced-changed(Bridge.advanced);
+            }
+        }
+        NumberRow {
+            text: @tr("Pictures in chat up to");
+            description: @tr("Linked pictures this small are downloaded and shown (0: never).");
+            value: Bridge.advanced.preview-kb;
+            unit: "KB";
+            accepted(t) => {
+                Bridge.advanced.preview-kb = t;
+                Bridge.advanced-changed(Bridge.advanced);
+            }
+        }
+    }
+    Card {
+        title: @tr("Cache");
+        icon: Icons.hard-drive;
+        NumberRow {
+            text: @tr("Avatars and icons on disk");
+            description: @tr("The least recently used go first (0: no limit).");
+            value: Bridge.advanced.cache-mb;
+            unit: "MB";
+            accepted(t) => {
+                Bridge.advanced.cache-mb = t;
+                Bridge.advanced-changed(Bridge.advanced);
+            }
+        }
+        ToggleRow {
+            text: @tr("Download avatars and icons");
+            description: @tr("Of the servers you are on");
+            checked: Bridge.advanced.fetch-images;
+            toggled(on) => {
+                Bridge.advanced.fetch-images = on;
+                Bridge.advanced-changed(Bridge.advanced);
+            }
+        }
+        NumberRow {
+            text: @tr("Transfer progress every");
+            description: @tr("How often file transfers report (0: continuously).");
+            value: Bridge.advanced.progress-ms;
+            unit: "ms";
+            accepted(t) => {
+                Bridge.advanced.progress-ms = t;
+                Bridge.advanced-changed(Bridge.advanced);
+            }
+        }
+    }
+    Card {
+        title: @tr("Logs and crash reports");
+        icon: Icons.scroll-text;
+        Hint {
+            text: Bridge.advanced.logs;
+        }
+        HorizontalLayout {
+            spacing: Theme.space-3;
+            Text {
+                text: Bridge.advanced.crash-dir != "" ? @tr("Crash reports: {}", Bridge.advanced.crash-dir) : @tr("No crash report folder.");
+                color: Theme.text-secondary;
+                font-size: Theme.font-sm;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            Button {
+                small: true;
+                icon: Icons.folder-open;
+                text: @tr("Open");
+                enabled: Bridge.advanced.crash-dir != "";
+                clicked => { Bridge.open-logs(); }
+            }
+        }
+    }
+    Card {
+        title: @tr("All settings");
+        icon: Icons.flask-conical;
+        subtitle: @tr("Every setting by its key, as JSON. For what the pages do not show; Enter applies, the arrow resets.");
+        SearchBox {
+            height: 36px;
+            show-shortcut: false;
+            placeholder: @tr("Filter settings");
+            label: @tr("Filter settings");
+            edited(text) => { Bridge.search-settings(text); }
+        }
+        for item in Bridge.all-settings: SettingRow {
+            item: item;
+        }
+    }
+}

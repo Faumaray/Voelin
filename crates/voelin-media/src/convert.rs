@@ -1,17 +1,24 @@
-//! Pixel format conversion through `yuv` (yuvutils-rs).
+//! Pixel format conversion through `yuv` (yuvutils-rs, SIMD: AVX2 / SSE4.1
+//! / NEON picked at runtime).
 //!
 //! All YUV data uses BT.601 limited range: WebRTC endpoints assume it for VP8,
 //! VP9 and H.264 unless the stream signals something else, and libwebrtc's
 //! capture pipeline produces it.
+//!
+//! [`Converter`] is the streaming path: it converts a borrowed frame (e.g. a
+//! mapped capture buffer, any stride) straight into a preallocated I420
+//! frame, in bands of rows on all cores, without allocating.
 
 use std::borrow::Cow;
+use std::sync::{Mutex, PoisonError};
 
 use yuv::{
 	BufferStoreMut, YuvBiPlanarImage, YuvConversionMode, YuvPlanarImage, YuvPlanarImageMut,
 	YuvRange, YuvStandardMatrix,
 };
 
-use crate::frame::{FrameData, Plane, VideoFrame, chroma_size};
+use crate::frame::{FrameData, FrameRef, PixelsRef, Plane, VideoFrame, chroma_size};
+use crate::workers::{Slots, Workers};
 use crate::{Error, Result};
 
 const RANGE: YuvRange = YuvRange::Limited;
@@ -30,6 +37,12 @@ fn stride_u32(stride: usize) -> Result<u32> {
 /// Suits a Slint `SharedPixelBuffer<Rgba8Pixel>`:
 /// `to_rgba(&frame, buffer.make_mut_bytes(), width as usize * 4)`.
 pub fn to_rgba(frame: &VideoFrame, out: &mut [u8], out_stride: usize) -> Result<()> {
+	to_rgba_ref(&frame.view(), out, out_stride)
+}
+
+/// Write a borrowed frame (e.g. a mapped capture buffer) as RGBA (alpha 255)
+/// into `out`, `out_stride` bytes per row. Allocates nothing.
+pub fn to_rgba_ref(frame: &FrameRef<'_>, out: &mut [u8], out_stride: usize) -> Result<()> {
 	frame.validate()?;
 	let (w, h) = (frame.width, frame.height);
 	let row = w as usize * 4;
@@ -41,32 +54,32 @@ pub fn to_rgba(frame: &VideoFrame, out: &mut [u8], out_stride: usize) -> Result<
 		)));
 	}
 	let out_stride_u32 = stride_u32(out_stride)?;
-	match &frame.data {
-		FrameData::I420 { y, u, v } => {
+	match &frame.pixels {
+		PixelsRef::I420 { y, u, v } => {
 			let image = YuvPlanarImage {
-				y_plane: &y.data,
+				y_plane: y.data,
 				y_stride: stride_u32(y.stride)?,
-				u_plane: &u.data,
+				u_plane: u.data,
 				u_stride: stride_u32(u.stride)?,
-				v_plane: &v.data,
+				v_plane: v.data,
 				v_stride: stride_u32(v.stride)?,
 				width: w,
 				height: h,
 			};
 			yuv::yuv420_to_rgba(&image, out, out_stride_u32, RANGE, MATRIX).map_err(error)
 		}
-		FrameData::Nv12 { y, uv } => {
+		PixelsRef::Nv12 { y, uv } => {
 			let image = YuvBiPlanarImage {
-				y_plane: &y.data,
+				y_plane: y.data,
 				y_stride: stride_u32(y.stride)?,
-				uv_plane: &uv.data,
+				uv_plane: uv.data,
 				uv_stride: stride_u32(uv.stride)?,
 				width: w,
 				height: h,
 			};
 			yuv::yuv_nv12_to_rgba(&image, out, out_stride_u32, RANGE, MATRIX, mode()).map_err(error)
 		}
-		FrameData::Bgra(p) => {
+		PixelsRef::Bgra(p) => {
 			for y in 0..h as usize {
 				let src = p.row(y, row);
 				let dst = &mut out[y * out_stride..y * out_stride + row];
@@ -76,7 +89,7 @@ pub fn to_rgba(frame: &VideoFrame, out: &mut [u8], out_stride: usize) -> Result<
 			}
 			Ok(())
 		}
-		FrameData::Rgba(p) => {
+		PixelsRef::Rgba(p) => {
 			for y in 0..h as usize {
 				out[y * out_stride..y * out_stride + row].copy_from_slice(p.row(y, row));
 			}
@@ -162,6 +175,186 @@ fn repack(plane: &Plane, width: usize, rows: usize) -> Plane {
 		out.data[y * width..(y + 1) * width].copy_from_slice(plane.row(y, width));
 	}
 	out
+}
+
+/// Rows `r0 .. r0 + rows` of an I420 destination (`r0` even).
+struct Band<'a> {
+	y: &'a mut [u8],
+	u: &'a mut [u8],
+	v: &'a mut [u8],
+	y_stride: usize,
+	u_stride: usize,
+	v_stride: usize,
+	width: usize,
+	r0: usize,
+	rows: usize,
+}
+
+impl Band<'_> {
+	/// Rows `from ..` of this band (`from` even).
+	fn skip(&mut self, from: usize) -> Band<'_> {
+		Band {
+			y: &mut self.y[from * self.y_stride..],
+			u: &mut self.u[from / 2 * self.u_stride..],
+			v: &mut self.v[from / 2 * self.v_stride..],
+			y_stride: self.y_stride,
+			u_stride: self.u_stride,
+			v_stride: self.v_stride,
+			width: self.width,
+			r0: self.r0 + from,
+			rows: self.rows - from,
+		}
+	}
+
+	/// Convert `rows` rows of packed pixels (`src` starts at the band's
+	/// first row) with yuv's SIMD code.
+	fn packed(&mut self, bgra: bool, src: &[u8], stride: usize, rows: usize) -> Result<()> {
+		let mut image = YuvPlanarImageMut {
+			y_plane: BufferStoreMut::Borrowed(&mut *self.y),
+			y_stride: stride_u32(self.y_stride)?,
+			u_plane: BufferStoreMut::Borrowed(&mut *self.u),
+			u_stride: stride_u32(self.u_stride)?,
+			v_plane: BufferStoreMut::Borrowed(&mut *self.v),
+			v_stride: stride_u32(self.v_stride)?,
+			width: self.width as u32,
+			height: rows as u32,
+		};
+		let convert = if bgra { yuv::bgra_to_yuv420 } else { yuv::rgba_to_yuv420 };
+		convert(&mut image, src, stride_u32(stride)?, RANGE, MATRIX, mode()).map_err(error)
+	}
+}
+
+/// Convert one band of `src` into `band`. `tail` is scratch memory for a
+/// last row pair that is not padded to the stride.
+fn convert_band(src: &PixelsRef<'_>, mut band: Band<'_>, tail: &Mutex<Vec<u8>>) -> Result<()> {
+	let (w, r0, rows) = (band.width, band.r0, band.rows);
+	let (c0, crows) = (r0 / 2, rows.div_ceil(2));
+	let cw = w.div_ceil(2);
+	match *src {
+		PixelsRef::Bgra(p) | PixelsRef::Rgba(p) => {
+			let bgra = matches!(src, PixelsRef::Bgra(_));
+			let data = &p.data[r0 * p.stride..];
+			let padded = rows * p.stride;
+			// yuv converts pairs of rows in `2 * stride` chunks, so it would
+			// skip a final pair whose last row ends before the stride does
+			// (a buffer without padding after the last row). An odd last
+			// row is converted on its own and needs no padding.
+			if data.len() >= padded || rows % 2 == 1 {
+				band.packed(bgra, &data[..data.len().min(padded)], p.stride, rows)
+			} else {
+				let head = rows - 2;
+				if head > 0 {
+					band.packed(bgra, &data[..head * p.stride], p.stride, head)?;
+				}
+				let mut copy = tail.lock().unwrap_or_else(PoisonError::into_inner);
+				copy.clear();
+				copy.extend_from_slice(&data[head * p.stride..][..w * 4]);
+				copy.extend_from_slice(&data[(head + 1) * p.stride..][..w * 4]);
+				band.skip(head).packed(bgra, &copy, w * 4, 2)
+			}
+		}
+		PixelsRef::I420 { y, u, v } => {
+			for r in 0..rows {
+				band.y[r * band.y_stride..][..w].copy_from_slice(y.row(r0 + r, w));
+			}
+			for r in 0..crows {
+				band.u[r * band.u_stride..][..cw].copy_from_slice(u.row(c0 + r, cw));
+				band.v[r * band.v_stride..][..cw].copy_from_slice(v.row(c0 + r, cw));
+			}
+			Ok(())
+		}
+		PixelsRef::Nv12 { y, uv } => {
+			for r in 0..rows {
+				band.y[r * band.y_stride..][..w].copy_from_slice(y.row(r0 + r, w));
+			}
+			for r in 0..crows {
+				let src = uv.row(c0 + r, cw * 2);
+				let u_row = &mut band.u[r * band.u_stride..][..cw];
+				let v_row = &mut band.v[r * band.v_stride..][..cw];
+				for ((pair, u), v) in src.chunks_exact(2).zip(u_row).zip(v_row) {
+					*u = pair[0];
+					*v = pair[1];
+				}
+			}
+			Ok(())
+		}
+	}
+}
+
+/// Converts borrowed frames of any format (any stride) into I420 frames the
+/// caller provides, in bands of rows on a [`Workers`] pool. Allocates nothing
+/// per frame.
+pub struct Converter {
+	workers: Workers,
+	tail: Mutex<Vec<u8>>,
+}
+
+impl Converter {
+	/// `threads` as in [`Workers::new`] (0: one per CPU).
+	pub fn new(threads: usize) -> Self {
+		Self { workers: Workers::new("voelin-convert", threads), tail: Mutex::new(Vec::new()) }
+	}
+
+	/// The thread pool, for other per-frame work (e.g. scaling).
+	pub fn workers(&mut self) -> &mut Workers {
+		&mut self.workers
+	}
+
+	/// Threads that convert, the caller included.
+	pub fn threads(&self) -> usize {
+		self.workers.threads()
+	}
+
+	/// Convert `src` into `dst`, an I420 frame of the same size whose planes
+	/// hold `stride * rows` bytes each (e.g. from a
+	/// [`FramePool`](crate::pool::FramePool)). Takes the timestamp too.
+	pub fn to_i420_into(&mut self, src: &FrameRef<'_>, dst: &mut VideoFrame) -> Result<()> {
+		src.validate()?;
+		if (dst.width, dst.height) != (src.width, src.height) {
+			return Err(Error::InvalidFrame(format!(
+				"destination is {}x{}, source {}x{}",
+				dst.width, dst.height, src.width, src.height
+			)));
+		}
+		let (w, h) = (src.width as usize, src.height as usize);
+		let (_, ch) = chroma_size(src.width, src.height);
+		let FrameData::I420 { y, u, v } = &mut dst.data else {
+			return Err(Error::InvalidFrame("the destination is not I420".into()));
+		};
+		let padded = |p: &Plane, width: usize, rows: usize| {
+			p.stride >= width && p.data.len() >= p.stride * rows
+		};
+		if !padded(y, w, h) || !padded(u, w.div_ceil(2), ch) || !padded(v, w.div_ceil(2), ch) {
+			return Err(Error::InvalidFrame("destination planes are too small".into()));
+		}
+		dst.timestamp = src.timestamp;
+		let tasks = self.workers.tasks(ch);
+		let band_pairs = ch.div_ceil(tasks);
+		let band_rows = band_pairs * 2;
+		let (y_stride, u_stride, v_stride) = (y.stride, u.stride, v.stride);
+		let bands = y
+			.data
+			.chunks_mut(band_rows * y_stride)
+			.zip(u.data.chunks_mut(band_pairs * u_stride))
+			.zip(v.data.chunks_mut(band_pairs * v_stride))
+			.take(ch.div_ceil(band_pairs));
+		let slots = Slots::new(bands.enumerate());
+		let failed = Mutex::new(None);
+		let tail = &self.tail;
+		self.workers.run(slots.len(), &|task| {
+			let Some((i, ((y, u), v))) = slots.take(task) else { return };
+			let r0 = i * band_rows;
+			let rows = band_rows.min(h - r0);
+			let band = Band { y, u, v, y_stride, u_stride, v_stride, width: w, r0, rows };
+			if let Err(e) = convert_band(&src.pixels, band, tail) {
+				failed.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert(e);
+			}
+		});
+		match failed.into_inner().unwrap_or_else(PoisonError::into_inner) {
+			Some(e) => Err(e),
+			None => Ok(()),
+		}
+	}
 }
 
 /// Peak signal-to-noise ratio in dB between two frames of the same size,

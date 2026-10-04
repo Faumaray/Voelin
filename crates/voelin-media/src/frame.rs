@@ -46,6 +46,29 @@ impl Plane {
 		&self.data[y * self.stride..y * self.stride + width]
 	}
 
+	/// The plane borrowed.
+	pub fn view(&self) -> PlaneRef<'_> {
+		PlaneRef { data: &self.data, stride: self.stride }
+	}
+}
+
+/// A borrowed image plane: `stride` bytes per row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlaneRef<'a> {
+	pub data: &'a [u8],
+	pub stride: usize,
+}
+
+impl<'a> PlaneRef<'a> {
+	pub fn new(data: &'a [u8], stride: usize) -> Self {
+		Self { data, stride }
+	}
+
+	/// Row `y`, `width` bytes long.
+	pub fn row(&self, y: usize, width: usize) -> &'a [u8] {
+		&self.data[y * self.stride..y * self.stride + width]
+	}
+
 	fn check(&self, name: &str, width: usize, rows: usize) -> Result<()> {
 		if self.stride < width {
 			return Err(Error::InvalidFrame(format!(
@@ -62,6 +85,134 @@ impl Plane {
 			)));
 		}
 		Ok(())
+	}
+
+	/// A tightly packed copy of `width` x `rows` bytes.
+	fn to_plane(self, width: usize, rows: usize) -> Plane {
+		let mut plane = Plane::new(Vec::with_capacity(width * rows), width);
+		self.copy_into(&mut plane, width, rows);
+		plane
+	}
+
+	/// As [`to_plane`](Self::to_plane), into `dst`'s buffer (which only
+	/// grows).
+	fn copy_into(self, dst: &mut Plane, width: usize, rows: usize) {
+		dst.data.clear();
+		for y in 0..rows {
+			dst.data.extend_from_slice(self.row(y, width));
+		}
+		dst.stride = width;
+	}
+}
+
+/// The pixels of a [`FrameRef`], borrowed (e.g. from a mapped capture
+/// buffer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PixelsRef<'a> {
+	I420 {
+		y: PlaneRef<'a>,
+		u: PlaneRef<'a>,
+		v: PlaneRef<'a>,
+	},
+	Nv12 {
+		y: PlaneRef<'a>,
+		uv: PlaneRef<'a>,
+	},
+	/// BGRA or BGRx.
+	Bgra(PlaneRef<'a>),
+	/// RGBA or RGBx.
+	Rgba(PlaneRef<'a>),
+}
+
+/// A video frame whose pixels are borrowed, e.g. a capture buffer that is
+/// mapped only while a callback runs. Capture backends hand these to a
+/// [`FrameSink`](crate::capture::FrameSink), which converts straight from
+/// them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameRef<'a> {
+	pub width: u32,
+	pub height: u32,
+	/// As [`VideoFrame::timestamp`].
+	pub timestamp: Duration,
+	pub pixels: PixelsRef<'a>,
+}
+
+impl FrameRef<'_> {
+	pub fn format(&self) -> PixelFormat {
+		match self.pixels {
+			PixelsRef::I420 { .. } => PixelFormat::I420,
+			PixelsRef::Nv12 { .. } => PixelFormat::Nv12,
+			PixelsRef::Bgra(_) => PixelFormat::Bgra,
+			PixelsRef::Rgba(_) => PixelFormat::Rgba,
+		}
+	}
+
+	/// Check that the planes are large enough for the frame size.
+	pub fn validate(&self) -> Result<()> {
+		if self.width == 0 || self.height == 0 {
+			return Err(Error::InvalidFrame(format!("empty frame {}x{}", self.width, self.height)));
+		}
+		let (w, h) = (self.width as usize, self.height as usize);
+		let (cw, ch) = chroma_size(self.width, self.height);
+		match &self.pixels {
+			PixelsRef::I420 { y, u, v } => {
+				y.check("Y", w, h)?;
+				u.check("U", cw, ch)?;
+				v.check("V", cw, ch)
+			}
+			PixelsRef::Nv12 { y, uv } => {
+				y.check("Y", w, h)?;
+				uv.check("UV", cw * 2, ch)
+			}
+			PixelsRef::Bgra(p) => p.check("BGRA", w * 4, h),
+			PixelsRef::Rgba(p) => p.check("RGBA", w * 4, h),
+		}
+	}
+
+	/// An owned copy with tightly packed planes.
+	pub fn to_frame(&self) -> VideoFrame {
+		let (w, h) = (self.width as usize, self.height as usize);
+		let (cw, ch) = chroma_size(self.width, self.height);
+		let data = match self.pixels {
+			PixelsRef::I420 { y, u, v } => FrameData::I420 {
+				y: y.to_plane(w, h),
+				u: u.to_plane(cw, ch),
+				v: v.to_plane(cw, ch),
+			},
+			PixelsRef::Nv12 { y, uv } => {
+				FrameData::Nv12 { y: y.to_plane(w, h), uv: uv.to_plane(cw * 2, ch) }
+			}
+			PixelsRef::Bgra(p) => FrameData::Bgra(p.to_plane(w * 4, h)),
+			PixelsRef::Rgba(p) => FrameData::Rgba(p.to_plane(w * 4, h)),
+		};
+		VideoFrame { width: self.width, height: self.height, timestamp: self.timestamp, data }
+	}
+
+	/// As [`to_frame`](Self::to_frame), into `out`: its buffers are reused
+	/// when it has this pixel format, so copying frames of one size into the
+	/// same `out` allocates nothing after the first.
+	pub fn copy_to(&self, out: &mut VideoFrame) {
+		let (w, h) = (self.width as usize, self.height as usize);
+		let (cw, ch) = chroma_size(self.width, self.height);
+		match (self.pixels, &mut out.data) {
+			(PixelsRef::I420 { y, u, v }, FrameData::I420 { y: oy, u: ou, v: ov }) => {
+				y.copy_into(oy, w, h);
+				u.copy_into(ou, cw, ch);
+				v.copy_into(ov, cw, ch);
+			}
+			(PixelsRef::Nv12 { y, uv }, FrameData::Nv12 { y: oy, uv: ouv }) => {
+				y.copy_into(oy, w, h);
+				uv.copy_into(ouv, cw * 2, ch);
+			}
+			(PixelsRef::Bgra(p), FrameData::Bgra(o)) | (PixelsRef::Rgba(p), FrameData::Rgba(o)) => {
+				p.copy_into(o, w * 4, h);
+			}
+			_ => {
+				*out = self.to_frame();
+				return;
+			}
+		}
+		(out.width, out.height, out.timestamp) = (self.width, self.height, self.timestamp);
 	}
 }
 
@@ -144,6 +295,19 @@ impl VideoFrame {
 		}
 	}
 
+	/// The frame with its pixels borrowed.
+	pub fn view(&self) -> FrameRef<'_> {
+		let pixels = match &self.data {
+			FrameData::I420 { y, u, v } => {
+				PixelsRef::I420 { y: y.view(), u: u.view(), v: v.view() }
+			}
+			FrameData::Nv12 { y, uv } => PixelsRef::Nv12 { y: y.view(), uv: uv.view() },
+			FrameData::Bgra(p) => PixelsRef::Bgra(p.view()),
+			FrameData::Rgba(p) => PixelsRef::Rgba(p.view()),
+		};
+		FrameRef { width: self.width, height: self.height, timestamp: self.timestamp, pixels }
+	}
+
 	/// The timestamp on the 90 kHz RTP video clock.
 	pub fn pts_90khz(&self) -> u64 {
 		(self.timestamp.as_micros() * u128::from(VIDEO_CLOCK_RATE) / 1_000_000) as u64
@@ -151,24 +315,71 @@ impl VideoFrame {
 
 	/// Check that the planes are large enough for the frame size.
 	pub fn validate(&self) -> Result<()> {
-		if self.width == 0 || self.height == 0 {
-			return Err(Error::InvalidFrame(format!("empty frame {}x{}", self.width, self.height)));
+		self.view().validate()
+	}
+}
+
+/// A picture in GPU memory: an NV12 VA-API surface, converted and scaled
+/// from a captured DMA-BUF on the GPU (`ffmpeg::GpuConverter`, Linux) so
+/// that no CPU reads its pixels, for the encoders that take one
+/// ([`VideoEncoder::gpu_alignment`](crate::VideoEncoder::gpu_alignment)).
+/// Dropping it gives the surface back to its pool. On Android it stands for
+/// a screen picture the virtual display renders straight into MediaCodec's
+/// input surface ([`GpuFrame::rendered`]): only its size and time travel.
+/// Only this crate makes them.
+#[non_exhaustive]
+pub struct GpuFrame {
+	pub width: u32,
+	pub height: u32,
+	/// As [`VideoFrame::timestamp`].
+	pub timestamp: Duration,
+	#[cfg(feature = "ffmpeg")]
+	pub(crate) surface: crate::ffmpeg::Surface,
+}
+
+impl GpuFrame {
+	/// The timestamp on the 90 kHz RTP video clock.
+	pub fn pts_90khz(&self) -> u64 {
+		(self.timestamp.as_micros() * u128::from(VIDEO_CLOCK_RATE) / 1_000_000) as u64
+	}
+
+	/// A screen picture the virtual display renders straight into the
+	/// encoder's input surface (`codec::mediacodec`, the zero-copy path):
+	/// nothing but its size and time is handed over.
+	#[cfg(all(target_os = "android", not(feature = "ffmpeg")))]
+	pub fn rendered(width: u32, height: u32, timestamp: Duration) -> Self {
+		Self { width, height, timestamp }
+	}
+
+	/// Such a picture as a simulcast layer of `width` x `height` sees it
+	/// (Android: the encoder draws the screen at its own size).
+	#[cfg(target_os = "android")]
+	pub fn sized(&self, width: u32, height: u32) -> Self {
+		Self {
+			width,
+			height,
+			timestamp: self.timestamp,
+			#[cfg(feature = "ffmpeg")]
+			surface: self.surface.new_ref(),
 		}
-		let (w, h) = (self.width as usize, self.height as usize);
-		let (cw, ch) = chroma_size(self.width, self.height);
-		match &self.data {
-			FrameData::I420 { y, u, v } => {
-				y.check("Y", w, h)?;
-				u.check("U", cw, ch)?;
-				v.check("V", cw, ch)
-			}
-			FrameData::Nv12 { y, uv } => {
-				y.check("Y", w, h)?;
-				uv.check("UV", cw * 2, ch)
-			}
-			FrameData::Bgra(p) => p.check("BGRA", w * 4, h),
-			FrameData::Rgba(p) => p.check("RGBA", w * 4, h),
+	}
+
+	/// The same picture at another time (another reference to the same
+	/// surface), e.g. to send a still screen again.
+	pub fn at(&self, timestamp: Duration) -> Self {
+		Self {
+			width: self.width,
+			height: self.height,
+			timestamp,
+			#[cfg(feature = "ffmpeg")]
+			surface: self.surface.new_ref(),
 		}
+	}
+}
+
+impl std::fmt::Debug for GpuFrame {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "GpuFrame({}x{} at {:?})", self.width, self.height, self.timestamp)
 	}
 }
 
@@ -217,5 +428,50 @@ mod tests {
 		let audio = AudioBuffer { samples: vec![0.0; 960], channels: 2, timestamp: Duration::ZERO };
 		assert_eq!(audio.frames(), 480);
 		assert_eq!(audio.duration(), Duration::from_millis(10));
+	}
+
+	#[test]
+	fn borrowed_frames() {
+		// 3x2 BGRA with 4 bytes of padding per row, last row unpadded.
+		let data: Vec<u8> = (0..16 + 12).collect();
+		let frame = FrameRef {
+			width: 3,
+			height: 2,
+			timestamp: Duration::from_millis(5),
+			pixels: PixelsRef::Bgra(PlaneRef::new(&data, 16)),
+		};
+		frame.validate().unwrap();
+		assert_eq!(frame.format(), PixelFormat::Bgra);
+		let owned = frame.to_frame();
+		let FrameData::Bgra(p) = &owned.data else { panic!("not BGRA") };
+		assert_eq!(p.stride, 12);
+		assert_eq!(p.data[..12], data[..12]);
+		assert_eq!(p.data[12..], data[16..]);
+		assert_eq!(owned.timestamp, Duration::from_millis(5));
+		assert_eq!(owned.view().to_frame(), owned);
+		let short = FrameRef { pixels: PixelsRef::Bgra(PlaneRef::new(&data[..27], 16)), ..frame };
+		assert!(short.validate().is_err());
+		assert_eq!(VideoFrame::black_i420(5, 3).view().format(), PixelFormat::I420);
+	}
+
+	#[test]
+	fn copies_reuse_the_destination() {
+		let source = VideoFrame::black_i420(33, 17).with_timestamp(Duration::from_millis(7));
+		let mut out = VideoFrame::from_bgra(1, 1, 4, vec![0; 4]).unwrap();
+		source.view().copy_to(&mut out);
+		assert_eq!(out, source, "another format: replaced");
+		let FrameData::I420 { y, .. } = &out.data else { panic!("not I420") };
+		let buffer = y.data.as_ptr();
+		let smaller = VideoFrame::black_i420(20, 10);
+		smaller.view().copy_to(&mut out);
+		assert_eq!(out, smaller);
+		let FrameData::I420 { y, .. } = &out.data else { panic!("not I420") };
+		assert_eq!(y.data.as_ptr(), buffer, "the same buffer");
+		let nv12 = FrameRef {
+			pixels: PixelsRef::Nv12 { y: PlaneRef::new(&[1; 4], 2), uv: PlaneRef::new(&[2; 2], 2) },
+			..VideoFrame::black_i420(2, 2).view()
+		};
+		nv12.copy_to(&mut out);
+		assert_eq!(out, nv12.to_frame());
 	}
 }

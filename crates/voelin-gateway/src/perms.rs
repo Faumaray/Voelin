@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use voelin_gateway_proto::PermRule;
 use voelin_query::{Command, QueryClient, Row};
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
@@ -78,6 +79,11 @@ pub struct PermIds {
 	pub channel_text_send: u32,
 	pub server_text_send: u32,
 	pub ignore_password: u32,
+	/// `b_channel_modify_name`: default for moderating a channel (0: unknown).
+	pub channel_modify_name: u32,
+	/// `b_virtualserver_modify_name`: default for administering the gateway
+	/// (0: unknown).
+	pub server_modify_name: u32,
 }
 
 impl PermIds {
@@ -97,6 +103,16 @@ impl PermIds {
 				voelin_query::Error::Protocol(format!("unknown permission {name}"))
 			})?;
 		}
+		// Only used for defaults of the gateway's own rules; without them the
+		// default grants nobody.
+		let mut optional = [0u32; 2];
+		for (i, name) in ["b_channel_modify_name", "b_virtualserver_modify_name"].iter().enumerate()
+		{
+			match client.send(&Command::new("permidgetbyname").arg("permsid", name)).await {
+				Ok(rows) => optional[i] = rows.first().and_then(|r| r.parse("permid")).unwrap_or(0),
+				Err(error) => tracing::warn!(%error, name, "unknown permission"),
+			}
+		}
 		Ok(Self {
 			join_power: ids[0],
 			needed_join_power: ids[1],
@@ -104,7 +120,78 @@ impl PermIds {
 			channel_text_send: ids[3],
 			server_text_send: ids[4],
 			ignore_password: ids[5],
+			channel_modify_name: optional[0],
+			server_modify_name: optional[1],
 		})
+	}
+}
+
+/// [`effective`] > 0 for a permission id that may be unknown (0).
+pub fn granted(entries: &[Entry], perm: u32) -> bool {
+	perm != 0 && effective(entries, perm) > 0
+}
+
+/// A user's TeamSpeak groups, as far as a rule needs them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UserGroups {
+	pub server: Vec<u64>,
+	/// In the channel concerned; empty without one.
+	pub channel: Vec<u64>,
+}
+
+/// Whether a rule lets a user with these groups act.
+pub fn rule_allows(rule: &PermRule, groups: &UserGroups) -> bool {
+	rule.everyone
+		|| rule.server_groups.iter().any(|g| groups.server.contains(g))
+		|| rule.channel_groups.iter().any(|g| groups.channel.contains(g))
+}
+
+type GroupCache<K> = Mutex<HashMap<K, (Instant, Vec<u64>)>>;
+
+/// Server groups per user and channel groups per (user, channel), cached,
+/// for users who are not online (online users' server groups come from
+/// presence).
+#[derive(Default)]
+pub struct GroupResolver {
+	server: GroupCache<u64>,
+	channel: GroupCache<(u64, u64)>,
+}
+
+impl GroupResolver {
+	pub async fn server_groups(
+		&self,
+		client: &QueryClient,
+		cldbid: u64,
+	) -> voelin_query::Result<Vec<u64>> {
+		if let Some((at, groups)) = self.server.lock().unwrap().get(&cldbid)
+			&& at.elapsed() < CACHE_TTL
+		{
+			return Ok(groups.clone());
+		}
+		let rows =
+			client.send(&Command::new("servergroupsbyclientid").arg("cldbid", cldbid)).await?;
+		let groups: Vec<u64> = rows.iter().filter_map(|r| r.parse("sgid")).collect();
+		self.server.lock().unwrap().insert(cldbid, (Instant::now(), groups.clone()));
+		Ok(groups)
+	}
+
+	pub async fn channel_groups(
+		&self,
+		client: &QueryClient,
+		cldbid: u64,
+		cid: u64,
+	) -> voelin_query::Result<Vec<u64>> {
+		if let Some((at, groups)) = self.channel.lock().unwrap().get(&(cldbid, cid))
+			&& at.elapsed() < CACHE_TTL
+		{
+			return Ok(groups.clone());
+		}
+		let rows = client
+			.send(&Command::new("channelgroupclientlist").arg("cid", cid).arg("cldbid", cldbid))
+			.await?;
+		let groups: Vec<u64> = rows.iter().filter_map(|r| r.parse("cgid")).collect();
+		self.channel.lock().unwrap().insert((cldbid, cid), (Instant::now(), groups.clone()));
+		Ok(groups)
 	}
 }
 
@@ -212,6 +299,8 @@ mod tests {
 			channel_text_send: 4,
 			server_text_send: 5,
 			ignore_password: 6,
+			channel_modify_name: 7,
+			server_modify_name: 0,
 		};
 		// Guest in an open channel: can read and post.
 		let guest = [e(0, 4, 1)];
@@ -229,5 +318,24 @@ mod tests {
 		assert!(channel_access(&[e(0, 4, 1), e(0, 6, 1)], &ids, true).read);
 		// No text permission: read only.
 		assert_eq!(channel_access(&[], &ids, false), ChannelAccess { read: true, post: false });
+		// Unknown permission ids grant nothing.
+		assert!(granted(&[e(3, 7, 1)], ids.channel_modify_name));
+		assert!(!granted(&[e(0, 0, 1)], ids.server_modify_name));
+	}
+
+	#[test]
+	fn rules() {
+		let groups = UserGroups { server: vec![7, 9], channel: vec![5] };
+		let rule = |everyone, server_groups: &[u64], channel_groups: &[u64]| PermRule {
+			everyone,
+			server_groups: server_groups.to_vec(),
+			channel_groups: channel_groups.to_vec(),
+		};
+		assert!(rule_allows(&rule(true, &[], &[]), &UserGroups::default()));
+		assert!(rule_allows(&rule(false, &[6, 9], &[]), &groups));
+		assert!(rule_allows(&rule(false, &[6], &[5]), &groups));
+		assert!(!rule_allows(&rule(false, &[6], &[1]), &groups));
+		// An empty rule allows nobody.
+		assert!(!rule_allows(&rule(false, &[], &[]), &groups));
 	}
 }

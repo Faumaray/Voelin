@@ -1,22 +1,258 @@
-//! Settings kept in the store (besides bookmarks and identities), and their
-//! conversion to and from the forms of the settings page.
+//! The UI's settings keys (besides the engine's, in
+//! `voelin_core::settings`), and their conversion to and from the forms of
+//! the settings page.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use voelin_audio::process::NoiseLevel;
+use voelin_core::settings::{Key, Kind};
 use voelin_core::{AudioSettings, TransmitMode};
 
 use crate::app::AudioForm;
 
-/// Store keys.
-pub const AUDIO_KEY: &str = "audio";
-pub const UI_KEY: &str = "ui";
-pub const CLIENT_PLAYBACK_KEY: &str = "client_playback";
+/// The window's settings, one value (the `ui` blob of earlier versions).
+pub static UI: Key<UiSettings> = Key::new(
+	"ui",
+	Kind::Json,
+	"The window's settings: push-to-talk key, H.264, the share dialog's choices.",
+	UiSettings::default,
+);
 
-/// Frame rates and bitrates (kbit/s) of the share dialog.
-pub const FPS_CHOICES: [u32; 3] = [15, 30, 60];
-pub const BITRATE_CHOICES: [u32; 4] = [2500, 4608, 8000, 10_000];
+/// Volume and mute of clients, by unique id.
+pub static CLIENT_PLAYBACK: Key<ClientPlaybackMap> = Key::new(
+	"client_playback",
+	Kind::Json,
+	"Volume and mute of clients, by unique id.",
+	ClientPlaybackMap::new,
+);
+
+/// Colours of the window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeChoice {
+	#[default]
+	Dark,
+	Light,
+	/// The system's light or dark scheme.
+	System,
+}
+
+impl ThemeChoice {
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Dark => "dark",
+			Self::Light => "light",
+			Self::System => "system",
+		}
+	}
+
+	pub fn parse(text: &str) -> Self {
+		match text {
+			"light" => Self::Light,
+			"system" => Self::System,
+			_ => Self::Dark,
+		}
+	}
+}
+
+/// `ui.theme`. (In a config file write `"ui.theme" = "light"` at the top:
+/// a `[ui]` table would be read as the `ui` blob.)
+pub static UI_THEME: Key<ThemeChoice> = Key::new(
+	"ui.theme",
+	Kind::Choice(&["dark", "light", "system"]),
+	"Colours of the window: dark, light, or the system's scheme.",
+	ThemeChoice::default,
+);
+
+fn positive_scale(v: &f32) -> Result<(), String> {
+	if v.is_finite() && *v > 0.0 { Ok(()) } else { Err("must be a number above 0".into()) }
+}
+
+/// `ui.font_scale`: text size, 1 = normal (no upper limit).
+pub static UI_FONT_SCALE: Key<f32> =
+	Key::new("ui.font_scale", Kind::Json, "Text size as a factor (a number; 1 = normal).", || 1.0)
+		.validated(positive_scale);
+
+/// `ui.narrow_breakpoint`: below this window width (logical pixels) the
+/// phone layout is used.
+pub static UI_NARROW_BREAKPOINT: Key<u32> = Key::new(
+	"ui.narrow_breakpoint",
+	Kind::UInt { min: 0 },
+	"Window width in pixels below which the phone layout is used.",
+	|| 800,
+);
+
+/// `ui.image_cache_mb`: memory for decoded images (avatars, icons, emoji).
+pub static UI_IMAGE_CACHE_MB: Key<u32> = Key::new(
+	"ui.image_cache_mb",
+	Kind::UInt { min: 0 },
+	"Memory in MB for decoded images (avatars, icons, emoji); 0 keeps none.",
+	|| 64,
+);
+
+/// `ui.members_width`: how wide the members and streams panel is, in
+/// pixels. Dragging its handle stores it; there is no built-in maximum.
+pub static UI_MEMBERS_WIDTH: Key<u32> = Key::new(
+	"ui.members_width",
+	Kind::UInt { min: 0 },
+	"Width of the members and streams panel in pixels.",
+	|| 280,
+);
+
+/// The UI's keys besides [`UI`] and [`CLIENT_PLAYBACK`], for registering.
+pub fn appearance_keys() -> [&'static dyn voelin_core::settings::Setting; 5] {
+	[&UI_THEME, &UI_FONT_SCALE, &UI_NARROW_BREAKPOINT, &UI_IMAGE_CACHE_MB, &UI_MEMBERS_WIDTH]
+}
+
+/// What a kind of notification does: nothing, the bell, or the bell and a
+/// desktop notification.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotifyLevel {
+	Off,
+	App,
+	#[default]
+	Desktop,
+}
+
+impl NotifyLevel {
+	pub fn index(self) -> i32 {
+		self as i32
+	}
+
+	pub fn from_index(index: i32) -> Self {
+		match index {
+			0 => Self::Off,
+			1 => Self::App,
+			_ => Self::Desktop,
+		}
+	}
+}
+
+const NOTIFY_LEVELS: Kind = Kind::Choice(&["off", "app", "desktop"]);
+
+/// `notify.*`: what the bell and the desktop say about each kind.
+pub static NOTIFY_MENTIONS: Key<NotifyLevel> = Key::new(
+	"notify.mentions",
+	NOTIFY_LEVELS,
+	"Our name in a channel or server chat: off, app (the bell) or desktop.",
+	NotifyLevel::default,
+);
+pub static NOTIFY_MESSAGES: Key<NotifyLevel> = Key::new(
+	"notify.private_messages",
+	NOTIFY_LEVELS,
+	"Private messages: off, app (the bell) or desktop.",
+	NotifyLevel::default,
+);
+pub static NOTIFY_POKES: Key<NotifyLevel> =
+	Key::new("notify.pokes", NOTIFY_LEVELS, "Pokes: off, app (the bell) or desktop.", || {
+		NotifyLevel::Desktop
+	});
+pub static NOTIFY_EVENTS: Key<NotifyLevel> = Key::new(
+	"notify.event_reminders",
+	NOTIFY_LEVELS,
+	"Reminders of scheduled events: off, app (the bell) or desktop.",
+	NotifyLevel::default,
+);
+pub static NOTIFY_FRIENDS: Key<NotifyLevel> = Key::new(
+	"notify.friends_online",
+	NOTIFY_LEVELS,
+	"Friends coming online: off, app (the bell) or desktop.",
+	|| NotifyLevel::App,
+);
+
+/// `video.camera`: the camera of the preview and the default of camera
+/// sources (a device id; empty: the first camera).
+pub static VIDEO_CAMERA: Key<String> = Key::new(
+	"video.camera",
+	Kind::Text { suggestions: &[] },
+	"Camera device (empty: the first one).",
+	String::new,
+);
+
+/// `video.background`: the camera's background effect.
+pub static VIDEO_BACKGROUND: Key<String> = Key::new(
+	"video.background",
+	Kind::Choice(&["none", "blur"]),
+	"Background effect of the camera: none or blur.",
+	|| "none".into(),
+);
+
+/// `video.resolution`: the camera's capture size, `auto` or `WIDTHxHEIGHT`.
+pub static VIDEO_RESOLUTION: Key<String> = Key::new(
+	"video.resolution",
+	Kind::Text { suggestions: &["auto", "1280x720", "1920x1080", "2560x1440"] },
+	"Camera resolution: auto or WIDTHxHEIGHT.",
+	|| "auto".into(),
+)
+.validated(valid_resolution);
+
+/// `video.mirror`: show our camera mirrored, as in a mirror.
+pub static VIDEO_MIRROR: Key<bool> =
+	Key::new("video.mirror", Kind::Bool, "Show our camera mirrored.", || true);
+
+/// `ui.image_preview_kb`: linked pictures up to this size are downloaded
+/// and shown in the chat (0: never). No maximum.
+pub static UI_IMAGE_PREVIEW_KB: Key<u32> = Key::new(
+	"ui.image_preview_kb",
+	Kind::UInt { min: 0 },
+	"Show pictures linked in chat up to this size in KB (0: never).",
+	|| 8192,
+);
+
+#[allow(clippy::ptr_arg)] // a validation of `Key<String>` is `fn(&String)`
+fn valid_resolution(text: &String) -> Result<(), String> {
+	if text == "auto" || parse_size(text).is_some() {
+		Ok(())
+	} else {
+		Err("auto or WIDTHxHEIGHT, e.g. 1280x720".into())
+	}
+}
+
+/// `1280x720` → (1280, 720), both above 0.
+pub fn parse_size(text: &str) -> Option<(u32, u32)> {
+	let (w, h) = text.trim().split_once(['x', 'X', '×'])?;
+	let (w, h) = (w.trim().parse().ok()?, h.trim().parse().ok()?);
+	(w > 0 && h > 0).then_some((w, h))
+}
+
+/// The keys of the home, messages and settings pages, for registering.
+pub fn page_keys() -> [&'static dyn voelin_core::settings::Setting; 10] {
+	[
+		&NOTIFY_MENTIONS,
+		&NOTIFY_MESSAGES,
+		&NOTIFY_POKES,
+		&NOTIFY_EVENTS,
+		&NOTIFY_FRIENDS,
+		&VIDEO_CAMERA,
+		&VIDEO_BACKGROUND,
+		&VIDEO_RESOLUTION,
+		&VIDEO_MIRROR,
+		&UI_IMAGE_PREVIEW_KB,
+	]
+}
+
+/// Frame rates and bitrates (kbit/s; 0: automatic) the share dialog
+/// offers, in the order of its lists (`dialogs.slint`); any other value can
+/// be typed in.
+pub const FPS_CHOICES: [u32; 7] = [15, 30, 60, 120, 144, 240, 320];
+pub const BITRATE_CHOICES: [u32; 8] = [0, 2500, 4608, 8000, 10_000, 20_000, 40_000, 60_000];
+
+/// The share dialog's lists before they grew, which [`ShareDefaults`]
+/// indexes for older versions.
+pub const LEGACY_FPS_CHOICES: [u32; 3] = [15, 30, 60];
+pub const LEGACY_BITRATE_CHOICES: [u32; 4] = [2500, 4608, 8000, 10_000];
+
+/// The index of the choice closest to `value`.
+pub fn nearest_choice(choices: &[u32], value: u32) -> usize {
+	(0..choices.len()).min_by_key(|&i| choices[i].abs_diff(value)).unwrap_or(0)
+}
+
+/// A whole number above 0 typed into a form field.
+pub fn parse_positive(text: &str) -> Option<u32> {
+	text.trim().parse().ok().filter(|v| *v > 0)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -47,7 +283,10 @@ impl Default for UiSettings {
 	}
 }
 
-/// The last choices in the share dialog.
+/// The last choices in the share dialog. Frame rate and bitrate are the
+/// settings `stream.fps` and `stream.bitrate_kbps`; the indices of the
+/// closest choices of the old lists ([`LEGACY_FPS_CHOICES`],
+/// [`LEGACY_BITRATE_CHOICES`]) are kept for older versions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShareDefaults {
@@ -250,12 +489,44 @@ mod tests {
 	}
 
 	#[test]
+	fn free_values() {
+		assert_eq!(nearest_choice(&FPS_CHOICES, 60), 2);
+		assert_eq!(nearest_choice(&FPS_CHOICES, 144), 4);
+		assert_eq!(nearest_choice(&FPS_CHOICES, 1000), 6);
+		assert_eq!(nearest_choice(&BITRATE_CHOICES, 0), 0, "automatic");
+		assert_eq!(nearest_choice(&BITRATE_CHOICES, 3000), 1);
+		assert_eq!(nearest_choice(&BITRATE_CHOICES, 55_000), 7);
+		assert_eq!(nearest_choice(&BITRATE_CHOICES, 120_000), 7);
+		assert_eq!(parse_positive(" 144 "), Some(144));
+		assert_eq!(parse_positive("0"), None);
+		assert_eq!(parse_positive("fast"), None);
+	}
+
+	#[test]
+	fn page_keys() {
+		assert_eq!(parse_size("1280x720"), Some((1280, 720)));
+		assert_eq!(parse_size(" 1920 × 1080 "), Some((1920, 1080)));
+		assert_eq!(parse_size("0x720"), None);
+		assert_eq!(parse_size("big"), None);
+		assert!(VIDEO_RESOLUTION.validate(&"auto".into()).is_ok());
+		assert!(VIDEO_RESOLUTION.validate(&"wide".into()).is_err());
+		assert_eq!(serde_json::to_value(NotifyLevel::App).unwrap(), "app");
+		assert_eq!(NotifyLevel::from_index(NotifyLevel::Off.index()), NotifyLevel::Off);
+		assert_eq!(NotifyLevel::from_index(7), NotifyLevel::Desktop);
+	}
+
+	#[test]
 	fn ui_settings_defaults() {
 		let parsed: UiSettings = serde_json::from_str(r#"{"openh264":true}"#).unwrap();
 		assert!(parsed.openh264);
 		assert!(!parsed.crash_reports, "crash reports are opt-in");
 		assert_eq!(parsed.ptt_key, "Ctrl+Shift+T");
 		assert_eq!(parsed.share, ShareDefaults::default());
+		assert_eq!(serde_json::to_value(ThemeChoice::System).unwrap(), "system");
+		assert_eq!(ThemeChoice::parse("light"), ThemeChoice::Light);
+		assert_eq!(ThemeChoice::parse("??"), ThemeChoice::Dark);
+		assert!(UI_FONT_SCALE.validate(&0.0).is_err());
+		assert!(UI_FONT_SCALE.validate(&3.5).is_ok());
 		let map: ClientPlaybackMap =
 			serde_json::from_str(r#"{"uid=":{"volume":0.5,"muted":false}}"#).unwrap();
 		assert_eq!(map["uid="].volume, 0.5);

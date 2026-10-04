@@ -4,81 +4,25 @@
 //!
 //! Runs only with `VOELIN_INTEROP=1` (see `tests/interop/README.md`).
 
-use std::path::PathBuf;
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use serde_json::json;
 use tokio::time::timeout;
 use voelin_stream::{
-	Codec, FrameSource, MediaKind, Peer, PeerConfig, PeerEvent, Signal, SyntheticSource,
+	Codec, FrameSource, LayerSpec, MediaKind, Peer, PeerConfig, PeerEvent, Signal, SrtpProfile,
+	SyntheticSource,
 };
 
-fn enabled() -> bool {
-	std::env::var("VOELIN_INTEROP").is_ok_and(|v| v == "1")
-}
+#[path = "../../../tests/interop/browser.rs"]
+mod browser;
+use browser::{Browser, enabled};
+mod relay;
+use relay::{Relay, Rule};
 
-/// The Node.js side (headless Chromium).
-struct Browser {
-	_child: Child,
-	stdin: ChildStdin,
-	stdout: Lines<BufReader<ChildStdout>>,
-}
-
-impl Browser {
-	async fn start() -> Self {
-		let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-			.join("../../tests/interop/browser-peer.cjs")
-			.canonicalize()
-			.expect("tests/interop/browser-peer.cjs");
-		let node = std::env::var("VOELIN_NODE").unwrap_or_else(|_| "node".into());
-		let mut command = Command::new(node);
-		command
-			.arg(script)
-			.stdin(Stdio::piped())
-			.stdout(Stdio::piped())
-			.stderr(Stdio::inherit())
-			.kill_on_drop(true);
-		// Playwright is usually installed globally.
-		if std::env::var_os("NODE_PATH").is_none()
-			&& let Ok(out) = std::process::Command::new("npm").args(["root", "-g"]).output()
-		{
-			command.env("NODE_PATH", String::from_utf8_lossy(&out.stdout).trim());
-		}
-		let mut child = command.spawn().expect("cannot start node (set VOELIN_NODE)");
-		let stdin = child.stdin.take().unwrap();
-		let stdout = BufReader::new(child.stdout.take().unwrap()).lines();
-		let mut browser = Self { _child: child, stdin, stdout };
-		let ready = browser.read().await;
-		eprintln!("browser: {}", ready["userAgent"]);
-		browser
-	}
-
-	async fn read(&mut self) -> Value {
-		let line = timeout(Duration::from_secs(60), self.stdout.next_line())
-			.await
-			.expect("browser did not answer")
-			.unwrap()
-			.expect("browser exited");
-		let value: Value = serde_json::from_str(&line).unwrap();
-		if let Some(error) = value.get("error") {
-			panic!("browser: {error}");
-		}
-		value
-	}
-
-	async fn call(&mut self, command: Value) -> Value {
-		let mut line = command.to_string();
-		line.push('\n');
-		self.stdin.write_all(line.as_bytes()).await.unwrap();
-		self.read().await
-	}
-
-	async fn quit(mut self) {
-		let _ = self.call(json!({ "op": "quit" })).await;
-	}
+/// The `srtpCipher` of `getStats()` for AES_CM_128_HMAC_SHA1_80, as Chromium
+/// 141 and 152 name it.
+fn aes_cm_128_sha1_80(cipher: &serde_json::Value) -> bool {
+	["AES_CM_128_HMAC_SHA1_80", "SRTP_AES128_CM_HMAC_SHA1_80"].iter().any(|name| cipher == name)
 }
 
 async fn wait_connected(peer: &mut Peer) {
@@ -95,7 +39,9 @@ async fn wait_connected(peer: &mut Peer) {
 	.expect("no connection with the browser");
 }
 
-/// Our streamer peer (as in a TeamSpeak stream) sends VP8 + Opus to Chromium.
+/// Our streamer peer (as in a TeamSpeak stream) sends VP8 + Opus to Chromium,
+/// which answers as DTLS client: our SRTP order gives AES_CM_128_HMAC_SHA1_80,
+/// and its transport-cc feedback drives our bandwidth estimation and pacer.
 #[tokio::test(flavor = "multi_thread")]
 async fn rust_streams_to_browser() {
 	if !enabled() {
@@ -106,6 +52,14 @@ async fn rust_streams_to_browser() {
 	let mut browser = Browser::start().await;
 	let config = PeerConfig::loopback();
 	let (mut peer, offer) = Peer::offer(&config, "interop").await.unwrap();
+	// As a Voelin streamer with several layers offers: with the list of its
+	// layers, which libwebrtc (the official client's stack) must skip.
+	let layers = [
+		LayerSpec::single(4_000_000),
+		LayerSpec { id: 1, scale: 0.5, ..LayerSpec::single(1_000_000) },
+	];
+	let offer = voelin_stream::layer::add_to_sdp(&offer, &layers);
+	assert!(offer.contains("\r\na=x-voelin-layers:0/1/4000000 1/0.5/1000000\r\n"), "{offer}");
 	let answer = browser.call(json!({ "op": "answer", "sdp": offer })).await;
 	let answer = answer["sdp"].as_str().unwrap();
 	eprintln!("browser answer:\n{answer}");
@@ -116,6 +70,7 @@ async fn rust_streams_to_browser() {
 	let mut source = SyntheticSource::new(30, 3000, true);
 	let mut frames = Vec::new();
 	let mut keyframe_requests = 0;
+	let mut estimates = Vec::new();
 	let end = Instant::now() + Duration::from_secs(3);
 	while Instant::now() < end {
 		source.poll_frames(Instant::now(), &mut frames);
@@ -123,15 +78,21 @@ async fn rust_streams_to_browser() {
 			peer.write(f.kind, f.time, f.data);
 		}
 		while let Some(event) = peer.try_next_event() {
-			if let PeerEvent::KeyframeRequest = event {
-				keyframe_requests += 1;
+			match event {
+				PeerEvent::KeyframeRequest => keyframe_requests += 1,
+				PeerEvent::BitrateEstimate(bitrate) => estimates.push(bitrate),
+				_ => {}
 			}
 		}
 		tokio::time::sleep(Duration::from_millis(10)).await;
 	}
 	let stats = browser.call(json!({ "op": "stats" })).await;
 	eprintln!("browser stats: {stats:#}\nkeyframe requests from the browser: {keyframe_requests}");
+	eprintln!("bandwidth estimates (bit/s): {estimates:?}");
 	assert_eq!(stats["connectionState"], "connected");
+	assert!(aes_cm_128_sha1_80(&stats["transport"]["srtpCipher"]), "{stats:#}");
+	assert_eq!(peer.srtp_profile(), Some(SrtpProfile::Aes128CmSha1_80));
+	assert!(!estimates.is_empty(), "no bandwidth estimate from the browser's feedback");
 	let video = &stats["inbound"]["video"];
 	let audio = &stats["inbound"]["audio"];
 	assert_eq!(video["codec"], "video/VP8");
@@ -299,6 +260,8 @@ async fn browser_streams_to_rust() {
 			}
 		}
 		wait_connected(&mut peer).await;
+		// We are the DTLS server here too: our order picks the profile.
+		assert_eq!(peer.srtp_profile(), Some(SrtpProfile::Aes128CmSha1_80), "{name}");
 		let received = receive(&mut peer, Duration::from_secs(8), 60).await;
 		eprintln!(
 			"{name}: video {:?}, audio {:?}, VP8 keyframes {}",
@@ -316,5 +279,163 @@ async fn browser_streams_to_rust() {
 		tested.push(name);
 	}
 	assert!(tested.contains(&"VP8") && tested.contains(&"VP9"), "tested {tested:?}");
+	let stats = browser.call(json!({ "op": "stats" })).await;
+	assert!(aes_cm_128_sha1_80(&stats["transport"]["srtpCipher"]), "{stats:#}");
+	browser.quit().await;
+}
+
+/// Chromium streams VP8, then renegotiates to VP9 on the same connection, as
+/// the official client re-offers when it does not encode the codec our
+/// answer chose: our viewer answers on the same peer and keeps receiving,
+/// now VP9.
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_renegotiates_with_rust() {
+	if !enabled() {
+		eprintln!("skipped: set VOELIN_INTEROP=1 (needs node, Playwright and Chromium)");
+		return;
+	}
+	let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
+	let mut browser = Browser::start().await;
+	let offer = browser.call(json!({ "op": "offer", "codec": "VP8", "trickle": false })).await;
+	let (mut peer, answer) =
+		Peer::answer(&PeerConfig::loopback(), offer["sdp"].as_str().unwrap()).await.unwrap();
+	browser.call(json!({ "op": "accept", "sdp": answer })).await;
+	wait_connected(&mut peer).await;
+	let before = receive(&mut peer, Duration::from_secs(5), 30).await;
+	assert!(before.video.get(Codec::Vp8) >= 30, "before: {:?}", before.video);
+
+	let offer = browser.call(json!({ "op": "reoffer", "codec": "VP9" })).await;
+	let again = peer.renegotiate(offer["sdp"].as_str().unwrap()).await.unwrap();
+	browser.call(json!({ "op": "accept", "sdp": again })).await;
+	let after = receive(&mut peer, Duration::from_secs(8), 30).await;
+	eprintln!("after the new offer: video {:?}, audio {:?}", after.video, after.audio);
+	assert!(after.video.get(Codec::Vp9) >= 30, "after: {:?}", after.video);
+	let stats = browser.call(json!({ "op": "stats" })).await;
+	assert_eq!(stats["connectionState"], "connected", "{stats:#}");
+	browser.quit().await;
+}
+
+/// Chromium with its host addresses behind mDNS names (`<uuid>.local`, as
+/// without camera or microphone permission) and no STUN: the names are
+/// its only candidates. Our candidates are kept from it, so it cannot
+/// start the checks itself (and learn our address from them): the
+/// connection comes up only if our peers resolve its names by a multicast
+/// DNS query and reach it, as streamer (the names in the browser's answer)
+/// and as viewer (in its offer). Then the media flows.
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_mdns_candidates_connect() {
+	if !enabled() {
+		eprintln!("skipped: set VOELIN_INTEROP=1 (needs node, Playwright and Chromium)");
+		return;
+	}
+	let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
+	let mut browser = Browser::start_with_mdns().await;
+	let only_mdns = |sdp: &str| {
+		let candidates: Vec<&str> = sdp.lines().filter(|l| l.starts_with("a=candidate:")).collect();
+		!candidates.is_empty() && candidates.iter().all(|l| l.contains(".local "))
+	};
+	let without_candidates = |sdp: &str| -> String {
+		sdp.split_inclusive('\n').filter(|l| !l.starts_with("a=candidate:")).collect()
+	};
+	let config = PeerConfig::loopback();
+
+	// Our streamer, the browser's answer with mDNS names.
+	let (mut peer, offer) = Peer::offer(&config, "mdns").await.unwrap();
+	let offer = without_candidates(&offer);
+	let answer = browser.call(json!({ "op": "answer", "sdp": offer })).await;
+	let answer = answer["sdp"].as_str().unwrap();
+	assert!(only_mdns(answer), "the browser's answer:\n{answer}");
+	peer.accept_answer(answer).await.unwrap();
+	wait_connected(&mut peer).await;
+	let mut source = SyntheticSource::new(30, 3000, false);
+	let mut frames = Vec::new();
+	let end = Instant::now() + Duration::from_secs(2);
+	while Instant::now() < end {
+		source.poll_frames(Instant::now(), &mut frames);
+		for f in frames.drain(..) {
+			peer.write(f.kind, f.time, f.data);
+		}
+		tokio::time::sleep(Duration::from_millis(10)).await;
+	}
+	let stats = browser.call(json!({ "op": "stats" })).await;
+	assert!(stats["inbound"]["video"]["framesDecoded"].as_u64().unwrap() > 20, "{stats:#}");
+
+	// The browser streams, its offer with mDNS names; our viewer answers.
+	let offer = browser.call(json!({ "op": "offer", "codec": "VP8", "trickle": false })).await;
+	let offer = offer["sdp"].as_str().unwrap();
+	assert!(only_mdns(offer), "the browser's offer:\n{offer}");
+	let (mut peer, answer) = Peer::answer(&config, offer).await.unwrap();
+	browser.call(json!({ "op": "accept", "sdp": without_candidates(&answer) })).await;
+	wait_connected(&mut peer).await;
+	let received = receive(&mut peer, Duration::from_secs(5), 20).await;
+	assert!(received.video.get(Codec::Vp8) >= 20, "{:?}", received.video);
+	browser.quit().await;
+}
+
+/// Our streamer peer to Chromium through a relay that passes the handshake
+/// and drops SRTP once AES-GCM was selected, as an official viewer whose
+/// SRTP fails after the handshake: synthetic media for `seconds`; whether
+/// the peer reported `NoFeedback`, the profile selected, Chromium's stats.
+async fn stream_through_failing_srtp(
+	browser: &mut Browser,
+	srtp_profiles: Vec<SrtpProfile>,
+	seconds: u64,
+) -> (bool, Option<u16>, serde_json::Value) {
+	let relay = Relay::new(Rule::FailSrtp(&[7, 8])).await;
+	let config = PeerConfig {
+		srtp_profiles,
+		stall_timeout: Duration::from_secs(1),
+		..PeerConfig::loopback()
+	};
+	let (mut peer, offer) = Peer::offer(&config, "interop").await.unwrap();
+	let answer = browser.call(json!({ "op": "answer", "sdp": relay.offer(&offer) })).await;
+	peer.accept_answer(&relay.answer(answer["sdp"].as_str().unwrap())).await.unwrap();
+	wait_connected(&mut peer).await;
+	let mut source = SyntheticSource::new(30, 3000, true);
+	let (mut frames, mut no_feedback) = (Vec::new(), false);
+	let end = Instant::now() + Duration::from_secs(seconds);
+	while Instant::now() < end {
+		source.poll_frames(Instant::now(), &mut frames);
+		for f in frames.drain(..) {
+			peer.write(f.kind, f.time, f.data);
+		}
+		while let Some(event) = peer.try_next_event() {
+			no_feedback |= matches!(event, PeerEvent::NoFeedback);
+		}
+		tokio::time::sleep(Duration::from_millis(10)).await;
+	}
+	(no_feedback, relay.profile(), browser.call(json!({ "op": "stats" })).await)
+}
+
+/// The streamer's fallback against libwebrtc: with AES-GCM first, our peer
+/// (the DTLS server) selects it; the relay lets no SRTP through, Chromium's
+/// receiver reports never mention our video, and the peer reports
+/// `NoFeedback` (the streamer session then offers again without the AEAD
+/// profiles). The next connection, AES_CM_128_HMAC_SHA1_80 only, works:
+/// no `NoFeedback`, Chromium decodes.
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_srtp_failure_is_noticed() {
+	use SrtpProfile::{AeadAes128Gcm, AeadAes256Gcm, Aes128CmSha1_80};
+	if !enabled() {
+		eprintln!("skipped: set VOELIN_INTEROP=1 (needs node, Playwright and Chromium)");
+		return;
+	}
+	let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
+	let mut browser = Browser::start().await;
+	let aead_first = vec![AeadAes128Gcm, AeadAes256Gcm, Aes128CmSha1_80];
+	let (no_feedback, profile, stats) =
+		stream_through_failing_srtp(&mut browser, aead_first, 3).await;
+	eprintln!("AES-GCM failing: NoFeedback {no_feedback}, profile {profile:?}, {stats:#}");
+	assert_eq!(profile, Some(7), "AEAD_AES_128_GCM selected");
+	assert!(no_feedback, "a viewer that gets nothing must be noticed");
+	assert_eq!(stats["inbound"]["video"]["framesDecoded"].as_u64().unwrap_or(0), 0);
+
+	let (no_feedback, profile, stats) =
+		stream_through_failing_srtp(&mut browser, vec![Aes128CmSha1_80], 3).await;
+	eprintln!("AES_CM: NoFeedback {no_feedback}, profile {profile:?}, {stats:#}");
+	assert_eq!(profile, Some(1));
+	assert!(!no_feedback, "a working connection must not be taken for a failing one");
+	assert!(aes_cm_128_sha1_80(&stats["transport"]["srtpCipher"]), "{stats:#}");
+	assert!(stats["inbound"]["video"]["framesDecoded"].as_u64().unwrap() > 30, "{stats:#}");
 	browser.quit().await;
 }

@@ -1,0 +1,313 @@
+// The server's sidebar: the server card, connect and observe, and the
+// channel tree with its clients.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Bridge, TreeItem } from "../bridge.slint";
+import { Nav } from "../nav.slint";
+import { Icon, Button, ButtonKind, IconButton, Avatar, LiveBadge, Chip, SectionHeader, SpeakingBars, PopupMenu, MenuEntry, ListView } from "../components/index.slint";
+
+// The banner at the top of the sidebar: server name, counts, a menu.
+export component ServerHeader inherits Rectangle {
+    height: 132px;
+    border-radius: Theme.radius-lg;
+    clip: true;
+    background: Theme.surface-2;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: Bridge.server-title;
+    // Painted banner: a night sky gradient with a horizon glow.
+    Rectangle {
+        height: 72px;
+        y: 0;
+        background: @linear-gradient(180deg, #1a2d7a 0%, #3a2a8f 45%, #0b1330 100%);
+        Rectangle {
+            y: parent.height - 30px;
+            height: 30px;
+            background: @linear-gradient(180deg, transparent 0%, Theme.surface-2 100%);
+        }
+        for star[i] in [
+            { x: 0.12, y: 0.2 }, { x: 0.3, y: 0.45 }, { x: 0.52, y: 0.15 }, { x: 0.7, y: 0.35 },
+            { x: 0.86, y: 0.18 }, { x: 0.42, y: 0.62 }, { x: 0.93, y: 0.55 }, { x: 0.2, y: 0.7 },
+        ]: Rectangle {
+            x: parent.width * star.x;
+            y: parent.height * star.y;
+            width: mod(i, 3) == 0 ? 3px : 2px;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: #ffffffb0;
+        }
+    }
+    VerticalLayout {
+        padding: Theme.space-4;
+        padding-top: 64px;
+        spacing: 2px;
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            Text {
+                text: Bridge.server-title;
+                font-size: Theme.font-lg;
+                font-weight: Theme.weight-semibold;
+                color: Theme.text;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            if Bridge.current-server >= 0: IconButton {
+                icon: Icons.chevron-down;
+                label: @tr("Server menu");
+                size: 28px;
+                icon-size: Theme.icon-sm;
+                clicked => { menu.show(self.x + self.width - 220px, self.y + self.height + 4px); }
+            }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                y: (parent.height - self.height) / 2;
+                border-radius: 4px;
+                background: Bridge.voice-connected ? Theme.success : Bridge.observing ? Theme.info : Bridge.voice-connecting ? Theme.warning : Theme.offline;
+            }
+            Text {
+                text: Bridge.server-stats != "" ? Bridge.server-stats
+                    : Bridge.voice-connecting ? @tr("Connecting…")
+                    : Bridge.current-server >= 0 ? @tr("Not connected") : @tr("Add a server to start");
+                font-size: Theme.font-sm;
+                color: Theme.text-secondary;
+                overflow: elide;
+            }
+        }
+    }
+    menu := PopupMenu {
+        entries: [
+            { text: @tr("Edit server"), icon: Icons.pencil, enabled: Bridge.current-server >= 0 },
+            { text: Bridge.observing ? @tr("Stop observing") : @tr("Observe invisibly"), icon: Icons.eye, enabled: Bridge.can-observe },
+            { text: @tr("Add server"), icon: Icons.plus, enabled: true, separator: true },
+        ];
+        activated(i) => {
+            if i == 0 {
+                Nav.edit-server(Bridge.current-server);
+            } else if i == 1 {
+                Bridge.toggle-observe();
+            } else {
+                Nav.add-server();
+            }
+        }
+    }
+}
+
+// Connect and observe while not connected.
+export component ConnectActions inherits HorizontalLayout {
+    spacing: Theme.space-3;
+    Button {
+        horizontal-stretch: 1;
+        kind: ButtonKind.primary;
+        icon: Icons.log-in;
+        text: Bridge.voice-connecting ? @tr("Connecting…") : @tr("Connect");
+        enabled: Bridge.current-server >= 0 && !Bridge.voice-connecting;
+        clicked => { Bridge.connect-voice(); }
+    }
+    Button {
+        icon: Bridge.observing ? Icons.eye-off : Icons.eye;
+        text: Bridge.observing ? @tr("Stop observing") : @tr("Observe");
+        enabled: Bridge.can-observe;
+        checked: Bridge.observing;
+        clicked => { Bridge.toggle-observe(); }
+    }
+}
+
+// One row of the tree: a channel or a client.
+component TreeRow inherits Rectangle {
+    in property <TreeItem> item;
+    callback client-clicked(int);
+    property <length> indent: item.depth * 14px;
+    height: item.is-channel ? 34px * Theme.font-scale : 30px * Theme.font-scale;
+    border-radius: Theme.radius-md;
+    background: item.is-channel && item.own ? Theme.accent-soft : area.has-hover ? Theme.surface-3 : transparent;
+    border-width: item.is-channel && item.own ? 1px : 0px;
+    border-color: Theme.accent;
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: item.is-channel ? @tr("Channel {}", item.name) : item.name;
+    accessible-description: (item.talking ? @tr("talking") + " " : "") + (item.streaming ? @tr("streaming") + " " : "") + (item.muted ? @tr("microphone off") + " " : "") + (item.local-muted ? @tr("muted for you") : "");
+    accessible-action-default => {
+        if item.is-channel {
+            Bridge.open-channel-chat(item.id);
+        } else {
+            client-clicked(item.id);
+        }
+    }
+    area := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        double-clicked => {
+            if item.is-channel {
+                Bridge.join-channel(item.id);
+            }
+        }
+        clicked => {
+            if item.is-channel {
+                Bridge.open-channel-chat(item.id);
+            } else if !item.myself {
+                client-clicked(item.id);
+            }
+        }
+    }
+    if item.is-channel: HorizontalLayout {
+        padding-left: Theme.space-2 + root.indent;
+        padding-right: Theme.space-3;
+        spacing: Theme.space-2;
+        Rectangle {
+            width: 18px;
+            accessible-role: AccessibleRole.button;
+            accessible-label: item.collapsed ? @tr("Expand") : @tr("Collapse");
+            accessible-action-default => { Bridge.toggle-collapse(item.id); }
+            Icon {
+                source: item.collapsed ? Icons.chevron-right : Icons.chevron-down;
+                size: 14px;
+                tint: Theme.text-muted;
+            }
+            TouchArea {
+                clicked => { Bridge.toggle-collapse(item.id); }
+            }
+        }
+        Icon {
+            source: item.locked ? Icons.lock : Icons.volume-2;
+            size: 18px;
+            tint: item.own ? Theme.text : Theme.icon;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: item.name;
+            color: item.own ? Theme.text : Theme.text-secondary;
+            font-weight: item.own ? Theme.weight-semibold : Theme.weight-medium;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        if item.members > 0 || item.max-members >= 0: HorizontalLayout {
+            spacing: 3px;
+            if item.own: Icon {
+                source: Icons.users;
+                size: 14px;
+                tint: Theme.text-secondary;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: item.max-members >= 0 ? item.members + "/" + item.max-members : item.members;
+                color: item.own ? Theme.text : Theme.text-muted;
+                font-size: Theme.font-sm;
+                vertical-alignment: center;
+            }
+        }
+    }
+    if !item.is-channel: HorizontalLayout {
+        padding-left: Theme.space-2 + root.indent + 12px;
+        padding-right: Theme.space-3;
+        spacing: Theme.space-3;
+        VerticalLayout {
+            alignment: center;
+            Avatar {
+                size: 22px;
+                initials: item.initials;
+                tint: item.tint;
+                speaking: item.talking;
+                label: item.name;
+            }
+        }
+        Text {
+            text: item.name;
+            color: item.away ? Theme.text-muted : item.myself ? Theme.accent-text : Theme.text-secondary;
+            font-weight: item.myself ? Theme.weight-semibold : Theme.weight-regular;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        if item.talking: VerticalLayout {
+            alignment: center;
+            SpeakingBars { }
+        }
+        // A click on someone's LIVE mark watches their stream.
+        if item.streaming: VerticalLayout {
+            alignment: center;
+            LiveBadge {
+                accessible-role: AccessibleRole.button;
+                accessible-label: item.myself ? @tr("Your stream") : @tr("Watch {}'s stream", item.name);
+                accessible-action-default => {
+                    if !item.myself {
+                        Bridge.watch-client(item.id);
+                    }
+                }
+                TouchArea {
+                    mouse-cursor: item.myself ? MouseCursor.default : MouseCursor.pointer;
+                    clicked => {
+                        if !item.myself {
+                            Bridge.watch-client(item.id);
+                        }
+                    }
+                }
+            }
+        }
+        if item.local-muted: Icon {
+            source: Icons.volume-x;
+            size: 14px;
+            tint: Theme.warning;
+            y: (parent.height - self.height) / 2;
+            accessible-role: AccessibleRole.image;
+            accessible-label: @tr("muted for you");
+        }
+        if !item.local-muted && item.local-volume != 100: Text {
+            text: @tr("{}%", item.local-volume);
+            color: Theme.text-muted;
+            font-size: Theme.font-xs;
+            vertical-alignment: center;
+        }
+        if item.muted: Icon {
+            source: Icons.mic-off;
+            size: 14px;
+            tint: Theme.danger;
+            y: (parent.height - self.height) / 2;
+            accessible-role: AccessibleRole.image;
+            accessible-label: @tr("mic off");
+        }
+        if item.sound-off: Icon {
+            source: Icons.headphone-off;
+            size: 14px;
+            tint: Theme.danger;
+            y: (parent.height - self.height) / 2;
+            accessible-role: AccessibleRole.image;
+            accessible-label: @tr("sound off");
+        }
+        if item.away: Text {
+            text: @tr("away");
+            color: Theme.text-muted;
+            font-size: Theme.font-xs;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Channels and the clients in them. Click a channel for its chat,
+// double-click to join; click a client for its volume.
+export component ChannelTree inherits VerticalLayout {
+    spacing: Theme.space-2;
+    SectionHeader {
+        text: @tr("Channels");
+        icon: Icons.volume-2;
+        small: true;
+    }
+    if Bridge.tree.length == 0: Text {
+        text: Bridge.current-server < 0 ? @tr("No server yet.") : @tr("Connect or observe to see the channels.");
+        color: Theme.text-muted;
+        font-size: Theme.font-sm;
+        wrap: word-wrap;
+    }
+    ListView {
+        vertical-stretch: 1;
+        accessible-role: AccessibleRole.list;
+        accessible-label: @tr("Channels and clients");
+        for row in Bridge.tree: TreeRow {
+            item: row;
+            client-clicked(id) => { Nav.open-client(id); }
+        }
+    }
+}

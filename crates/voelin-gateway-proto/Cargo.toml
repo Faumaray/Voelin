@@ -8,13 +8,22 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# A typed WebSocket client (`voelin_gateway_proto::client`).
+client = ["dep:futures-util", "dep:tokio", "dep:tokio-tungstenite"]
+
 [dependencies]
 base64 = "0.22"
+futures-util = { version = "0.3.34", features = ["sink"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = { package = "sha-1", version = "0.10" }
 sha2 = "0.10"
 thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "sync"], optional = true }
+# TLS (`wss://`, as gateways run behind a proxy) with the system's
+# certificates; rustls and its crates are in the tree already (reqwest).
+tokio-tungstenite = { version = "0.30", optional = true, features = ["rustls-tls-native-roots"] }
 voelin-model = { path = "../voelin-model" }
 tsproto-types = { path = "../proto/tsproto-types" }
 

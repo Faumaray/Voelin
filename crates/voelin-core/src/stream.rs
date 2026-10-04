@@ -3,28 +3,44 @@
 //!
 //! The voice task forwards stream notifications here and sends the resulting
 //! commands. Only started for TeamSpeak 6 servers.
+//!
+//! The streams of the whole server are listed, in every channel: a stream can
+//! be watched from any channel, as with the official client. Streams that
+//! started before we joined, and streams in other channels (the server
+//! announces a stream only in its channel), are looked up on the server
+//! (`requeststreaminfo`), so no gateway is needed. A gateway's directory is a
+//! second source: its registered entries (stream id and streamer) are handed
+//! to the stream sessions ([`voelin_stream::Streams::discovered`]), and a
+//! [`StreamLookup`] answers for the gateway when the server cannot. Our own
+//! stream's life (live, viewers, ended) goes back to the session
+//! ([`OwnStreamEvent`]), which keeps its directory entry.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::sync::{broadcast, mpsc};
 use tracing::debug;
 use tsclientlib::ClientId;
-pub use voelin_stream::{
-	Codec, EncodedFrame, EndReason, FrameSource, Frequency, LeaveReason, MediaFrame, MediaKind,
-	MediaTime, PeerConfig, StreamInfo, StreamKind, StreamSetup, SyntheticSource, VideoCodec,
-	ViewerInfo, ViewerState,
-};
 use voelin_stream::{
-	Output, Request, StreamEvent, StreamNotification, StreamerEvent, StreamerOptions, Streams,
-	WatchEvent,
+	ClientState, LayerFeedback, Output, Request, StreamEvent, StreamLookup, StreamNotification,
+	StreamerEvent, StreamerOptions, Streams, WatchEvent,
+};
+pub use voelin_stream::{
+	Codec, EncodedFrame, EndReason, FrameSource, Frequency, LayerId, LayerSet, LayerSpec,
+	LeaveReason, MediaFrame, MediaKind, MediaTime, PeerConfig, SrtpProfile, StreamInfo, StreamKind,
+	StreamSetup, SyntheticSource, VideoCodec, VideoFormat, ViewerInfo, ViewerState,
 };
 
 use crate::audio::{AudioHandle, AudioIn};
+use crate::settings::{STREAM_PERMISSIONS, SharedSettings, StreamPermissions};
 use crate::voice::VoiceCmd;
 use crate::{Event, SessionId};
+
+/// How often the viewer count of one stream in our channel is asked for
+/// (round robin, see [`Streams::refresh_viewer_counts`]).
+const VIEWER_COUNTS: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Our own stream.
 #[derive(Clone, Debug, PartialEq)]
@@ -60,12 +76,27 @@ pub struct StreamFrame {
 	pub frame: MediaFrame,
 }
 
-/// Hands encoded frames of our stream to the engine, e.g. from an encoder thread.
+/// What a simulcast layer of our stream is encoded at
+/// ([`StreamSink::layer_format`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayerFormat {
+	pub width: u32,
+	pub height: u32,
+	pub fps: u32,
+	/// Bit/s: the layer's bitrate, or its automatic one.
+	pub bitrate: u64,
+	/// The bitrate is automatic (from the size and frame rate).
+	pub automatic: bool,
+}
+
+/// Hands encoded frames of our stream to the engine, e.g. from an encoder
+/// thread, and tells the encoders what the viewers need per simulcast layer:
+/// keyframes and bitrates. Those are read lock-free from the stream session.
 #[derive(Clone)]
 pub struct StreamSink {
 	tx: mpsc::UnboundedSender<StreamInput>,
 	live: Arc<AtomicBool>,
-	keyframe: Arc<AtomicBool>,
+	feedback: Arc<LayerFeedback>,
 }
 
 impl StreamSink {
@@ -74,9 +105,45 @@ impl StreamSink {
 		self.live.load(Ordering::Relaxed) && self.tx.send(StreamInput::Frame(frame)).is_ok()
 	}
 
-	/// Whether a viewer asked for a keyframe since the last call.
+	/// Send one video frame encoded in `format`: only viewers whose answer
+	/// chose that codec (and H.264 profile) get it.
+	pub fn send_video(&self, frame: EncodedFrame, format: VideoFormat) -> bool {
+		self.live.load(Ordering::Relaxed)
+			&& self.tx.send(StreamInput::VideoFrame(frame, format)).is_ok()
+	}
+
+	/// Whether a viewer's answer chose `format`.
+	pub fn has_video_codec(&self, format: VideoFormat) -> bool {
+		self.feedback.has_codec(format)
+	}
+
+	/// Whether a viewer asked for a keyframe of any layer since the last
+	/// call (or [`take_layer_keyframes`](Self::take_layer_keyframes)).
 	pub fn take_keyframe_request(&self) -> bool {
-		self.keyframe.swap(false, Ordering::Relaxed)
+		self.feedback.take_any_keyframe()
+	}
+
+	/// Adds to `layers` the simulcast layers viewers asked a keyframe for
+	/// since the last call. Every layer is asked for when the stream goes live.
+	pub fn take_layer_keyframes(&self, layers: &mut LayerSet) {
+		self.feedback.take_keyframes(layers);
+	}
+
+	/// Bitrate (bit/s) the bandwidth estimates of `layer`'s viewers allow:
+	/// the lowest estimate of its viewers, at least
+	/// [`voelin_stream::session::MIN_VIDEO_BITRATE`], at most the layer's
+	/// `max_bitrate`. `None` while no viewer of the layer has an estimate.
+	pub fn layer_bitrate(&self, layer: LayerId) -> Option<u64> {
+		self.feedback.bitrate(layer)
+	}
+
+	/// What the encoder of `layer` makes. An automatic bitrate goes into the
+	/// stream's layer, so new connections start at it and every connection
+	/// probes for it; the largest layer sets the H.264 level of new offers
+	/// (`PeerConfig::set_h264_format`), so the offer declares what the
+	/// encoder writes into its SPS, also for 4K, 8K and high frame rates.
+	pub fn layer_format(&self, layer: LayerId, format: LayerFormat) {
+		let _ = self.tx.send(StreamInput::LayerFormat { layer, format });
 	}
 
 	pub fn is_live(&self) -> bool {
@@ -118,13 +185,96 @@ pub(crate) enum StreamInput {
 	RequestKeyframe {
 		stream_id: String,
 	},
+	/// The stream's video arrives but does not decode.
+	Undecodable {
+		stream_id: String,
+	},
+	WatchLayer {
+		stream_id: String,
+		layer: Option<LayerId>,
+	},
+	/// Simulcast layers of our stream (now and for streams started later).
+	Layers(Vec<LayerSpec>),
+	/// What a layer of our stream is encoded at ([`StreamSink::layer_format`]).
+	LayerFormat {
+		layer: LayerId,
+		format: LayerFormat,
+	},
+	/// SRTP profile order of new connections.
+	SrtpProfiles(Vec<SrtpProfile>),
 	Frame(EncodedFrame),
+	/// A video frame for the viewers that chose its codec and H.264 profile.
+	VideoFrame(EncodedFrame, VideoFormat),
 	Notification(StreamNotification),
 	RequestFailed(Request, String),
-	/// Clients on the server with their `client_is_streaming`.
-	Clients(BTreeMap<u16, Option<bool>>),
+	/// Clients on the server: channel and `client_is_streaming`.
+	Clients(BTreeMap<u16, ClientState>),
+	/// Clients that are friends (contacts), for `stream.permissions`.
+	Friends(BTreeSet<u16>),
+	/// The registered streams of the gateway's directory (full list).
+	Directory(Vec<StreamInfo>),
 	/// The voice connection is gone.
 	Shutdown(String),
+}
+
+/// Our own stream, for the session (the gateway directory).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum OwnStreamEvent {
+	Live {
+		id: String,
+		title: String,
+		kind: StreamKind,
+	},
+	/// Connected viewers.
+	Viewers(u32),
+	Ended {
+		id: String,
+	},
+}
+
+/// The kind of a stream as the gateway directory names it.
+pub(crate) fn kind_name(kind: StreamKind) -> String {
+	match kind {
+		StreamKind::Camera => "camera".into(),
+		StreamKind::Screen => "screen".into(),
+		StreamKind::Window => "window".into(),
+		StreamKind::Other(v) => format!("other:{v}"),
+	}
+}
+
+/// [`kind_name`] back; unknown names are screens.
+pub(crate) fn parse_kind(name: &str) -> StreamKind {
+	match name {
+		"camera" => StreamKind::Camera,
+		"window" => StreamKind::Window,
+		other => match other.strip_prefix("other:").and_then(|v| v.parse().ok()) {
+			Some(v) => StreamKind::from_u8(v),
+			None => StreamKind::Screen,
+		},
+	}
+}
+
+/// The gateway directory as the stream task sees it.
+#[derive(Default)]
+struct GatewayStreams {
+	entries: Vec<StreamInfo>,
+	/// Streamers the [`GatewayLookup`] was asked about.
+	wanted: Vec<ClientId>,
+}
+
+/// Looks unannounced streams up in the gateway's directory (after the
+/// server, see [`voelin_stream::discovery`]).
+struct GatewayLookup(Arc<Mutex<GatewayStreams>>);
+
+impl StreamLookup for GatewayLookup {
+	fn lookup(&mut self, streamer: ClientId, _out: &mut voelin_stream::session::Outbox) -> bool {
+		let mut dir = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+		let known = dir.entries.iter().any(|e| e.streamer == streamer);
+		if known {
+			dir.wanted.push(streamer);
+		}
+		known
+	}
 }
 
 pub(crate) struct StreamHandle {
@@ -132,6 +282,7 @@ pub(crate) struct StreamHandle {
 }
 
 impl StreamHandle {
+	#[allow(clippy::too_many_arguments)] // the parts of the session the task uses
 	pub fn spawn(
 		session: SessionId,
 		own_client: u16,
@@ -140,18 +291,32 @@ impl StreamHandle {
 		events: broadcast::Sender<Event>,
 		frames: broadcast::Sender<StreamFrame>,
 		audio: Option<AudioHandle>,
+		settings: SharedSettings,
+		own: mpsc::UnboundedSender<OwnStreamEvent>,
 	) -> Self {
 		let (tx, rx) = mpsc::unbounded_channel();
+		let mut streams = Streams::new(ClientId(own_client), config);
+		let gateway = Arc::new(Mutex::new(GatewayStreams::default()));
+		streams.add_lookup(Box::new(GatewayLookup(gateway.clone())));
 		let task = StreamTask {
 			session,
-			streams: Streams::new(ClientId(own_client), config),
+			streams,
 			voice,
 			events,
 			frames,
 			audio,
 			tx: tx.clone(),
 			sink: None,
+			layers: Vec::new(),
+			settings,
+			own,
+			setup: None,
+			formats: BTreeMap::new(),
+			live: None,
+			viewers: 0,
 			clients: BTreeMap::new(),
+			friends: BTreeSet::new(),
+			gateway,
 		};
 		tokio::spawn(task.run(rx));
 		Self { tx }
@@ -160,6 +325,25 @@ impl StreamHandle {
 	pub fn send(&self, input: StreamInput) {
 		let _ = self.tx.send(input);
 	}
+}
+
+/// What an offer's H.264 level must hold: the largest size, frame rate and
+/// bitrate of the stream's layers that are encoded (`formats`), a layer's
+/// bitrate taken at its `max_bitrate` when that is higher, since bandwidth
+/// estimates may raise the encoder to it. `None` before any is.
+fn offer_format(
+	formats: &BTreeMap<LayerId, LayerFormat>,
+	layers: &[LayerSpec],
+) -> Option<(u32, u32, u32, u64)> {
+	formats.iter().filter(|(id, _)| layers.iter().any(|l| l.id == **id)).fold(
+		None,
+		|most, (id, f)| {
+			let max = layers.iter().find(|l| l.id == *id).and_then(|l| l.max_bitrate);
+			let bitrate = f.bitrate.max(max.unwrap_or(0));
+			let (w, h, fps, b) = most.unwrap_or((0, 0, 0, 0));
+			Some((w.max(f.width), h.max(f.height), fps.max(f.fps), b.max(bitrate)))
+		},
+	)
 }
 
 struct StreamTask {
@@ -174,12 +358,31 @@ struct StreamTask {
 	tx: mpsc::UnboundedSender<StreamInput>,
 	/// The sink of our live stream.
 	sink: Option<StreamSink>,
-	/// Clients on the server and their `client_is_streaming`.
-	clients: BTreeMap<u16, Option<bool>>,
+	/// Simulcast layers of our stream (empty: one layer).
+	layers: Vec<LayerSpec>,
+	/// `stream.permissions` decides join requests.
+	settings: SharedSettings,
+	/// Our stream's life, for the session.
+	own: mpsc::UnboundedSender<OwnStreamEvent>,
+	/// The setup of our stream since `Start`.
+	setup: Option<StreamSetup>,
+	/// What each layer of our stream is encoded at, since `Start`.
+	formats: BTreeMap<LayerId, LayerFormat>,
+	/// Our live stream's id.
+	live: Option<String>,
+	/// Connected viewers of our stream, as last told.
+	viewers: u32,
+	/// The clients as of the last update.
+	clients: BTreeMap<u16, ClientState>,
+	/// Friends' client ids (`stream.permissions = friends`).
+	friends: BTreeSet<u16>,
+	gateway: Arc<Mutex<GatewayStreams>>,
 }
 
 impl StreamTask {
 	async fn run(mut self, mut rx: mpsc::UnboundedReceiver<StreamInput>) {
+		let mut counts = tokio::time::interval(VIEWER_COUNTS);
+		counts.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 		loop {
 			tokio::select! {
 				input = rx.recv() => match input {
@@ -191,6 +394,7 @@ impl StreamTask {
 					Some(input) => self.input(input).await,
 				},
 				() = self.streams.wait_peers() => {}
+				_ = counts.tick() => self.streams.refresh_viewer_counts(),
 			}
 			self.flush();
 		}
@@ -201,11 +405,45 @@ impl StreamTask {
 		let _ = self.events.send(event);
 	}
 
+	/// A layer of our stream is encoded at `format` (see
+	/// [`StreamSink::layer_format`]).
+	fn layer_format(
+		&mut self,
+		layer: LayerId,
+		format: LayerFormat,
+	) -> Result<(), voelin_stream::SessionError> {
+		// The live stream's layers only; the configured ones (for streams
+		// started later) keep their automatic bitrate.
+		let Some(mut layers) = self.streams.streamer().map(|s| s.layers().to_vec()) else {
+			return Ok(());
+		};
+		self.formats.insert(layer, format);
+		if let Some((width, height, fps, bitrate)) = offer_format(&self.formats, &layers) {
+			let mut config = self.streams.peer_config().clone();
+			config.set_h264_format(width, height, fps, bitrate);
+			if config.h264_profile_level_ids != self.streams.peer_config().h264_profile_level_ids {
+				debug!(width, height, fps, bitrate, "H.264 offered for the stream's largest layer");
+				self.streams.set_peer_config(config);
+			}
+		}
+		match layers.iter_mut().find(|l| l.id == layer) {
+			Some(spec) if format.automatic && spec.bitrate != format.bitrate => {
+				spec.bitrate = format.bitrate;
+				self.streams.set_layers(layers)
+			}
+			_ => Ok(()),
+		}
+	}
+
 	async fn input(&mut self, input: StreamInput) {
 		let session = self.session;
 		let result = match input {
 			StreamInput::Start { setup, auto_accept } => {
-				self.streams.start(StreamerOptions { setup, auto_accept }).map(|()| {
+				self.setup = Some(setup.clone());
+				self.formats.clear();
+				let layers = self.layers.clone();
+				let options = StreamerOptions { setup, auto_accept, layers, ..Default::default() };
+				self.streams.start(options).map(|()| {
 					self.emit(Event::StreamState { session, state: StreamState::Starting });
 				})
 			}
@@ -222,8 +460,31 @@ impl StreamTask {
 				self.streams.request_keyframe(&stream_id);
 				Ok(())
 			}
+			StreamInput::Undecodable { stream_id } => self.streams.video_undecodable(&stream_id),
+			StreamInput::WatchLayer { stream_id, layer } => self
+				.streams
+				.set_watch_layer(&stream_id, layer)
+				.map(|()| self.watch_layers(&stream_id)),
+			StreamInput::Layers(layers) => {
+				self.layers = layers.clone();
+				// Without a stream they are used for the next one.
+				if self.streams.streamer().is_some() {
+					self.streams.set_layers(layers)
+				} else {
+					Ok(())
+				}
+			}
+			StreamInput::LayerFormat { layer, format } => self.layer_format(layer, format),
+			StreamInput::SrtpProfiles(profiles) => {
+				self.streams.set_srtp_profiles(profiles);
+				Ok(())
+			}
 			StreamInput::Frame(frame) => {
 				self.streams.write_frame(&frame);
+				Ok(())
+			}
+			StreamInput::VideoFrame(frame, format) => {
+				self.streams.write_frame_in(&frame, Some(format));
 				Ok(())
 			}
 			StreamInput::Notification(n) => {
@@ -234,20 +495,21 @@ impl StreamTask {
 				self.streams.request_failed(&request, &error);
 				Ok(())
 			}
+			StreamInput::Friends(friends) => {
+				self.friends = friends;
+				Ok(())
+			}
 			StreamInput::Clients(clients) => {
-				// Streams of clients that left or stopped streaming are gone.
-				// Only changes count: a snapshot may predate the streaming flag
-				// of a stream that was just announced.
-				for (client, streaming) in &clients {
-					let was = self.clients.get(client).copied().flatten();
-					if let (Some(was), Some(now)) = (was, *streaming)
-						&& was != now
-					{
-						self.streams.set_client_streaming(ClientId(*client), now);
-					}
-				}
-				self.streams.retain_streamers(|c| clients.contains_key(&c.0));
-				self.clients = clients;
+				// Streams of clients that left, stopped streaming or are not
+				// in our channel are gone; unannounced ones are looked up.
+				self.clients = clients.clone();
+				self.streams.update_clients(clients);
+				self.add_directory_streams();
+				Ok(())
+			}
+			StreamInput::Directory(entries) => {
+				self.gateway.lock().unwrap_or_else(PoisonError::into_inner).entries = entries;
+				self.add_directory_streams();
 				Ok(())
 			}
 			StreamInput::Shutdown(_) => Ok(()),
@@ -255,6 +517,30 @@ impl StreamTask {
 		if let Err(e) = result {
 			self.emit(Event::Error { session, message: format!("stream: {e}") });
 		}
+	}
+
+	/// Streams of the gateway directory we were not told about: streamers in
+	/// our channel that still stream (the sessions check the channel).
+	fn add_directory_streams(&mut self) {
+		let entries = {
+			let mut dir = self.gateway.lock().unwrap_or_else(PoisonError::into_inner);
+			dir.wanted.clear();
+			dir.entries.clone()
+		};
+		let own = self.streams.own_client();
+		for info in entries {
+			let stopped =
+				self.clients.get(&info.streamer.0).is_some_and(|c| c.streaming == Some(false));
+			if info.streamer != own && !stopped && self.streams.directory().get(&info.id).is_none()
+			{
+				debug!(stream = %info.id, streamer = info.streamer.0, "stream from the gateway directory");
+				self.streams.discovered(info);
+			}
+		}
+	}
+
+	fn own_stream(&self, event: OwnStreamEvent) {
+		let _ = self.own.send(event);
 	}
 
 	/// Send the requests on the connection and report the events.
@@ -274,29 +560,67 @@ impl StreamTask {
 		match event {
 			StreamEvent::Streams(streams) => self.emit(Event::StreamsChanged { session, streams }),
 			StreamEvent::Streamer(StreamerEvent::Live { id }) => {
+				let feedback = match self.streams.streamer() {
+					Some(s) => s.layer_feedback().clone(),
+					None => Arc::new(LayerFeedback::new()),
+				};
 				let sink = StreamSink {
 					tx: self.tx.clone(),
 					live: Arc::new(AtomicBool::new(true)),
-					keyframe: Arc::new(AtomicBool::new(true)),
+					feedback,
 				};
 				self.sink = Some(sink.clone());
+				let setup = self.setup.clone().unwrap_or_default();
+				self.live = Some(id.clone());
+				self.viewers = 0;
+				self.own_stream(OwnStreamEvent::Live {
+					id: id.clone(),
+					title: setup.name,
+					kind: setup.kind,
+				});
 				self.emit(Event::StreamState { session, state: StreamState::Live { id, sink } });
 			}
 			StreamEvent::Streamer(StreamerEvent::Request { viewer, message }) => {
-				self.emit(Event::StreamViewerRequest { session, viewer: viewer.0, message });
+				match self.join_decision(viewer) {
+					// Answered through the input queue, as the user would.
+					Some(accept) => {
+						debug!(
+							viewer = viewer.0,
+							accept, "join request answered by stream.permissions"
+						);
+						let _ = self.tx.send(StreamInput::Respond { viewer: viewer.0, accept });
+					}
+					None => {
+						self.emit(Event::StreamViewerRequest {
+							session,
+							viewer: viewer.0,
+							message,
+						});
+					}
+				}
 			}
 			StreamEvent::Streamer(StreamerEvent::Viewers(viewers)) => {
+				let connected =
+					viewers.iter().filter(|v| v.state == ViewerState::Connected).count() as u32;
+				if connected != self.viewers && self.live.is_some() {
+					self.viewers = connected;
+					self.own_stream(OwnStreamEvent::Viewers(connected));
+				}
 				self.emit(Event::StreamViewers { session, viewers });
 			}
-			StreamEvent::Streamer(StreamerEvent::KeyframeRequest) => {
-				if let Some(sink) = &self.sink {
-					sink.keyframe.store(true, Ordering::Relaxed);
-				}
-				self.emit(Event::StreamKeyframeRequest { session });
+			// The sink already has it (layer feedback).
+			StreamEvent::Streamer(StreamerEvent::KeyframeRequest { layer }) => {
+				self.emit(Event::StreamKeyframeRequest { session, layer });
+			}
+			StreamEvent::Streamer(StreamerEvent::LayerBitrate { layer, bitrate }) => {
+				self.emit(Event::StreamLayerBitrate { session, layer, bitrate });
 			}
 			StreamEvent::Streamer(StreamerEvent::Ended(reason)) => {
 				if let Some(sink) = self.sink.take() {
 					sink.live.store(false, Ordering::Relaxed);
+				}
+				if let Some(id) = self.live.take() {
+					self.own_stream(OwnStreamEvent::Ended { id });
 				}
 				self.emit(Event::StreamState { session, state: StreamState::Ended(reason) });
 			}
@@ -310,6 +634,7 @@ impl StreamTask {
 						}
 						WatchState::Ended(reason)
 					}
+					WatchEvent::Layers(_) => return self.watch_layers(&id),
 					WatchEvent::Frame(frame) => {
 						if let (MediaKind::Audio, Some(audio)) = (frame.kind, &self.audio) {
 							audio.send(AudioIn::StreamAudio {
@@ -327,6 +652,33 @@ impl StreamTask {
 		}
 	}
 
+	/// Tell the layers of watched stream `id` and the one we asked for.
+	fn watch_layers(&self, id: &str) {
+		let Some(watched) = self.streams.watching().find(|v| v.id() == id) else { return };
+		self.emit(Event::WatchLayers {
+			session: self.session,
+			stream_id: id.to_owned(),
+			layers: watched.layers().to_vec(),
+			layer: watched.layer(),
+		});
+	}
+
+	/// The answer `stream.permissions` gives to a join request; `None`: ask.
+	fn join_decision(&self, viewer: ClientId) -> Option<bool> {
+		match *self.settings.current().get_arc(&STREAM_PERMISSIONS) {
+			StreamPermissions::Everyone => Some(true),
+			StreamPermissions::Nobody => Some(false),
+			// Friends are let in; others: ask.
+			StreamPermissions::Friends => self.friends.contains(&viewer.0).then_some(true),
+			// Our channel is let in; viewers from other channels: ask.
+			StreamPermissions::Channel => {
+				let discovery = self.streams.discovery();
+				let own = discovery.own_channel();
+				(own.is_some() && discovery.channel_of(viewer) == own).then_some(true)
+			}
+		}
+	}
+
 	/// The connection is gone: report our stream and watched streams as ended.
 	fn shutdown(&mut self, reason: String) {
 		let session = self.session;
@@ -336,6 +688,9 @@ impl StreamTask {
 		}
 		if let Some(sink) = self.sink.take() {
 			sink.live.store(false, Ordering::Relaxed);
+		}
+		if let Some(id) = self.live.take() {
+			self.own_stream(OwnStreamEvent::Ended { id });
 		}
 		for watched in self.streams.watching() {
 			let stream_id = watched.id().to_owned();
@@ -358,12 +713,22 @@ mod tests {
 	use voelin_stream::{FrameSource, SyntheticSource};
 
 	use super::*;
+	use crate::settings::Settings;
 
 	const CLIENTS: [u16; 2] = [5, 6];
 
 	/// The notifications the server sends for `request` from `from`, per receiver.
+	/// Every offer the fake server relayed, from all tests of this process.
+	fn lock_offers() -> std::sync::MutexGuard<'static, Vec<String>> {
+		static OFFERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+		OFFERS.lock().unwrap_or_else(PoisonError::into_inner)
+	}
+
 	fn relay(from: u16, request: Request) -> Vec<(u16, StreamNotification)> {
 		let both = |n: StreamNotification| CLIENTS.map(|c| (c, n.clone())).to_vec();
+		if let Request::Respond { offer: Some(sdp), .. } = &request {
+			lock_offers().push(sdp.clone());
+		}
 		match request {
 			Request::Setup(setup) => CLIENTS
 				.map(|c| {
@@ -375,6 +740,7 @@ mod tests {
 						bitrate: setup.bitrate,
 						viewer_limit: setup.viewer_limit,
 						audio: setup.audio,
+						viewers: Some(0),
 					};
 					let return_code = (c == from).then(|| "1".to_owned());
 					(c, StreamNotification::Started { info, return_code })
@@ -418,6 +784,7 @@ mod tests {
 			Request::RemoveViewer { id, viewer, reason } => {
 				both(StreamNotification::ViewerLeft { id, viewer, reason: Some(reason) })
 			}
+			Request::StreamInfo { .. } => Vec::new(),
 		}
 	}
 
@@ -443,6 +810,34 @@ mod tests {
 	fn pair(
 		audio: Option<AudioHandle>,
 	) -> (Handles, broadcast::Receiver<Event>, broadcast::Receiver<StreamFrame>) {
+		pair_with(audio, &Settings::in_memory())
+	}
+
+	/// [`pair`] with `settings` for both tasks.
+	fn pair_with(
+		audio: Option<AudioHandle>,
+		settings: &Settings,
+	) -> (Handles, broadcast::Receiver<Event>, broadcast::Receiver<StreamFrame>) {
+		let (handles, rx, frames, _) = pair_full(audio, settings, false, PeerConfig::loopback());
+		(handles, rx, frames)
+	}
+
+	/// [`pair_with`] with peers of `config`; with `late`, the server does not tell the viewer
+	/// (session 2) about streams, as for a client that joined after the
+	/// stream started, and does not answer lookups. Also returns what the
+	/// streamer (session 1) reports about its own stream.
+	fn pair_full(
+		audio: Option<AudioHandle>,
+		settings: &Settings,
+		late: bool,
+		config: PeerConfig,
+	) -> (
+		Handles,
+		broadcast::Receiver<Event>,
+		broadcast::Receiver<StreamFrame>,
+		mpsc::UnboundedReceiver<OwnStreamEvent>,
+	) {
+		let (own_tx, own_rx) = mpsc::unbounded_channel();
 		let (events, rx) = broadcast::channel(4096);
 		let (frames, frames_rx) = broadcast::channel(4096);
 		let mut voices = Vec::new();
@@ -450,7 +845,7 @@ mod tests {
 		let mut audio = audio;
 		for (i, clid) in CLIENTS.into_iter().enumerate() {
 			let (voice, voice_rx) = mpsc::unbounded_channel();
-			let config = PeerConfig::loopback();
+			let config = config.clone();
 			let session = i as u64 + 1;
 			handles.push(StreamHandle::spawn(
 				session,
@@ -460,6 +855,8 @@ mod tests {
 				events.clone(),
 				frames.clone(),
 				if session == 2 { audio.take() } else { None },
+				SharedSettings::new(settings.clone()),
+				if session == 1 { own_tx.clone() } else { mpsc::unbounded_channel().0 },
 			));
 			voices.push(voice_rx);
 		}
@@ -471,6 +868,10 @@ mod tests {
 				while let Some(cmd) = voice_rx.recv().await {
 					if let VoiceCmd::Stream(request) = cmd {
 						for (to, n) in relay(CLIENTS[i], request) {
+							let announcement = matches!(n, StreamNotification::Started { .. });
+							if late && to == CLIENTS[1] && announcement {
+								continue;
+							}
 							let index = CLIENTS.iter().position(|c| *c == to).unwrap();
 							handles[index].send(StreamInput::Notification(n));
 						}
@@ -478,7 +879,7 @@ mod tests {
 				}
 			});
 		}
-		(handles, rx, frames_rx)
+		(handles, rx, frames_rx, own_rx)
 	}
 
 	/// Session 1 streams (auto-accepting), session 2 watches; returns the sink
@@ -582,6 +983,317 @@ mod tests {
 		})
 		.await;
 		handles[1].send(StreamInput::Shutdown("bye".into()));
+	}
+
+	/// Simulcast layers and the SRTP setting through the stream tasks: the
+	/// viewer gets the top layer only, the sink carries keyframe requests and
+	/// the bitrate target per layer.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn layers_through_stream_tasks() {
+		let (handles, mut rx, mut frames_rx) = pair(None);
+		let layers = vec![
+			LayerSpec { id: 0, min_bitrate: 800_000, ..LayerSpec::single(2_000_000) },
+			LayerSpec { id: 1, scale: 0.5, ..LayerSpec::single(500_000) },
+		];
+		// Set before the stream starts: kept for it.
+		handles[0].send(StreamInput::Layers(layers.clone()));
+		// The viewer is the DTLS server: its order decides.
+		handles[1].send(StreamInput::SrtpProfiles(vec![SrtpProfile::AeadAes128Gcm]));
+		let sink = live_and_watching(&handles, &mut rx).await;
+		let mut keyframes = LayerSet::new();
+		sink.take_layer_keyframes(&mut keyframes);
+		assert!(keyframes.contains(0), "{keyframes:?}");
+
+		let feeder = tokio::spawn({
+			let sink = sink.clone();
+			async move {
+				let mut source = SyntheticSource::with_layers(30, 0, true, &layers);
+				let mut out = Vec::new();
+				while sink.is_live() {
+					source.poll_frames(Instant::now(), &mut out);
+					for f in out.drain(..) {
+						sink.send(f);
+					}
+					tokio::time::sleep(Duration::from_millis(10)).await;
+				}
+			}
+		});
+		let mut video = 0;
+		timeout(Duration::from_secs(10), async {
+			while video < 20 {
+				let f = frames_rx.recv().await.unwrap();
+				if f.frame.kind == MediaKind::Video {
+					assert_eq!(SyntheticSource::frame_layer(&f.frame.data), Some(0));
+					video += 1;
+				}
+			}
+		})
+		.await
+		.expect("no frames");
+		// Bandwidth estimates reach the viewer list and the layer's target.
+		let (mut info, mut bitrate) = (None, None);
+		wait(&mut rx, |e| {
+			match e {
+				Event::StreamViewers { session: 1, viewers } if viewers[0].estimate.is_some() => {
+					info = Some(viewers[0].clone());
+				}
+				Event::StreamLayerBitrate { session: 1, layer: 0, bitrate: b } => bitrate = Some(b),
+				_ => {}
+			}
+			(info.is_some() && bitrate.is_some()).then_some(())
+		})
+		.await;
+		let info = info.unwrap();
+		assert_eq!(info.layer, Some(0));
+		assert_eq!(info.srtp_profile, Some(SrtpProfile::AeadAes128Gcm));
+		assert!(sink.layer_bitrate(0).is_some_and(|b| b > 0));
+		assert_eq!(sink.layer_bitrate(1), None, "no viewer on layer 1");
+
+		handles[0].send(StreamInput::Stop);
+		wait(&mut rx, |e| match e {
+			Event::WatchState { session: 2, state: WatchState::Ended(_), .. } => Some(()),
+			_ => None,
+		})
+		.await;
+		feeder.await.unwrap();
+	}
+
+	/// What the encoder tells about a layer reaches the live stream: the
+	/// largest layer's size, frame rate and bitrate set the H.264 level of
+	/// the next offer (both profiles), and an automatic bitrate goes into the
+	/// layer (which asks the viewer's layer for a keyframe, as every layer
+	/// change does); the same again changes nothing.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn layer_formats_reach_the_live_stream() {
+		// The streamer offers H.264 (and the viewer takes it).
+		let config = PeerConfig { video_codecs: vec![VideoCodec::H264], ..PeerConfig::loopback() };
+		let (handles, mut rx, _frames, _) = pair_full(None, &Settings::in_memory(), false, config);
+		let setup = StreamSetup { name: "4K120".into(), ..Default::default() };
+		handles[0].send(StreamInput::Start { setup, auto_accept: true });
+		// Live for the streamer and listed for the viewer, in either order.
+		let (mut sink, mut listed) = (None, false);
+		wait(&mut rx, |e| {
+			match e {
+				Event::StreamState { session: 1, state: StreamState::Live { sink: s, .. } } => {
+					sink = Some(s);
+				}
+				Event::StreamsChanged { session: 2, streams } => listed = streams.len() == 1,
+				_ => {}
+			}
+			(sink.is_some() && listed).then_some(())
+		})
+		.await;
+		let sink = sink.unwrap();
+		let format =
+			|bitrate| LayerFormat { width: 3840, height: 2160, fps: 60, bitrate, automatic: true };
+		// Before the viewer asks: its offer is made after this.
+		sink.layer_format(0, format(60_000_000));
+		handles[1].send(StreamInput::Watch { stream_id: "s-1".into() });
+		wait(&mut rx, |e| match e {
+			Event::WatchState { session: 2, state: WatchState::Connected, .. } => Some(()),
+			_ => None,
+		})
+		.await;
+		// 3840x2160 at 60 fps is level 5.2 (0x34) in both profiles.
+		let offers = lock_offers().clone();
+		assert!(
+			offers.iter().any(|o| o.contains("profile-level-id=640c34") && o.contains("42e034")),
+			"{offers:?}"
+		);
+
+		let keyframes = || {
+			let mut layers = LayerSet::new();
+			sink.take_layer_keyframes(&mut layers);
+			layers.contains(0)
+		};
+		keyframes();
+		sink.layer_format(0, format(9_000_000));
+		timeout(Duration::from_secs(5), async {
+			while !keyframes() {
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the layer did not change");
+		sink.layer_format(0, format(9_000_000));
+		tokio::time::sleep(Duration::from_millis(200)).await;
+		assert!(!keyframes(), "nothing changed");
+		handles[0].send(StreamInput::Stop);
+	}
+
+	#[test]
+	fn the_offer_covers_the_largest_layer() {
+		let format = |width, height, fps, bitrate| LayerFormat {
+			width,
+			height,
+			fps,
+			bitrate,
+			automatic: false,
+		};
+		let layers = [
+			LayerSpec { max_bitrate: Some(12_000_000), ..LayerSpec::single(8_000_000) },
+			LayerSpec { id: 1, scale: 0.5, ..LayerSpec::single(2_000_000) },
+		];
+		let mut formats = BTreeMap::new();
+		assert_eq!(offer_format(&formats, &layers), None);
+		formats.insert(1, format(960, 540, 120, 2_000_000));
+		formats.insert(0, format(1920, 1080, 60, 8_000_000));
+		// Layer 0's size and its bitrate at its maximum, layer 1's rate.
+		assert_eq!(offer_format(&formats, &layers), Some((1920, 1080, 120, 12_000_000)));
+		// A layer the stream no longer has does not count.
+		formats.insert(7, format(7680, 4320, 30, 60_000_000));
+		assert_eq!(offer_format(&formats, &layers), Some((1920, 1080, 120, 12_000_000)));
+	}
+
+	/// A viewer that was not told about a running stream, and whose server
+	/// lookup goes unanswered, finds it in the gateway directory and
+	/// watches it; the streamer reports its stream's life for the directory.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn late_viewer_finds_the_stream_in_the_gateway_directory() {
+		let loopback = PeerConfig::loopback();
+		let (handles, mut rx, _frames, mut own) =
+			pair_full(None, &Settings::in_memory(), true, loopback);
+		let setup = StreamSetup {
+			name: "directory test".into(),
+			kind: StreamKind::Window,
+			..Default::default()
+		};
+		handles[0].send(StreamInput::Start { setup, auto_accept: true });
+		wait(&mut rx, |e| match e {
+			Event::StreamState { session: 1, state: StreamState::Live { .. } } => Some(()),
+			_ => None,
+		})
+		.await;
+		let live = timeout(Duration::from_secs(5), own.recv()).await.unwrap().unwrap();
+		assert_eq!(
+			live,
+			OwnStreamEvent::Live {
+				id: "s-1".into(),
+				title: "directory test".into(),
+				kind: StreamKind::Window
+			}
+		);
+		// Both in channel 1, the streamer streaming: the viewer asks the
+		// server, which does not answer.
+		let clients = BTreeMap::from([
+			(CLIENTS[0], ClientState { channel: 1, streaming: Some(true) }),
+			(CLIENTS[1], ClientState { channel: 1, streaming: Some(false) }),
+		]);
+		handles[1].send(StreamInput::Clients(clients));
+		tokio::time::sleep(Duration::from_millis(200)).await;
+		// The gateway's directory has it.
+		let entry = StreamInfo {
+			id: "s-1".into(),
+			streamer: ClientId(CLIENTS[0]),
+			name: "directory test".into(),
+			kind: parse_kind(&kind_name(StreamKind::Window)),
+			bitrate: 0,
+			viewer_limit: 0,
+			audio: true,
+			viewers: None,
+		};
+		handles[1].send(StreamInput::Directory(vec![entry]));
+		wait(&mut rx, |e| match e {
+			Event::StreamsChanged { session: 2, streams }
+				if streams.iter().any(|s| s.id == "s-1") =>
+			{
+				Some(())
+			}
+			_ => None,
+		})
+		.await;
+		handles[1].send(StreamInput::Watch { stream_id: "s-1".into() });
+		wait(&mut rx, |e| match e {
+			Event::WatchState { session: 2, state: WatchState::Connected, .. } => Some(()),
+			_ => None,
+		})
+		.await;
+		// One connected viewer, then the end.
+		let viewers = timeout(Duration::from_secs(5), own.recv()).await.unwrap().unwrap();
+		assert_eq!(viewers, OwnStreamEvent::Viewers(1));
+		handles[0].send(StreamInput::Stop);
+		loop {
+			match timeout(Duration::from_secs(5), own.recv()).await.unwrap().unwrap() {
+				OwnStreamEvent::Ended { id } => break assert_eq!(id, "s-1"),
+				OwnStreamEvent::Viewers(_) => {}
+				other => panic!("{other:?}"),
+			}
+		}
+		for h in handles.iter() {
+			h.send(StreamInput::Shutdown("done".into()));
+		}
+	}
+
+	#[test]
+	fn kind_names_round_trip() {
+		for kind in
+			[StreamKind::Camera, StreamKind::Screen, StreamKind::Window, StreamKind::Other(9)]
+		{
+			assert_eq!(parse_kind(&kind_name(kind)), kind);
+		}
+		assert_eq!(parse_kind("game"), StreamKind::Screen);
+	}
+
+	/// `stream.permissions` answers join requests (`friends` and `channel`:
+	/// those are let in, others are asked).
+	#[tokio::test(flavor = "multi_thread")]
+	async fn permissions_answer_join_requests() {
+		let in_channels = |streamer: u64, viewer: u64| {
+			StreamInput::Clients(BTreeMap::from([
+				(CLIENTS[0], ClientState { channel: streamer, streaming: Some(false) }),
+				(CLIENTS[1], ClientState { channel: viewer, streaming: Some(false) }),
+			]))
+		};
+		for (permissions, viewer_channel, friend, expected) in [
+			(StreamPermissions::Everyone, 2, false, Some(true)),
+			(StreamPermissions::Channel, 1, false, Some(true)),
+			(StreamPermissions::Channel, 2, false, None),
+			(StreamPermissions::Nobody, 1, false, Some(false)),
+			(StreamPermissions::Friends, 1, false, None),
+			(StreamPermissions::Friends, 2, true, Some(true)),
+		] {
+			let settings = Settings::in_memory();
+			settings.set(&STREAM_PERMISSIONS, permissions).unwrap();
+			let (handles, mut rx, _frames) = pair_with(None, &settings);
+			for h in handles.iter() {
+				h.send(in_channels(1, viewer_channel));
+			}
+			if friend {
+				handles[0].send(StreamInput::Friends(BTreeSet::from([CLIENTS[1]])));
+			}
+			let setup = StreamSetup { name: "p".into(), ..Default::default() };
+			handles[0].send(StreamInput::Start { setup, auto_accept: false });
+			let (mut live, mut listed) = (false, false);
+			wait(&mut rx, |e| {
+				match e {
+					Event::StreamState { session: 1, state: StreamState::Live { .. } } => {
+						live = true
+					}
+					Event::StreamsChanged { session: 2, streams } => listed = !streams.is_empty(),
+					_ => {}
+				}
+				(live && listed).then_some(())
+			})
+			.await;
+			handles[1].send(StreamInput::Watch { stream_id: "s-1".into() });
+			let answer = wait(&mut rx, |e| match e {
+				Event::WatchState { session: 2, state: WatchState::Connected, .. } => {
+					Some(Some(true))
+				}
+				Event::WatchState {
+					session: 2,
+					state: WatchState::Ended(EndReason::Denied),
+					..
+				} => Some(Some(false)),
+				Event::StreamViewerRequest { session: 1, .. } => Some(None),
+				_ => None,
+			})
+			.await;
+			assert_eq!(answer, expected, "{permissions:?}, viewer in channel {viewer_channel}");
+			for h in handles.iter() {
+				h.send(StreamInput::Shutdown("done".into()));
+			}
+		}
 	}
 
 	/// The whole path: test pattern → VP8 → stream task → str0m peers on

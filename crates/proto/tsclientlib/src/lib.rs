@@ -14,7 +14,7 @@
 #![recursion_limit = "128"]
 
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::convert::TryInto;
 use std::iter;
 use std::mem;
@@ -271,6 +271,12 @@ struct ConnectedConnection {
 	client: client::Client,
 	cur_return_code: u16,
 	cur_filetransfer_id: u16,
+	/// Voelin patch: `ftinitdownload`/`ftinitupload` commands waiting for
+	/// their answer, by return code. The server refuses a transfer (file not
+	/// found, no permission, quota) with an `error` for the command, which
+	/// must fail the transfer: the caller only knows its
+	/// [`FiletransferHandle`].
+	filetransfer_commands: HashMap<u16, FiletransferHandle>,
 	/// If we are subscribed to the server. This will automatically subscribe to new channels.
 	subscribed: bool,
 	/// If a file stream can be opened, it gets put in here until the tcp
@@ -1149,6 +1155,7 @@ impl Connection {
 						client,
 						cur_return_code: 0,
 						cur_filetransfer_id: 0,
+						filetransfer_commands: HashMap::new(),
 						subscribed: false,
 						filetransfers: Default::default(),
 						connection_time: OffsetDateTime::now_utc(),
@@ -1362,6 +1369,14 @@ impl ConnectedConnection {
 							missing_permission: msg.missing_permission_id,
 						})
 					};
+					// Voelin patch: a refused file transfer fails its handle.
+					if let Some(ft) = self.filetransfer_commands.remove(&ret_code) {
+						if let Err(e) = res {
+							stream_items
+								.push_back(Ok(StreamItem::FiletransferFailed(ft, e.into())));
+						}
+						continue;
+					}
 					stream_items
 						.push_back(Ok(StreamItem::MessageResult(MessageHandle(ret_code), res)));
 				} else {
@@ -1371,7 +1386,8 @@ impl ConnectedConnection {
 		} else if let InMessage::FileDownload(msg) = &msg {
 			for msg in msg.iter() {
 				let ft_id = FiletransferHandle(msg.client_filetransfer_id);
-				let ip = msg.ip.unwrap_or_else(|| self.client.address.ip());
+				// Voelin patch: servers listening on all interfaces announce 0.0.0.0.
+				let ip = msg.ip.filter(|ip| !ip.is_unspecified()).unwrap_or_else(|| self.client.address.ip());
 				let addr = SocketAddr::new(ip, msg.port);
 				let key = msg.filetransfer_key.clone();
 				let size = msg.size;
@@ -1397,7 +1413,8 @@ impl ConnectedConnection {
 		} else if let InMessage::FileUpload(msg) = &msg {
 			for msg in msg.iter() {
 				let ft_id = FiletransferHandle(msg.client_filetransfer_id);
-				let ip = msg.ip.unwrap_or_else(|| self.client.address.ip());
+				// Voelin patch: servers listening on all interfaces announce 0.0.0.0.
+				let ip = msg.ip.filter(|ip| !ip.is_unspecified()).unwrap_or_else(|| self.client.address.ip());
 				let addr = SocketAddr::new(ip, msg.port);
 				let key = msg.filetransfer_key.clone();
 				let seek_position = msg.seek_position;
@@ -1617,7 +1634,7 @@ impl ConnectedConnection {
 
 	fn send_command_with_result(&mut self, mut packet: OutCommand) -> Result<MessageHandle> {
 		let code = self.cur_return_code;
-		self.cur_return_code += 1;
+		self.cur_return_code = self.cur_return_code.wrapping_add(1);
 		packet.write_arg("return_code", &code);
 
 		self.send_command(packet).map(|_| MessageHandle(code))
@@ -1632,7 +1649,7 @@ impl ConnectedConnection {
 		seek_position: Option<u64>,
 	) -> Result<FiletransferHandle> {
 		let ft_id = self.cur_filetransfer_id;
-		self.cur_filetransfer_id += 1;
+		self.cur_filetransfer_id = self.cur_filetransfer_id.wrapping_add(1);
 		let pass = channel_password
 			.map(|p| tsproto_types::crypto::encode_password(p.as_bytes()))
 			.unwrap_or_default();
@@ -1645,7 +1662,9 @@ impl ConnectedConnection {
 			protocol: 1,
 		}));
 
-		self.send_command_with_result(packet).map(|_| FiletransferHandle(ft_id))
+		let handle = self.send_command_with_result(packet)?;
+		self.filetransfer_commands.insert(handle.0, FiletransferHandle(ft_id));
+		Ok(FiletransferHandle(ft_id))
 	}
 
 	fn upload_file(
@@ -1653,7 +1672,7 @@ impl ConnectedConnection {
 		overwrite: bool, resume: bool,
 	) -> Result<FiletransferHandle> {
 		let ft_id = self.cur_filetransfer_id;
-		self.cur_filetransfer_id += 1;
+		self.cur_filetransfer_id = self.cur_filetransfer_id.wrapping_add(1);
 
 		let pass = channel_password
 			.map(|p| tsproto_types::crypto::encode_password(p.as_bytes()))
@@ -1669,7 +1688,9 @@ impl ConnectedConnection {
 			protocol: 1,
 		}));
 
-		self.send_command_with_result(packet).map(|_| FiletransferHandle(ft_id))
+		let handle = self.send_command_with_result(packet)?;
+		self.filetransfer_commands.insert(handle.0, FiletransferHandle(ft_id));
+		Ok(FiletransferHandle(ft_id))
 	}
 }
 

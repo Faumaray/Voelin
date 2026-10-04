@@ -1,7 +1,10 @@
-//! Application state on the UI thread, wired to the engine.
+//! Application state on the UI thread, wired to the engine: setup, the
+//! event loop glue and the state the screens share.
 //!
-//! Streams (the streams panel, sharing, the viewer) are in `streams.rs`,
-//! the settings page's data in `settings.rs`.
+//! The screens' logic is elsewhere: servers and the channel tree in
+//! `servers.rs`, chat in `chat.rs`, streams in `streams.rs`, the settings
+//! page in `settings_page.rs` and `appearance.rs`, the view models in `vm/`,
+//! callbacks in `bind/`, development switches in `dev.rs`.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -11,29 +14,65 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, ModelRc, VecModel};
 use tokio::runtime::Runtime;
 use tracing::warn;
+use voelin_core::media::decoder_preference;
+use voelin_core::settings::{
+	AUDIO, CRASH_REPORTS, IDENTITY_IMPORT, STREAM_DECODER_BACKEND, STREAM_HARDWARE_DECODING,
+	Settings,
+};
 use voelin_core::stream::StreamInfo;
 use voelin_core::{
-	AudioSettings, Command, Engine, Event, ObserveState, SessionState, Source, VoiceOptions,
-	VoiceState,
+	AudioSettings, Command, Engine, Event, History, HistoryMessage, SessionState, VoiceState,
 };
-use voelin_model::{
-	Capabilities, ChannelId, ChatMessage, ChatTarget, Presence, TreeRow, tree_rows,
-};
-use voelin_platform::{crash, notices};
-use voelin_store::{Bookmark, MemorySecrets, QueryConfig, QueryTransport, Secrets, Store};
+use voelin_model::{Capabilities, ChannelId, ChatTarget, GroupInfo, Presence};
+use voelin_platform::crash;
+use voelin_store::{Bookmark, MemorySecrets, Secrets, Store};
 
 use crate::hotkey::GlobalPtt;
 use crate::settings::{
-	self, AUDIO_KEY, CLIENT_PLAYBACK_KEY, ClientPlayback, ClientPlaybackMap, DeviceChoices, UI_KEY,
-	UiSettings,
+	CLIENT_PLAYBACK, ClientPlaybackMap, DeviceChoices, UI, UiSettings, appearance_keys,
 };
 use crate::streams::{Share, Watch};
 use crate::video::Video;
+use crate::vm::chat::Previous;
 
 slint::include_modules!();
+
+/// The settings service on the client database: the UI's keys registered,
+/// then a config file (`VOELIN_CONFIG`, else `<data dir>/config.toml` if it
+/// exists), `VOELIN_SETTING_*` variables and `overrides` below the stored
+/// values. Without the database the settings live in memory.
+fn open_settings(dir: &Path, overrides: &[String]) -> Settings {
+	let prefs = Settings::open(&dir.join("client.db")).unwrap_or_else(|e| {
+		warn!(%e, "settings are not stored this time");
+		Settings::in_memory()
+	});
+	prefs.register(&UI);
+	prefs.register(&CLIENT_PLAYBACK);
+	for key in appearance_keys() {
+		prefs.register(key);
+	}
+	for key in crate::settings::page_keys() {
+		prefs.register(key);
+	}
+	prefs.register(&crate::studio::STUDIO_UI);
+	let config = std::env::var_os("VOELIN_CONFIG")
+		.map(PathBuf::from)
+		.or_else(|| Some(dir.join("config.toml")).filter(|p| p.exists()));
+	let mut errors = match config.map(|path| prefs.load_config_file(&path)) {
+		Some(Ok(errors)) => errors,
+		Some(Err(e)) => vec![e],
+		None => Vec::new(),
+	};
+	errors.extend(prefs.apply_env(std::env::vars()));
+	errors.extend(prefs.apply_overrides(overrides.iter().map(String::as_str)));
+	for e in errors {
+		warn!(%e, "setting ignored");
+	}
+	prefs
+}
 
 /// Secrets in the OS keyring, or in memory when there is none (headless
 /// Linux without a Secret Service).
@@ -78,11 +117,77 @@ impl Secrets for FallbackSecrets {
 	}
 }
 
-struct Tab {
-	target: ChatTarget,
-	title: String,
-	lines: Vec<ChatLine>,
-	unread: i32,
+/// A message of a chat with the handle the UI knows it by: the engine's
+/// local ids are 64 bit, a Slint `int` is not.
+pub(crate) struct Msg {
+	pub key: i32,
+	pub message: HistoryMessage,
+}
+
+/// A chat of a session: its lines are the model the chat view shows while
+/// the tab is selected, so a new message is one row appended.
+pub(crate) struct Tab {
+	pub target: ChatTarget,
+	pub title: String,
+	pub lines: Rc<VecModel<ChatLine>>,
+	/// The messages, oldest first, by `(ts_ms, id)`.
+	pub messages: Vec<Msg>,
+	/// Live messages of a session that keeps no history (no server unique
+	/// id yet): grouped from the message before, without ids.
+	pub last: Option<Previous>,
+	pub unread: i32,
+	/// Nothing older exists as far as the engine can tell.
+	pub complete: bool,
+	/// A gateway page arrived: the chat is not only what we saw.
+	pub synced: bool,
+	/// An older page was asked for.
+	pub loading: bool,
+	/// The next message handle.
+	next_key: i32,
+	/// The pins of this chat, once asked for.
+	pub pins: Vec<crate::chat::PinRow>,
+	pub pins_loaded: bool,
+	/// The gateway topics of this chat, and the open one with its messages.
+	pub topics: Vec<voelin_gateway_proto::TopicInfo>,
+	pub topics_loaded: bool,
+	pub topic: Option<i64>,
+	pub topic_messages: Vec<Msg>,
+	/// The message jumped to from the pins.
+	pub marked: Option<i64>,
+}
+
+impl Tab {
+	pub fn new(target: ChatTarget, title: String) -> Self {
+		Self {
+			target,
+			title,
+			lines: Rc::new(VecModel::default()),
+			messages: Vec::new(),
+			last: None,
+			unread: 0,
+			complete: false,
+			synced: false,
+			loading: false,
+			next_key: 1,
+			pins: Vec::new(),
+			pins_loaded: false,
+			topics: Vec::new(),
+			topics_loaded: false,
+			topic: None,
+			topic_messages: Vec::new(),
+			marked: None,
+		}
+	}
+
+	/// A handle for a message that has none yet.
+	pub fn take_key(&mut self) -> i32 {
+		self.next_key += 1;
+		self.next_key
+	}
+
+	pub fn message(&self, key: i32) -> Option<&HistoryMessage> {
+		self.messages.iter().chain(&self.topic_messages).find(|m| m.key == key).map(|m| &m.message)
+	}
 }
 
 /// What we know about one server session.
@@ -90,16 +195,35 @@ pub(crate) struct SessionView {
 	pub state: SessionState,
 	pub capabilities: Capabilities,
 	pub presence: Arc<Presence>,
-	collapsed: HashSet<ChannelId>,
-	talking: HashSet<u16>,
-	tabs: Vec<Tab>,
-	current_tab: usize,
+	pub collapsed: HashSet<ChannelId>,
+	pub talking: HashSet<u16>,
+	pub tabs: Vec<Tab>,
+	pub current_tab: usize,
 	/// The own channel's tab was focused for this voice connection.
-	focused_own_channel: bool,
+	pub focused_own_channel: bool,
 	/// The streams in our channel (TeamSpeak 6).
 	pub streams: Vec<StreamInfo>,
 	/// Clients whose stored volume was sent for this voice connection.
-	applied_playback: HashSet<u16>,
+	pub applied_playback: HashSet<u16>,
+	/// Avatar pictures in the engine's cache, by unique id
+	/// ([`Event::AvatarReady`]).
+	pub avatars: HashMap<String, PathBuf>,
+	/// Icons in the engine's cache, by icon id ([`Event::IconReady`]).
+	pub icons: HashMap<u32, PathBuf>,
+	/// The server groups in display order ([`Event::Groups`]).
+	pub server_groups: Vec<GroupInfo>,
+	/// What the session's gateway offers (`voelin_gateway_proto::feature`).
+	pub gateway_caps: Vec<String>,
+	/// The client whose member card is open.
+	pub member_card: Option<u16>,
+	/// Viewers of the streams in the gateway's directory, by stream id.
+	pub stream_viewers: HashMap<String, u32>,
+	/// Downloads started from chat, by transfer id.
+	pub downloads: HashMap<u64, crate::chat::Download>,
+	/// The next transfer id.
+	pub next_transfer: u64,
+	/// What the home, messages and events screens keep of the session.
+	pub extra: crate::social::SessionExtra,
 }
 
 impl Default for SessionView {
@@ -110,16 +234,20 @@ impl Default for SessionView {
 			presence: Arc::default(),
 			collapsed: HashSet::new(),
 			talking: HashSet::new(),
-			tabs: vec![Tab {
-				target: ChatTarget::Server,
-				title: "Server".into(),
-				lines: Vec::new(),
-				unread: 0,
-			}],
+			tabs: vec![Tab::new(ChatTarget::Server, "Server".into())],
 			current_tab: 0,
 			focused_own_channel: false,
 			streams: Vec::new(),
 			applied_playback: HashSet::new(),
+			avatars: HashMap::new(),
+			icons: HashMap::new(),
+			server_groups: Vec::new(),
+			gateway_caps: Vec::new(),
+			member_card: None,
+			stream_viewers: HashMap::new(),
+			downloads: HashMap::new(),
+			next_transfer: 1,
+			extra: Default::default(),
 		}
 	}
 }
@@ -130,6 +258,19 @@ impl SessionView {
 		self.capabilities.streams && self.state.voice == VoiceState::Connected
 	}
 
+	/// The channel a client is in.
+	pub fn channel_of(&self, client: u16) -> Option<u64> {
+		self.presence.clients.get(&client).map(|c| c.channel)
+	}
+
+	/// The name of a client's channel when it is not ours; empty in ours.
+	pub fn other_channel_name(&self, client: u16) -> String {
+		self.channel_of(client)
+			.filter(|c| Some(*c) != self.state.own_channel)
+			.and_then(|c| self.presence.channels.get(&c))
+			.map_or_else(String::new, |c| c.name.clone())
+	}
+
 	/// A client's nickname, or its id.
 	pub fn nickname(&self, client: u16) -> String {
 		self.presence
@@ -137,29 +278,138 @@ impl SessionView {
 			.get(&client)
 			.map_or_else(|| format!("client {client}"), |c| c.nickname.clone())
 	}
+
+	/// Unread messages in all chats.
+	pub fn unread(&self) -> i32 {
+		self.tabs.iter().map(|t| t.unread).sum()
+	}
+
+	/// The session's gateway offers this feature
+	/// (`voelin_gateway_proto::feature`).
+	pub fn gateway_has(&self, feature: &str) -> bool {
+		self.gateway_caps.iter().any(|c| c == feature)
+	}
+
+	/// The chat history is kept by the engine (it knows the server): its
+	/// messages come with ids, reactions and pins.
+	pub fn has_history(&self) -> bool {
+		self.state.server_uid.is_some()
+	}
+
+	/// The avatar picture of a client, if the engine fetched one.
+	pub fn avatar(&self, client: u16) -> Option<&PathBuf> {
+		let uid = self.presence.clients.get(&client)?.uid.as_deref()?;
+		self.avatars.get(uid)
+	}
+}
+
+/// The models the Bridge shows, created once and updated row by row
+/// (`vm::list::sync`).
+pub(crate) struct Models {
+	pub servers: Rc<VecModel<ServerItem>>,
+	pub tree: Rc<VecModel<TreeItem>>,
+	pub members: Rc<VecModel<MemberItem>>,
+	pub server_members: Rc<VecModel<MemberItem>>,
+	pub tabs: Rc<VecModel<ChatTab>>,
+	pub streams: Rc<VecModel<StreamItem>>,
+	pub viewers: Rc<VecModel<ViewerItem>>,
+	pub pins: Rc<VecModel<PinItem>>,
+	pub topics: Rc<VecModel<TopicItem>>,
+	pub topic_messages: Rc<VecModel<ChatLine>>,
+	/// The quality choices of the watched stream.
+	pub qualities: Rc<VecModel<slint::SharedString>>,
+	/// Shown when there is no chat.
+	pub no_chat: Rc<VecModel<ChatLine>>,
+	/// Home, friends, messages, the bell, the search, events.
+	pub social: crate::social::SocialModels,
+	/// Settings pages.
+	pub layers: Rc<VecModel<LayerItem>>,
+	pub audio_sources: Rc<VecModel<AudioSourceItem>>,
+	pub identities: Rc<VecModel<IdentityItem>>,
+	pub gateway_config: Rc<VecModel<ConfigItem>>,
+	pub gateway_perms: Rc<VecModel<PermItem>>,
+	pub all_settings: Rc<VecModel<SettingItem>>,
+}
+
+impl Models {
+	fn new(bridge: &Bridge) -> Self {
+		let models = Self {
+			servers: Rc::default(),
+			tree: Rc::default(),
+			members: Rc::default(),
+			server_members: Rc::default(),
+			tabs: Rc::default(),
+			streams: Rc::default(),
+			viewers: Rc::default(),
+			pins: Rc::default(),
+			topics: Rc::default(),
+			topic_messages: Rc::default(),
+			qualities: Rc::default(),
+			no_chat: Rc::default(),
+			social: crate::social::SocialModels::new(bridge),
+			layers: Rc::default(),
+			audio_sources: Rc::default(),
+			identities: Rc::default(),
+			gateway_config: Rc::default(),
+			gateway_perms: Rc::default(),
+			all_settings: Rc::default(),
+		};
+		bridge.set_servers(ModelRc::from(models.servers.clone()));
+		bridge.set_tree(ModelRc::from(models.tree.clone()));
+		bridge.set_members(ModelRc::from(models.members.clone()));
+		bridge.set_server_members(ModelRc::from(models.server_members.clone()));
+		bridge.set_tabs(ModelRc::from(models.tabs.clone()));
+		bridge.set_streams(ModelRc::from(models.streams.clone()));
+		bridge.set_share_viewers(ModelRc::from(models.viewers.clone()));
+		bridge.set_pins(ModelRc::from(models.pins.clone()));
+		bridge.set_topics(ModelRc::from(models.topics.clone()));
+		bridge.set_topic_messages(ModelRc::from(models.topic_messages.clone()));
+		bridge.set_viewer_qualities(ModelRc::from(models.qualities.clone()));
+		bridge.set_messages(ModelRc::from(models.no_chat.clone()));
+		bridge.set_layers(ModelRc::from(models.layers.clone()));
+		bridge.set_audio_sources(ModelRc::from(models.audio_sources.clone()));
+		bridge.set_identities(ModelRc::from(models.identities.clone()));
+		bridge.set_gateway_config(ModelRc::from(models.gateway_config.clone()));
+		bridge.set_gateway_perms(ModelRc::from(models.gateway_perms.clone()));
+		bridge.set_all_settings(ModelRc::from(models.all_settings.clone()));
+		models
+	}
 }
 
 pub(crate) struct App {
 	pub ui: slint::Weak<MainWindow>,
-	store: Store,
-	secrets: Box<dyn Secrets>,
+	pub store: Store,
+	pub secrets: Box<dyn Secrets>,
 	pub engine: Engine,
-	identity: tsclientlib::Identity,
-	bookmarks: Vec<Bookmark>,
+	pub identity: tsclientlib::Identity,
+	pub bookmarks: Vec<Bookmark>,
 	pub current: Option<i64>,
 	pub sessions: HashMap<i64, SessionView>,
-	status: String,
+	pub models: Models,
+	pub status: String,
+	/// The members panel's search.
+	pub member_filter: String,
+	/// The topics drawer's search.
+	pub topic_filter: String,
+	/// The voice channel view is shown (its people come first in the
+	/// members panel).
+	pub voice_view: bool,
+	/// The settings service (shared with the engine); `settings`, `audio`
+	/// and `playback` are working copies of its keys.
+	pub prefs: Settings,
 	pub settings: UiSettings,
-	audio: AudioSettings,
+	pub audio: AudioSettings,
 	/// Audio settings changed since they were last stored.
-	audio_dirty: bool,
-	inputs: DeviceChoices,
-	outputs: DeviceChoices,
-	playback: ClientPlaybackMap,
+	pub audio_dirty: bool,
+	pub inputs: DeviceChoices,
+	pub outputs: DeviceChoices,
+	pub playback: ClientPlaybackMap,
+	/// The engine's contacts, by unique id ([`Event::ContactsChanged`]).
+	pub contacts: HashMap<String, voelin_core::Contact>,
 	/// The client in the volume dialog: session, client id, unique id.
-	playback_dialog: Option<(i64, u16, Option<String>)>,
-	mic_test: bool,
-	ptt: GlobalPtt,
+	pub playback_dialog: Option<(i64, u16, Option<String>)>,
+	pub mic_test: bool,
+	pub ptt: GlobalPtt,
 	pub video: Video,
 	/// Our stream.
 	pub share: Option<Share>,
@@ -168,19 +418,36 @@ pub(crate) struct App {
 	pub share_error: String,
 	/// The stream in the viewer.
 	pub watch: Option<Watch>,
+	/// A client whose stream was asked for before it was known (session,
+	/// client): watched when the lookup brings it.
+	pub pending_watch: Option<(i64, u16)>,
 	/// Stream volume in percent, kept between streams.
 	pub stream_volume: f32,
 	/// `VOELIN_DEMO_STREAM`: the viewer shows a local test stream.
 	pub demo: bool,
+	/// `VOELIN_DEMO_UI`: sample servers, channels and chat (dev.rs).
+	pub demo_ui: bool,
 	/// `VOELIN_AUTOSHARE=test-pattern`: share the test pattern once streams work.
 	pub autoshare: bool,
 	/// `VOELIN_OPEN=client`: open the volume dialog of the first other client.
-	open_client_pending: bool,
+	pub open_client_pending: bool,
 	/// The notices are in the About page's model.
-	notices_loaded: bool,
+	pub notices_loaded: bool,
+	/// Files being uploaded to a channel from the composer: session,
+	/// channel and name, so the link can be posted when they are up.
+	pub uploads: HashMap<u64, (i64, u64, String)>,
+	/// Home, friends, messages, the bell and the search.
+	pub social: crate::social::Social,
+	/// The settings pages of the new design.
+	pub pages: crate::settings_pages::Pages,
+	/// The Stream Studio (studio.rs).
+	pub studio: crate::studio::StudioState,
 }
 
 thread_local! {
+	// It is `const`; clippy for Android targets does not see that through
+	// the macro's expansion there.
+	#[allow(clippy::missing_const_for_thread_local)]
 	static APP: RefCell<Option<App>> = const { RefCell::new(None) };
 }
 
@@ -208,6 +475,9 @@ pub struct RunOptions {
 	/// goes on in a service while the activity is recreated). Default: an
 	/// engine that stops with the window.
 	pub engine: Option<HostedEngine>,
+	/// Setting overrides as `key=value` (e.g. `--set` on the command line);
+	/// values set in the app take precedence.
+	pub setting_overrides: Vec<String>,
 }
 
 impl std::fmt::Debug for RunOptions {
@@ -216,6 +486,7 @@ impl std::fmt::Debug for RunOptions {
 			.field("data_dir", &self.data_dir)
 			.field("secrets", &self.secrets.is_some())
 			.field("engine", &self.engine.is_some())
+			.field("setting_overrides", &self.setting_overrides)
 			.finish()
 	}
 }
@@ -270,14 +541,13 @@ pub fn run(options: RunOptions) -> Result<()> {
 	};
 	let HostedEngine { engine, runtime, mut events } = hosted;
 
-	// Development switches: VOELIN_DATA_DIR isolates the database,
-	// VOELIN_AUTOCONNECT=voice|observe connects the first bookmark on start,
-	// VOELIN_SCREENSHOT=<png> saves the window after VOELIN_SCREENSHOT_DELAY seconds and exits,
-	// VOELIN_DEMO_STREAM=1 shows a local test stream in the viewer,
-	// VOELIN_OPEN=share|settings[:<tab>]|about|client opens that on start (client: the
-	// volume dialog of the first other client once connected), VOELIN_AUTOWATCH=1
-	// watches the first stream that shows up, VOELIN_AUTOSHARE=test-pattern shares
-	// the test pattern (accepting everyone) once connected to a TeamSpeak 6 server.
+	// VOELIN_DATA_DIR isolates the database; the other development
+	// switches are in dev.rs.
+	// A host that names the data directory (Android) has no platform cache
+	// directory either: avatars and icons go next to the database.
+	if let Some(dir) = &options.data_dir {
+		engine.send(Command::AttachCache(dir.join("images")));
+	}
 	let dir: PathBuf = match (options.data_dir, std::env::var_os("VOELIN_DATA_DIR")) {
 		(Some(dir), _) => dir,
 		(None, Some(dir)) => dir.into(),
@@ -285,26 +555,50 @@ pub fn run(options: RunOptions) -> Result<()> {
 	};
 	let store =
 		Store::open(&dir.join("client.db")).context("failed to open the client database")?;
-	let identity = match store.identities()?.first() {
+	// Chat history and contacts live in the client database; without this
+	// the engine would keep them for this run only.
+	match History::open(&dir.join("client.db")) {
+		Ok(history) => engine.send(Command::AttachHistory(history)),
+		Err(e) => warn!(%e, "chat history is not stored this time"),
+	}
+	let prefs = open_settings(&dir, &options.setting_overrides);
+	let switches = crate::dev::Switches::from_env();
+	// New identities of the official TeamSpeak clients, on every start (not
+	// with the sample data of VOELIN_DEMO_UI); the client's default
+	// identity becomes ours while we have none the user chose.
+	let imported = if prefs.get(&IDENTITY_IMPORT) && !switches.demo_ui {
+		voelin_core::identity::import_new(&store, &voelin_core::identity::discover())
+			.unwrap_or_else(|e| {
+				warn!(%e, "could not import TeamSpeak identities");
+				Default::default()
+			})
+	} else {
+		Default::default()
+	};
+	let identity = match store.default_identity()? {
 		Some(entry) => store.identity(entry.id)?,
 		None => {
 			// Creating an identity takes a moment (security level 8).
 			let identity = tsclientlib::Identity::create();
-			store.add_identity("Default", &identity)?;
+			let origin = voelin_store::IdentityOrigin::Created;
+			store.add_identity(crate::servers::CREATED_IDENTITY, &identity, origin)?;
 			identity
 		}
 	};
-	let settings: UiSettings = store.setting(UI_KEY).ok().flatten().unwrap_or_default();
+	engine.send(Command::AttachSettings(prefs.clone()));
+	let mut settings: UiSettings = (*prefs.get_arc(&UI)).clone();
+	settings.crash_reports = prefs.get(&CRASH_REPORTS);
 	crash::set_enabled(settings.crash_reports);
 	crash::test_crash_if_requested();
-	let audio: AudioSettings = store.setting(AUDIO_KEY).ok().flatten().unwrap_or_default();
-	let playback: ClientPlaybackMap =
-		store.setting(CLIENT_PLAYBACK_KEY).ok().flatten().unwrap_or_default();
+	let audio: AudioSettings = prefs.get(&AUDIO);
+	let playback: ClientPlaybackMap = prefs.get(&CLIENT_PLAYBACK);
 	engine.send(Command::SetAudioSettings(Box::new(audio.clone())));
 
 	let ui = MainWindow::new()?;
-	ui.global::<Bridge>().set_app_name(voelin_platform::APP_NAME.into());
-	ui.global::<Bridge>().set_app_version(env!("CARGO_PKG_VERSION").into());
+	let bridge = ui.global::<Bridge>();
+	bridge.set_app_name(voelin_platform::APP_NAME.into());
+	bridge.set_app_version(env!("CARGO_PKG_VERSION").into());
+	let models = Models::new(&bridge);
 	// Wayland and X11 find the desktop file (and icon) by this id.
 	#[cfg(not(target_os = "android"))]
 	if let Err(e) = slint::set_xdg_app_id(voelin_platform::APP_ID) {
@@ -319,8 +613,8 @@ pub fn run(options: RunOptions) -> Result<()> {
 	if settings.global_ptt {
 		ptt.set(Some(settings.ptt_key.clone()));
 	}
-	let video = Video::new(&dir, settings.openh264);
-	let demo = std::env::var("VOELIN_DEMO_STREAM").is_ok_and(|v| v == "1");
+	let mut video = Video::new(&dir, settings.openh264);
+	video.set_decoder_preference(decoder_preference(&prefs));
 	let app = App {
 		ui: ui.as_weak(),
 		store,
@@ -330,13 +624,19 @@ pub fn run(options: RunOptions) -> Result<()> {
 		current: bookmarks.first().map(|b| b.id),
 		bookmarks,
 		sessions: HashMap::new(),
-		status: "Ready".into(),
+		models,
+		status: String::new(),
+		member_filter: String::new(),
+		topic_filter: String::new(),
+		voice_view: false,
+		prefs,
 		settings,
 		audio,
 		audio_dirty: false,
 		inputs: DeviceChoices::default(),
 		outputs: DeviceChoices::default(),
 		playback,
+		contacts: HashMap::new(),
 		playback_dialog: None,
 		mic_test: false,
 		ptt,
@@ -345,20 +645,37 @@ pub fn run(options: RunOptions) -> Result<()> {
 		share_busy: false,
 		share_error: String::new(),
 		watch: None,
+		pending_watch: None,
 		stream_volume: 100.0,
-		demo,
-		autoshare: std::env::var("VOELIN_AUTOSHARE").is_ok_and(|v| v == "test-pattern"),
-		open_client_pending: std::env::var("VOELIN_OPEN").is_ok_and(|v| v == "client"),
+		demo: switches.demo_stream,
+		demo_ui: switches.demo_ui,
+		autoshare: switches.autoshare,
+		open_client_pending: switches.open_client,
 		notices_loaded: false,
+		uploads: HashMap::new(),
+		social: Default::default(),
+		pages: Default::default(),
+		studio: Default::default(),
 	};
 	APP.with(|a| *a.borrow_mut() = Some(app));
-	wire_callbacks(&ui);
+	crate::bind::wire(&ui);
 	with_app(|app| {
+		app.apply_appearance();
+		app.load_own_uids();
+		app.apply_srtp();
 		app.refresh_all();
 		app.refresh_settings_flags();
 		app.refresh_crash_notice();
+		app.load_recent_chats();
+		app.refresh_people();
+		app.refresh_home();
+		app.refresh_notices();
+		app.refresh_pages();
 		if app.demo {
 			app.start_demo();
+		}
+		if let Some(text) = crate::servers::imported_status(&imported) {
+			app.set_status(text);
 		}
 	});
 
@@ -379,44 +696,9 @@ pub fn run(options: RunOptions) -> Result<()> {
 		with_app(|app| app.tick());
 	});
 
-	match std::env::var("VOELIN_AUTOCONNECT").as_deref() {
-		Ok("voice") => {
-			with_app(|app| app.connect_voice());
-		}
-		Ok("observe") => {
-			with_app(|app| app.toggle_observe());
-		}
-		_ => {}
-	}
-	match std::env::var("VOELIN_OPEN").as_deref() {
-		Ok("share") => ui.invoke_open_share_dialog(),
-		Ok("about") => {
-			with_app(|app| app.load_notices());
-			ui.set_show_about(true);
-		}
-		Ok(open) if open.starts_with("settings") => {
-			with_app(|app| app.open_settings());
-			let tab = open.strip_prefix("settings:").and_then(|t| t.parse().ok());
-			ui.set_settings_tab(tab.unwrap_or(0));
-			ui.set_settings_open(true);
-		}
-		_ => {}
-	}
-	let _screenshot_timer = std::env::var_os("VOELIN_SCREENSHOT").map(|path| {
-		let delay =
-			std::env::var("VOELIN_SCREENSHOT_DELAY").ok().and_then(|d| d.parse().ok()).unwrap_or(4);
-		let weak = ui.as_weak();
-		let timer = slint::Timer::default();
-		timer.start(slint::TimerMode::SingleShot, Duration::from_secs(delay), move || {
-			if let Some(ui) = weak.upgrade() {
-				if let Err(e) = save_screenshot(&ui, std::path::Path::new(&path)) {
-					eprintln!("screenshot failed: {e}");
-				}
-				let _ = ui.hide();
-			}
-		});
-		timer
-	});
+	let _dev = crate::dev::start(&ui, &switches);
+	// What the platform asked for before the window ran.
+	crate::inbox::take();
 
 	ui.run()?;
 	// With our own engine, leave servers properly, so no ghost client stays
@@ -424,14 +706,17 @@ pub fn run(options: RunOptions) -> Result<()> {
 	let own = own_runtime.is_some();
 	let open = with_app(|app| {
 		app.save_audio();
+		if let Err(e) = app.prefs.flush() {
+			warn!(%e, "could not store settings");
+		}
 		app.watch = None;
 		app.share = None;
-		if own {
+		if own && !app.demo_ui {
 			for id in app.sessions.keys() {
 				app.engine.send(Command::CloseSession { session: *id as u64 });
 			}
 		}
-		own && !app.sessions.is_empty()
+		own && !app.sessions.is_empty() && !app.demo_ui
 	});
 	APP.with(|a| a.borrow_mut().take());
 	if let Some(runtime) = own_runtime {
@@ -443,175 +728,8 @@ pub fn run(options: RunOptions) -> Result<()> {
 	Ok(())
 }
 
-fn wire_callbacks(ui: &MainWindow) {
-	let bridge = ui.global::<Bridge>();
-	bridge.on_select_server(|id| {
-		with_app(|app| {
-			app.current = Some(id as i64);
-			app.refresh_all();
-		});
-	});
-	bridge.on_connect_voice(|| {
-		with_app(|app| app.connect_voice());
-	});
-	bridge.on_disconnect_voice(|| {
-		with_app(|app| app.command(|session| Command::DisconnectVoice { session }));
-	});
-	bridge.on_toggle_observe(|| {
-		with_app(|app| app.toggle_observe());
-	});
-	bridge.on_join_channel(|cid| {
-		with_app(|app| {
-			app.command(|session| Command::MoveToChannel {
-				session,
-				channel: cid as ChannelId,
-				password: None,
-			})
-		});
-	});
-	bridge.on_open_channel_chat(|cid| {
-		with_app(|app| app.open_chat(ChatTarget::Channel(cid as ChannelId), true));
-	});
-	bridge.on_toggle_collapse(|cid| {
-		with_app(|app| {
-			if let Some(view) = app.view_mut() {
-				let cid = cid as ChannelId;
-				if !view.collapsed.remove(&cid) {
-					view.collapsed.insert(cid);
-				}
-			}
-			app.refresh_tree();
-		});
-	});
-	bridge.on_select_tab(|i| {
-		with_app(|app| {
-			if let Some(view) = app.view_mut() {
-				view.current_tab = i as usize;
-				if let Some(tab) = view.tabs.get_mut(i as usize) {
-					tab.unread = 0;
-				}
-			}
-			app.refresh_chat();
-		});
-	});
-	bridge.on_close_tab(|i| {
-		with_app(|app| app.close_tab(i as usize));
-	});
-	bridge.on_send_message(|text| {
-		with_app(|app| app.send_message(text.to_string()));
-	});
-	bridge.on_set_input_muted(|muted| {
-		with_app(|app| app.command(|session| Command::SetInputMuted { session, muted }));
-	});
-	bridge.on_set_output_muted(|muted| {
-		with_app(|app| app.command(|session| Command::SetOutputMuted { session, muted }));
-	});
-	bridge.on_push_to_talk(|on| {
-		with_app(|app| app.command(|session| Command::SetTransmitting { session, on }));
-	});
-	bridge.on_edit_bookmark(|id| with_app(|app| app.bookmark_form(id as i64)).unwrap_or_default());
-	bridge.on_save_bookmark(|form| {
-		with_app(|app| app.save_bookmark(form));
-	});
-	bridge.on_delete_bookmark(|id| {
-		with_app(|app| app.delete_bookmark(id as i64));
-	});
-
-	// Streams.
-	bridge.on_open_share(|| with_app(|app| app.open_share()).unwrap_or_default());
-	bridge.on_start_share(|form| {
-		with_app(|app| app.start_share(form));
-	});
-	bridge.on_stop_share(|| {
-		with_app(|app| app.stop_share());
-	});
-	bridge.on_respond_viewer(|viewer, accept| {
-		with_app(|app| app.respond_viewer(viewer as u16, accept));
-	});
-	bridge.on_kick_viewer(|viewer| {
-		with_app(|app| app.kick_viewer(viewer as u16));
-	});
-	bridge.on_watch_stream(|id| {
-		with_app(|app| app.watch_stream(id.to_string()));
-	});
-	bridge.on_show_viewer(|| {
-		with_app(|app| app.show_viewer(true));
-	});
-	bridge.on_hide_viewer(|| {
-		with_app(|app| app.show_viewer(false));
-	});
-	bridge.on_leave_stream(|| {
-		with_app(|app| app.leave_stream());
-	});
-	bridge.on_set_stream_volume(|volume| {
-		with_app(|app| app.set_stream_volume(volume));
-	});
-	bridge.on_toggle_fullscreen(|| {
-		with_app(|app| app.toggle_fullscreen());
-	});
-
-	// Settings.
-	bridge.on_open_settings(|| {
-		with_app(|app| app.open_settings());
-	});
-	bridge.on_close_settings(|| {
-		with_app(|app| app.close_settings());
-	});
-	bridge.on_audio_changed(|form| {
-		with_app(|app| app.audio_changed(&form));
-	});
-	bridge.on_toggle_mic_test(|| {
-		with_app(|app| app.set_mic_test(!app.mic_test));
-	});
-	bridge.on_apply_ptt(|enabled, key| {
-		with_app(|app| app.apply_ptt(enabled, key.to_string()));
-	});
-	bridge.on_set_h264(|enabled| {
-		with_app(|app| app.set_h264(enabled));
-	});
-	bridge.on_download_h264(|| {
-		with_app(|app| app.download_h264());
-	});
-	bridge.on_open_client(|id| with_app(|app| app.open_client(id as u16)).unwrap_or(false));
-	bridge.on_client_audio_changed(|form| {
-		with_app(|app| app.client_playback_changed(&form));
-	});
-
-	// Crash reports and notices.
-	bridge.on_set_crash_reports(|enabled| {
-		with_app(|app| app.set_crash_reports(enabled));
-	});
-	bridge.on_open_crash_folder(|| {
-		with_app(|app| {
-			let result = crash::dir().ok_or_else(|| "no crash report folder".to_owned());
-			if let Err(e) = result.and_then(|dir| open_path(&dir).map_err(|e| e.to_string())) {
-				app.set_status(format!("Cannot open the crash report folder: {e}"));
-			}
-		});
-	});
-	bridge.on_delete_crash_reports(|| {
-		with_app(|app| {
-			match crash::clear() {
-				Ok(n) => app.set_status(format!("Deleted {n} crash reports")),
-				Err(e) => app.set_status(format!("Cannot delete the crash reports: {e}")),
-			}
-			app.refresh_crash_notice();
-		});
-	});
-	bridge.on_dismiss_crash_notice(|| {
-		with_app(|app| {
-			if let Some(ui) = app.ui.upgrade() {
-				ui.global::<Bridge>().set_crash_notice(SharedString::new());
-			}
-		});
-	});
-	bridge.on_open_about(|| {
-		with_app(|app| app.load_notices());
-	});
-}
-
 /// Open a file or folder with the desktop's default application.
-fn open_path(path: &Path) -> std::io::Result<()> {
+pub(crate) fn open_path(path: &Path) -> std::io::Result<()> {
 	#[cfg(windows)]
 	let mut command = std::process::Command::new("explorer");
 	#[cfg(target_os = "macos")]
@@ -624,28 +742,12 @@ fn open_path(path: &Path) -> std::io::Result<()> {
 	Ok(())
 }
 
-fn save_screenshot(ui: &MainWindow, path: &std::path::Path) -> Result<()> {
-	let image = ui.window().take_snapshot()?;
-	let file = std::io::BufWriter::new(std::fs::File::create(path)?);
-	let mut encoder = png::Encoder::new(file, image.width(), image.height());
-	encoder.set_color(png::ColorType::Rgba);
-	encoder.set_depth(png::BitDepth::Eight);
-	encoder.write_header()?.write_image_data(image.as_bytes())?;
-	Ok(())
-}
-
-fn time_of(ts_ms: i64) -> String {
-	chrono::DateTime::from_timestamp_millis(ts_ms)
-		.map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string())
-		.unwrap_or_default()
-}
-
 pub(crate) fn model<T: Clone + 'static>(items: Vec<T>) -> ModelRc<T> {
 	ModelRc::from(Rc::new(VecModel::from(items)))
 }
 
 impl App {
-	fn view_mut(&mut self) -> Option<&mut SessionView> {
+	pub fn view_mut(&mut self) -> Option<&mut SessionView> {
 		let id = self.current?;
 		Some(self.sessions.entry(id).or_default())
 	}
@@ -658,8 +760,10 @@ impl App {
 		self.bookmarks.iter().find(|b| b.id == id)
 	}
 
+	/// Send a command for the current session. Not for the sample
+	/// sessions of VOELIN_DEMO_UI: the engine would open them for real.
 	pub fn command(&self, f: impl FnOnce(u64) -> Command) {
-		if let Some(id) = self.current {
+		if let Some(id) = self.current.filter(|_| !self.demo_ui) {
 			self.engine.send(f(id as u64));
 		}
 	}
@@ -672,232 +776,44 @@ impl App {
 	}
 
 	pub fn store_settings(&self) {
-		if let Err(e) = self.store.set_setting(UI_KEY, &self.settings) {
+		if let Err(e) = self.prefs.set(&UI, self.settings.clone()) {
 			warn!(%e, "could not store settings");
 		}
 	}
 
-	fn connect_voice(&mut self) {
-		let Some(b) = self.current.and_then(|id| self.bookmark(id)).cloned() else { return };
-		let mut options = VoiceOptions::new(&b.address, &b.nickname);
-		options.identity = Some(self.identity.clone());
-		options.server_password = self.secrets.get(&b.server_password_key()).ok().flatten();
-		options.channel = b.default_channel.clone();
-		options.audio = true;
-		options.stream_peer = self.video.peer_config(options.stream_peer);
-		self.engine
-			.send(Command::ConnectVoice { session: b.id as u64, options: Box::new(options) });
-		self.set_status(format!("Connecting to {}…", b.address));
-	}
-
-	fn toggle_observe(&mut self) {
-		let Some(b) = self.current.and_then(|id| self.bookmark(id)).cloned() else { return };
-		let session = b.id as u64;
-		let observing =
-			self.sessions.get(&b.id).is_some_and(|v| v.state.observe != ObserveState::Off);
-		if observing {
-			self.engine.send(Command::StopObserving { session });
-			return;
-		}
-		if let Some(url) = &b.gateway_url {
-			self.engine.send(Command::ObserveGateway {
-				session,
-				url: url.clone(),
-				identity: Box::new(self.identity.clone()),
-			});
-		} else if let Some(q) = &b.query {
-			let secret = self.secrets.get(&b.query_password_key()).ok().flatten();
-			let transport = match q.transport {
-				QueryTransport::Raw => voelin_query::Transport::Raw,
-				QueryTransport::Ssh => voelin_query::Transport::Ssh,
-				QueryTransport::Http => voelin_query::Transport::Http,
-			};
-			let connect = voelin_query::Connect {
-				transport,
-				addr: format!("{}:{}", q.host, q.port),
-				user: q.user.clone(),
-				secret,
-				server_port: q.server_port,
-				server_id: None,
-				line: Default::default(),
-			};
-			self.engine.send(Command::ObserveQuery { session, connect: Box::new(connect) });
-		}
-		self.set_status("Observing invisibly…");
-	}
-
-	fn open_chat(&mut self, target: ChatTarget, focus: bool) {
-		let Some(id) = self.current else { return };
-		let title = match &target {
-			ChatTarget::Channel(cid) => {
-				let name = self
-					.sessions
-					.get(&id)
-					.and_then(|v| v.presence.channels.get(cid).map(|c| c.name.clone()));
-				format!("#{}", name.unwrap_or_else(|| cid.to_string()))
+	/// A setting changed, maybe elsewhere (a command, another window): take
+	/// the values the window keeps copies of. The engine applies audio
+	/// settings itself.
+	fn setting_changed(&mut self, key: &str) {
+		if key == AUDIO.name() && !self.audio_dirty {
+			self.audio = self.prefs.get(&AUDIO);
+		} else if key == CRASH_REPORTS.name() {
+			let enabled = self.prefs.get(&CRASH_REPORTS);
+			if enabled != self.settings.crash_reports {
+				self.settings.crash_reports = enabled;
+				crash::set_enabled(enabled);
+				self.refresh_settings_flags();
 			}
-			ChatTarget::Server => "Server".into(),
-			ChatTarget::Private(uid) => format!("@{uid}"),
-		};
-		let view = self.sessions.entry(id).or_default();
-		let index = match view.tabs.iter().position(|t| t.target == target) {
-			Some(i) => i,
-			None => {
-				view.tabs.push(Tab { target: target.clone(), title, lines: Vec::new(), unread: 0 });
-				self.engine.send(Command::OpenChat { session: id as u64, target });
-				view.tabs.len() - 1
-			}
-		};
-		if focus {
-			view.current_tab = index;
-			view.tabs[index].unread = 0;
+		} else if key == CLIENT_PLAYBACK.name() {
+			self.playback = self.prefs.get(&CLIENT_PLAYBACK);
+		} else if appearance_keys().iter().any(|k| k.name() == key) {
+			self.apply_appearance();
+		} else if key == voelin_core::settings::STREAM_AUDIO_SOURCES.name() {
+			// A running share mixes the new sources (streams.rs).
+			self.share_audio_changed();
+		} else if key == STREAM_HARDWARE_DECODING.name() || key == STREAM_DECODER_BACKEND.name() {
+			self.video.set_decoder_preference(decoder_preference(&self.prefs));
 		}
-		self.refresh_chat();
+		self.page_setting_changed(key);
 	}
 
-	fn close_tab(&mut self, index: usize) {
-		let Some(id) = self.current else { return };
-		let view = self.sessions.entry(id).or_default();
-		if index == 0 || index >= view.tabs.len() {
-			return;
-		}
-		let tab = view.tabs.remove(index);
-		view.current_tab = view.current_tab.min(view.tabs.len() - 1);
-		self.engine.send(Command::CloseChat { session: id as u64, target: tab.target });
-		self.refresh_chat();
+	pub(crate) fn handle_event(&mut self, event: Event) {
+		let touched = self.social_event(&event);
+		self.dispatch(event);
+		self.social_refresh(touched);
 	}
 
-	fn send_message(&mut self, text: String) {
-		let Some(id) = self.current else { return };
-		let Some(view) = self.sessions.get(&id) else { return };
-		let target = view.tabs[view.current_tab].target.clone();
-		self.engine.send(Command::SendChat { session: id as u64, target, text });
-	}
-
-	fn bookmark_form(&self, id: i64) -> BookmarkForm {
-		let Some(b) = self.bookmark(id) else {
-			return BookmarkForm {
-				id: -1,
-				nickname: std::env::var("USER").unwrap_or_default().into(),
-				query_transport: "none".into(),
-				query_user: "serveradmin".into(),
-				..Default::default()
-			};
-		};
-		let secret = |key: String| -> SharedString {
-			self.secrets.get(&key).ok().flatten().unwrap_or_default().into()
-		};
-		let (transport, addr, user) = match &b.query {
-			Some(q) => (
-				match q.transport {
-					QueryTransport::Raw => "raw",
-					QueryTransport::Ssh => "ssh",
-					QueryTransport::Http => "http",
-				},
-				format!("{}:{}", q.host, q.port),
-				q.user.clone(),
-			),
-			None => ("none", String::new(), "serveradmin".to_string()),
-		};
-		BookmarkForm {
-			id: b.id as i32,
-			name: b.name.clone().into(),
-			address: b.address.clone().into(),
-			nickname: b.nickname.clone().into(),
-			server_password: secret(b.server_password_key()),
-			gateway_url: b.gateway_url.clone().unwrap_or_default().into(),
-			query_transport: transport.into(),
-			query_addr: addr.into(),
-			query_user: user.into(),
-			query_password: secret(b.query_password_key()),
-		}
-	}
-
-	fn save_bookmark(&mut self, form: BookmarkForm) {
-		let query = match form.query_transport.as_str() {
-			"none" | "" => None,
-			t => {
-				let (host, port) = form
-					.query_addr
-					.rsplit_once(':')
-					.map_or((form.query_addr.to_string(), None), |(h, p)| {
-						(h.to_string(), p.parse().ok())
-					});
-				let transport = match t {
-					"raw" => QueryTransport::Raw,
-					"http" => QueryTransport::Http,
-					_ => QueryTransport::Ssh,
-				};
-				let default_port = match transport {
-					QueryTransport::Raw => 10011,
-					QueryTransport::Ssh => 10022,
-					QueryTransport::Http => 10080,
-				};
-				Some(QueryConfig {
-					transport,
-					host,
-					port: port.unwrap_or(default_port),
-					user: form.query_user.to_string(),
-					server_port: None,
-				})
-			}
-		};
-		let mut bookmark = Bookmark {
-			id: form.id as i64,
-			name: if form.name.is_empty() {
-				form.address.to_string()
-			} else {
-				form.name.to_string()
-			},
-			address: form.address.to_string(),
-			nickname: form.nickname.to_string(),
-			identity: None,
-			default_channel: None,
-			gateway_url: Some(form.gateway_url.to_string()).filter(|u| !u.is_empty()),
-			query,
-			client_version: None,
-		};
-		let result = if bookmark.id < 0 {
-			self.store.add_bookmark(&bookmark).map(|id| bookmark.id = id)
-		} else {
-			self.store.update_bookmark(&bookmark)
-		};
-		if let Err(e) = result {
-			self.set_status(format!("Could not save: {e}"));
-			return;
-		}
-		for (key, value) in [
-			(bookmark.server_password_key(), &form.server_password),
-			(bookmark.query_password_key(), &form.query_password),
-		] {
-			let result = if value.is_empty() {
-				self.secrets.delete(&key)
-			} else {
-				self.secrets.set(&key, value)
-			};
-			if let Err(e) = result {
-				warn!(%e, "could not store secret");
-			}
-		}
-		self.current = Some(bookmark.id);
-		self.bookmarks = self.store.bookmarks().unwrap_or_default();
-		self.refresh_all();
-	}
-
-	fn delete_bookmark(&mut self, id: i64) {
-		self.engine.send(Command::CloseSession { session: id as u64 });
-		if let Some(b) = self.bookmark(id).cloned() {
-			let _ = self.secrets.delete(&b.server_password_key());
-			let _ = self.secrets.delete(&b.query_password_key());
-		}
-		let _ = self.store.delete_bookmark(id);
-		self.sessions.remove(&id);
-		self.bookmarks = self.store.bookmarks().unwrap_or_default();
-		self.current = self.bookmarks.first().map(|b| b.id);
-		self.refresh_all();
-	}
-
-	fn handle_event(&mut self, event: Event) {
+	fn dispatch(&mut self, event: Event) {
 		match event {
 			Event::State { session, state } => {
 				let id = session as i64;
@@ -925,11 +841,16 @@ impl App {
 				}
 				self.refresh_servers();
 				self.refresh_toolbar();
+				self.refresh_tree();
 				self.refresh_streams();
 				self.autoshare();
+				if self.open_client_pending && self.current == Some(id) {
+					self.open_first_client();
+				}
 			}
 			Event::ServerInfo { session, name, flavor, capabilities } => {
 				self.sessions.entry(session as i64).or_default().capabilities = capabilities;
+				self.adopt_server_name(session as i64, &name);
 				if self.current == Some(session as i64) {
 					let kind = match flavor {
 						voelin_model::ServerFlavor::Ts3(v) => format!("TeamSpeak 3 {v}"),
@@ -945,6 +866,7 @@ impl App {
 				self.sessions.entry(session as i64).or_default().presence = presence;
 				self.apply_client_playback(session as i64);
 				if self.current == Some(session as i64) {
+					self.refresh_toolbar();
 					self.refresh_tree();
 					self.refresh_chat();
 					self.refresh_streams();
@@ -978,448 +900,86 @@ impl App {
 			Event::MicrophoneTestError { message } => {
 				self.set_status(format!("Microphone test: {message}"))
 			}
-			Event::Chat { session, message } => self.add_message(session as i64, message),
-			Event::Error { message, .. } => self.set_status(message),
-			event => self.stream_event(event),
-		}
-	}
-
-	fn add_message(&mut self, id: i64, message: ChatMessage) {
-		let current = self.current == Some(id);
-		let view = self.sessions.entry(id).or_default();
-		let index = match view.tabs.iter().position(|t| t.target == message.target) {
-			Some(i) => i,
-			None => {
-				let title = match &message.target {
-					ChatTarget::Channel(cid) => format!(
-						"#{}",
-						view.presence
-							.channels
-							.get(cid)
-							.map(|c| c.name.clone())
-							.unwrap_or_else(|| cid.to_string())
-					),
-					ChatTarget::Private(_) => format!("@{}", message.author_name),
-					ChatTarget::Server => "Server".into(),
-				};
-				view.tabs.push(Tab {
-					target: message.target.clone(),
-					title,
-					lines: Vec::new(),
-					unread: 0,
-				});
-				view.tabs.len() - 1
+			// Only for sessions the engine keeps no history for (it does not
+			// know the server yet): those get ids and reactions instead.
+			Event::Chat { session, message } => {
+				let id = session as i64;
+				if !self.sessions.entry(id).or_default().has_history() {
+					self.add_message(id, message);
+				}
 			}
-		};
-		let tab = &mut view.tabs[index];
-		tab.lines.push(ChatLine {
-			author: message.author_name.into(),
-			text: message.text.into(),
-			time: time_of(message.ts_ms).into(),
-			relayed: message.via_relay,
-		});
-		if !(current && view.current_tab == index) {
-			tab.unread += 1;
-		}
-		if current {
-			self.refresh_chat();
+			Event::ChatHistory { session, target, messages, source, complete } => {
+				self.history_batch(session as i64, &target, messages, source, complete);
+			}
+			Event::Gateway { session, update } => {
+				self.gateway_extra(session as i64, &update);
+				self.gateway_update(session as i64, update);
+			}
+			Event::Groups { session, server_groups, .. } => {
+				let view = self.sessions.entry(session as i64).or_default();
+				view.server_groups = (*server_groups).clone();
+				// Display order, as TeamSpeak sorts them.
+				view.server_groups.sort_by_key(|g| (g.sort_id, g.id));
+				if self.current == Some(session as i64) {
+					self.refresh_tree();
+				}
+			}
+			Event::AvatarReady { session, client_uid, path, .. } => {
+				let view = self.sessions.entry(session as i64).or_default();
+				view.avatars.insert(client_uid, path);
+				if self.current == Some(session as i64) {
+					self.refresh_tree();
+					self.refresh_chat();
+				}
+			}
+			Event::IconReady { session, icon, path } => {
+				let view = self.sessions.entry(session as i64).or_default();
+				view.icons.insert(icon, path);
+				if self.current == Some(session as i64) {
+					self.refresh_tree();
+				}
+			}
+			Event::Transfer { session, transfer, state } => {
+				self.transfer_progress(session as i64, transfer, state);
+			}
+			// The engine's contacts would replace the sample ones.
+			Event::ContactsChanged { .. } if self.demo_ui && !self.contacts.is_empty() => {}
+			Event::ContactsChanged { contacts } => {
+				self.contacts = contacts.iter().map(|c| (c.uid.clone(), c.clone())).collect();
+				self.refresh_member_card();
+			}
+			// The sample sessions of VOELIN_DEMO_UI are unknown to the engine.
+			Event::Error { .. } if self.demo_ui => {}
+			Event::Error { message, .. } => self.set_status(message),
+			Event::SettingChanged { key } => self.setting_changed(&key),
+			Event::SettingRejected { key, message } => {
+				self.set_status(format!("Setting {key}: {message}"));
+			}
+			// The Stream Studio's stream (studio.rs).
+			Event::StreamState { session, state } if self.studio_streams_to(session as i64) => {
+				self.studio_stream_state(state);
+			}
+			Event::StreamViewers { session, viewers } if self.studio_streams_to(session as i64) => {
+				self.studio_viewers(viewers);
+			}
+			event => self.stream_event(event),
 		}
 	}
 
 	/// Once a second.
 	fn tick(&mut self) {
 		self.tick_streams();
+		self.tick_pages();
 		if self.audio_dirty {
 			self.save_audio();
 		}
 	}
 
-	fn refresh_all(&mut self) {
+	pub fn refresh_all(&mut self) {
 		self.refresh_servers();
 		self.refresh_toolbar();
 		self.refresh_tree();
 		self.refresh_chat();
 		self.refresh_streams();
-	}
-
-	fn refresh_servers(&self) {
-		let Some(ui) = self.ui.upgrade() else { return };
-		let bridge = ui.global::<Bridge>();
-		let items = self
-			.bookmarks
-			.iter()
-			.map(|b| {
-				let state = self.sessions.get(&b.id).map(|v| v.state.clone()).unwrap_or_default();
-				let status = match (state.voice, state.observe) {
-					(VoiceState::Connected, _) => "connected",
-					(VoiceState::Connecting, _) | (_, ObserveState::Connecting) => "connecting",
-					(_, ObserveState::Observing) => "observing",
-					_ => "offline",
-				};
-				ServerItem {
-					id: b.id as i32,
-					name: b.name.clone().into(),
-					address: b.address.clone().into(),
-					status: status.into(),
-				}
-			})
-			.collect();
-		bridge.set_servers(model(items));
-		bridge.set_current_server(self.current.map_or(-1, |id| id as i32));
-	}
-
-	fn refresh_toolbar(&self) {
-		let Some(ui) = self.ui.upgrade() else { return };
-		let bridge = ui.global::<Bridge>();
-		let bookmark = self.current.and_then(|id| self.bookmark(id));
-		let state = self.view().map(|v| v.state.clone()).unwrap_or_default();
-		bridge.set_server_title(
-			bookmark.map_or("No server selected".into(), |b| b.name.clone()).into(),
-		);
-		bridge.set_voice_connected(state.voice == VoiceState::Connected);
-		bridge.set_voice_connecting(state.voice == VoiceState::Connecting);
-		bridge.set_observing(state.observe != ObserveState::Off);
-		bridge.set_can_observe(
-			bookmark.is_some_and(|b| b.gateway_url.is_some() || b.query.is_some()),
-		);
-		bridge.set_input_muted(state.input_muted);
-		bridge.set_output_muted(state.output_muted);
-		bridge.set_transmitting(state.transmitting);
-		bridge.set_presence_source(
-			match state.presence_source {
-				Some(Source::Voice) => "live (voice)",
-				Some(Source::Gateway) => "invisible (gateway)",
-				Some(Source::Query) => "invisible (query)",
-				None => "",
-			}
-			.into(),
-		);
-		bridge.set_status_text(self.status.clone().into());
-		if state.voice != VoiceState::Connected {
-			bridge.set_input_level(-100.0);
-			bridge.set_input_sending(false);
-		}
-	}
-
-	fn refresh_tree(&self) {
-		let Some(ui) = self.ui.upgrade() else { return };
-		let Some(view) = self.view() else {
-			ui.global::<Bridge>().set_tree(model(Vec::new()));
-			return;
-		};
-		let own_channel = view.state.own_channel;
-		let rows = tree_rows(&view.presence, &|cid| view.collapsed.contains(&cid))
-			.into_iter()
-			.map(|row| match row {
-				TreeRow::Channel { depth, channel } => TreeItem {
-					is_channel: true,
-					depth: depth as i32,
-					id: channel.id as i32,
-					name: channel.name.clone().into(),
-					own: own_channel == Some(channel.id),
-					locked: channel.has_password,
-					collapsed: view.collapsed.contains(&channel.id),
-					local_volume: 100,
-					..Default::default()
-				},
-				TreeRow::Client { depth, client } => {
-					let playback = client
-						.uid
-						.as_ref()
-						.and_then(|uid| self.playback.get(uid))
-						.copied()
-						.unwrap_or_default();
-					TreeItem {
-						is_channel: false,
-						depth: depth as i32,
-						id: client.id as i32,
-						name: client.nickname.clone().into(),
-						own: false,
-						talking: view.talking.contains(&client.id) || client.talking == Some(true),
-						muted: client.input_muted,
-						sound_off: client.output_muted,
-						away: client.away.is_some(),
-						streaming: client.streaming == Some(true),
-						local_muted: playback.muted,
-						local_volume: (playback.volume * 100.0).round() as i32,
-						myself: view.state.own_client == Some(client.id),
-						..Default::default()
-					}
-				}
-			})
-			.collect();
-		ui.global::<Bridge>().set_tree(model(rows));
-	}
-
-	fn refresh_chat(&self) {
-		let Some(ui) = self.ui.upgrade() else { return };
-		let bridge = ui.global::<Bridge>();
-		let Some(view) = self.view() else {
-			bridge.set_tabs(model(vec![ChatTab { title: "Server".into(), ..Default::default() }]));
-			bridge.set_messages(model(Vec::new()));
-			return;
-		};
-		let tabs = view
-			.tabs
-			.iter()
-			.map(|t| ChatTab {
-				title: t.title.clone().into(),
-				kind: matches!(t.target, ChatTarget::Channel(_)) as i32,
-				id: match t.target {
-					ChatTarget::Channel(cid) => cid as i32,
-					_ => 0,
-				},
-				unread: t.unread,
-			})
-			.collect();
-		bridge.set_tabs(model(tabs));
-		bridge.set_current_tab(view.current_tab as i32);
-		bridge.set_messages(model(view.tabs[view.current_tab].lines.clone()));
-	}
-
-	// Settings page.
-
-	fn open_settings(&mut self) {
-		let list = |devices: voelin_audio::Result<Vec<voelin_audio::device::DeviceInfo>>,
-		            input: bool| {
-			let devices = devices.unwrap_or_else(|e| {
-				warn!("cannot list audio devices: {e}");
-				Vec::new()
-			});
-			devices
-				.into_iter()
-				.map(|d| {
-					let default = if input { d.default_input } else { d.default_output };
-					(d.id, d.name, default)
-				})
-				.collect::<Vec<_>>()
-		};
-		let inputs = list(voelin_audio::device::input_devices(), true);
-		let outputs = list(voelin_audio::device::output_devices(), false);
-		self.inputs = DeviceChoices::new(&inputs, self.audio.input_device.as_deref());
-		self.outputs = DeviceChoices::new(&outputs, self.audio.output_device.as_deref());
-		let Some(ui) = self.ui.upgrade() else { return };
-		let bridge = ui.global::<Bridge>();
-		let names = |c: &DeviceChoices| model(c.names.iter().map(SharedString::from).collect());
-		bridge.set_input_devices(names(&self.inputs));
-		bridge.set_output_devices(names(&self.outputs));
-		bridge.set_audio(settings::audio_form(&self.audio, &self.inputs, &self.outputs));
-		bridge.set_global_ptt(self.settings.global_ptt);
-		bridge.set_ptt_key(self.settings.ptt_key.clone().into());
-		bridge.set_h264_enabled(self.settings.openh264);
-		self.refresh_h264();
-	}
-
-	fn close_settings(&mut self) {
-		self.set_mic_test(false);
-		self.save_audio();
-	}
-
-	fn audio_changed(&mut self, form: &AudioForm) {
-		let audio = settings::apply_audio_form(form, &self.audio, &self.inputs, &self.outputs);
-		if audio == self.audio {
-			return;
-		}
-		self.audio = audio;
-		self.audio_dirty = true;
-		self.engine.send(Command::SetAudioSettings(Box::new(self.audio.clone())));
-	}
-
-	fn save_audio(&mut self) {
-		if !self.audio_dirty {
-			return;
-		}
-		self.audio_dirty = false;
-		if let Err(e) = self.store.set_setting(AUDIO_KEY, &self.audio) {
-			warn!(%e, "could not store audio settings");
-		}
-	}
-
-	fn set_mic_test(&mut self, on: bool) {
-		if self.mic_test == on {
-			return;
-		}
-		self.mic_test = on;
-		self.engine.send(Command::TestMicrophone { on });
-		if let Some(ui) = self.ui.upgrade() {
-			let bridge = ui.global::<Bridge>();
-			bridge.set_mic_test(on);
-			if !on {
-				bridge.set_input_level(-100.0);
-			}
-		}
-	}
-
-	fn apply_ptt(&mut self, enabled: bool, key: String) {
-		let key = key.trim().to_owned();
-		self.settings.global_ptt = enabled;
-		if !key.is_empty() {
-			self.settings.ptt_key = key.clone();
-		}
-		self.store_settings();
-		self.ptt.set((enabled && !key.is_empty()).then_some(key));
-	}
-
-	fn set_ptt_status(&mut self, status: String) {
-		if let Some(ui) = self.ui.upgrade() {
-			ui.global::<Bridge>().set_ptt_status(status.into());
-		}
-	}
-
-	fn set_h264(&mut self, enabled: bool) {
-		self.settings.openh264 = enabled;
-		self.store_settings();
-		self.video.set_h264(enabled);
-		self.refresh_h264();
-	}
-
-	fn download_h264(&mut self) {
-		let runtime = self.engine.runtime().clone();
-		self.video.download_h264(&runtime, |download| {
-			later(move |app| {
-				app.video.downloaded(download, app.settings.openh264);
-				app.refresh_h264();
-			});
-		});
-		self.refresh_h264();
-	}
-
-	fn refresh_h264(&self) {
-		let Some(ui) = self.ui.upgrade() else { return };
-		let bridge = ui.global::<Bridge>();
-		let (loaded, status) = self.video.h264_status();
-		bridge.set_h264_loaded(loaded);
-		bridge.set_h264_busy(status.starts_with("Downloading"));
-		bridge.set_h264_status(status.into());
-	}
-
-	/// Switches the About page and the settings show.
-	fn refresh_settings_flags(&self) {
-		let Some(ui) = self.ui.upgrade() else { return };
-		let bridge = ui.global::<Bridge>();
-		bridge.set_h264_enabled(self.settings.openh264);
-		bridge.set_h264_attribution(notices::OPENH264_ATTRIBUTION.into());
-		bridge.set_crash_reports(self.settings.crash_reports);
-	}
-
-	fn set_crash_reports(&mut self, enabled: bool) {
-		self.settings.crash_reports = enabled;
-		self.store_settings();
-		crash::set_enabled(enabled);
-	}
-
-	/// A notice while crash reports are on disk.
-	fn refresh_crash_notice(&self) {
-		let Some(ui) = self.ui.upgrade() else { return };
-		let text = match crash::pending_reports() {
-			Ok(reports) if !reports.is_empty() => {
-				let newest = &reports[reports.len() - 1];
-				let saved = match reports.len() {
-					1 => "1 crash report is saved".to_owned(),
-					n => format!("{n} crash reports are saved"),
-				};
-				format!("The app crashed earlier ({}). {saved} on this device.", newest.summary)
-			}
-			_ => String::new(),
-		};
-		ui.global::<Bridge>().set_crash_notice(text.into());
-	}
-
-	/// The third-party notices, one model entry per line.
-	fn load_notices(&mut self) {
-		if self.notices_loaded {
-			return;
-		}
-		let Some(ui) = self.ui.upgrade() else { return };
-		let lines: Vec<SharedString> = notices::text().lines().map(SharedString::from).collect();
-		ui.global::<Bridge>().set_notices(model(lines));
-		self.notices_loaded = true;
-	}
-
-	// Local volume and mute of clients.
-
-	/// Fill the volume dialog for `client` of the current session.
-	fn open_client(&mut self, client: u16) -> bool {
-		let Some(id) = self.current else { return false };
-		let Some(info) = self.view().and_then(|v| v.presence.clients.get(&client)).cloned() else {
-			return false;
-		};
-		let playback =
-			info.uid.as_ref().and_then(|uid| self.playback.get(uid)).copied().unwrap_or_default();
-		self.playback_dialog = Some((id, client, info.uid.clone()));
-		if let Some(ui) = self.ui.upgrade() {
-			ui.global::<Bridge>().set_client_audio(ClientAudio {
-				id: client as i32,
-				name: info.nickname.into(),
-				volume: playback.volume * 100.0,
-				muted: playback.muted,
-			});
-		}
-		true
-	}
-
-	fn client_playback_changed(&mut self, form: &ClientAudio) {
-		let Some((session, client, uid)) = self.playback_dialog.clone() else { return };
-		let playback =
-			ClientPlayback { volume: (form.volume / 100.0).clamp(0.0, 4.0), muted: form.muted };
-		let session = session as u64;
-		self.engine.send(Command::SetClientVolume { session, client, volume: playback.volume });
-		self.engine.send(Command::SetClientMuted { session, client, muted: playback.muted });
-		// Kept by unique id; clients without one only for this connection.
-		if let Some(uid) = uid {
-			if playback.is_default() {
-				self.playback.remove(&uid);
-			} else {
-				self.playback.insert(uid, playback);
-			}
-			if let Err(e) = self.store.set_setting(CLIENT_PLAYBACK_KEY, &self.playback) {
-				warn!(%e, "could not store client volumes");
-			}
-		}
-		self.refresh_tree();
-	}
-
-	/// `VOELIN_OPEN=client`: the volume dialog of the first client that is not us.
-	fn open_first_client(&mut self) {
-		let Some(view) = self.view().filter(|v| v.state.own_client.is_some()) else { return };
-		let own = view.state.own_client;
-		let mut others: Vec<_> =
-			view.presence.clients.values().filter(|c| Some(c.id) != own && !c.is_query).collect();
-		others.sort_by_key(|c| c.id);
-		let Some(id) = others.first().map(|c| c.id) else { return };
-		self.open_client_pending = false;
-		if self.open_client(id)
-			&& let Some(ui) = self.ui.upgrade()
-		{
-			ui.set_client_open(true);
-		}
-	}
-
-	/// Send the stored volumes of clients that appeared in a voice session.
-	fn apply_client_playback(&mut self, session: i64) {
-		let Some(view) = self.sessions.get_mut(&session) else { return };
-		if view.state.voice != VoiceState::Connected
-			|| view.state.presence_source != Some(Source::Voice)
-		{
-			return;
-		}
-		let presence = view.presence.clone();
-		view.applied_playback.retain(|id| presence.clients.contains_key(id));
-		for client in presence.clients.values() {
-			if !view.applied_playback.insert(client.id) {
-				continue;
-			}
-			let stored = client.uid.as_ref().and_then(|uid| self.playback.get(uid));
-			let Some(playback) = stored else { continue };
-			let (s, c) = (session as u64, client.id);
-			self.engine.send(Command::SetClientVolume {
-				session: s,
-				client: c,
-				volume: playback.volume,
-			});
-			if playback.muted {
-				self.engine.send(Command::SetClientMuted { session: s, client: c, muted: true });
-			}
-		}
 	}
 }

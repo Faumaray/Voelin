@@ -424,6 +424,7 @@ fields = [
 	{ map="mode@stream", ts="mode", pretty="StreamMode", type="u8" },
 	{ map="bitrate@stream", ts="bitrate", pretty="Bitrate", type="u32" },
 	{ map="viewer_limit@stream", ts="viewer_limit", pretty="ViewerLimit", type="u32" },
+	{ map="viewer@stream", ts="viewer", pretty="Viewers", type="u32" },
 	{ map="audio@stream", ts="audio", pretty="Audio", type="bool" },
 	{ map="json@stream", ts="json", pretty="Json", type="str" },
 	{ map="offer@stream", ts="offer", pretty="Offer", type="str" },
@@ -502,7 +503,13 @@ msg = [
 	# notifystreamstarted clid=20 id=e7da957e-7ce0-46cf-bf6d-754d3446b4d4 name=probe type=3 access=1 mode=1 bitrate=4608 viewer_limit=0 audio=1
 	{ name="StreamStarted",             notify="notifystreamstarted",             attributes=["clid", "id@stream", "name@stream?", "type@stream?", "access@stream?", "mode@stream?", "bitrate@stream?", "viewer_limit@stream?", "audio@stream?", "return_code?"] },
 	{ name="StreamStopped",             notify="notifystreamstopped",             attributes=["id@stream", "clid?", "reason@stream?"] },
-	{ name="StreamInfo",                notify="notifystreaminfo",                attributes=["id@stream", "clid?", "name@stream?", "type@stream?", "access@stream?", "mode@stream?", "bitrate@stream?", "viewer_limit@stream?", "audio@stream?"] },
+	# The answer to requeststreaminfo, one part per stream of the client; no
+	# part but return_code when it has none (docs/research/ts6-late-join.md):
+	# notifystreaminfo return_code=1 clid=6 id=6b5158dd-22ba-4118-b20d-9196fe975ac7 name=probe type=3 accessibility=1 mode=1 viewer=0 bitrate=4608 viewer_limit=0 audio=1
+	{ name="StreamInfo",                notify="notifystreaminfo",                attributes=["id@stream?", "clid?", "name@stream?", "type@stream?", "accessibility@stream?", "mode@stream?", "viewer@stream?", "bitrate@stream?", "viewer_limit@stream?", "audio@stream?", "return_code?"] },
+	# After updatestream, to the channel; only the changed fields:
+	# notifystreamupdated clid=6 id=6b5158dd-22ba-4118-b20d-9196fe975ac7 name=renamed bitrate=4000
+	{ name="StreamUpdated",             notify="notifystreamupdated",             attributes=["clid", "id@stream", "name@stream?", "type@stream?", "access@stream?", "mode@stream?", "bitrate@stream?", "viewer_limit@stream?", "audio@stream?", "return_code?"] },
 	{ name="JoinStreamRequest",         notify="notifyjoinstreamrequest",         attributes=["id@stream", "clid", "msg?", "is_remove@stream?"] },
 	{ name="RespondJoinStreamRequest",  notify="notifyrespondjoinstreamrequest",  attributes=["id@stream", "clid?", "msg?", "offer@stream?", "decision@stream?"] },
 	{ name="StreamSignaling",           notify="notifystreamsignaling",           attributes=["id@stream", "clid", "json@stream"] },
@@ -1067,4 +1074,7 @@ msg = [
 	{ name="RespondJoinStreamRequestRequest", notify="respondjoinstreamrequest",    attributes=["id@stream", "clid", "msg?", "offer@stream?", "decision@stream"] },
 	# removeclientfromstream id=<uuid> clid=<viewer> reason=<StreamLeaveReason>; all required
 	{ name="RemoveClientFromStream",        notify="removeclientfromstream",        attributes=["id@stream", "clid", "reason@stream"] },
+	# requeststreaminfo clid=<streamer>; clid is required, id is ignored
+	# -> {StreamInfo} (with the command's return_code), also for other channels
+	{ name="RequestStreamInfo",             notify="requeststreaminfo",             attributes=["clid"] },
 ]

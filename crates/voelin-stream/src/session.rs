@@ -31,18 +31,40 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use str0m::media::{MediaKind, MediaTime};
+use str0m::media::{MediaKind, MediaTime, Rid};
 use tracing::{debug, warn};
 use tsclientlib::ClientId;
 use tsproto_packets::packets::OutCommand;
 
-use crate::peer::{MediaFrame, Peer, PeerConfig, PeerEvent};
+use crate::discovery::{ClientState, Discovery, StreamLookup};
+use crate::dtls::SrtpProfile;
+use crate::feedback::LayerFeedback;
+use crate::layer::{self, LayerId, LayerSet, LayerSpec};
+use crate::peer::{
+	MediaFrame, OfferOptions, Peer, PeerConfig, PeerEvent, VideoCodec, VideoFormat,
+	offered_video_codecs,
+};
 use crate::proto::{self, LeaveReason, StreamInfo, StreamNotification, StreamSetup};
 use crate::signal::Signal;
 use crate::source::EncodedFrame;
 
-/// Keyframe requests closer together than this are merged into one event.
+/// Keyframe requests of a layer closer together than this are merged into
+/// one event.
 const KEYFRAME_INTERVAL: Duration = Duration::from_millis(250);
+/// A viewer moves up to a layer once its estimate exceeds the layer's
+/// `min_bitrate` by this many percent ...
+const UP_MARGIN_PERCENT: u64 = 20;
+/// ... for this long.
+const UP_DELAY: Duration = Duration::from_secs(2);
+/// Lowest bitrate target (bit/s) of a video layer: below it encoders cannot
+/// produce usable video.
+pub const MIN_VIDEO_BITRATE: u64 = 30_000;
+/// Changed bandwidth estimates are reported in the viewer list at most this
+/// often (layer and state changes at once).
+const STATS_INTERVAL: Duration = Duration::from_secs(1);
+/// A layer's bitrate target is reported when it moved by more than
+/// 1/`BITRATE_REPORT_STEP` (5%) since the last report.
+const BITRATE_REPORT_STEP: u64 = 20;
 /// How often a viewer asks for a new offer after its connection failed.
 const MAX_RECONNECTS: u32 = 3;
 /// Peer events handled per peer and poll, so one busy peer cannot starve the rest.
@@ -65,6 +87,8 @@ pub enum Request {
 	Signal { id: String, peer: ClientId, signal: Signal },
 	/// `removeclientfromstream`
 	RemoveViewer { id: String, viewer: ClientId, reason: LeaveReason },
+	/// `requeststreaminfo`: the streams of a client (see [`crate::discovery`]).
+	StreamInfo { streamer: ClientId },
 }
 
 impl Request {
@@ -81,6 +105,7 @@ impl Request {
 			}
 			Self::Signal { id, peer, signal } => proto::signaling(id, *peer, &signal.to_json()),
 			Self::RemoveViewer { id, viewer, reason } => proto::remove_viewer(id, *viewer, *reason),
+			Self::StreamInfo { streamer } => proto::stream_info(*streamer),
 		}
 	}
 }
@@ -116,6 +141,17 @@ pub struct ViewerInfo {
 	pub state: ViewerState,
 	/// The message of the join request.
 	pub message: String,
+	/// The simulcast layer the viewer receives (it moves at a keyframe of the
+	/// new layer); `None` before we offered, and with RID simulcast (all
+	/// layers).
+	pub layer: Option<LayerId>,
+	/// The latest bandwidth estimate of the connection (bit/s).
+	pub estimate: Option<u64>,
+	/// The SRTP profile of the connection, once DTLS is done.
+	pub srtp_profile: Option<SrtpProfile>,
+	/// The video codec the viewer's answer chose (it gets video in that
+	/// codec).
+	pub codec: Option<VideoCodec>,
 }
 
 /// What happens to our own stream.
@@ -130,10 +166,21 @@ pub enum StreamerEvent {
 		viewer: ClientId,
 		message: String,
 	},
-	/// The viewers or their states changed (full list).
+	/// The viewers, their states or layers changed (full list; changed
+	/// estimates are included about once a second).
 	Viewers(Vec<ViewerInfo>),
-	/// A viewer connected or lost a frame: the encoder should send a keyframe.
-	KeyframeRequest,
+	/// A viewer of `layer` connected, lost a frame or switches to it: the
+	/// layer's encoder should send a keyframe. Also flagged in
+	/// [`StreamerSession::layer_feedback`].
+	KeyframeRequest {
+		layer: LayerId,
+	},
+	/// The bitrate target of `layer` (bit/s) changed: the lowest bandwidth
+	/// estimate of its viewers, see [`StreamerSession::layer_bitrate`].
+	LayerBitrate {
+		layer: LayerId,
+		bitrate: u64,
+	},
 	Ended(EndReason),
 }
 
@@ -145,6 +192,10 @@ pub enum WatchEvent {
 	Connected,
 	/// An encoded video or audio frame.
 	Frame(MediaFrame),
+	/// The simulcast layers the streamer's offer lists
+	/// ([`layer::SDP_ATTRIBUTE`]): pick one with [`Streams::set_watch_layer`].
+	/// Only Voelin streamers list them, and only with several layers.
+	Layers(Vec<LayerSpec>),
 	Ended(EndReason),
 }
 
@@ -208,6 +259,10 @@ pub enum SessionError {
 	NotWatching(String),
 	#[error("cannot watch our own stream")]
 	OwnStream,
+	#[error("stream {0} has no layers to choose from")]
+	NoLayers(String),
+	#[error("stream {0} has no layer {1}")]
+	UnknownLayer(String, LayerId),
 }
 
 /// The streams in our channel, from `notifystreamstarted`/`notifystreaminfo`/
@@ -227,7 +282,33 @@ impl StreamDirectory {
 				self.streaming.insert(info.streamer.0);
 				self.streams.insert(info.id.clone(), info.clone()).as_ref() != Some(info)
 			}
+			StreamNotification::Updated {
+				id, name, kind, bitrate, viewer_limit, audio, ..
+			} => {
+				let Some(info) = self.streams.get_mut(id) else { return false };
+				let before = info.clone();
+				info.name = name.clone().unwrap_or(before.name.clone());
+				info.kind = kind.unwrap_or(before.kind);
+				info.bitrate = bitrate.unwrap_or(before.bitrate);
+				info.viewer_limit = viewer_limit.unwrap_or(before.viewer_limit);
+				info.audio = audio.unwrap_or(before.audio);
+				*info != before
+			}
 			StreamNotification::Stopped { id, .. } => self.streams.remove(id).is_some(),
+			// The server tells the whole channel who joins, but only the
+			// streamer and the viewer who leaves (and nobody when a viewer
+			// stops watching by leaving the server):
+			// [`Streams::refresh_viewer_counts`] asks again now and then.
+			StreamNotification::ViewerJoined { id, .. }
+			| StreamNotification::ViewerLeft { id, .. } => {
+				let joined = matches!(n, StreamNotification::ViewerJoined { .. });
+				let Some(count) = self.streams.get_mut(id).and_then(|s| s.viewers.as_mut()) else {
+					return false;
+				};
+				let before = *count;
+				*count = if joined { count.saturating_add(1) } else { count.saturating_sub(1) };
+				*count != before
+			}
 			_ => false,
 		}
 	}
@@ -284,6 +365,265 @@ pub struct StreamerOptions {
 	/// Accept every join request. Otherwise each one is reported as
 	/// [`StreamerEvent::Request`] and answered with [`Streams::respond`].
 	pub auto_accept: bool,
+	/// The simulcast layers the source produces. Empty: one layer (0) at the
+	/// setup's bitrate. Change it while live with [`Streams::set_layers`].
+	pub layers: Vec<LayerSpec>,
+	/// Bandwidth estimate (bit/s) a new viewer starts with: it gets the
+	/// highest layer whose `min_bitrate` fits. `None`: the `bitrate` of the
+	/// layer with the highest `min_bitrate`, i.e. new viewers start on the top
+	/// layer, as a stream without simulcast does.
+	pub start_bitrate: Option<u64>,
+}
+
+/// The layers of our stream with their state, allocated when the list is set.
+#[derive(Debug)]
+struct LayerTable {
+	specs: Vec<LayerSpec>,
+	/// The RID of each layer, for peers with RID simulcast.
+	rids: Vec<Option<Rid>>,
+	/// Indices of `specs` by descending `min_bitrate` (then `bitrate`): the
+	/// order viewers step down through.
+	ladder: Vec<usize>,
+	/// When a keyframe of each layer was last asked for.
+	last_keyframe_request: Vec<Option<Instant>>,
+	/// The bitrate target last reported per layer.
+	reported: Vec<Option<u64>>,
+}
+
+impl LayerTable {
+	/// `specs`, or one layer 0 at `bitrate` if empty. Later layers with an id
+	/// already listed are dropped.
+	fn new(specs: &[LayerSpec], bitrate: u64) -> Self {
+		let mut unique: Vec<LayerSpec> = Vec::with_capacity(specs.len().max(1));
+		for spec in specs {
+			if unique.iter().any(|s| s.id == spec.id) {
+				warn!(layer = spec.id, "duplicate layer id, ignored");
+			} else {
+				unique.push(spec.clone());
+			}
+		}
+		if unique.is_empty() {
+			unique.push(LayerSpec::single(bitrate));
+		}
+		let mut ladder: Vec<usize> = (0..unique.len()).collect();
+		ladder.sort_by(|a, b| {
+			let (a, b) = (&unique[*a], &unique[*b]);
+			b.min_bitrate.cmp(&a.min_bitrate).then(b.bitrate.cmp(&a.bitrate))
+		});
+		Self {
+			rids: unique.iter().map(|s| s.rid.as_deref().map(Rid::from)).collect(),
+			last_keyframe_request: vec![None; unique.len()],
+			reported: vec![None; unique.len()],
+			ladder,
+			specs: unique,
+		}
+	}
+
+	fn len(&self) -> usize {
+		self.specs.len()
+	}
+
+	fn index(&self, layer: LayerId) -> Option<usize> {
+		self.specs.iter().position(|s| s.id == layer)
+	}
+
+	fn rid_index(&self, rid: Rid) -> Option<usize> {
+		self.rids.iter().position(|r| *r == Some(rid))
+	}
+
+	/// Position of layer `index` in the ladder (0: top).
+	fn rank(&self, index: usize) -> usize {
+		self.ladder.iter().position(|i| *i == index).unwrap_or(usize::MAX)
+	}
+
+	fn top(&self) -> usize {
+		self.ladder[0]
+	}
+
+	/// The highest layer whose `min_bitrate` `estimate` reaches, else the
+	/// lowest.
+	fn fitting(&self, estimate: u64) -> usize {
+		let fits = self.ladder.iter().find(|i| self.specs[**i].min_bitrate <= estimate);
+		fits.or(self.ladder.last()).copied().unwrap_or(0)
+	}
+
+	/// What a layer is sent at when bandwidth allows: `max_bitrate`, else
+	/// `bitrate`.
+	fn cap(&self, index: usize) -> u64 {
+		let spec = &self.specs[index];
+		spec.max_bitrate.unwrap_or(spec.bitrate)
+	}
+
+	/// Layers with a RID, if at least two: what an offer with RID simulcast
+	/// carries.
+	fn rid_layers(&self) -> impl Iterator<Item = usize> + '_ {
+		let n = self.rids.iter().filter(|r| r.is_some()).count();
+		(0..self.len()).filter(move |i| n >= 2 && self.rids[*i].is_some())
+	}
+
+	/// The share of `estimate` a RID simulcast peer that takes `rids` has for
+	/// layer `index`: from the lowest layer up, each gets up to its
+	/// [`cap`](Self::cap), the highest the rest.
+	fn rid_share(&self, rids: &[Rid], estimate: u64, index: usize) -> Option<u64> {
+		let taken = |i: usize| self.rids[i].is_some_and(|r| rids.contains(&r));
+		if !taken(index) {
+			return None;
+		}
+		let top = self.ladder.iter().copied().find(|i| taken(*i))?;
+		let mut remaining = estimate;
+		for &i in self.ladder.iter().rev().filter(|i| taken(**i)) {
+			let share = if i == top { remaining } else { remaining.min(self.cap(i)) };
+			if i == index {
+				return Some(share);
+			}
+			remaining -= share;
+		}
+		None
+	}
+}
+
+/// Which layer a viewer without RID simulcast receives, and switching
+/// between layers: down as soon as the estimate falls below the layer's
+/// `min_bitrate`, up once the estimate has exceeded the higher layer's
+/// `min_bitrate` by [`UP_MARGIN_PERCENT`] for [`UP_DELAY`]. A switch waits
+/// for a keyframe of the new layer; until then the old layer is sent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LayerChoice {
+	/// The layer whose frames the viewer gets.
+	layer: LayerId,
+	/// The layer to switch to at its next keyframe.
+	pending: Option<LayerId>,
+	/// Since when the estimate allows a higher layer.
+	up_since: Option<Instant>,
+}
+
+impl LayerChoice {
+	fn new(layer: LayerId) -> Self {
+		Self { layer, pending: None, up_since: None }
+	}
+
+	/// The layer the viewer is on or heading to.
+	fn target(&self) -> LayerId {
+		self.pending.unwrap_or(self.layer)
+	}
+
+	/// A new estimate. Returns the layer a keyframe is needed of when the
+	/// viewer is to switch.
+	fn estimate(&mut self, table: &LayerTable, estimate: u64, now: Instant) -> Option<LayerId> {
+		let Some(current) = table.index(self.target()) else {
+			// The layer is gone (new layer list).
+			self.up_since = None;
+			return self.switch_to(table.specs[table.fitting(estimate)].id);
+		};
+		if estimate < table.specs[current].min_bitrate {
+			self.up_since = None;
+			return self.switch_to(table.specs[table.fitting(estimate)].id);
+		}
+		let with_margin = u128::from(estimate) * 100 / (100 + u128::from(UP_MARGIN_PERCENT));
+		let up = table.fitting(u64::try_from(with_margin).unwrap_or(u64::MAX));
+		if table.rank(up) >= table.rank(current) {
+			self.up_since = None;
+			return None;
+		}
+		let since = *self.up_since.get_or_insert(now);
+		if now.saturating_duration_since(since) < UP_DELAY {
+			return None;
+		}
+		self.up_since = None;
+		self.switch_to(table.specs[up].id)
+	}
+
+	/// Head for `layer`; the layer to request a keyframe of, if any.
+	fn switch_to(&mut self, layer: LayerId) -> Option<LayerId> {
+		if layer == self.layer {
+			self.pending = None;
+			None
+		} else if self.pending == Some(layer) {
+			None
+		} else {
+			self.pending = Some(layer);
+			Some(layer)
+		}
+	}
+
+	/// A video frame of `layer`: whether it goes to the viewer, and whether
+	/// the viewer switched to it.
+	fn frame(&mut self, layer: LayerId, keyframe: bool) -> (bool, bool) {
+		if keyframe && self.pending == Some(layer) {
+			self.layer = layer;
+			self.pending = None;
+			return (true, true);
+		}
+		(self.layer == layer, false)
+	}
+}
+
+/// The ladder of a connection that connects but carries no media: the next
+/// one leaves out the SRTP profile it negotiated (every AEAD profile when
+/// that was one: an SRTP library has both or neither), or the video codec
+/// it carried, as long as another is left. What was left out stays out for
+/// the later connections of that viewer or watched stream.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Fallback {
+	srtp: Vec<SrtpProfile>,
+	codecs: Vec<VideoCodec>,
+}
+
+impl Fallback {
+	/// `config` without what was left out.
+	fn apply(&self, config: &PeerConfig) -> PeerConfig {
+		let mut config = config.clone();
+		config.srtp_profiles = self.srtp_left(&config);
+		config.video_codecs.retain(|c| !self.codecs.contains(c));
+		config.accept_video_codecs.retain(|c| !self.codecs.contains(c));
+		config
+	}
+
+	/// The profiles of `config`'s order not left out yet.
+	fn srtp_left(&self, config: &PeerConfig) -> Vec<SrtpProfile> {
+		let order: &[SrtpProfile] = match &config.srtp_profiles[..] {
+			[] => &SrtpProfile::DEFAULT_ORDER,
+			order => order,
+		};
+		order.iter().copied().filter(|p| !self.srtp.contains(p)).collect()
+	}
+
+	/// Leave out `failed` (and the other AEAD profile with an AEAD one); the
+	/// profiles left, `None` (nothing left out) when none would be.
+	fn without_srtp(
+		&mut self,
+		config: &PeerConfig,
+		failed: SrtpProfile,
+	) -> Option<Vec<SrtpProfile>> {
+		let same = |p: &SrtpProfile| *p == failed || (p.is_aead() && failed.is_aead());
+		let left: Vec<_> = self.srtp_left(config).into_iter().filter(|p| !same(p)).collect();
+		if left.is_empty() {
+			return None;
+		}
+		self.srtp.extend(SrtpProfile::ALL.into_iter().filter(same));
+		Some(left)
+	}
+
+	/// Leave out `failed` of `codecs`; those left, `None` (nothing left
+	/// out) when none would be.
+	fn without_codec(
+		&mut self,
+		codecs: &[VideoCodec],
+		failed: VideoCodec,
+	) -> Option<Vec<VideoCodec>> {
+		let left: Vec<_> =
+			codecs.iter().copied().filter(|c| *c != failed && !self.codecs.contains(c)).collect();
+		if left.is_empty() {
+			return None;
+		}
+		self.codecs.push(failed);
+		Some(left)
+	}
+}
+
+/// `items` for a log line.
+fn list<T: std::fmt::Display>(items: &[T]) -> String {
+	items.iter().map(T::to_string).collect::<Vec<_>>().join(", ")
 }
 
 struct ViewerSlot {
@@ -291,9 +631,49 @@ struct ViewerSlot {
 	message: String,
 	/// `None` while the viewer waits for our decision or after its connection closed.
 	peer: Option<Peer>,
+	/// The viewer's layer (without RID simulcast).
+	choice: LayerChoice,
+	/// The RIDs the viewer's answer took (RID simulcast): it gets all these layers.
+	rids: Option<Vec<Rid>>,
+	/// The latest bandwidth estimate of the connection (bit/s).
+	estimate: Option<u64>,
+	srtp_profile: Option<SrtpProfile>,
+	/// The video codec (and H.264 profile) its answer chose.
+	codec: Option<VideoFormat>,
+	/// The layer the viewer asked for ([`Signal::Layer`]); `None`: its
+	/// estimate decides.
+	pinned: Option<LayerId>,
+	/// What its connections leave out after one carried nothing.
+	fallback: Fallback,
+}
+
+impl ViewerSlot {
+	fn new(message: String) -> Self {
+		Self {
+			state: ViewerState::Requested,
+			message,
+			peer: None,
+			choice: LayerChoice::new(0),
+			rids: None,
+			estimate: None,
+			srtp_profile: None,
+			codec: None,
+			pinned: None,
+			fallback: Fallback::default(),
+		}
+	}
+
+	fn connected(&self) -> bool {
+		self.state == ViewerState::Connected
+	}
 }
 
 /// Our own stream: `setupstream`, one peer connection per accepted viewer.
+///
+/// With several layers, each viewer gets the layer its bandwidth estimate
+/// allows ([`LayerChoice`]), or every layer with its RID if its connection
+/// negotiated RID simulcast. Keyframe requests and bitrate targets go to the
+/// encoders per layer, through events and [`layer_feedback`](Self::layer_feedback).
 pub struct StreamerSession {
 	own: ClientId,
 	options: StreamerOptions,
@@ -303,7 +683,10 @@ pub struct StreamerSession {
 	/// Stopped before the server confirmed the setup: stop once it does.
 	stop_when_live: bool,
 	viewers: BTreeMap<u16, ViewerSlot>,
-	last_keyframe_request: Option<Instant>,
+	layers: LayerTable,
+	feedback: Arc<LayerFeedback>,
+	/// When the viewer list was last reported.
+	last_viewers_event: Option<Instant>,
 }
 
 impl StreamerSession {
@@ -315,6 +698,9 @@ impl StreamerSession {
 		out: &mut Outbox,
 	) -> Self {
 		out.request(Request::Setup(options.setup.clone()));
+		let layers = LayerTable::new(&options.layers, setup_bitrate(&options.setup));
+		let feedback = Arc::new(LayerFeedback::new());
+		feedback.prepare(layers.specs.iter().map(|s| s.id));
 		Self {
 			own,
 			options,
@@ -323,7 +709,9 @@ impl StreamerSession {
 			ended: false,
 			stop_when_live: false,
 			viewers: BTreeMap::new(),
-			last_keyframe_request: None,
+			layers,
+			feedback,
+			last_viewers_event: None,
 		}
 	}
 
@@ -341,6 +729,21 @@ impl StreamerSession {
 		self.ended && !self.stop_when_live
 	}
 
+	/// The layers of the stream (one layer 0 without simulcast).
+	pub fn layers(&self) -> &[LayerSpec] {
+		&self.layers.specs
+	}
+
+	/// Keyframe requests and bitrate targets per layer, for the encoders.
+	pub fn layer_feedback(&self) -> &Arc<LayerFeedback> {
+		&self.feedback
+	}
+
+	/// The bitrate (bit/s) the estimates of `layer`'s viewers allow.
+	pub fn layer_bitrate(&self, layer: LayerId) -> Option<u64> {
+		self.feedback.bitrate(layer)
+	}
+
 	pub fn viewers(&self) -> Vec<ViewerInfo> {
 		self.viewers
 			.iter()
@@ -348,6 +751,10 @@ impl StreamerSession {
 				client: ClientId(*clid),
 				state: v.state,
 				message: v.message.clone(),
+				layer: (v.peer.is_some() && v.rids.is_none()).then_some(v.choice.layer),
+				estimate: v.estimate,
+				srtp_profile: v.srtp_profile,
+				codec: v.codec.map(VideoFormat::codec),
 			})
 			.collect()
 	}
@@ -371,20 +778,19 @@ impl StreamerSession {
 					self.stop_when_live = false;
 					out.request(Request::Stop { id: info.id.clone() });
 				} else if !self.ended {
+					// Encoders start with a keyframe of every layer.
+					for spec in &self.layers.specs {
+						self.feedback.request_keyframe(spec.id);
+					}
 					out.event(StreamEvent::Streamer(StreamerEvent::Live { id: info.id.clone() }));
 				}
 			}
 			_ if self.ended => {}
 			StreamNotification::Stopped { .. } => self.end(EndReason::Stopped, out),
 			StreamNotification::JoinRequest { viewer, message, remove: false, .. } => {
-				let slot = ViewerSlot {
-					state: ViewerState::Requested,
-					message: message.clone(),
-					peer: None,
-				};
-				self.viewers.insert(viewer.0, slot);
+				self.viewers.insert(viewer.0, ViewerSlot::new(message.clone()));
 				if self.options.auto_accept {
-					self.offer(*viewer, false, out).await;
+					self.offer(*viewer, false, out);
 				} else {
 					out.event(StreamEvent::Streamer(StreamerEvent::Request {
 						viewer: *viewer,
@@ -397,6 +803,7 @@ impl StreamerSession {
 			| StreamNotification::ViewerLeft { viewer, .. } => {
 				if self.viewers.remove(&viewer.0).is_some() {
 					self.emit_viewers(out);
+					self.update_targets(out);
 				}
 			}
 			StreamNotification::Signaling { peer, json, .. } => {
@@ -436,22 +843,102 @@ impl StreamerSession {
 			}
 			Signal::Reconnect => {
 				if slot.state != ViewerState::Requested {
-					self.offer(viewer, true, out).await;
+					self.offer(viewer, true, out);
 				}
 			}
+			Signal::Layer { layer } => self.pin(viewer, layer, out),
 			other => debug!(viewer = viewer.0, "ignoring signal {other:?}"),
 		}
 	}
 
+	/// A viewer asks for `layer` ([`Signal::Layer`]; `None`: its estimate
+	/// decides again). It moves at the layer's next keyframe, which is
+	/// requested. An unknown layer counts as `None`; viewers with RID
+	/// simulcast get every layer anyway.
+	fn pin(&mut self, viewer: ClientId, layer: Option<LayerId>, out: &mut Outbox) {
+		let start = self.start_bitrate();
+		let Some(slot) = self.viewers.get_mut(&viewer.0).filter(|s| s.rids.is_none()) else {
+			return;
+		};
+		slot.pinned = layer.filter(|l| self.layers.index(*l).is_some());
+		slot.choice.up_since = None;
+		let fitting = self.layers.fitting(slot.estimate.unwrap_or(start));
+		let target = slot.pinned.unwrap_or(self.layers.specs[fitting].id);
+		debug!(viewer = viewer.0, ?layer, target, "viewer picks a layer");
+		if let Some(layer) = slot.choice.switch_to(target) {
+			self.keyframe_request(layer, out);
+		}
+		self.emit_viewers(out);
+		self.update_targets(out);
+	}
+
+	/// The estimate a new viewer starts with.
+	fn start_bitrate(&self) -> u64 {
+		self.options.start_bitrate.unwrap_or(self.layers.specs[self.layers.top()].bitrate)
+	}
+
+	/// What a viewer's connection probes for: enough for the top layer (with
+	/// the margin to switch up), or for all its layers with RID simulcast.
+	fn desired_bitrate(&self, rids: Option<&[Rid]>) -> u64 {
+		match rids {
+			Some(rids) => {
+				let taken = (0..self.layers.len())
+					.filter(|i| self.layers.rids[*i].is_some_and(|r| rids.contains(&r)));
+				taken.map(|i| self.layers.cap(i)).fold(0, u64::saturating_add)
+			}
+			None => {
+				let top = u128::from(self.layers.cap(self.layers.top()));
+				let with_margin = top * (100 + u128::from(UP_MARGIN_PERCENT)) / 100;
+				u64::try_from(with_margin).unwrap_or(u64::MAX)
+			}
+		}
+	}
+
 	/// Create a peer for `viewer` and send our offer: in `respondjoinstreamrequest`,
-	/// or as `reconnectOffer` for a viewer that lost its connection.
-	async fn offer(&mut self, viewer: ClientId, reconnect: bool, out: &mut Outbox) {
+	/// or as `reconnectOffer` for a viewer that lost its connection (or
+	/// whose connection carried nothing, see [`Fallback`]).
+	fn offer(&mut self, viewer: ClientId, reconnect: bool, out: &mut Outbox) {
 		let Some(id) = self.id.clone() else { return };
-		match Peer::offer(&self.config, &id).await {
+		let start = self.start_bitrate();
+		let layer = self.layers.specs[self.layers.fitting(start)].id;
+		// Offering RID simulcast: the start estimate is for all its layers.
+		let rid_offer = self.config.simulcast && self.layers.rid_layers().next().is_some();
+		let (start_bitrate, desired_bitrate) = if rid_offer {
+			let all: Vec<Rid> =
+				self.layers.rid_layers().filter_map(|i| self.layers.rids[i]).collect();
+			let desired = self.desired_bitrate(Some(&all));
+			(desired, desired)
+		} else {
+			(start, self.desired_bitrate(None))
+		};
+		let options = OfferOptions {
+			start_bitrate: Some(start_bitrate),
+			desired_bitrate: Some(desired_bitrate),
+			layers: &self.layers.specs,
+		};
+		let config = match self.viewers.get(&viewer.0) {
+			Some(slot) => slot.fallback.apply(&self.config),
+			None => self.config.clone(),
+		};
+		match Peer::offer_now(&config, &id, &options) {
 			Ok((peer, sdp)) => {
+				// Voelin viewers learn the layers and may pick one (other
+				// clients skip the attribute); not with RID simulcast, where
+				// a viewer gets them all.
+				let sdp = if self.layers.len() > 1 && !rid_offer {
+					layer::add_to_sdp(&sdp, &self.layers.specs)
+				} else {
+					sdp
+				};
 				if let Some(slot) = self.viewers.get_mut(&viewer.0) {
 					slot.peer = Some(peer);
 					slot.state = ViewerState::Connecting;
+					// A reconnecting viewer keeps the layer it asked for.
+					slot.choice = LayerChoice::new(slot.pinned.unwrap_or(layer));
+					slot.codec = None;
+					slot.rids = None;
+					slot.estimate = None;
+					slot.srtp_profile = None;
 				}
 				out.request(if reconnect {
 					Request::Signal { id, peer: viewer, signal: Signal::Offer { sdp, reconnect } }
@@ -470,6 +957,7 @@ impl StreamerSession {
 			}
 		}
 		self.emit_viewers(out);
+		self.update_targets(out);
 	}
 
 	/// Accept or deny a pending join request.
@@ -485,7 +973,7 @@ impl StreamerSession {
 			_ => return Err(SessionError::NoRequest(viewer.0)),
 		}
 		if accept {
-			self.offer(viewer, false, out).await;
+			self.offer(viewer, false, out);
 		} else {
 			self.viewers.remove(&viewer.0);
 			out.request(Request::Respond { id, viewer, offer: None, accept: false });
@@ -512,6 +1000,7 @@ impl StreamerSession {
 			out.request(Request::RemoveViewer { id: id.clone(), viewer, reason });
 		}
 		self.emit_viewers(out);
+		self.update_targets(out);
 	}
 
 	/// End the stream (`stopstream`).
@@ -532,18 +1021,119 @@ impl StreamerSession {
 		out.event(StreamEvent::Streamer(StreamerEvent::Ended(reason)));
 	}
 
-	/// Send an encoded frame to every connected viewer.
-	pub fn write(&self, kind: MediaKind, time: MediaTime, data: Arc<[u8]>) {
-		for slot in self.viewers.values() {
-			if let (ViewerState::Connected, Some(peer)) = (slot.state, &slot.peer) {
-				peer.write(kind, time, data.clone());
+	/// Use a new layer list: viewers move to the layers their estimates
+	/// allow (at the next keyframe of their new layer, which is requested),
+	/// connections probe for the new bitrates. Peers with RID simulcast keep
+	/// the RIDs their answer took.
+	pub fn set_layers(&mut self, layers: Vec<LayerSpec>, out: &mut Outbox) {
+		let old: Vec<LayerId> = self.layers.specs.iter().map(|s| s.id).collect();
+		self.layers = LayerTable::new(&layers, setup_bitrate(&self.options.setup));
+		self.options.layers = layers;
+		self.feedback.prepare(self.layers.specs.iter().map(|s| s.id));
+		for id in old {
+			if self.layers.index(id).is_none() {
+				self.feedback.set_bitrate(id, None);
 			}
+		}
+		let start = self.start_bitrate();
+		let mut keyframes = LayerSet::new();
+		for slot in self.viewers.values_mut() {
+			slot.pinned = slot.pinned.filter(|l| self.layers.index(*l).is_some());
+			if slot.peer.is_none() {
+				let fitting = self.layers.specs[self.layers.fitting(start)].id;
+				slot.choice = LayerChoice::new(slot.pinned.unwrap_or(fitting));
+				continue;
+			}
+			if slot.rids.is_none() {
+				let fitting = self.layers.fitting(slot.estimate.unwrap_or(start));
+				slot.choice.up_since = None;
+				let target = slot.pinned.unwrap_or(self.layers.specs[fitting].id);
+				if let Some(layer) = slot.choice.switch_to(target) {
+					keyframes.insert(layer);
+				}
+				if slot.connected() {
+					keyframes.insert(slot.choice.target());
+				}
+			}
+		}
+		let desired: Vec<(u16, u64)> = self
+			.viewers
+			.iter()
+			.filter(|(_, v)| v.peer.is_some())
+			.map(|(c, v)| (*c, self.desired_bitrate(v.rids.as_deref())))
+			.collect();
+		for (client, bitrate) in desired {
+			if let Some(peer) = self.viewers.get(&client).and_then(|v| v.peer.as_ref()) {
+				peer.set_desired_bitrate(bitrate);
+			}
+		}
+		for layer in keyframes.iter() {
+			self.keyframe_request(layer, out);
+		}
+		self.emit_viewers(out);
+		self.update_targets(out);
+	}
+
+	/// Send an encoded frame: audio to every connected viewer, video to the
+	/// viewers of its layer (with its RID to peers with RID simulcast).
+	pub fn write_frame(&mut self, frame: &EncodedFrame, out: &mut Outbox) {
+		self.write_frame_in(frame, None, out);
+	}
+
+	/// [`write_frame`](Self::write_frame) for video encoded in `format`
+	/// (`None`: whatever the viewers negotiated): only viewers whose answer
+	/// chose that codec and H.264 profile get it.
+	pub fn write_frame_in(
+		&mut self,
+		frame: &EncodedFrame,
+		format: Option<VideoFormat>,
+		out: &mut Outbox,
+	) {
+		let (kind, time, layer) = (frame.kind, frame.time, frame.layer);
+		let rid = match kind {
+			MediaKind::Video => self.layers.index(layer).and_then(|i| self.layers.rids[i]),
+			MediaKind::Audio => None,
+		};
+		let mut switched = false;
+		for slot in self.viewers.values_mut() {
+			let (ViewerState::Connected, Some(peer)) = (slot.state, &slot.peer) else {
+				continue;
+			};
+			if kind == MediaKind::Audio {
+				peer.write(kind, time, frame.data.clone());
+				continue;
+			}
+			if let (Some(format), Some(negotiated)) = (format, slot.codec)
+				&& format != negotiated
+			{
+				continue;
+			}
+			match &slot.rids {
+				Some(rids) => {
+					if let Some(rid) = rid
+						&& rids.contains(&rid)
+					{
+						peer.write_rid(kind, time, frame.data.clone(), Some(rid));
+					}
+				}
+				None => {
+					let (send, now_on_layer) = slot.choice.frame(layer, frame.keyframe);
+					switched |= now_on_layer;
+					if send {
+						peer.write(kind, time, frame.data.clone());
+					}
+				}
+			}
+		}
+		if switched {
+			self.emit_viewers(out);
+			self.update_targets(out);
 		}
 	}
 
 	/// Whether any viewer is connected (frames are dropped otherwise).
 	pub fn has_connected_viewers(&self) -> bool {
-		self.viewers.values().any(|v| v.state == ViewerState::Connected)
+		self.viewers.values().any(ViewerSlot::connected)
 	}
 
 	/// A command of this session failed on the server.
@@ -558,6 +1148,7 @@ impl StreamerSession {
 			Request::Respond { viewer, accept: true, .. } => {
 				if self.viewers.remove(&viewer.0).is_some() {
 					self.emit_viewers(out);
+					self.update_targets(out);
 				}
 			}
 			other => debug!(?other, "stream command failed: {error}"),
@@ -595,16 +1186,76 @@ impl StreamerSession {
 		match event {
 			PeerEvent::Connected => {
 				slot.state = ViewerState::Connected;
+				slot.srtp_profile = slot.peer.as_ref().and_then(Peer::srtp_profile);
+				if let Some(profile) = slot.srtp_profile {
+					debug!(viewer = viewer.0, %profile, "viewer connected");
+				}
+				let layers = self.viewer_layers(viewer.0);
+				for layer in layers.iter() {
+					self.keyframe_request(layer, out);
+				}
 				self.emit_viewers(out);
-				self.keyframe_request(out);
+				self.update_targets(out);
 			}
 			PeerEvent::LocalCandidate { candidate, mid } => out.request(Request::Signal {
 				id,
 				peer: viewer,
 				signal: Signal::IceCandidate { candidate, mid, mline_index: Some(0) },
 			}),
-			PeerEvent::KeyframeRequest => self.keyframe_request(out),
-			PeerEvent::Media(_) => {}
+			PeerEvent::KeyframeRequest => {
+				let layers = self.viewer_layers(viewer.0);
+				for layer in layers.iter() {
+					self.keyframe_request(layer, out);
+				}
+			}
+			PeerEvent::LayerKeyframeRequest(rid) => {
+				if let Some(i) = self.layers.rid_index(rid) {
+					self.keyframe_request(self.layers.specs[i].id, out);
+				}
+			}
+			PeerEvent::BitrateEstimate(bitrate) => {
+				self.viewer_estimate(viewer, bitrate, Instant::now(), out);
+			}
+			PeerEvent::Simulcast(rids) => {
+				debug!(viewer = viewer.0, ?rids, "viewer takes RID simulcast");
+				let desired = self.desired_bitrate(Some(&rids));
+				if let Some(slot) = self.viewers.get_mut(&viewer.0) {
+					if let Some(peer) = &slot.peer {
+						peer.set_desired_bitrate(desired);
+					}
+					slot.rids = Some(rids);
+				}
+			}
+			PeerEvent::VideoCodec(format) => {
+				debug!(viewer = viewer.0, %format, "viewer's video codec");
+				slot.codec = Some(format);
+				self.emit_viewers(out);
+			}
+			PeerEvent::NoFeedback => {
+				// Its SRTP fails, or nothing reaches it: offer a new
+				// connection with the next lower set. A Voelin viewer steps
+				// down by itself first (it waits half as long).
+				let profile = slot.peer.as_ref().and_then(Peer::srtp_profile);
+				let left = profile.and_then(|p| slot.fallback.without_srtp(&self.config, p));
+				match (profile, left) {
+					(Some(profile), Some(left)) => {
+						warn!(
+							viewer = viewer.0,
+							"connected, but the viewer reports none of our video; offering a \
+							 new connection without SRTP {profile} (left: {})",
+							list(&left)
+						);
+						self.offer(viewer, true, out);
+					}
+					_ => warn!(
+						viewer = viewer.0,
+						?profile,
+						"connected, but the viewer reports none of our video; nothing left to \
+						 fall back to"
+					),
+				}
+			}
+			PeerEvent::Media(_) | PeerEvent::LayerMedia { .. } | PeerEvent::NoVideo { .. } => {}
 			PeerEvent::Closed => {
 				// The viewer may ask for a new offer (`reconnect`); it stays
 				// until it leaves.
@@ -612,23 +1263,123 @@ impl StreamerSession {
 					debug!(viewer = viewer.0, "viewer connection closed");
 					slot.state = ViewerState::Connecting;
 					self.emit_viewers(out);
+					self.update_targets(out);
 				}
 			}
 		}
 	}
 
-	fn keyframe_request(&mut self, out: &mut Outbox) {
-		let now = Instant::now();
-		if self.last_keyframe_request.is_some_and(|t| now.duration_since(t) < KEYFRAME_INTERVAL) {
-			return;
+	/// The layers `viewer` receives.
+	fn viewer_layers(&self, viewer: u16) -> LayerSet {
+		let Some(slot) = self.viewers.get(&viewer) else { return LayerSet::new() };
+		match &slot.rids {
+			Some(rids) => (0..self.layers.len())
+				.filter(|i| self.layers.rids[*i].is_some_and(|r| rids.contains(&r)))
+				.map(|i| self.layers.specs[i].id)
+				.collect(),
+			None => [slot.choice.layer].into_iter().collect(),
 		}
-		self.last_keyframe_request = Some(now);
-		out.event(StreamEvent::Streamer(StreamerEvent::KeyframeRequest));
 	}
 
-	fn emit_viewers(&self, out: &mut Outbox) {
+	/// A new bandwidth estimate of `viewer`'s connection.
+	fn viewer_estimate(&mut self, viewer: ClientId, bitrate: u64, now: Instant, out: &mut Outbox) {
+		let Some(slot) = self.viewers.get_mut(&viewer.0) else { return };
+		slot.estimate = Some(bitrate);
+		let (keyframe, affected) = match &slot.rids {
+			Some(_) => (None, None),
+			None => {
+				let keyframe = if self.layers.len() > 1 && slot.pinned.is_none() {
+					slot.choice.estimate(&self.layers, bitrate, now)
+				} else {
+					None
+				};
+				(keyframe, self.layers.index(slot.choice.layer))
+			}
+		};
+		if let Some(layer) = keyframe {
+			debug!(viewer = viewer.0, bitrate, layer, "viewer switches layers");
+			self.keyframe_request(layer, out);
+			self.emit_viewers(out);
+		} else if self.last_viewers_event.is_none_or(|t| now.duration_since(t) >= STATS_INTERVAL) {
+			self.emit_viewers(out);
+		}
+		match affected {
+			Some(i) => self.update_target(i, out),
+			None => self.update_targets(out),
+		}
+	}
+
+	/// A viewer of `layer` needs a keyframe; requests of a layer closer
+	/// together than [`KEYFRAME_INTERVAL`] are merged.
+	fn keyframe_request(&mut self, layer: LayerId, out: &mut Outbox) {
+		let Some(i) = self.layers.index(layer) else { return };
+		let now = Instant::now();
+		let last = &mut self.layers.last_keyframe_request[i];
+		if last.is_some_and(|t| now.duration_since(t) < KEYFRAME_INTERVAL) {
+			return;
+		}
+		*last = Some(now);
+		self.feedback.request_keyframe(layer);
+		out.event(StreamEvent::Streamer(StreamerEvent::KeyframeRequest { layer }));
+	}
+
+	/// The bitrate target of layer `index`: the lowest estimate (or RID
+	/// share) of its connected viewers, at least [`MIN_VIDEO_BITRATE`], at
+	/// most the layer's `max_bitrate`.
+	fn layer_target(&self, index: usize) -> Option<u64> {
+		let id = self.layers.specs[index].id;
+		let lowest = self
+			.viewers
+			.values()
+			// A viewer that picked its layer takes it as it is: a slow one
+			// must not lower the picture of everyone else on that layer.
+			.filter(|v| v.connected() && v.pinned.is_none())
+			.filter_map(|v| {
+				let estimate = v.estimate?;
+				match &v.rids {
+					Some(rids) => self.layers.rid_share(rids, estimate, index),
+					None => (v.choice.layer == id).then_some(estimate),
+				}
+			})
+			.min()?;
+		let max = self.layers.specs[index].max_bitrate.unwrap_or(u64::MAX);
+		Some(lowest.max(MIN_VIDEO_BITRATE).min(max))
+	}
+
+	fn update_target(&mut self, index: usize, out: &mut Outbox) {
+		let target = self.layer_target(index);
+		let layer = self.layers.specs[index].id;
+		self.feedback.set_bitrate(layer, target);
+		let reported = &mut self.layers.reported[index];
+		match (target, *reported) {
+			(None, _) => *reported = None,
+			(Some(new), Some(old)) if new.abs_diff(old) <= old / BITRATE_REPORT_STEP => {}
+			(Some(bitrate), _) => {
+				*reported = Some(bitrate);
+				out.event(StreamEvent::Streamer(StreamerEvent::LayerBitrate { layer, bitrate }));
+			}
+		}
+	}
+
+	fn update_targets(&mut self, out: &mut Outbox) {
+		for i in 0..self.layers.len() {
+			self.update_target(i, out);
+		}
+	}
+
+	fn emit_viewers(&mut self, out: &mut Outbox) {
+		// Every change of the viewers comes through here: the encoders learn
+		// which codecs are needed now.
+		self.feedback
+			.set_codecs(self.viewers.values().filter(|v| v.peer.is_some()).filter_map(|v| v.codec));
+		self.last_viewers_event = Some(Instant::now());
 		out.event(StreamEvent::Streamer(StreamerEvent::Viewers(self.viewers())));
 	}
+}
+
+/// The video bitrate of a stream setup in bit/s.
+fn setup_bitrate(setup: &StreamSetup) -> u64 {
+	u64::from(setup.bitrate) * 1000
 }
 
 /// State of a stream we watch.
@@ -651,6 +1402,18 @@ pub struct ViewerSession {
 	state: WatchState,
 	peer: Option<Peer>,
 	reconnects: u32,
+	/// The RID simulcast layer we play, if the streamer sends several.
+	layer_rid: Option<Rid>,
+	/// The layers the streamer's offer listed; `None`: it listed none (not
+	/// a Voelin streamer, or one layer), so we never ask for one.
+	layers: Option<Vec<LayerSpec>>,
+	/// The layer we asked for; `None`: the streamer's estimate decides.
+	layer: Option<LayerId>,
+	/// The streamer's last offer, and the codec our answer took from it.
+	offer: Option<String>,
+	codec: Option<VideoCodec>,
+	/// What our connections leave out after one carried nothing.
+	fallback: Fallback,
 }
 
 impl ViewerSession {
@@ -672,6 +1435,12 @@ impl ViewerSession {
 			state: WatchState::Requested,
 			peer: None,
 			reconnects: 0,
+			layer_rid: None,
+			layers: None,
+			layer: None,
+			offer: None,
+			codec: None,
+			fallback: Fallback::default(),
 		}
 	}
 
@@ -718,6 +1487,22 @@ impl ViewerSession {
 				}
 			}
 			StreamNotification::Signaling { json, .. } => match Signal::parse(json) {
+				// A new offer on the running connection (the official client
+				// re-offers when it does not encode the codec we chose) is
+				// answered by the same peer; `reconnectOffer` starts a new one.
+				Ok(Signal::Offer { sdp, reconnect: false }) if self.peer.is_some() => {
+					let peer = self.peer.as_ref().expect("checked above");
+					match peer.renegotiate(&sdp).await {
+						Ok(answer) => {
+							self.codec = offered_video_codecs(&answer).first().copied();
+							self.offer = Some(sdp);
+							self.signal(Signal::Answer { sdp: answer }, out);
+						}
+						Err(e) => {
+							self.fail(format!("cannot answer the streamer's new offer: {e}"), out)
+						}
+					}
+				}
 				Ok(Signal::Offer { sdp, .. }) => self.answer(&sdp, out).await,
 				Ok(Signal::IceCandidate { candidate, .. }) => {
 					if let Some(peer) = &self.peer {
@@ -737,11 +1522,21 @@ impl ViewerSession {
 
 	/// Answer an offer (the first one or a `reconnectOffer`) with a new peer.
 	async fn answer(&mut self, offer: &str, out: &mut Outbox) {
-		match Peer::answer(&self.config, offer).await {
+		match Peer::answer(&self.fallback.apply(&self.config), offer).await {
 			Ok((peer, sdp)) => {
 				self.peer = Some(peer);
 				self.state = WatchState::Connecting;
+				// The streamer sends the first codec of our answer.
+				self.codec = offered_video_codecs(&sdp).first().copied();
+				self.offer = Some(offer.to_owned());
 				self.signal(Signal::Answer { sdp }, out);
+				let layers = layer::from_sdp(offer).filter(|l| l.len() > 1);
+				if layers != self.layers {
+					self.layer =
+						self.layer.filter(|id| layers.iter().flatten().any(|l| l.id == *id));
+					self.layers = layers;
+					self.event(WatchEvent::Layers(self.layers.clone().unwrap_or_default()), out);
+				}
 			}
 			Err(e) => self.fail(format!("cannot answer the streamer's offer: {e}"), out),
 		}
@@ -749,6 +1544,11 @@ impl ViewerSession {
 
 	fn signal(&self, signal: Signal, out: &mut Outbox) {
 		out.request(Request::Signal { id: self.id.clone(), peer: self.streamer, signal });
+	}
+
+	/// The peer configuration for connections made from now on.
+	pub fn set_config(&mut self, config: PeerConfig) {
+		self.config = config;
 	}
 
 	/// Stop watching (or withdraw the request).
@@ -764,6 +1564,82 @@ impl ViewerSession {
 	pub fn request_keyframe(&self) {
 		if let Some(peer) = &self.peer {
 			peer.request_keyframe();
+		}
+	}
+
+	/// The layers the streamer offers to choose from (see
+	/// [`WatchEvent::Layers`]).
+	pub fn layers(&self) -> &[LayerSpec] {
+		self.layers.as_deref().unwrap_or_default()
+	}
+
+	/// The layer we asked for ([`set_layer`](Self::set_layer)).
+	pub fn layer(&self) -> Option<LayerId> {
+		self.layer
+	}
+
+	/// Ask the streamer for simulcast layer `layer` (`None`: let our
+	/// bandwidth estimate decide again). Only if its offer listed layers:
+	/// other streamers never get the request.
+	pub fn set_layer(
+		&mut self,
+		layer: Option<LayerId>,
+		out: &mut Outbox,
+	) -> Result<(), SessionError> {
+		let layers = self.layers.as_ref().ok_or_else(|| SessionError::NoLayers(self.id.clone()))?;
+		if let Some(id) = layer
+			&& !layers.iter().any(|l| l.id == id)
+		{
+			return Err(SessionError::UnknownLayer(self.id.clone(), id));
+		}
+		self.layer = layer;
+		self.signal(Signal::Layer { layer }, out);
+		Ok(())
+	}
+
+	/// The media of this connection does not get through (`why`): ask for a
+	/// new connection with the next lower set ([`Fallback`]): without the
+	/// SRTP profile this one negotiated when `srtp` (nothing came at all),
+	/// else (or when no other profile is left) without its video codec.
+	fn fall_back(&mut self, srtp: bool, why: &str, out: &mut Outbox) {
+		let config = self.fallback.apply(&self.config);
+		let profile = self.peer.as_ref().and_then(Peer::srtp_profile);
+		let mut step = None;
+		if srtp && let Some(profile) = profile {
+			step = self
+				.fallback
+				.without_srtp(&config, profile)
+				.map(|left| format!("without SRTP {profile} (left: {})", list(&left)));
+		}
+		if step.is_none()
+			&& let Some(codec) = self.codec
+		{
+			let offered: Vec<VideoCodec> =
+				offered_video_codecs(self.offer.as_deref().unwrap_or(""))
+					.into_iter()
+					.filter(|c| config.accept_video_codecs.contains(c))
+					.collect();
+			step = self
+				.fallback
+				.without_codec(&offered, codec)
+				.map(|left| format!("without {codec} (left: {})", list(&left)));
+		}
+		let Some(step) = step else {
+			warn!(stream = self.id, "{why}; nothing left to fall back to");
+			return;
+		};
+		warn!(stream = self.id, "{why}; asking for a new connection {step}");
+		self.peer = None;
+		self.state = WatchState::Connecting;
+		self.signal(Signal::Reconnect, out);
+	}
+
+	/// Video arrives, but none of it decodes here (the app's decoders told
+	/// [`Streams::video_undecodable`]): a new connection without its codec,
+	/// if the streamer offered another we take.
+	pub fn video_undecodable(&mut self, out: &mut Outbox) {
+		if self.state == WatchState::Connected {
+			self.fall_back(false, "video arrives, but none of it decodes", out);
 		}
 	}
 
@@ -840,7 +1716,24 @@ impl ViewerSession {
 				self.signal(Signal::IceCandidate { candidate, mid, mline_index: Some(0) }, out);
 			}
 			PeerEvent::Media(frame) => self.event(WatchEvent::Frame(frame), out),
-			PeerEvent::KeyframeRequest => {}
+			// A streamer offered RID simulcast: play one layer, the first that arrives.
+			PeerEvent::LayerMedia { rid, frame } => {
+				if *self.layer_rid.get_or_insert(rid) == rid {
+					self.event(WatchEvent::Frame(frame), out);
+				}
+			}
+			PeerEvent::NoVideo { audio: false } => {
+				self.fall_back(true, "connected, but nothing arrives", out);
+			}
+			PeerEvent::NoVideo { audio: true } => {
+				self.fall_back(false, "connected, but no video arrives (audio does)", out);
+			}
+			PeerEvent::KeyframeRequest
+			| PeerEvent::LayerKeyframeRequest(_)
+			| PeerEvent::BitrateEstimate(_)
+			| PeerEvent::Simulcast(_)
+			| PeerEvent::VideoCodec(_)
+			| PeerEvent::NoFeedback => {}
 			PeerEvent::Closed => {
 				if self.peer.take().is_none() {
 					return;
@@ -868,9 +1761,12 @@ pub struct Streams {
 	own: ClientId,
 	config: PeerConfig,
 	directory: StreamDirectory,
+	discovery: Discovery,
 	streamer: Option<StreamerSession>,
 	viewers: BTreeMap<String, ViewerSession>,
 	out: Outbox,
+	/// The stream whose viewer count was asked for last.
+	counted: Option<String>,
 }
 
 impl Streams {
@@ -880,9 +1776,11 @@ impl Streams {
 			own,
 			config,
 			directory: StreamDirectory::default(),
+			discovery: Discovery::new(own),
 			streamer: None,
 			viewers: BTreeMap::new(),
 			out: Outbox::default(),
+			counted: None,
 		}
 	}
 
@@ -892,6 +1790,11 @@ impl Streams {
 
 	pub fn directory(&self) -> &StreamDirectory {
 		&self.directory
+	}
+
+	/// The clients' channels as of [`Self::update_clients`].
+	pub fn discovery(&self) -> &Discovery {
+		&self.discovery
 	}
 
 	/// Our stream, while it has not ended.
@@ -939,15 +1842,57 @@ impl Streams {
 		streamer.ok_or(SessionError::NotStreaming)?.kick(viewer, &mut self.out)
 	}
 
-	/// Send an encoded frame of our stream to all connected viewers.
-	pub fn write(&self, kind: MediaKind, time: MediaTime, data: impl Into<Arc<[u8]>>) {
-		if let Some(s) = self.streamer() {
-			s.write(kind, time, data.into());
+	/// Send an encoded frame of our stream (layer 0) to all connected viewers.
+	pub fn write(&mut self, kind: MediaKind, time: MediaTime, data: impl Into<Arc<[u8]>>) {
+		let frame = EncodedFrame { kind, time, data: data.into(), layer: 0, keyframe: false };
+		self.write_frame(&frame);
+	}
+
+	/// Send an encoded frame of our stream: audio to every connected viewer,
+	/// video to the viewers of its layer.
+	pub fn write_frame(&mut self, frame: &EncodedFrame) {
+		self.write_frame_in(frame, None);
+	}
+
+	/// [`write_frame`](Self::write_frame) of video encoded in `format`: to
+	/// the viewers that negotiated it (see
+	/// [`StreamerSession::write_frame_in`]).
+	pub fn write_frame_in(&mut self, frame: &EncodedFrame, format: Option<VideoFormat>) {
+		if let Some(s) = self.streamer.as_mut().filter(|s| !s.is_ended()) {
+			s.write_frame_in(frame, format, &mut self.out);
 		}
 	}
 
-	pub fn write_frame(&self, frame: &EncodedFrame) {
-		self.write(frame.kind, frame.time, frame.data.clone());
+	/// Change the simulcast layers of our stream while it runs (see
+	/// [`StreamerSession::set_layers`]).
+	pub fn set_layers(&mut self, layers: Vec<crate::LayerSpec>) -> Result<(), SessionError> {
+		let streamer = self.streamer.as_mut().filter(|s| !s.is_ended());
+		streamer.ok_or(SessionError::NotStreaming)?.set_layers(layers, &mut self.out);
+		Ok(())
+	}
+
+	/// The peer configuration of new connections.
+	pub fn peer_config(&self) -> &PeerConfig {
+		&self.config
+	}
+
+	/// Use `config` for connections made from now on (our stream's viewers,
+	/// streams we watch); existing connections keep theirs.
+	pub fn set_peer_config(&mut self, config: PeerConfig) {
+		if let Some(s) = &mut self.streamer {
+			s.config = config.clone();
+		}
+		for v in self.viewers.values_mut() {
+			v.set_config(config.clone());
+		}
+		self.config = config;
+	}
+
+	/// The SRTP profile order of new connections (a user setting); see
+	/// [`PeerConfig::srtp_profiles`].
+	pub fn set_srtp_profiles(&mut self, profiles: Vec<crate::SrtpProfile>) {
+		let config = PeerConfig { srtp_profiles: profiles, ..self.config.clone() };
+		self.set_peer_config(config);
 	}
 
 	/// Watch a stream from the directory.
@@ -998,6 +1943,28 @@ impl Streams {
 		}
 	}
 
+	/// Watch simulcast layer `layer` of a stream (`None`: as our bandwidth
+	/// allows); see [`ViewerSession::set_layer`].
+	pub fn set_watch_layer(
+		&mut self,
+		id: &str,
+		layer: Option<LayerId>,
+	) -> Result<(), SessionError> {
+		let viewer =
+			self.viewers.get_mut(id).ok_or_else(|| SessionError::NotWatching(id.into()))?;
+		viewer.set_layer(layer, &mut self.out)
+	}
+
+	/// The video of a watched stream arrives, but none of it decodes: watch
+	/// it in another codec the streamer offered, if there is one (see
+	/// [`ViewerSession::video_undecodable`]).
+	pub fn video_undecodable(&mut self, id: &str) -> Result<(), SessionError> {
+		let viewer =
+			self.viewers.get_mut(id).ok_or_else(|| SessionError::NotWatching(id.into()))?;
+		viewer.video_undecodable(&mut self.out);
+		Ok(())
+	}
+
 	/// Reconnect to a watched stream: the streamer sends a new offer.
 	pub fn reconnect(&mut self, id: &str) -> Result<(), SessionError> {
 		let viewer =
@@ -1019,7 +1986,10 @@ impl Streams {
 
 	/// Feed a stream notification from the connection.
 	pub async fn handle_notification(&mut self, n: StreamNotification) {
-		if self.directory.apply(&n) {
+		// Looked up streams of clients that have left the server since.
+		let gone = matches!(&n, StreamNotification::Info(info)
+			if !self.discovery.knows(info.streamer));
+		if !gone && self.directory.apply(&n) {
 			self.emit_streams();
 		}
 		if let Some(s) = &mut self.streamer
@@ -1049,11 +2019,58 @@ impl Streams {
 		}
 	}
 
+	/// The clients on the server changed (full list, with ourselves): keeps
+	/// the directory to the streams of clients that are on the server and
+	/// stream, in any channel, and looks up the streams the server did not
+	/// announce to us (see [`crate::discovery`]). Covers
+	/// [`Self::set_client_streaming`] and [`Self::retain_streamers`].
+	pub fn update_clients(&mut self, clients: BTreeMap<u16, ClientState>) {
+		if self.discovery.update(clients, &mut self.directory, &mut self.out) {
+			self.emit_streams();
+		}
+	}
+
+	/// A stream found by another [`StreamLookup`] (e.g. a gateway's directory).
+	pub fn discovered(&mut self, info: StreamInfo) {
+		if self.discovery.knows(info.streamer)
+			&& self.directory.apply(&StreamNotification::Info(info))
+		{
+			self.emit_streams();
+		}
+	}
+
+	/// Another place to look up unannounced streams, after the server.
+	pub fn add_lookup(&mut self, lookup: Box<dyn StreamLookup>) {
+		self.discovery.add_lookup(lookup);
+	}
+
+	/// Ask the server for the viewer count of the next stream of another
+	/// client in our channel, round robin: one `requeststreaminfo` per call,
+	/// so a few calls a minute keep the counts close without flooding the
+	/// server however many stream. Viewers leaving are only announced to the
+	/// streamer and themselves (see [`StreamDirectory::apply`]).
+	pub fn refresh_viewer_counts(&mut self) {
+		let (own, last) = (self.own, self.counted.take());
+		let others = || self.directory.iter().filter(|s| s.streamer != own);
+		let next = others()
+			.find(|s| last.as_ref().is_some_and(|last| s.id > *last))
+			.or_else(|| others().next())
+			.map(|s| (s.id.clone(), s.streamer));
+		let Some((id, streamer)) = next else { return };
+		if self.discovery.ask_server(streamer, &mut self.out) {
+			self.counted = Some(id);
+		}
+	}
+
 	/// A request from [`Output::Request`] failed on the server.
 	pub fn request_failed(&mut self, request: &Request, error: &str) {
 		let watched = match request {
 			Request::Join { id, .. } | Request::Leave { id, .. } | Request::Signal { id, .. } => {
 				self.viewers.get_mut(id)
+			}
+			Request::StreamInfo { .. } => {
+				self.discovery.failed(request, error);
+				return;
 			}
 			_ => None,
 		};
@@ -1142,6 +2159,7 @@ mod tests {
 			bitrate: 4608,
 			viewer_limit: 0,
 			audio: true,
+			viewers: Some(0),
 		}
 	}
 
@@ -1206,7 +2224,7 @@ mod tests {
 		let config = PeerConfig::loopback();
 		let mut s = Streams::new(OWN, config.clone());
 		let setup = StreamSetup { name: "t".into(), ..Default::default() };
-		s.start(StreamerOptions { setup, auto_accept: false }).unwrap();
+		s.start(StreamerOptions { setup, auto_accept: false, ..Default::default() }).unwrap();
 		assert_eq!(s.start(StreamerOptions::default()), Err(SessionError::AlreadyStreaming));
 		let (requests, _) = drain(&mut s);
 		assert_eq!(
@@ -1266,9 +2284,10 @@ mod tests {
 		let events =
 			until(&mut s, |e| viewers(e) == Some(vec![(20, ViewerState::Connected)])).await;
 		assert!(
-			events
-				.iter()
-				.any(|e| matches!(e, StreamEvent::Streamer(StreamerEvent::KeyframeRequest))),
+			events.iter().any(|e| matches!(
+				e,
+				StreamEvent::Streamer(StreamerEvent::KeyframeRequest { layer: 0 })
+			)),
 			"a new viewer needs a keyframe"
 		);
 		// Frames reach the viewer.
@@ -1535,5 +2554,400 @@ mod tests {
 		assert!(d.apply(&started("c", ClientId(3), false)));
 		assert!(d.apply(&stopped("c")));
 		assert!(!d.apply(&join(ClientId(3), false)));
+	}
+
+	#[tokio::test]
+	async fn viewer_counts() {
+		let joined = |id: &str| StreamNotification::ViewerJoined { id: id.into(), viewer: OTHER };
+		let left = |id: &str| StreamNotification::ViewerLeft {
+			id: id.into(),
+			viewer: OTHER,
+			reason: Some(LeaveReason::None),
+		};
+		let mut d = StreamDirectory::default();
+		assert!(d.apply(&started("a", ClientId(1), false)));
+		assert_eq!(d.get("a").unwrap().viewers, Some(0));
+		assert!(d.apply(&joined("a")) && d.apply(&joined("a")) && d.apply(&left("a")));
+		assert_eq!(d.get("a").unwrap().viewers, Some(1));
+		// The server's count replaces ours; never below zero.
+		let counted = StreamInfo { viewers: Some(5), ..info("a", ClientId(1)) };
+		assert!(d.apply(&StreamNotification::Info(counted)));
+		assert_eq!(d.get("a").unwrap().viewers, Some(5));
+		let unknown = StreamInfo { viewers: None, ..info("a", ClientId(1)) };
+		assert!(d.apply(&StreamNotification::Info(unknown)));
+		assert!(!d.apply(&joined("a")) && !d.apply(&left("x")));
+		assert!(d.apply(&started("z", ClientId(1), false)) && !d.apply(&left("z")));
+
+		// Asked for one stream of another client at a time, round robin.
+		let mut s = Streams::new(OWN, PeerConfig::loopback());
+		for (id, streamer) in [("a", OWN), ("b", ClientId(2)), ("c", ClientId(3))] {
+			s.handle_notification(StreamNotification::Info(info(id, streamer))).await;
+		}
+		let _ = drain(&mut s);
+		let mut asked = Vec::new();
+		for _ in 0..3 {
+			s.refresh_viewer_counts();
+			asked.extend(drain(&mut s).0.into_iter().map(|r| match r {
+				Request::StreamInfo { streamer } => streamer.0,
+				other => panic!("{other:?}"),
+			}));
+		}
+		assert_eq!(asked, [2, 3, 2]);
+	}
+
+	/// Layers for the simulcast tests: 0 needs 2 Mbit/s, 1 needs 600 kbit/s
+	/// (at most 1.2 Mbit/s), 2 is the fallback.
+	fn three_layers() -> Vec<LayerSpec> {
+		vec![
+			LayerSpec { id: 0, min_bitrate: 2_000_000, ..LayerSpec::single(4_000_000) },
+			LayerSpec {
+				id: 1,
+				scale: 0.5,
+				min_bitrate: 600_000,
+				max_bitrate: Some(1_200_000),
+				..LayerSpec::single(1_000_000)
+			},
+			LayerSpec { id: 2, scale: 0.25, ..LayerSpec::single(300_000) },
+		]
+	}
+
+	fn streamer_events(out: &mut Outbox) -> Vec<StreamerEvent> {
+		let mut events = Vec::new();
+		while let Some(o) = out.pop() {
+			if let Output::Event(StreamEvent::Streamer(e)) = o {
+				events.push(e);
+			}
+		}
+		events
+	}
+
+	fn keyframe_layers(events: &[StreamerEvent]) -> Vec<LayerId> {
+		let layers = events.iter().filter_map(|e| match e {
+			StreamerEvent::KeyframeRequest { layer } => Some(*layer),
+			_ => None,
+		});
+		layers.collect()
+	}
+
+	fn bitrates(events: &[StreamerEvent]) -> Vec<(LayerId, u64)> {
+		let bitrates = events.iter().filter_map(|e| match e {
+			StreamerEvent::LayerBitrate { layer, bitrate } => Some((*layer, *bitrate)),
+			_ => None,
+		});
+		bitrates.collect()
+	}
+
+	#[test]
+	fn layer_table() {
+		// The list order does not matter; the ladder goes by min_bitrate.
+		let mut layers = three_layers();
+		layers.rotate_left(1);
+		layers.push(LayerSpec { id: 1, ..LayerSpec::single(1) });
+		let table = LayerTable::new(&layers, 0);
+		assert_eq!(table.len(), 3, "duplicate id dropped");
+		let ids = |i: &usize| table.specs[*i].id;
+		assert_eq!(table.ladder.iter().map(ids).collect::<Vec<_>>(), [0, 1, 2]);
+		assert_eq!(ids(&table.fitting(10_000_000)), 0);
+		assert_eq!(ids(&table.fitting(2_000_000)), 0);
+		assert_eq!(ids(&table.fitting(1_999_999)), 1);
+		assert_eq!(ids(&table.fitting(100)), 2);
+		assert_eq!(table.cap(table.index(1).unwrap()), 1_200_000);
+		// Without layers: one layer 0 at the setup's bitrate.
+		let single = LayerTable::new(&[], 4_608_000);
+		assert_eq!((single.len(), single.specs[0].id, single.specs[0].bitrate), (1, 0, 4_608_000));
+		assert_eq!(single.fitting(0), 0);
+	}
+
+	#[test]
+	fn rid_shares() {
+		let mut layers = three_layers();
+		for (l, rid) in layers.iter_mut().zip(["f", "h", "q"]) {
+			l.rid = Some(rid.into());
+		}
+		let table = LayerTable::new(&layers, 0);
+		let rids: Vec<Rid> = ["f", "h", "q"].map(Rid::from).to_vec();
+		let share = |estimate, id| table.rid_share(&rids, estimate, table.index(id).unwrap());
+		// From the bottom up: q gets its 300k, h up to its 1.2M, f the rest.
+		assert_eq!(share(5_000_000, 2), Some(300_000));
+		assert_eq!(share(5_000_000, 1), Some(1_200_000));
+		assert_eq!(share(5_000_000, 0), Some(3_500_000));
+		assert_eq!(share(1_000_000, 1), Some(700_000));
+		assert_eq!(share(1_000_000, 0), Some(0));
+		// A peer that took only f and q.
+		let two = [Rid::from("f"), Rid::from("q")];
+		assert_eq!(table.rid_share(&two, 1_000_000, table.index(1).unwrap()), None);
+		assert_eq!(table.rid_share(&two, 1_000_000, table.index(0).unwrap()), Some(700_000));
+	}
+
+	#[test]
+	fn layer_choice_hysteresis() {
+		let table = LayerTable::new(&three_layers(), 0);
+		let t0 = Instant::now();
+		let mut c = LayerChoice::new(0);
+		// Enough for layer 0: stay.
+		assert_eq!(c.estimate(&table, 3_000_000, t0), None);
+		// Below its minimum: switch down at once, to the layer that fits.
+		assert_eq!(c.estimate(&table, 1_000_000, t0), Some(1));
+		assert_eq!((c.layer, c.pending, c.target()), (0, Some(1), 1));
+		// Asked again: no new keyframe request.
+		assert_eq!(c.estimate(&table, 900_000, t0), None);
+		// Until a keyframe of layer 1, layer 0 is sent.
+		assert_eq!(c.frame(1, false), (false, false));
+		assert_eq!(c.frame(0, false), (true, false));
+		assert_eq!(c.frame(0, true), (true, false));
+		assert_eq!(c.frame(1, true), (true, true));
+		assert_eq!((c.layer, c.pending), (1, None));
+		assert_eq!(c.frame(0, true), (false, false));
+		assert_eq!(c.frame(1, false), (true, false));
+		// Just above layer 0's minimum is not enough to go up (margin) ...
+		assert_eq!(c.estimate(&table, 2_300_000, t0), None);
+		assert_eq!(c.up_since, None);
+		// ... 2.5 Mbit/s is, but only after UP_DELAY.
+		assert_eq!(c.estimate(&table, 2_500_000, t0), None);
+		assert_eq!(c.estimate(&table, 2_500_000, t0 + UP_DELAY / 2), None);
+		// A dip restarts the wait.
+		assert_eq!(c.estimate(&table, 2_000_000, t0 + UP_DELAY / 2), None);
+		let t1 = t0 + UP_DELAY;
+		assert_eq!(c.estimate(&table, 2_500_000, t1), None);
+		assert_eq!(c.estimate(&table, 2_500_000, t1 + UP_DELAY), Some(0));
+		assert_eq!(c.target(), 0);
+		// Falling back before the keyframe cancels the switch without a request.
+		assert_eq!(c.estimate(&table, 1_000_000, t1 + UP_DELAY), None);
+		assert_eq!((c.layer, c.pending), (1, None));
+		// Down to the last layer, and no lower.
+		assert_eq!(c.estimate(&table, 100_000, t1), Some(2));
+		assert_eq!(c.frame(2, true), (true, true));
+		assert_eq!(c.estimate(&table, 1, t1), None);
+		// The layer went away (new list): move to what fits.
+		let table = LayerTable::new(&three_layers()[..2], 0);
+		assert_eq!(c.estimate(&table, 100_000, t1), Some(1));
+	}
+
+	/// A streamer with `layers` and connected viewers (without peers) on
+	/// the given layers.
+	fn streamer_with(layers: Vec<LayerSpec>, viewers: &[(u16, LayerId)]) -> StreamerSession {
+		let mut out = Outbox::default();
+		let options = StreamerOptions { layers, ..Default::default() };
+		let mut s = StreamerSession::start(OWN, options, PeerConfig::loopback(), &mut out);
+		s.id = Some("s-1".into());
+		for (client, layer) in viewers {
+			let mut slot = ViewerSlot::new(String::new());
+			slot.state = ViewerState::Connected;
+			slot.choice = LayerChoice::new(*layer);
+			s.viewers.insert(*client, slot);
+		}
+		s
+	}
+
+	#[test]
+	fn layer_bitrates_and_keyframes() {
+		let mut s = streamer_with(three_layers(), &[(20, 0), (21, 0), (22, 1)]);
+		let mut out = Outbox::default();
+		let now = Instant::now();
+		let feedback = s.layer_feedback().clone();
+		assert_eq!(feedback.bitrate(0), None);
+
+		// The lowest estimate of a layer's viewers, no cap without max_bitrate.
+		s.viewer_estimate(ClientId(20), 9_000_000, now, &mut out);
+		assert_eq!(bitrates(&streamer_events(&mut out)), [(0, 9_000_000)]);
+		s.viewer_estimate(ClientId(21), 3_000_000, now, &mut out);
+		assert_eq!(bitrates(&streamer_events(&mut out)), [(0, 3_000_000)]);
+		// Small changes update the target, but are not reported.
+		s.viewer_estimate(ClientId(21), 3_100_000, now, &mut out);
+		assert!(bitrates(&streamer_events(&mut out)).is_empty());
+		assert_eq!(feedback.bitrate(0), Some(3_100_000));
+		assert_eq!(s.layer_bitrate(0), Some(3_100_000));
+		// Layer 1 is capped at its max_bitrate.
+		s.viewer_estimate(ClientId(22), 1_500_000, now, &mut out);
+		assert_eq!(bitrates(&streamer_events(&mut out)), [(1, 1_200_000)]);
+		// A viewer that moves to another layer counts there once it switched.
+		s.viewer_estimate(ClientId(21), 1_000_000, now, &mut out);
+		let events = streamer_events(&mut out);
+		assert_eq!(keyframe_layers(&events), [1], "keyframe of the new layer");
+		assert_eq!(bitrates(&events), [(0, 1_000_000)], "still on layer 0");
+		assert_eq!(s.viewers()[1].layer, None, "no peer in this test");
+		assert_eq!(s.viewers[&21].choice.pending, Some(1));
+		s.viewers.get_mut(&21).unwrap().choice.frame(1, true);
+		s.update_targets(&mut out);
+		assert_eq!(bitrates(&streamer_events(&mut out)), [(0, 9_000_000), (1, 1_000_000)]);
+		// Never below MIN_VIDEO_BITRATE.
+		s.viewer_estimate(ClientId(22), 10_000, now, &mut out);
+		s.viewer_estimate(ClientId(21), 10_000, now, &mut out);
+		assert_eq!(feedback.bitrate(1), Some(MIN_VIDEO_BITRATE));
+		let _ = streamer_events(&mut out);
+
+		// Keyframe requests go to the viewer's layer, merged per layer.
+		let _ = feedback.take_any_keyframe();
+		s.peer_event(ClientId(20), PeerEvent::KeyframeRequest, &mut out);
+		s.peer_event(ClientId(20), PeerEvent::KeyframeRequest, &mut out);
+		s.peer_event(ClientId(22), PeerEvent::KeyframeRequest, &mut out);
+		assert_eq!(keyframe_layers(&streamer_events(&mut out)), [0]);
+		let mut layers = LayerSet::new();
+		feedback.take_keyframes(&mut layers);
+		assert_eq!(layers.iter().collect::<Vec<_>>(), [0]);
+		// Viewer 22 is still on layer 1 (switching to 2); layer 1 was
+		// requested for viewer 21's switch just before.
+		s.layers.last_keyframe_request.fill(None);
+		s.peer_event(ClientId(22), PeerEvent::KeyframeRequest, &mut out);
+		assert_eq!(keyframe_layers(&streamer_events(&mut out)), [1]);
+
+		// Viewers leave: their layers lose their targets.
+		s.viewers.clear();
+		s.update_targets(&mut out);
+		assert_eq!((feedback.bitrate(0), feedback.bitrate(1)), (None, None));
+	}
+
+	#[test]
+	fn single_layer_never_switches() {
+		let mut s = streamer_with(Vec::new(), &[(20, 0)]);
+		let mut out = Outbox::default();
+		s.viewer_estimate(ClientId(20), 50_000, Instant::now(), &mut out);
+		let events = streamer_events(&mut out);
+		assert!(keyframe_layers(&events).is_empty());
+		assert_eq!(bitrates(&events), [(0, 50_000)]);
+		assert_eq!(s.viewers[&20].choice, LayerChoice::new(0));
+		assert_eq!(s.layers(), [LayerSpec::single(4_608_000)]);
+	}
+
+	#[tokio::test]
+	async fn new_layer_list_reassigns_viewers() {
+		let mut s = streamer_with(three_layers(), &[(20, 0), (21, 2), (22, 0)]);
+		// 20 and 21 have connections, 22 none yet.
+		for client in [20, 21] {
+			let (peer, _) = Peer::offer(&PeerConfig::loopback(), "s-1").await.unwrap();
+			s.viewers.get_mut(&client).unwrap().peer = Some(peer);
+		}
+		s.viewers.get_mut(&22).unwrap().state = ViewerState::Requested;
+		let mut out = Outbox::default();
+		let now = Instant::now();
+		s.viewer_estimate(ClientId(20), 2_500_000, now, &mut out);
+		s.viewer_estimate(ClientId(21), 250_000, now, &mut out);
+		let _ = streamer_events(&mut out);
+		assert_eq!(s.layer_feedback().bitrate(2), Some(250_000));
+
+		// Layer 2 is gone, layer 1 needs less now, layer 5 is new.
+		let mut layers = three_layers();
+		layers.truncate(2);
+		layers[1].min_bitrate = 200_000;
+		layers.push(LayerSpec { id: 5, ..LayerSpec::single(100_000) });
+		s.set_layers(layers, &mut out);
+		let events = streamer_events(&mut out);
+		assert_eq!(s.layers().len(), 3);
+		assert_eq!(s.viewers[&20].choice, LayerChoice::new(0), "still fits");
+		assert_eq!((s.viewers[&21].choice.layer, s.viewers[&21].choice.pending), (2, Some(1)));
+		assert_eq!(keyframe_layers(&events), [0, 1], "the connected viewers' layers");
+		assert_eq!(s.viewers[&22].choice, LayerChoice::new(0), "starts on the top layer");
+		assert_eq!(s.layer_feedback().bitrate(2), None, "removed layer");
+		assert_eq!(bitrates(&events), [(0, 2_500_000)]);
+	}
+
+	/// Two viewers on real loopback connections: one moves to layer 1 and
+	/// gets its frames from the next keyframe on, the other stays on layer 0.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn layer_switching_over_loopback() {
+		// Estimates are injected; the connections' own would interfere.
+		let config = PeerConfig { bandwidth_estimation: false, ..PeerConfig::loopback() };
+		let mut s = Streams::new(OWN, config);
+		let layers = three_layers()[..2].to_vec();
+		s.start(StreamerOptions { auto_accept: true, layers, ..Default::default() }).unwrap();
+		s.handle_notification(started("s-1", OWN, true)).await;
+		let mut peers = Vec::new();
+		for client in [20, 21] {
+			s.handle_notification(join(ClientId(client), false)).await;
+			let (requests, _) = drain(&mut s);
+			let offer = requests
+				.iter()
+				.find_map(|r| match r {
+					Request::Respond { offer: Some(sdp), .. } => Some(sdp.clone()),
+					_ => None,
+				})
+				.unwrap();
+			let (peer, answer) = Peer::answer(&PeerConfig::loopback(), &offer).await.unwrap();
+			s.handle_notification(signaling(ClientId(client), &Signal::Answer { sdp: answer }))
+				.await;
+			peers.push(peer);
+		}
+		let connected = vec![(20, ViewerState::Connected), (21, ViewerState::Connected)];
+		until(&mut s, |e| viewers(e) == Some(connected.clone())).await;
+		let info = s.streamer().unwrap().viewers();
+		assert_eq!(info.iter().map(|v| v.layer).collect::<Vec<_>>(), [Some(0), Some(0)]);
+		assert!(
+			info.iter().all(|v| v.srtp_profile == Some(SrtpProfile::Aes128CmSha1_80)),
+			"{info:?}"
+		);
+
+		let frame = |seq: u64, layer: LayerId, keyframe: bool| EncodedFrame {
+			kind: MediaKind::Video,
+			time: MediaTime::from_90khz(seq * 3000),
+			data: SyntheticSource::layer_frame(seq, layer, 1500).into(),
+			layer,
+			keyframe,
+		};
+		let mut seq = 0;
+		// Both get layer 0.
+		let received = |peer: &mut Peer| {
+			let mut frames = Vec::new();
+			while let Some(e) = peer.try_next_event() {
+				if let PeerEvent::Media(f) = e
+					&& f.kind == MediaKind::Video
+				{
+					frames.push((f.data[22], SyntheticSource::frame_layer(&f.data).unwrap()));
+				}
+			}
+			frames
+		};
+		timeout(Duration::from_secs(10), async {
+			let mut got = [false, false];
+			while got != [true, true] {
+				seq += 1;
+				s.write_frame(&frame(seq, 0, true));
+				tokio::time::sleep(Duration::from_millis(50)).await;
+				for (i, peer) in peers.iter_mut().enumerate() {
+					got[i] |= !received(peer).is_empty();
+				}
+			}
+		})
+		.await
+		.expect("no video at the viewers");
+		tokio::time::sleep(Duration::from_millis(200)).await;
+		for peer in &mut peers {
+			let _ = received(peer);
+		}
+
+		// Viewer 21's estimate drops below layer 0's minimum.
+		let streamer = s.streamer.as_mut().unwrap();
+		streamer.viewer_estimate(ClientId(21), 1_000_000, Instant::now(), &mut s.out);
+		let (_, events) = drain(&mut s);
+		assert!(events.iter().any(|e| matches!(
+			e,
+			StreamEvent::Streamer(StreamerEvent::KeyframeRequest { layer: 1 })
+		)));
+		let first = seq + 1;
+		for (layer, keyframe) in [(1, false), (0, false), (1, true), (0, false), (1, false)] {
+			seq += 1;
+			s.write_frame(&frame(seq, layer, keyframe));
+			tokio::time::sleep(Duration::from_millis(30)).await;
+		}
+		let seq = |n: u64| (first + n) as u8;
+		let mut got = [Vec::new(), Vec::new()];
+		timeout(Duration::from_secs(5), async {
+			while got[0].len() < 2 || got[1].len() < 3 {
+				for (i, peer) in peers.iter_mut().enumerate() {
+					got[i].extend(received(peer));
+				}
+				tokio::time::sleep(Duration::from_millis(20)).await;
+			}
+		})
+		.await
+		.unwrap_or_else(|_| panic!("frames: {got:?}"));
+		assert_eq!(got[0], [(seq(1), 0), (seq(3), 0)]);
+		assert_eq!(got[1], [(seq(1), 0), (seq(2), 1), (seq(4), 1)]);
+		let (_, events) = drain(&mut s);
+		let info = s.streamer().unwrap().viewers();
+		assert_eq!(info.iter().map(|v| v.layer).collect::<Vec<_>>(), [Some(0), Some(1)]);
+		assert!(
+			events.iter().any(|e| matches!(e, StreamEvent::Streamer(StreamerEvent::Viewers(_))))
+		);
+		assert_eq!(s.streamer().unwrap().layer_bitrate(1), Some(1_000_000));
 	}
 }

@@ -7,16 +7,27 @@
 //   offer {codec, trickle} send canvas video + oscillator audio; offer with
 //                         `codec` preferred -> {sdp} or {unsupported};
 //                         with `trickle` the SDP has no candidates
+//   reoffer {codec}       a new offer on the running connection with `codec`
+//                         preferred (a renegotiation) -> {sdp} or {unsupported}
 //   candidates            candidates gathered so far -> {candidates: [{candidate, sdpMid, sdpMLineIndex}]}
 //   accept {sdp}          apply the answer to our offer
 //   candidate {candidate, sdpMid, sdpMLineIndex}   add a remote candidate
-//   stats                 connection state, inbound/outbound RTP counters,
-//                         frames shown by a <video> element
+//   stats                 connection state, inbound/outbound RTP counters
+//                         (incl. the decoder and decoded frame size),
+//                         frames shown by a <video> element, the DTLS/SRTP
+//                         parameters of the transport
 //   quit
 'use strict';
 
 const readline = require('node:readline');
-const { chromium } = require('playwright');
+// Playwright, or playwright-core driving a browser it did not download
+// (`VOELIN_CHROMIUM`, e.g. a system Chromium that decodes H.264).
+let chromium;
+try {
+	({ chromium } = require('playwright'));
+} catch {
+	({ chromium } = require('playwright-core'));
+}
 
 // Runs in the page.
 const PAGE_SCRIPT = `
@@ -114,6 +125,19 @@ window.peer = {
 		return { sdp };
 	},
 
+	// A new offer on the running connection with the codec preferred, as the
+	// official client sends when it re-aligns its codec.
+	async reoffer({ codec }) {
+		const pc = this.pc;
+		const transceiver = pc.getTransceivers().find((t) => t.sender.track && t.sender.track.kind === 'video');
+		const all = RTCRtpSender.getCapabilities('video').codecs;
+		const wanted = all.filter((c) => c.mimeType.toLowerCase() === 'video/' + codec.toLowerCase());
+		if (wanted.length === 0) return { unsupported: codec };
+		transceiver.setCodecPreferences([...wanted, ...all.filter((c) => !wanted.includes(c))]);
+		await pc.setLocalDescription(await pc.createOffer());
+		return { sdp: pc.localDescription.sdp };
+	},
+
 	async candidates() {
 		await gathered(this.pc, 3000);
 		return { candidates: this.localCandidates };
@@ -134,10 +158,12 @@ window.peer = {
 		const codecs = {};
 		const inbound = {};
 		const outbound = {};
+		let transport = {};
 		report.forEach((s) => {
 			if (s.type === 'codec') codecs[s.id] = s.mimeType;
 			if (s.type === 'inbound-rtp') inbound[s.kind] = s;
 			if (s.type === 'outbound-rtp') outbound[s.kind] = s;
+			if (s.type === 'transport') transport = s;
 		});
 		const pick = (s, keys) => {
 			const o = { codec: codecs[s.codecId] };
@@ -145,8 +171,10 @@ window.peer = {
 			return o;
 		};
 		const out = { connectionState: this.pc.connectionState, shownFrames: this.shownFrames, inbound: {}, outbound: {} };
+		out.transport = {};
+		['dtlsState', 'dtlsRole', 'tlsVersion', 'dtlsCipher', 'srtpCipher'].forEach((k) => (out.transport[k] = transport[k]));
 		for (const k in inbound) {
-			out.inbound[k] = pick(inbound[k], ['packetsReceived', 'bytesReceived', 'packetsLost', 'framesReceived', 'framesDecoded', 'keyFramesDecoded', 'pliCount', 'totalSamplesReceived']);
+			out.inbound[k] = pick(inbound[k], ['packetsReceived', 'bytesReceived', 'packetsLost', 'framesReceived', 'framesDecoded', 'keyFramesDecoded', 'framesDropped', 'frameWidth', 'frameHeight', 'decoderImplementation', 'freezeCount', 'pliCount', 'totalSamplesReceived']);
 		}
 		for (const k in outbound) {
 			out.outbound[k] = pick(outbound[k], ['packetsSent', 'bytesSent', 'framesEncoded', 'keyFramesEncoded', 'pliCount']);
@@ -162,13 +190,16 @@ window.peer = {
 `;
 
 async function main() {
+	const args = ['--autoplay-policy=no-user-gesture-required'];
+	// Real host candidates instead of mDNS names (no getUserMedia permission
+	// here), unless the test is about mDNS names (VOELIN_BROWSER_MDNS=1).
+	if (process.env.VOELIN_BROWSER_MDNS !== '1') {
+		args.push('--disable-features=WebRtcHideLocalIpsWithMdns');
+	}
 	const browser = await chromium.launch({
 		headless: true,
-		args: [
-			// Real host candidates instead of mDNS names (no getUserMedia permission here).
-			'--disable-features=WebRtcHideLocalIpsWithMdns',
-			'--autoplay-policy=no-user-gesture-required',
-		],
+		executablePath: process.env.VOELIN_CHROMIUM || undefined,
+		args,
 	});
 	const page = await browser.newPage();
 	page.on('console', (m) => process.stderr.write('[page] ' + m.text() + '\n'));

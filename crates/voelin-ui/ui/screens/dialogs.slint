@@ -1,0 +1,657 @@
+// Dialogs: add/edit a server, share the screen, a client's volume, About.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Bridge, BookmarkForm, ShareForm } from "../bridge.slint";
+import { Nav, Page } from "../nav.slint";
+import { Icon, Button, ButtonKind, IconButton, TextField, Field, Select, Toggle, ToggleRow, Slider, Modal, Card, Chip, Banner, Avatar, Status, ListView, ScrollView } from "../components/index.slint";
+import { AboutSlint } from "std-widgets.slint";
+import { StudioBridge } from "../studio-bridge.slint";
+import { MixerRow, PickDialog } from "studio-parts.slint";
+
+// Buttons at the bottom right of a dialog.
+component Footer inherits HorizontalLayout {
+    alignment: end;
+    spacing: Theme.space-3;
+}
+
+// Add or edit a server: its address and, if it has one, its password; the
+// rest under Advanced (name, nickname, gateway, ServerQuery), which Voelin
+// fills in itself when left empty.
+export component BookmarkDialog inherits Modal {
+    in-out property <BookmarkForm> form;
+    // Join by address: connect once saved.
+    in property <bool> join;
+    callback done();
+    // The fields beyond address and password: shown when editing.
+    property <bool> advanced: form.id >= 0;
+    title: join ? @tr("Join a server") : form.id < 0 ? @tr("Add server") : @tr("Edit server");
+    subtitle: @tr("Only the address is needed; Voelin finds the rest.");
+    icon: Icons.server;
+    card-width: 560px;
+    // Fits the address and password (two lines more on a phone).
+    card-height: advanced ? 720px : Nav.narrow ? 360px : 330px;
+    dismissed => { done(); }
+    ScrollView {
+        vertical-stretch: 1;
+        VerticalLayout {
+            alignment: start;
+            spacing: Theme.space-4;
+            padding-right: Theme.space-3;
+            Field {
+                label: @tr("Address");
+                hint: @tr("Host name, IP address or server nickname; a port only if the server needs one.");
+                TextField { text <=> form.address; placeholder: "ts.example.org"; label: @tr("Address"); icon: Icons.globe; }
+            }
+            Field {
+                label: @tr("Server password (optional)");
+                TextField { text <=> form.server-password; input-type: InputType.password; label: @tr("Server password"); icon: Icons.lock; }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-3;
+                Button {
+                    kind: ButtonKind.ghost;
+                    small: true;
+                    icon: root.advanced ? Icons.chevron-down : Icons.chevron-right;
+                    text: @tr("Advanced");
+                    clicked => { root.advanced = !root.advanced; }
+                }
+                Text {
+                    text: @tr("Name, nickname, gateway, ServerQuery");
+                    color: Theme.text-muted;
+                    font-size: Theme.font-sm;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+            }
+            if root.advanced: VerticalLayout {
+                spacing: Theme.space-4;
+                Field {
+                    label: @tr("Name");
+                    hint: @tr("Empty: the address, then the server's own name once connected.");
+                    TextField { text <=> form.name; placeholder: @tr("The server's name"); label: @tr("Name"); }
+                }
+                Field {
+                    label: @tr("Nickname");
+                    hint: @tr("Empty: the nickname of your identity.");
+                    TextField { text <=> form.nickname; label: @tr("Nickname"); icon: Icons.user; }
+                }
+                Text {
+                    text: @tr("Invisible presence and chat without joining");
+                    font-weight: Theme.weight-semibold;
+                    color: Theme.text;
+                    wrap: word-wrap;
+                }
+                Field {
+                    label: @tr("Gateway URL");
+                    hint: @tr("Empty: looked up in DNS, as published by the server's admin.");
+                    TextField { text <=> form.gateway-url; placeholder: @tr("Found automatically"); label: @tr("Gateway URL"); }
+                }
+                HorizontalLayout {
+                    spacing: Theme.space-4;
+                    Field {
+                        label: @tr("Query transport");
+                        Select {
+                            model: ["none", "ssh", "raw", "http"];
+                            current-value <=> form.query-transport;
+                            current-index: form.query-transport == "ssh" ? 1 : form.query-transport == "raw" ? 2 : form.query-transport == "http" ? 3 : 0;
+                            label: @tr("Query transport");
+                        }
+                    }
+                    Field {
+                        label: @tr("Query address");
+                        TextField { text <=> form.query-addr; placeholder: "ts.example.org:10022"; label: @tr("Query address"); }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: Theme.space-4;
+                    Field {
+                        label: @tr("Query login");
+                        TextField { text <=> form.query-user; label: @tr("Query login"); }
+                    }
+                    Field {
+                        label: @tr("Query password");
+                        TextField { text <=> form.query-password; input-type: InputType.password; label: @tr("Query password"); }
+                    }
+                }
+            }
+        }
+    }
+    Footer {
+        if form.id >= 0: Button {
+            kind: ButtonKind.danger;
+            icon: Icons.trash-2;
+            text: @tr("Delete");
+            clicked => {
+                Bridge.delete-bookmark(form.id);
+                done();
+            }
+        }
+        Rectangle { horizontal-stretch: 1; }
+        Button {
+            text: @tr("Cancel");
+            clicked => { done(); }
+        }
+        Button {
+            kind: ButtonKind.primary;
+            text: root.join ? @tr("Join") : form.id < 0 ? @tr("Add") : @tr("Save");
+            enabled: form.address != "";
+            clicked => {
+                Bridge.save-bookmark(form);
+                if root.join {
+                    Bridge.connect-voice();
+                    Nav.show(Page.server);
+                }
+                done();
+            }
+        }
+    }
+}
+
+// A capture source as a selectable card.
+component SourceCard inherits Rectangle {
+    in property <string> name;
+    in property <string> detail;
+    in property <bool> selected;
+    callback clicked();
+    height: 52px;
+    border-radius: Theme.radius-md;
+    background: selected ? Theme.accent-soft : touch.has-hover ? Theme.surface-3 : Theme.surface-2;
+    border-width: 1px;
+    border-color: selected ? Theme.accent : Theme.border;
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: name;
+    accessible-description: detail;
+    accessible-item-selectable: true;
+    accessible-item-selected: selected;
+    accessible-action-default => { clicked(); }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: Theme.space-4;
+        padding-right: Theme.space-4;
+        spacing: Theme.space-3;
+        Icon {
+            source: Icons.monitor;
+            tint: root.selected ? Theme.accent-text : Theme.icon;
+            y: (parent.height - self.height) / 2;
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.name;
+                color: Theme.text;
+                font-weight: Theme.weight-medium;
+                overflow: elide;
+            }
+            if root.detail != "": Text {
+                text: root.detail;
+                color: Theme.text-muted;
+                font-size: Theme.font-xs;
+                overflow: elide;
+            }
+        }
+        Rectangle {
+            width: 18px;
+            height: 18px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 9px;
+            border-width: 2px;
+            border-color: root.selected ? Theme.accent : Theme.border-strong;
+            if root.selected: Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: Theme.accent;
+            }
+        }
+    }
+}
+
+// The stream's audio: the Stream Studio's mixer rows (`stream.audio_sources`,
+// levels while live) and Add, which opens its picker.
+component ShareAudio inherits VerticalLayout {
+    callback add();
+    spacing: Theme.space-1;
+    HorizontalLayout {
+        spacing: Theme.space-2;
+        Text {
+            text: @tr("Audio sources");
+            color: Theme.text-secondary;
+            font-size: Theme.font-sm;
+            font-weight: Theme.weight-semibold;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Button {
+            small: true;
+            icon: Icons.plus;
+            text: @tr("Add");
+            clicked => { root.add(); }
+        }
+    }
+    if StudioBridge.audio.length == 0: Text {
+        text: @tr("No audio: add your microphone, the desktop or an application.");
+        color: Theme.text-muted;
+        font-size: Theme.font-sm;
+        wrap: word-wrap;
+    }
+    // Three rows at a time.
+    if StudioBridge.audio.length > 0: ListView {
+        height: min(StudioBridge.audio.length, 3) * 56px;
+        accessible-label: @tr("Audio sources");
+        for audio[i] in StudioBridge.audio: MixerRow {
+            audio: audio;
+            index: i;
+            compact: true;
+            phone: Nav.narrow;
+        }
+    }
+}
+
+component ShareCard inherits Modal {
+    in-out property <ShareForm> form;
+    callback done();
+    callback pick-audio();
+    property <bool> live: Bridge.share-state == "live" || Bridge.share-state == "starting";
+    title: Bridge.share-state == "live" ? @tr("You are sharing your screen") : Bridge.share-state == "starting" ? @tr("Starting…") : @tr("Share screen");
+    subtitle: live ? Bridge.share-status : @tr("Stream to the people in your channel.");
+    icon: Icons.radio;
+    card-width: 600px;
+    card-height: 860px;
+    dismissed => { done(); }
+
+    if live: VerticalLayout {
+        spacing: Theme.space-4;
+        vertical-stretch: 1;
+        Text {
+            text: @tr("Viewers");
+            font-weight: Theme.weight-semibold;
+            color: Theme.text;
+        }
+        if Bridge.share-viewers.length == 0: Text {
+            text: @tr("Nobody is watching yet. Viewers in your channel can join from their streams list.");
+            color: Theme.text-muted;
+            wrap: word-wrap;
+        }
+        ListView {
+            vertical-stretch: 1;
+            accessible-label: @tr("Viewers");
+            for viewer in Bridge.share-viewers: HorizontalLayout {
+                padding-top: Theme.space-2;
+                padding-bottom: Theme.space-2;
+                spacing: Theme.space-3;
+                VerticalLayout {
+                    alignment: center;
+                    Avatar {
+                        size: 32px;
+                        initials: "";
+                        status: viewer.state == "connected" ? Status.online : viewer.state == "requested" ? Status.idle : Status.offline;
+                        Icon {
+                            source: Icons.user;
+                            size: 16px;
+                            tint: #ffffff;
+                        }
+                    }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    Text {
+                        text: viewer.name;
+                        color: Theme.text;
+                        font-weight: Theme.weight-semibold;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: viewer.state == "requested" ? (viewer.message == "" ? @tr("asks to watch") : @tr("asks to watch: {}", viewer.message)) : viewer.state == "connecting" ? @tr("connecting") : @tr("watching");
+                        font-size: Theme.font-sm;
+                        color: viewer.state == "requested" ? Theme.warning : viewer.state == "connected" ? Theme.success : Theme.text-muted;
+                        overflow: elide;
+                    }
+                }
+                if viewer.state == "requested": Button {
+                    small: true;
+                    kind: ButtonKind.primary;
+                    text: @tr("Accept");
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Bridge.respond-viewer(viewer.client, true); }
+                }
+                if viewer.state == "requested": Button {
+                    small: true;
+                    text: @tr("Deny");
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Bridge.respond-viewer(viewer.client, false); }
+                }
+                if viewer.state != "requested": Button {
+                    small: true;
+                    text: @tr("Remove");
+                    accessible-label: @tr("Remove {}", viewer.name);
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Bridge.kick-viewer(viewer.client); }
+                }
+            }
+        }
+        // Changes apply to the stream at once.
+        if Bridge.share-audio: ShareAudio {
+            add => { root.pick-audio(); }
+        }
+        if !Bridge.share-audio: Text {
+            text: @tr("This stream has no sound.");
+            color: Theme.text-muted;
+            font-size: Theme.font-sm;
+        }
+        Footer {
+            Button {
+                text: @tr("Close");
+                clicked => { done(); }
+            }
+            Button {
+                kind: ButtonKind.danger;
+                icon: Icons.square;
+                text: @tr("Stop sharing");
+                clicked => { Bridge.stop-share(); }
+            }
+        }
+    }
+    if !live: VerticalLayout {
+        spacing: Theme.space-4;
+        vertical-stretch: 1;
+        Text {
+            text: @tr("What to share");
+            font-weight: Theme.weight-semibold;
+            color: Theme.text;
+        }
+        ListView {
+            vertical-stretch: 1;
+            min-height: 120px;
+            accessible-label: @tr("What to share");
+            for source[i] in Bridge.share-sources: VerticalLayout {
+                padding-bottom: Theme.space-2;
+                SourceCard {
+                    name: source.name;
+                    detail: source.detail;
+                    selected: form.source == i;
+                    clicked => { form.source = i; }
+                }
+            }
+        }
+        Field {
+            label: @tr("Stream name");
+            TextField { text <=> form.name; label: @tr("Stream name"); }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-4;
+            Field {
+                label: @tr("Frame rate");
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    Select {
+                        // FPS_CHOICES (settings.rs).
+                        model: [@tr("15 fps"), @tr("30 fps"), @tr("60 fps"), @tr("120 fps"), @tr("144 fps"), @tr("240 fps"), @tr("320 fps")];
+                        current-index <=> form.fps-index;
+                        label: @tr("Frame rate");
+                        selected => { form.fps = [15, 30, 60, 120, 144, 240, 320][self.current-index]; }
+                    }
+                    TextField {
+                        text <=> form.fps;
+                        input-type: number;
+                        placeholder: @tr("fps");
+                        label: @tr("Frames per second");
+                        // On a phone both pairs fit side by side.
+                        width: Nav.narrow ? 60px : 80px;
+                        horizontal-stretch: 0;
+                    }
+                }
+            }
+            Field {
+                label: @tr("Quality");
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    Select {
+                        // BITRATE_CHOICES (settings.rs); Auto leaves the field empty.
+                        model: [@tr("Auto (up to 60 Mbit/s)"), @tr("Low (2.5 Mbit/s)"), @tr("Standard (4.6 Mbit/s)"), @tr("High (8 Mbit/s)"), @tr("10 Mbit/s"), @tr("20 Mbit/s"), @tr("40 Mbit/s"), @tr("Best (60 Mbit/s)")];
+                        current-index <=> form.bitrate-index;
+                        label: @tr("Quality");
+                        selected => { form.bitrate = self.current-index == 0 ? "" : "\{[0, 2500, 4608, 8000, 10000, 20000, 40000, 60000][self.current-index]}"; }
+                    }
+                    TextField {
+                        text <=> form.bitrate;
+                        input-type: number;
+                        placeholder: form.bitrate-index == 0 ? @tr("auto") : @tr("kbit/s");
+                        label: @tr("Bitrate in kbit/s");
+                        // On a phone both pairs fit side by side.
+                        width: Nav.narrow ? 60px : 80px;
+                        horizontal-stretch: 0;
+                    }
+                }
+            }
+        }
+        // Off: no audio at all.
+        ToggleRow {
+            text: @tr("Share system audio");
+            icon: Icons.volume-2;
+            checked <=> form.audio;
+        }
+        if form.audio: ShareAudio {
+            add => { root.pick-audio(); }
+        }
+        ToggleRow {
+            text: @tr("Let everyone in the channel watch without asking");
+            icon: Icons.users;
+            checked <=> form.auto-accept;
+        }
+        if Bridge.share-error != "": Banner {
+            text: Bridge.share-error;
+            tone: Theme.danger;
+            icon: Icons.circle-alert;
+        }
+        Footer {
+            Button {
+                text: @tr("Cancel");
+                clicked => { done(); }
+            }
+            Button {
+                kind: ButtonKind.primary;
+                icon: Icons.radio;
+                text: Bridge.share-busy ? @tr("Starting…") : @tr("Start sharing");
+                enabled: !Bridge.share-busy && Bridge.streams-available && Bridge.share-sources.length > 0;
+                clicked => { Bridge.start-share(form); }
+            }
+        }
+    }
+}
+
+// Share the screen or a window, with the stream's audio; the studio's
+// audio picker opens over it.
+export component ShareDialog inherits Rectangle {
+    in-out property <ShareForm> form;
+    callback done();
+    property <bool> picking;
+    ShareCard {
+        width: parent.width;
+        height: parent.height;
+        form <=> root.form;
+        done => { root.done(); }
+        pick-audio => {
+            StudioBridge.list-audio();
+            root.picking = true;
+        }
+    }
+    if root.picking: PickDialog {
+        width: parent.width;
+        height: parent.height;
+        kind: "audio";
+        done => { root.picking = false; }
+    }
+}
+
+// Local volume and mute of one client.
+export component ClientAudioDialog inherits Modal {
+    callback done();
+    title: Bridge.client-audio.name;
+    subtitle: @tr("Only changes what you hear.");
+    icon: Icons.volume-2;
+    card-width: 420px;
+    card-height: 300px;
+    dismissed => { done(); }
+    HorizontalLayout {
+        spacing: Theme.space-3;
+        Text {
+            text: @tr("Volume");
+            color: Theme.text;
+            vertical-alignment: center;
+        }
+        Slider {
+            y: (parent.height - self.height) / 2;
+            minimum: 0;
+            maximum: 400;
+            step: 5;
+            value: Bridge.client-audio.volume;
+            enabled: !Bridge.client-audio.muted;
+            label: @tr("Volume of {}", Bridge.client-audio.name);
+            changed(v) => {
+                Bridge.client-audio.volume = round(v / 5) * 5;
+                Bridge.client-audio-changed(Bridge.client-audio);
+            }
+        }
+        Text {
+            text: @tr("{}%", round(Bridge.client-audio.volume));
+            width: 48px;
+            color: Theme.text-secondary;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+        }
+    }
+    ToggleRow {
+        text: @tr("Mute for me");
+        icon: Icons.volume-x;
+        checked: Bridge.client-audio.muted;
+        toggled(on) => {
+            Bridge.client-audio.muted = on;
+            Bridge.client-audio-changed(Bridge.client-audio);
+        }
+    }
+    if Bridge.client-audio.streaming: Button {
+        kind: ButtonKind.primary;
+        icon: Icons.monitor;
+        text: @tr("Watch {}'s stream", Bridge.client-audio.name);
+        clicked => {
+            Bridge.watch-client(Bridge.client-audio.id);
+            done();
+        }
+    }
+    Rectangle { vertical-stretch: 1; }
+    Footer {
+        Button {
+            text: @tr("Reset");
+            icon: Icons.refresh-cw;
+            clicked => {
+                Bridge.client-audio.volume = 100;
+                Bridge.client-audio.muted = false;
+                Bridge.client-audio-changed(Bridge.client-audio);
+            }
+        }
+        Button {
+            kind: ButtonKind.primary;
+            text: @tr("Close");
+            clicked => { done(); }
+        }
+    }
+}
+
+// Bundled assets that need crediting where the app shows its notices.
+export component Credits inherits VerticalLayout {
+    spacing: Theme.space-2;
+    Text {
+        text: @tr("Fonts, icons and emoji");
+        font-weight: Theme.weight-semibold;
+        color: Theme.text;
+    }
+    Text {
+        text: "Inter — Copyright (c) 2016 The Inter Project Authors, SIL Open Font License 1.1.";
+        color: Theme.text-secondary;
+        font-size: Theme.font-sm;
+        wrap: word-wrap;
+    }
+    Text {
+        text: "Lucide icons — Copyright (c) Lucide Icons and Contributors, ISC License; icons from Feather Copyright (c) 2013-present Cole Bemis, MIT License.";
+        color: Theme.text-secondary;
+        font-size: Theme.font-sm;
+        wrap: word-wrap;
+    }
+    Text {
+        text: "Twemoji graphics by Twitter, Inc and other contributors, licensed under CC-BY 4.0 (https://creativecommons.org/licenses/by/4.0/).";
+        color: Theme.text-secondary;
+        font-size: Theme.font-sm;
+        wrap: word-wrap;
+    }
+}
+
+export component AboutDialog inherits Modal {
+    callback done();
+    title: Bridge.app-name + " " + Bridge.app-version;
+    subtitle: @tr("Unofficial TeamSpeak 3/6 compatible client. Not affiliated with TeamSpeak Systems GmbH.");
+    icon: Icons.logo;
+    tint-icon: false;
+    card-width: 760px;
+    card-height: 720px;
+    dismissed => { done(); }
+    HorizontalLayout {
+        spacing: Theme.space-5;
+        Rectangle {
+            width: 200px;
+            height: 110px;
+            border-radius: Theme.radius-md;
+            // AboutSlint is required by Slint's royalty-free license; it is
+            // drawn for a light background.
+            background: #ffffff;
+            AboutSlint {
+                width: 100%;
+                height: 100%;
+            }
+        }
+        Credits {
+            horizontal-stretch: 1;
+        }
+    }
+    if Bridge.h264-enabled: Text {
+        text: Bridge.h264-attribution;
+        color: Theme.text-secondary;
+        wrap: word-wrap;
+    }
+    Text {
+        text: @tr("Third-party notices");
+        font-weight: Theme.weight-semibold;
+        color: Theme.text;
+    }
+    Rectangle {
+        vertical-stretch: 1;
+        background: Theme.surface-2;
+        border-radius: Theme.radius-md;
+        border-width: 1px;
+        border-color: Theme.border;
+        ListView {
+            accessible-label: @tr("Third-party notices");
+            for line in Bridge.notices: Text {
+                x: 10px;
+                width: parent.width - 20px;
+                text: line;
+                font-size: Theme.font-xs;
+                color: Theme.text-secondary;
+                wrap: word-wrap;
+            }
+        }
+    }
+    Footer {
+        Button {
+            kind: ButtonKind.primary;
+            text: @tr("Close");
+            clicked => { done(); }
+        }
+    }
+}

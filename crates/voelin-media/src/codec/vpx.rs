@@ -1,13 +1,20 @@
 //! VP8 and VP9 through the system libvpx.
 //!
 //! Encoder settings follow libwebrtc's realtime configuration: one pass CBR,
-//! no lag, error resilient, fixed high speed (`cpu-used` 8), keyframes on
-//! request, and screen-content tuning for [`ContentHint::Screen`].
+//! no lag (`VPX_DL_REALTIME`), error resilient, keyframes only on request,
+//! and screen-content tuning for [`ContentHint::Screen`]
+//! (`VP8E_SET_SCREEN_CONTENT_MODE`, `VP9E_SET_TUNE_CONTENT`, static
+//! threshold). Threads default to the CPUs the frame size can use; VP8 gets
+//! as many token partitions, VP9 row multithreading and tile columns by
+//! width. `cpu-used` adapts to the measured encode time (see
+//! [`SpeedControl`]) unless [`EncoderConfig::speed`] fixes it. Bitrate
+//! changes apply to the running encoder, without a keyframe.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::codec::{
-	Codec, ContentHint, EncodedFrame, EncoderBackend, EncoderConfig, VideoDecoder, VideoEncoder,
+	Codec, ContentHint, EncodedChunk, EncodedFrame, EncoderBackend, EncoderConfig, VideoDecoder,
+	VideoEncoder,
 };
 use crate::convert;
 use crate::frame::{FrameData, Plane, VIDEO_CLOCK_RATE, VideoFrame};
@@ -38,18 +45,117 @@ pub fn libvpx_version() -> String {
 	raw::version()
 }
 
+/// Speed levels (bigger is faster): VP8 `cpu-used` is minus the level (a
+/// fixed speed), VP9's is the level (realtime mode).
+struct Levels {
+	slowest: i32,
+	fastest: i32,
+	/// Where adapting starts: fast, so the first seconds do not fall behind.
+	start: i32,
+}
+
+// On screen content (a probe with the desktop test pattern), VP8 levels
+// above 10 were no faster, only about 3 dB worse, and levels below 6 about
+// ten times slower for under 1 dB.
+const VP8_LEVELS: Levels = Levels { slowest: 6, fastest: 10, start: 10 };
+const VP9_LEVELS: Levels = Levels { slowest: 5, fastest: 9, start: 8 };
+
+/// Adapts the speed level to how long frames take to encode compared to
+/// the frame interval (keyframes excluded: they are always slow):
+/// - faster at once when a single frame took more than the whole interval,
+///   and when the running mean is above 75 % of it;
+/// - slower (better quality) only when the mean stayed below 35 % for a
+///   while: 15 frames, doubling (up to 16x) each time a slower level had to
+///   be undone, so it does not oscillate around a level that is too slow.
+pub struct SpeedControl {
+	level: i32,
+	slowest: i32,
+	fastest: i32,
+	/// Mean encode time in seconds.
+	mean: f64,
+	frames: u32,
+	/// Frames the mean must stay low before going slower.
+	patience: u32,
+	/// The last change went slower.
+	slowed: bool,
+}
+
+impl SpeedControl {
+	const WINDOW: u32 = 15;
+	const TOO_SLOW: f64 = 0.75;
+	const TOO_FAST: f64 = 0.35;
+
+	fn new(levels: &Levels) -> Self {
+		Self {
+			level: levels.start,
+			slowest: levels.slowest,
+			fastest: levels.fastest,
+			mean: 0.0,
+			frames: 0,
+			patience: Self::WINDOW,
+			slowed: false,
+		}
+	}
+
+	pub fn level(&self) -> i32 {
+		self.level
+	}
+
+	/// Account one encode; returns the new level if it changed.
+	pub fn update(&mut self, took: Duration, interval: Duration) -> Option<i32> {
+		if interval.is_zero() {
+			return None;
+		}
+		let took = took.as_secs_f64();
+		self.mean = if self.frames == 0 { took } else { self.mean * 0.8 + took * 0.2 };
+		self.frames += 1;
+		let budget = interval.as_secs_f64();
+		let load = self.mean / budget;
+		let faster = took > budget || (self.frames >= Self::WINDOW && load > Self::TOO_SLOW);
+		let level = if faster {
+			if self.slowed {
+				// Going slower was a mistake: wait longer next time.
+				self.patience = (self.patience * 2).min(Self::WINDOW * 16);
+			}
+			(self.level + 1).min(self.fastest)
+		} else if self.frames >= self.patience && load < Self::TOO_FAST {
+			(self.level - 1).max(self.slowest)
+		} else {
+			self.level
+		};
+		if level == self.level {
+			return None;
+		}
+		self.slowed = level < self.level;
+		self.level = level;
+		self.frames = 0;
+		Some(level)
+	}
+}
+
 /// libvpx VP8 / VP9 encoder.
 pub struct VpxEncoder {
 	codec: Codec,
 	config: EncoderConfig,
 	encoder: Option<raw::Encoder>,
 	last_pts: Option<i64>,
+	speed: SpeedControl,
 }
 
 impl VpxEncoder {
 	pub fn new(codec: Codec, config: EncoderConfig) -> Result<Self> {
 		check(codec, true)?;
-		Ok(Self { codec, config, encoder: None, last_pts: None })
+		let levels = if codec == Codec::Vp9 { &VP9_LEVELS } else { &VP8_LEVELS };
+		Ok(Self { codec, config, encoder: None, last_pts: None, speed: SpeedControl::new(levels) })
+	}
+
+	/// The libvpx `cpu-used` value in use.
+	pub fn cpu_used(&self) -> i32 {
+		match (self.config.speed, self.codec) {
+			(Some(speed), _) => speed,
+			(None, Codec::Vp9) => self.speed.level(),
+			(None, _) => -self.speed.level(),
+		}
 	}
 
 	fn error(&self, message: String) -> Error {
@@ -69,6 +175,7 @@ impl VpxEncoder {
 				keyframe_interval: self.config.keyframe_interval,
 				screen: self.config.content == ContentHint::Screen,
 				threads: self.config.threads_for(width, height),
+				speed: self.cpu_used(),
 			};
 			let encoder = raw::Encoder::new(&params).map_err(|e| self.error(e))?;
 			self.encoder = Some(encoder);
@@ -87,19 +194,47 @@ impl VideoEncoder for VpxEncoder {
 	}
 
 	fn encode(&mut self, frame: &VideoFrame, force_keyframe: bool) -> Result<Vec<EncodedFrame>> {
+		let mut frames = Vec::new();
+		self.encode_with(frame, force_keyframe, &mut |f| {
+			frames.push(EncodedFrame {
+				data: f.data.to_vec(),
+				keyframe: f.keyframe,
+				pts_90khz: f.pts_90khz,
+			});
+		})?;
+		Ok(frames)
+	}
+
+	/// Encodes straight from the frame's planes (I420 frames are not
+	/// copied) and hands out libvpx's own output buffer.
+	fn encode_with(
+		&mut self,
+		frame: &VideoFrame,
+		force_keyframe: bool,
+		out: &mut dyn FnMut(EncodedChunk<'_>),
+	) -> Result<()> {
 		let i420 = convert::to_i420(frame)?;
 		let FrameData::I420 { y, u, v } = &i420.data else {
 			unreachable!("to_i420 returns I420");
 		};
-		// libvpx needs strictly increasing timestamps.
+		// libvpx needs strictly increasing timestamps. The duration of a
+		// frame, from which CBR rate control budgets its bits, is the time
+		// since the previous one (a variable frame rate), but at least 3/4
+		// of the nominal interval: a frame whose timestamp had to be bumped
+		// (e.g. after a keyframe re-sent while the screen was still) would
+		// otherwise get almost no bits and come out as a smear.
+		let interval = VIDEO_CLOCK_RATE / u64::from(self.config.fps.max(1));
 		let mut pts = i420.pts_90khz() as i64;
-		if let Some(last) = self.last_pts
-			&& pts <= last
-		{
-			pts = last + 1;
-		}
+		let elapsed = match self.last_pts {
+			Some(last) if pts <= last => {
+				pts = last + 1;
+				0
+			}
+			Some(last) => (pts - last) as u64,
+			None => interval,
+		};
+		let duration = elapsed.clamp(interval * 3 / 4, VIDEO_CLOCK_RATE);
 		self.last_pts = Some(pts);
-		let duration = VIDEO_CLOCK_RATE / u64::from(self.config.fps.max(1));
 		let image = raw::I420 {
 			width: i420.width,
 			height: i420.height,
@@ -110,15 +245,40 @@ impl VideoEncoder for VpxEncoder {
 			uv_stride: u.stride,
 		};
 		let codec = self.codec;
-		let encoder = self.ensure_encoder(i420.width, i420.height)?;
-		let packets = encoder
-			.encode(&image, pts, duration, force_keyframe)
+		self.ensure_encoder(i420.width, i420.height)?;
+		let encoder = self.encoder.as_mut().expect("created above");
+		let started = Instant::now();
+		let mut keyframe = force_keyframe;
+		encoder
+			.encode(&image, pts, duration, force_keyframe, &mut |p| {
+				keyframe |= p.keyframe;
+				if !p.data.is_empty() {
+					out(EncodedChunk {
+						data: p.data,
+						keyframe: p.keyframe,
+						pts_90khz: p.pts as u64,
+					});
+				}
+			})
 			.map_err(|message| Error::Encoder { codec, message })?;
-		Ok(packets
-			.into_iter()
-			.filter(|p| !p.data.is_empty())
-			.map(|p| EncodedFrame { data: p.data, keyframe: p.keyframe, pts_90khz: p.pts as u64 })
-			.collect())
+		if self.config.speed.is_none() && !keyframe {
+			let budget = Duration::from_secs(1) / self.config.fps.max(1);
+			if let Some(level) = self.speed.update(started.elapsed(), budget) {
+				let cpu_used = if codec == Codec::Vp9 { level } else { -level };
+				tracing::debug!(%codec, cpu_used, "encoder speed");
+				encoder.set_speed(cpu_used).map_err(|message| Error::Encoder { codec, message })?;
+			}
+		}
+		Ok(())
+	}
+
+	fn set_fps(&mut self, fps: u32) -> Result<()> {
+		self.config.fps = fps.max(1);
+		Ok(())
+	}
+
+	fn speed(&self) -> Option<i32> {
+		Some(self.cpu_used())
 	}
 
 	fn set_bitrate(&mut self, bps: u32) -> Result<()> {
@@ -241,6 +401,66 @@ mod tests {
 		}
 		encoder.set_bitrate(300_000).unwrap();
 		assert!(!encoder.encode(&frame(3, 97, 55), false).unwrap()[0].keyframe);
+	}
+
+	#[test]
+	fn speed_follows_the_encode_time() {
+		let mut control = SpeedControl::new(&VP8_LEVELS);
+		let interval = Duration::from_millis(33);
+		// Fast encodes: slower levels (better quality) down to the slowest.
+		let mut changes = Vec::new();
+		for _ in 0..500 {
+			changes.extend(control.update(Duration::from_millis(2), interval));
+		}
+		assert_eq!(control.level(), VP8_LEVELS.slowest);
+		assert!(changes.windows(2).all(|w| w[1] == w[0] - 1), "{changes:?}");
+		// Slow encodes: faster again.
+		for _ in 0..500 {
+			control.update(Duration::from_millis(30), interval);
+		}
+		assert_eq!(control.level(), VP8_LEVELS.fastest);
+		// One frame over the budget: faster at once.
+		let mut control = SpeedControl::new(&VP9_LEVELS);
+		assert_eq!(control.update(Duration::from_millis(40), interval), Some(9));
+		// A slower level that turns out too slow makes the next try wait.
+		let mut control = SpeedControl::new(&VP8_LEVELS);
+		let mut n = 0;
+		while control.update(Duration::from_millis(2), interval).is_none() {
+			n += 1;
+		}
+		assert_eq!((n, control.level()), (14, 9));
+		assert_eq!(control.update(Duration::from_millis(40), interval), Some(10));
+		let mut n = 0;
+		while control.update(Duration::from_millis(2), interval).is_none() {
+			n += 1;
+		}
+		assert_eq!(n, 29, "patience doubled");
+		// In between: stays.
+		let level = control.level();
+		for _ in 0..100 {
+			assert!(
+				control.update(Duration::from_millis(18), interval).is_none()
+					|| level != control.level()
+			);
+		}
+	}
+
+	#[test]
+	fn borrowed_output_and_fixed_speed() {
+		let config = EncoderConfig { speed: Some(-6), ..EncoderConfig::default() };
+		let mut encoder = VpxEncoder::new(Codec::Vp8, config).unwrap();
+		assert_eq!(encoder.speed(), Some(-6));
+		let mut sizes = Vec::new();
+		for n in 0..3 {
+			encoder
+				.encode_with(&frame(n, 64, 48), false, &mut |f| {
+					sizes.push((f.data.len(), f.keyframe))
+				})
+				.unwrap();
+		}
+		assert_eq!(sizes.len(), 3);
+		assert!(sizes[0].1 && !sizes[1].1);
+		assert_eq!(VpxEncoder::new(Codec::Vp9, EncoderConfig::default()).unwrap().speed(), Some(8));
 	}
 
 	#[test]

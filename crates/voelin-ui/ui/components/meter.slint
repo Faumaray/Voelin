@@ -1,0 +1,69 @@
+import { Theme } from "../theme.slint";
+
+// The segmented audio level meter: green, then yellow, red at the top; unlit
+// segments dim. `level` is dBFS; an optional threshold marker (voice
+// activation).
+export component Meter inherits Rectangle {
+    in property <float> level: -100;
+    in property <float> threshold: -40;
+    in property <bool> show-threshold;
+    // Dimmed while nothing is sent.
+    in property <bool> active: true;
+    in property <int> segments: 20;
+    // dBFS at the left edge.
+    in property <float> floor: -70;
+    in property <length> gap: 3px;
+
+    property <float> lit: clamp((level - floor) / (0 - floor), 0, 1) * segments;
+
+    height: 10px;
+    min-width: 80px;
+    horizontal-stretch: 1;
+    accessible-role: AccessibleRole.progress-indicator;
+    accessible-label: @tr("Microphone level");
+    accessible-value: @tr("{} dB", round(level));
+    accessible-value-minimum: floor;
+    accessible-value-maximum: 0;
+
+    for i in root.segments: Rectangle {
+        property <float> part: i / root.segments;
+        x: i * (root.width + root.gap) / root.segments;
+        width: (root.width + root.gap) / root.segments - root.gap;
+        border-radius: 2px;
+        background: i < root.lit
+            ? (part >= 0.9 ? Theme.meter-high : part >= 0.7 ? Theme.meter-mid : Theme.meter-low).transparentize(root.active ? 0 : 0.45)
+            : Theme.meter-off;
+    }
+    if root.show-threshold: Rectangle {
+        x: root.width * clamp((root.threshold - root.floor) / (0 - root.floor), 0, 1) - 1px;
+        y: -3px;
+        width: 2px;
+        height: root.height + 6px;
+        border-radius: 1px;
+        background: Theme.text;
+    }
+}
+
+// Three bars that move while someone speaks (the "speaking" glyph).
+export component SpeakingBars inherits Rectangle {
+    in property <bool> active: true;
+    in property <color> tint: Theme.success;
+    property <int> phase;
+    width: 14px;
+    height: 14px;
+    Timer {
+        interval: 160ms;
+        running: root.active;
+        triggered => { root.phase = mod(root.phase + 1, 4); }
+    }
+    for i in 3: Rectangle {
+        property <float> h: !root.active ? 0.35 : mod(i + root.phase, 4) == 0 ? 1.0 : mod(i + root.phase, 4) == 1 ? 0.6 : mod(i + root.phase, 4) == 2 ? 0.8 : 0.45;
+        x: i * 5px;
+        y: root.height * (1 - h) / 2;
+        width: 3px;
+        height: root.height * h;
+        border-radius: 1.5px;
+        background: root.tint;
+        animate height, y { duration: 140ms; }
+    }
+}

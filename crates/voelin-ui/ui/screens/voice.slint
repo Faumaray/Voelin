@@ -1,0 +1,324 @@
+// The voice channel we are in: who is there (and who talks), the streams
+// in it, and the channel's chat below.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Bridge, MemberItem, StreamItem } from "../bridge.slint";
+import { Nav, SettingsSection } from "../nav.slint";
+import { Icon, IconButton, Button, ButtonKind, Avatar, LiveBadge, Chip, SpeakingBars } from "../components/index.slint";
+import { MessageList, Composer } from "chat.slint";
+
+// One person: a large avatar with a ring (green while talking, blue while
+// streaming), the muted mark, the name and what they do.
+component Participant inherits VerticalLayout {
+    in property <MemberItem> member;
+    property <length> size: 80px;
+    width: 120px;
+    spacing: Theme.space-2;
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: member.name;
+    accessible-description: member.status;
+    accessible-action-default => { Bridge.open-member(member.id); }
+    HorizontalLayout {
+        alignment: center;
+        Rectangle {
+            width: root.size + 8px;
+            height: root.size + 8px;
+            border-radius: self.width / 2;
+            border-width: member.talking || member.streaming ? 3px : 2px;
+            border-color: member.talking ? Theme.success : member.streaming ? Theme.accent : Theme.border-strong;
+            Avatar {
+                size: root.size;
+                initials: member.initials;
+                tint: member.tint;
+                image: member.avatar;
+                label: member.name;
+            }
+            // Talking, or the microphone off, at the bottom right.
+            if member.talking || member.muted || member.sound-off: Rectangle {
+                x: parent.width - self.width - 2px;
+                y: parent.height - self.height - 2px;
+                width: 26px;
+                height: 26px;
+                border-radius: 13px;
+                background: Theme.surface;
+                border-width: 2px;
+                border-color: Theme.surface;
+                if member.talking: SpeakingBars {
+                    width: 14px;
+                    height: 14px;
+                }
+                if !member.talking: Icon {
+                    source: member.sound-off ? Icons.headphone-off : Icons.mic-off;
+                    size: 15px;
+                    tint: Theme.danger;
+                }
+            }
+            TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { Bridge.open-member(member.id); }
+            }
+        }
+    }
+    HorizontalLayout {
+        alignment: center;
+        spacing: Theme.space-2;
+        Text {
+            text: member.name;
+            color: member.myself ? Theme.accent-text : Theme.text;
+            font-size: Theme.font-md;
+            font-weight: Theme.weight-medium;
+            overflow: elide;
+        }
+        if member.admin: Icon {
+            source: Icons.crown;
+            size: 15px;
+            tint: Theme.gold;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+    HorizontalLayout {
+        alignment: center;
+        spacing: Theme.space-2;
+        if member.talking: SpeakingBars {
+            width: 12px;
+            height: 12px;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: member.talking ? @tr("Speaking") : member.streaming ? @tr("Streaming") : member.away ? @tr("Away") : "";
+            color: member.talking ? Theme.success : Theme.text-secondary;
+            font-size: Theme.font-sm;
+            overflow: elide;
+        }
+        if member.streaming && !member.talking: Icon {
+            source: Icons.monitor;
+            size: 14px;
+            tint: Theme.text-secondary;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+}
+
+// A stream in the channel as a large card: LIVE, the title, who streams
+// what, and Watch.
+component StreamCard inherits Rectangle {
+    in property <StreamItem> stream;
+    height: 236px;
+    border-radius: Theme.radius-lg;
+    clip: true;
+    // Two stops: the software renderer draws a seam at a middle stop.
+    background: @linear-gradient(160deg, #26237a 0%, #0c1430 100%);
+    border-width: 1px;
+    border-color: stream.watching ? Theme.accent : Theme.border-strong;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: stream.name;
+    // The picture while we watch it (the viewer hidden behind the chat).
+    if stream.watching && Bridge.viewer-has-frame: Image {
+        width: parent.width;
+        height: parent.height;
+        source: Bridge.viewer-frame;
+        image-fit: cover;
+    }
+    if !(stream.watching && Bridge.viewer-has-frame): Icon {
+        source: stream.kind == "Camera" ? Icons.video : Icons.monitor-up;
+        size: 72px;
+        tint: #ffffff22;
+    }
+    // Darker at the bottom, for the text.
+    Rectangle {
+        y: parent.height * 0.4;
+        height: parent.height * 0.6;
+        background: @linear-gradient(180deg, #00000000 0%, #060a18e0 100%);
+    }
+    HorizontalLayout {
+        x: Theme.space-4;
+        y: Theme.space-4;
+        height: 28px;
+        spacing: Theme.space-3;
+        LiveBadge {
+            large: true;
+            y: (parent.height - self.height) / 2;
+        }
+        if stream.viewers > 0: Chip {
+            text: @tr("{} watching", stream.viewers);
+            icon: Icons.eye;
+            tint: #ffffff;
+            fill: #060a18a0;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+    HorizontalLayout {
+        padding: Theme.space-4;
+        padding-top: 0px;
+        spacing: Theme.space-3;
+        alignment: stretch;
+        VerticalLayout {
+            alignment: end;
+            horizontal-stretch: 1;
+            spacing: Theme.space-1;
+            Text {
+                text: stream.id == "" ? @tr("{} is streaming", stream.streamer) : stream.name != "" ? stream.name : @tr("Untitled stream");
+                color: #ffffff;
+                font-size: Theme.font-lg;
+                font-weight: Theme.weight-semibold;
+                overflow: elide;
+            }
+            Text {
+                text: stream.kind != "" ? stream.streamer + "  •  " + stream.kind : stream.streamer;
+                color: #ffffffc0;
+                font-size: Theme.font-body;
+                overflow: elide;
+            }
+            HorizontalLayout {
+                padding-top: Theme.space-2;
+                spacing: Theme.space-2;
+                alignment: start;
+                if stream.bitrate != "": Chip {
+                    text: stream.bitrate;
+                    tint: #ffffffe0;
+                    fill: #ffffff1a;
+                }
+                if stream.audio: Chip {
+                    text: @tr("Sound");
+                    icon: Icons.volume-2;
+                    tint: #ffffffe0;
+                    fill: #ffffff1a;
+                }
+                if stream.own: Chip {
+                    text: @tr("Your stream");
+                    tint: #ffffffe0;
+                    fill: #ffffff1a;
+                }
+            }
+        }
+        if stream.id != "" && !stream.own: VerticalLayout {
+            alignment: end;
+            Button {
+                icon: stream.watching ? Icons.monitor : Icons.external-link;
+                text: stream.watching ? @tr("Show Stream") : @tr("Watch Stream");
+                checked: true;
+                clicked => {
+                    if stream.watching {
+                        Bridge.show-viewer();
+                    } else {
+                        Bridge.watch-stream(stream.id);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The voice channel view (desktop): header, people, streams, chat.
+export component VoiceView inherits VerticalLayout {
+    // The title with the buttons beside it; the topic and the count below
+    // take the whole width.
+    HorizontalLayout {
+        padding-left: Theme.space-7;
+        padding-right: Theme.space-5;
+        padding-top: Theme.space-5;
+        padding-bottom: Theme.space-3;
+        spacing: Theme.space-5;
+        Icon {
+            source: Icons.volume-2;
+            size: 40px;
+            tint: Theme.text-secondary;
+            y: Theme.space-1;
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: Theme.space-1;
+            HorizontalLayout {
+                spacing: Theme.space-3;
+                Text {
+                    text: Bridge.own-channel;
+                    color: Theme.text;
+                    font-size: Theme.font-3xl;
+                    font-weight: Theme.weight-semibold;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                IconButton {
+                    icon: Icons.message-square;
+                    label: @tr("Chat only");
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Nav.show-voice(false); }
+                }
+                Button {
+                    icon: Icons.settings;
+                    text: @tr("Voice Settings");
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Nav.open-settings(SettingsSection.voice); }
+                }
+                Button {
+                    kind: ButtonKind.danger;
+                    icon: Icons.phone-off;
+                    text: @tr("Leave");
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        Nav.show-voice(false);
+                        Bridge.disconnect-voice();
+                    }
+                }
+            }
+            if Bridge.own-channel-topic != "": Text {
+                text: Bridge.own-channel-topic;
+                color: Theme.text-secondary;
+                font-size: Theme.font-md;
+                overflow: elide;
+            }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                alignment: start;
+                Icon {
+                    source: Icons.users;
+                    size: 16px;
+                    tint: Theme.text-secondary;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: Bridge.own-channel-limit >= 0
+                        ? @tr("{} in voice  /  {} total", Bridge.members.length, Bridge.own-channel-limit)
+                        : @tr("{} in voice", Bridge.members.length);
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-body;
+                }
+            }
+        }
+    }
+    // The people, centred, wrapping into more rows when there are many.
+    FlexboxLayout {
+        padding-left: Theme.space-6;
+        padding-right: Theme.space-6;
+        padding-top: Theme.space-3;
+        padding-bottom: Theme.space-4;
+        alignment: center;
+        spacing-horizontal: Theme.space-6;
+        spacing-vertical: Theme.space-4;
+        accessible-role: AccessibleRole.list;
+        accessible-label: @tr("In voice");
+        for member in Bridge.members: Participant {
+            member: member;
+        }
+    }
+    if Bridge.streams.length > 0: HorizontalLayout {
+        padding-left: Theme.space-6;
+        padding-right: Theme.space-6;
+        padding-bottom: Theme.space-3;
+        spacing: Theme.space-4;
+        for stream in Bridge.streams: StreamCard {
+            horizontal-stretch: 1;
+            stream: stream;
+        }
+    }
+    MessageList {
+        vertical-stretch: 1;
+        model: Bridge.messages;
+        older: true;
+    }
+    Composer {
+        placeholder: @tr("Message {}", Bridge.own-channel);
+    }
+}

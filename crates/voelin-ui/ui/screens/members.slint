@@ -1,0 +1,431 @@
+// The members panel: everyone on the server in sections (the people in our
+// voice channel or those streaming first, then each server group), a
+// search, and a card for one person.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Bridge, MemberItem } from "../bridge.slint";
+import { Nav } from "../nav.slint";
+import { Icon, IconButton, Button, ButtonKind, Avatar, Status, LiveBadge, Chip, Divider, Slider, SpeakingBars, Tooltip, SearchBox, ListView } from "../components/index.slint";
+
+// Crown, priority speaker, channel commander, recording.
+component MemberBadges inherits HorizontalLayout {
+    in property <MemberItem> member;
+    in property <length> size: 14px;
+    spacing: 3px;
+    if member.admin: Icon {
+        source: Icons.crown;
+        size: root.size;
+        tint: Theme.gold;
+        accessible-role: AccessibleRole.image;
+        accessible-label: @tr("server admin");
+    }
+    if member.priority: Icon {
+        source: Icons.star;
+        size: root.size;
+        tint: Theme.accent-text;
+        accessible-role: AccessibleRole.image;
+        accessible-label: @tr("priority speaker");
+    }
+    if member.commander: Icon {
+        source: Icons.flag;
+        size: root.size;
+        tint: Theme.info;
+        accessible-role: AccessibleRole.image;
+        accessible-label: @tr("channel commander");
+    }
+    if member.recording: Icon {
+        source: Icons.record;
+        size: root.size;
+        tint: Theme.danger;
+        accessible-role: AccessibleRole.image;
+        accessible-label: @tr("recording");
+    }
+}
+
+// The heading above the first member of a section: "Moderator — 3".
+export component GroupHeader inherits HorizontalLayout {
+    in property <MemberItem> member;
+    padding-top: Theme.space-5;
+    padding-bottom: Theme.space-2;
+    padding-left: Theme.space-2;
+    spacing: Theme.space-2;
+    if member.group-icon.width > 0: Image {
+        width: 16px;
+        height: 16px;
+        source: member.group-icon;
+        y: (parent.height - self.height) / 2;
+    }
+    Text {
+        text: member.group-count > 0 ? @tr("{} — {}", member.group, member.group-count) : member.group;
+        color: Theme.text-secondary;
+        font-size: Theme.font-md;
+        font-weight: Theme.weight-medium;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+        overflow: elide;
+    }
+}
+
+// One person in the panel: avatar, name with badges and role, what they
+// are doing.
+export component MemberRow inherits Rectangle {
+    in property <MemberItem> member;
+    height: 52px * Theme.font-scale;
+    border-radius: Theme.radius-md;
+    background: Bridge.member-card.open && Bridge.member-card.id == member.id ? Theme.accent-soft
+        : area.has-hover ? Theme.surface-3 : transparent;
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: member.name;
+    accessible-description: member.status;
+    accessible-action-default => { Bridge.open-member(member.id); }
+    area := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { Bridge.open-member(member.id); }
+    }
+    opacity: member.away ? 0.6 : 1.0;
+    HorizontalLayout {
+        padding-left: Theme.space-2;
+        padding-right: Theme.space-2;
+        spacing: Theme.space-3;
+        VerticalLayout {
+            alignment: center;
+            Avatar {
+                size: 40px;
+                initials: member.initials;
+                tint: member.tint;
+                image: member.avatar;
+                speaking: member.talking;
+                status: member.away ? Status.idle : member.sound-off ? Status.dnd : Status.online;
+                label: member.name;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: 1px;
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                alignment: start;
+                Text {
+                    text: member.name;
+                    color: member.myself ? Theme.accent-text : member.role != "" ? Theme.name-text : Theme.text;
+                    font-size: Theme.font-md;
+                    font-weight: Theme.weight-medium;
+                    overflow: elide;
+                }
+                MemberBadges {
+                    member: member;
+                    y: (parent.height - self.height) / 2;
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                alignment: start;
+                Text {
+                    text: member.status;
+                    color: member.talking ? Theme.success : Theme.text-muted;
+                    font-size: Theme.font-sm;
+                    overflow: elide;
+                }
+                if member.talking: SpeakingBars {
+                    width: 12px;
+                    height: 12px;
+                    y: (parent.height - self.height) / 2;
+                }
+                if member.streaming: Icon {
+                    source: Icons.monitor;
+                    size: 14px;
+                    tint: Theme.text-secondary;
+                    y: (parent.height - self.height) / 2;
+                }
+            }
+        }
+        if member.role != "": Icon {
+            source: Icons.shield-check;
+            size: 18px;
+            tint: #c06cff;
+            y: (parent.height - self.height) / 2;
+        }
+        if member.role != "": Chip {
+            text: member.role;
+            fill: Theme.surface-3;
+            outlined: true;
+            y: (parent.height - self.height) / 2;
+        }
+        if member.streaming: VerticalLayout {
+            alignment: center;
+            LiveBadge { }
+        }
+        if member.muted: Icon {
+            source: Icons.mic-off;
+            size: 16px;
+            tint: Theme.danger;
+            y: (parent.height - self.height) / 2;
+        }
+        if member.sound-off: Icon {
+            source: Icons.headphone-off;
+            size: 16px;
+            tint: Theme.danger;
+            y: (parent.height - self.height) / 2;
+        }
+        if member.talk-power > 0: Text {
+            text: member.talk-power;
+            color: Theme.text-disabled;
+            font-size: Theme.font-xs;
+            vertical-alignment: center;
+            accessible-label: @tr("talk power {}", member.talk-power);
+        }
+    }
+}
+
+// Everything about one person, over the panel.
+export component MemberCardPopup inherits Rectangle {
+    property <length> card-width: 300px;
+    width: root.card-width;
+    height: card.preferred-height;
+    background: Theme.surface-3;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.border-strong;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: Bridge.member-card.name;
+    // Clicks inside stay inside.
+    TouchArea { }
+    card := VerticalLayout {
+        padding: Theme.space-4;
+        spacing: Theme.space-3;
+        HorizontalLayout {
+            spacing: Theme.space-3;
+            Avatar {
+                size: 52px;
+                initials: Bridge.member-card.initials;
+                tint: Bridge.member-card.tint;
+                image: Bridge.member-card.avatar;
+                label: Bridge.member-card.name;
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                spacing: 2px;
+                Text {
+                    text: Bridge.member-card.name;
+                    color: Theme.text;
+                    font-size: Theme.font-lg;
+                    font-weight: Theme.weight-semibold;
+                    overflow: elide;
+                }
+                Text {
+                    text: Bridge.member-card.status;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-sm;
+                    overflow: elide;
+                }
+            }
+            IconButton {
+                icon: Icons.x;
+                label: @tr("Close");
+                size: 26px;
+                icon-size: Theme.icon-sm;
+                clicked => { Bridge.open-member(-1); }
+            }
+        }
+        if Bridge.member-card.description != "": Text {
+            text: Bridge.member-card.description;
+            color: Theme.text-secondary;
+            font-size: Theme.font-sm;
+            wrap: word-wrap;
+        }
+        if Bridge.member-card.groups.length > 0: VerticalLayout {
+            spacing: Theme.space-2;
+            Text {
+                text: @tr("Groups");
+                color: Theme.text-muted;
+                font-size: Theme.font-xs;
+                font-weight: Theme.weight-semibold;
+            }
+            for group in Bridge.member-card.groups: Text {
+                text: group;
+                color: Theme.text-secondary;
+                font-size: Theme.font-sm;
+                overflow: elide;
+            }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            alignment: start;
+            if Bridge.member-card.talk-power > 0: Chip {
+                text: @tr("talk power {}", Bridge.member-card.talk-power);
+                icon: Icons.mic;
+            }
+            if Bridge.member-card.country != "": Chip {
+                text: Bridge.member-card.country;
+                icon: Icons.globe;
+            }
+        }
+        Divider { }
+        // Local playback of this person.
+        VerticalLayout {
+            spacing: Theme.space-2;
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                Text {
+                    text: @tr("Volume");
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: @tr("{}%", round(Bridge.member-card.volume));
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    vertical-alignment: center;
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                IconButton {
+                    icon: Bridge.member-card.muted ? Icons.volume-x : Icons.volume-2;
+                    label: Bridge.member-card.muted ? @tr("Unmute for me") : @tr("Mute for me");
+                    checked: Bridge.member-card.muted;
+                    danger: true;
+                    size: 30px;
+                    icon-size: Theme.icon-sm;
+                    enabled: Bridge.member-card.known;
+                    clicked => { Bridge.member-action("mute"); }
+                }
+                Slider {
+                    horizontal-stretch: 1;
+                    minimum: 0;
+                    maximum: 200;
+                    step: 5;
+                    value: Bridge.member-card.volume;
+                    enabled: Bridge.member-card.known && !Bridge.member-card.muted;
+                    label: @tr("Volume of {}", Bridge.member-card.name);
+                    changed(v) => { Bridge.member-volume(v); }
+                }
+            }
+        }
+        Divider { }
+        if Bridge.member-card.streaming: Button {
+            small: true;
+            kind: ButtonKind.primary;
+            icon: Icons.monitor;
+            text: @tr("Watch stream");
+            clicked => { Bridge.member-action("watch"); }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            Button {
+                horizontal-stretch: 1;
+                small: true;
+                icon: Icons.message-square;
+                text: @tr("Message");
+                enabled: Bridge.member-card.known;
+                clicked => { Bridge.member-action("message"); }
+            }
+            Button {
+                horizontal-stretch: 1;
+                small: true;
+                icon: Icons.hand;
+                text: @tr("Poke");
+                clicked => { Bridge.member-action("poke"); }
+            }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            Button {
+                horizontal-stretch: 1;
+                small: true;
+                icon: Icons.user-plus;
+                text: Bridge.member-card.friend ? @tr("Friend") : @tr("Add friend");
+                checked: Bridge.member-card.friend;
+                enabled: Bridge.member-card.known;
+                clicked => { Bridge.member-action("friend"); }
+            }
+            Button {
+                horizontal-stretch: 1;
+                small: true;
+                kind: Bridge.member-card.blocked ? ButtonKind.danger : ButtonKind.secondary;
+                icon: Icons.shield;
+                text: Bridge.member-card.blocked ? @tr("Blocked") : @tr("Block");
+                enabled: Bridge.member-card.known;
+                clicked => { Bridge.member-action("blocked"); }
+            }
+        }
+    }
+}
+
+// The right panel of a server: "Members — 412", a search, everyone in
+// sections. Its width is the setting `ui.members_width`.
+export component MembersPanel inherits VerticalLayout {
+    property <bool> searching;
+    padding-top: Theme.space-4;
+    padding-bottom: Theme.space-2;
+    spacing: Theme.space-2;
+    HorizontalLayout {
+        padding-left: Theme.space-5;
+        padding-right: Theme.space-3;
+        spacing: Theme.space-2;
+        Text {
+            text: @tr("Members — {}", Bridge.member-total);
+            color: Theme.text;
+            font-size: Theme.font-lg;
+            font-weight: Theme.weight-medium;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        IconButton {
+            icon: Icons.search;
+            label: @tr("Search members");
+            checked: root.searching;
+            size: 32px;
+            icon-size: Theme.icon-sm;
+            clicked => {
+                root.searching = !root.searching;
+                if !root.searching {
+                    Bridge.search-members("");
+                }
+            }
+        }
+    }
+    if root.searching: HorizontalLayout {
+        padding-left: Theme.space-4;
+        padding-right: Theme.space-4;
+        SearchBox {
+            height: 36px;
+            show-shortcut: false;
+            placeholder: @tr("Search members…");
+            label: @tr("Search members");
+            init => { self.focus(); }
+            edited(text) => { Bridge.search-members(text); }
+        }
+    }
+    if Bridge.server-members.length == 0: HorizontalLayout {
+        padding-left: Theme.space-5;
+        padding-right: Theme.space-5;
+        Text {
+            text: @tr("Connect or observe to see who is here.");
+            color: Theme.text-muted;
+            font-size: Theme.font-sm;
+            wrap: word-wrap;
+        }
+    }
+    ListView {
+        vertical-stretch: 1;
+        accessible-role: AccessibleRole.list;
+        accessible-label: @tr("Members");
+        for member in Bridge.server-members: VerticalLayout {
+            padding-left: Theme.space-3;
+            padding-right: Theme.space-3;
+            if member.first-in-group: GroupHeader {
+                member: member;
+            }
+            MemberRow {
+                member: member;
+            }
+        }
+    }
+}

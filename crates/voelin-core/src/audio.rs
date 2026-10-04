@@ -20,6 +20,7 @@ use tsclientlib::ClientId;
 use tsproto_packets::packets::{AudioData, CodecType, Direction, InAudioBuf, OutAudio, OutPacket};
 use voelin_audio::pcm::{self, FRAME_SAMPLES};
 use voelin_audio::settings::TransmitMode;
+use voelin_audio::tap;
 use voelin_audio::vad::SILENCE_DB;
 use voelin_audio::{AudioSettings, Framer, Mixer, Processor, Vad, VoiceCodec, VoiceEncoder};
 
@@ -145,6 +146,10 @@ struct Pipeline {
 	/// Watched streams whose audio plays through the mixer.
 	streams: HashMap<String, StreamAudio>,
 	stream_volumes: HashMap<String, f32>,
+	/// Where processed microphone audio is published (for our screen
+	/// share's microphone source), and our id as its publisher.
+	mic_tap: &'static tap::Tap,
+	tap_id: u64,
 	/// Processed microphone audio, for tests.
 	#[cfg(test)]
 	tap: Vec<f32>,
@@ -168,6 +173,8 @@ impl Pipeline {
 			level_peak: None,
 			streams: HashMap::new(),
 			stream_volumes: HashMap::new(),
+			mic_tap: tap::microphone(),
+			tap_id: tap::publisher_id(),
 			settings,
 			#[cfg(test)]
 			tap: Vec::new(),
@@ -276,6 +283,15 @@ impl Pipeline {
 		self.processor.capture(samples, &mut self.processed);
 		#[cfg(test)]
 		self.tap.extend_from_slice(&self.processed);
+		// Our screen share's microphone source; one atomic load when unused.
+		let mic = self.mic_tap;
+		if mic.is_active() {
+			if self.input_muted {
+				mic.publish_silence(self.tap_id, self.processed.len());
+			} else {
+				mic.publish(self.tap_id, &self.processed);
+			}
+		}
 		let mut frames = Vec::new();
 		self.framer.push(&self.processed, |f| frames.push(f.to_vec()));
 		for frame in frames {
@@ -574,6 +590,41 @@ mod tests {
 		p.handle(AudioIn::InputMuted(false));
 		p.handle(AudioIn::Transmit(false));
 		assert_eq!(capture(&mut p, &tone), (0, 0));
+	}
+
+	/// The processed microphone reaches tap consumers (silence while muted,
+	/// whatever the transmit mode), and nothing is done without one.
+	#[test]
+	fn processed_microphone_reaches_the_tap() {
+		use std::sync::{Arc, Mutex};
+
+		static TAP: tap::Tap = tap::Tap::new();
+		struct Sink(Arc<Mutex<Vec<f32>>>);
+		impl tap::TapSink for Sink {
+			fn write(&mut self, samples: &[f32]) {
+				self.0.lock().unwrap().extend_from_slice(samples);
+			}
+			fn silence(&mut self, frames: usize) {
+				self.0.lock().unwrap().extend(std::iter::repeat_n(0.0, frames));
+			}
+		}
+
+		let mut p = pipeline(TransmitMode::PushToTalk);
+		p.mic_tap = &TAP;
+		let tone = sine(440.0, 0.1, 0.3);
+		capture(&mut p, &tone);
+		let got = Arc::new(Mutex::new(Vec::new()));
+		let guard = TAP.attach(Box::new(Sink(got.clone())));
+		// Not transmitting (push-to-talk released): still tapped.
+		assert_eq!(capture(&mut p, &tone), (0, 0));
+		assert_eq!(*got.lock().unwrap(), tone);
+		p.handle(AudioIn::InputMuted(true));
+		capture(&mut p, &tone);
+		let got_now = got.lock().unwrap().clone();
+		assert_eq!(got_now.len(), 2 * tone.len());
+		assert!(got_now[tone.len()..].iter().all(|s| *s == 0.0));
+		drop(guard);
+		assert!(!TAP.is_active());
 	}
 
 	#[test]

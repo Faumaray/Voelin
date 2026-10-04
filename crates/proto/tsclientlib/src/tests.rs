@@ -2,7 +2,11 @@ use once_cell::sync::Lazy;
 use ts_bookkeeping::messages::s2c::InMessage;
 use tsproto_packets::packets::{Direction, Flags, OutPacket, PacketType};
 
-static TRACING: Lazy<()> = Lazy::new(|| tracing_subscriber::fmt().with_test_writer().init());
+// Voelin patch: `try_init`. quickcheck's logging installs a `log` logger, after
+// which `init` panics, poisons this `Lazy` and fails every test that follows.
+static TRACING: Lazy<()> = Lazy::new(|| {
+	let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+});
 
 pub(crate) fn create_logger() { Lazy::force(&TRACING); }
 

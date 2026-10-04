@@ -1,15 +1,25 @@
 # tsgw: companion gateway for invisible presence and channel chat.
 # Copy to tsgw.toml and adjust. See docs/gateway-admin.md.
+#
+# Two kinds of keys:
+# - BOOTSTRAP keys (query login, addresses, database path) are read at start
+#   from this file, TSGW_<KEY> environment variables or `--set key=value`.
+#   Changing them needs a restart.
+# - Everything else is a SEED: the value used unless an admin changes it at
+#   runtime (Voelin's admin screen / config_set). Values set at runtime are
+#   stored in the database and win over this file; `config_reset` goes back
+#   to it. Reload with SIGHUP (or just save: the file is checked every 5 s).
+# Precedence: runtime (database) > --set > environment > this file > default.
 
-# Signed into every login challenge. Defaults to listen.public_url.
+# BOOTSTRAP. Signed into every login challenge. Defaults to listen.public_url.
 # gateway_id = "wss://gw.example.org/v1"
 
 [server]
-# Voice port of the virtual server this gateway serves.
+# BOOTSTRAP. Voice port of the virtual server this gateway serves.
 voice_port = 9987
 
 [query]
-# "ssh" (TeamSpeak 3 and 6) or "raw" (TeamSpeak 3 only).
+# BOOTSTRAP. "ssh" (TeamSpeak 3 and 6) or "raw" (TeamSpeak 3 only).
 transport = "ssh"
 addr = "127.0.0.1:10022"
 user = "serveradmin"
@@ -19,6 +29,7 @@ user = "serveradmin"
 allowlisted = false
 
 [listen]
+# BOOTSTRAP.
 bind = "0.0.0.0:7788"
 # public_url = "wss://gw.example.org/v1"
 
@@ -33,11 +44,61 @@ token_ttl_hours = 720
 nickname = "Chat Relay"
 format = "[{nick}] {text}"
 idle_teardown_secs = 120
+# Each relay is one query connection; stay below the server's per-IP limit.
 max_channel_relays = 6
 # Channels relayed all the time, so their history is complete.
 pinned_channels = []
 
 [history]
-enabled = true
+# BOOTSTRAP: the database also holds tokens and runtime settings.
 path = "tsgw.db"
-retention_days = 30
+enabled = true
+# 0 keeps messages forever (pinned messages are always kept).
+retention_days = 0
+
+# Optional features; Voelin hides what is off.
+[features]
+pins = true
+reactions = true
+topics = true
+events = true
+streams = true
+activity = true
+
+[topics]
+# How topic posts appear in TeamSpeak; TeamSpeak posts in this form join the topic.
+relay_format = "[#{topic}] {text}"
+
+[events]
+# Remind subscribers this many minutes before an event (0: when it starts).
+reminder_minutes = [15, 0]
+stream_link_minutes = 60
+
+[activity]
+retention_days = 0
+
+[limits]
+# Per connection; 0 turns a limit off.
+posts_per_window = 5
+post_window_secs = 5
+actions_per_window = 30
+action_window_secs = 10
+
+# Quotas: 0 means none.
+[quota]
+history_page = 0
+pins_per_channel = 0
+topics_per_channel = 0
+events_per_user = 0
+reactions_per_message = 0
+reaction_bytes = 64
+message_bytes = 0
+streams_per_user = 0
+
+# Who may do what, by TeamSpeak server group or channel group ids. Without
+# a rule an action has its default (see docs/gateway-admin.md).
+[perm]
+# pin = { server_groups = [6], channel_groups = [5] }
+# create_event = { server_groups = [6, 7] }
+# admin = { server_groups = [6] }
+# react = { everyone = true }

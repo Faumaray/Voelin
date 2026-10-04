@@ -1,0 +1,309 @@
+// Where the user is: the page, open dialogs, panel sizes. Any screen can
+// navigate through these functions; Rust sets the same properties for the
+// development switch VOELIN_OPEN (src/dev.rs).
+
+import { Bridge, BookmarkForm, ShareForm, EventForm, OfflineForm } from "bridge.slint";
+import { StudioBridge } from "studio-bridge.slint";
+
+export enum Page {
+    // Welcome page: servers at a glance.
+    home,
+    // A server: channels, chat or the stream viewer, members and streams.
+    server,
+    settings,
+    // Contacts and where they are.
+    friends,
+    // Direct messages across servers.
+    messages,
+    // Recordings and clips.
+    library,
+    // A server's scheduled events (gateway `events`).
+    events,
+    // The Stream Studio (scenes, preview, mixer, going live).
+    studio,
+}
+
+// Sections of the settings page (`settings-section` takes these numbers).
+export enum SettingsSection {
+    voice,
+    keybinds,
+    streaming,
+    privacy,
+    appearance,
+    account,
+    profiles,
+    devices,
+    notifications,
+    integrations,
+    advanced,
+}
+
+// Tabs of the bottom navigation in the narrow (mobile) layout.
+export enum MobileTab {
+    home,
+    servers,
+    chat,
+    activity,
+    you,
+}
+
+export global Nav {
+    in-out property <Page> page: Page.server;
+    in-out property <SettingsSection> settings-section: SettingsSection.voice;
+    in-out property <MobileTab> mobile-tab: MobileTab.chat;
+    // Narrow windows use the mobile layout; the breakpoint is the setting
+    // `ui.narrow_breakpoint`.
+    in-out property <bool> narrow: false;
+    in-out property <length> narrow-breakpoint: 800px;
+    // Wide enough for a third column (home, direct messages).
+    in-out property <bool> wide: true;
+    in-out property <bool> right-panel-open: true;
+    in-out property <length> right-panel-width: 280px;
+    // The voice channel we are in (people, streams, its chat) instead of
+    // the plain chat.
+    in-out property <bool> voice-view: false;
+    // Drawers in place of the members panel (gateway features).
+    in-out property <bool> pins-open;
+    in-out property <bool> topics-open;
+    // The message the emoji picker reacts to; 0: it fills the composer.
+    in-out property <int> react-key;
+    // "Start a topic" asks for a title first.
+    in-out property <bool> topic-form-open;
+    in-out property <int> topic-form-key;
+    in-out property <string> topic-form-title;
+
+    // Dialogs.
+    in-out property <bool> about-open;
+    in-out property <bool> share-open;
+    in-out property <bool> client-open;
+    in-out property <bool> bookmark-open;
+    // The emoji picker over the composer, and the composer's text.
+    in-out property <bool> emoji-open;
+    in-out property <string> draft;
+    in-out property <BookmarkForm> bookmark-form;
+    in-out property <ShareForm> share-form;
+
+    // The bell's panel, the search (Ctrl+K) and its selected result, a
+    // picture opened from the chat, the event and offline message forms,
+    // the friends page's tab, the direct messages' tab, the add-server
+    // dialog in "join" mode (connect once saved).
+    in-out property <bool> notifications-open;
+    in-out property <bool> search-open;
+    in-out property <string> search-text;
+    in-out property <int> search-index;
+    in-out property <bool> lightbox-open;
+    in-out property <image> lightbox;
+    in-out property <bool> event-form-open;
+    in-out property <EventForm> event-form;
+    in-out property <string> event-error;
+    in-out property <bool> offline-form-open;
+    in-out property <OfflineForm> offline-form;
+    in-out property <int> friends-tab;
+    in-out property <int> dm-tab;
+    in-out property <bool> join-open;
+
+    // The phone layout (narrow windows).
+    // The server's members as a page of their own (the desktop shows them
+    // beside the chat).
+    in-out property <bool> members-open;
+    // The voice channel screen (design mockup 02) instead of a tab: the
+    // voice channel view, or a stream we watch.
+    out property <bool> phone-voice: narrow && page == Page.server && Bridge.voice-connected && (voice-view || Bridge.viewer-open);
+
+    // Settings were opened (so leaving them tells Rust).
+    property <bool> settings-active;
+
+    public function show(p: Page) {
+        if p != Page.settings && settings-active {
+            settings-active = false;
+            Bridge.close-settings();
+        }
+        // The phone shows Home on its own tab: a server goes to Servers,
+        // and Home from anywhere (the desktop's logo, a switch) is that tab.
+        // Also while wide, so the tab is right when the window narrows.
+        if p == Page.server && mobile-tab == MobileTab.home {
+            mobile-tab = MobileTab.servers;
+        }
+        if p == Page.home {
+            mobile-tab = MobileTab.home;
+        }
+        page = p;
+        notifications-open = false;
+        if p == Page.events {
+            Bridge.open-events();
+        }
+        if p == Page.messages {
+            Bridge.open-messages();
+        }
+        if p == Page.library {
+            Bridge.open-library();
+        }
+    }
+
+    // A tab of the phone's bottom navigation, without the pages that were
+    // over the last one (pins, topics, members).
+    public function show-tab(tab: MobileTab) {
+        pins-open = false;
+        topics-open = false;
+        members-open = false;
+        show(tab == MobileTab.home ? Page.home : Page.server);
+        mobile-tab = tab;
+    }
+
+    public function open-settings(section: SettingsSection) {
+        if !settings-active {
+            settings-active = true;
+            Bridge.open-settings();
+        }
+        settings-section = section;
+        page = Page.settings;
+        notifications-open = false;
+        Bridge.settings-section(section == SettingsSection.voice ? 0
+            : section == SettingsSection.keybinds ? 1
+            : section == SettingsSection.streaming ? 2
+            : section == SettingsSection.privacy ? 3
+            : section == SettingsSection.appearance ? 4
+            : section == SettingsSection.account ? 5
+            : section == SettingsSection.profiles ? 6
+            : section == SettingsSection.devices ? 7
+            : section == SettingsSection.notifications ? 8
+            : section == SettingsSection.integrations ? 9 : 10);
+    }
+
+    public function open-search(text: string) {
+        search-text = text;
+        search-index = 0;
+        search-open = true;
+        notifications-open = false;
+        Bridge.search(text);
+    }
+
+    public function close-search() {
+        search-open = false;
+        search-text = "";
+    }
+
+    public function open-picture(key: int, index: int) {
+        lightbox = Bridge.open-preview(key, index);
+        lightbox-open = true;
+    }
+
+    public function create-event() {
+        event-form = Bridge.edit-event(-1);
+        event-error = "";
+        event-form-open = true;
+    }
+
+    public function edit-event(id: int) {
+        event-form = Bridge.edit-event(id);
+        event-error = "";
+        event-form-open = true;
+    }
+
+    public function write-offline(uid: string, to: string) {
+        offline-form = { uid: uid, to: to, subject: "", text: "" };
+        offline-form-open = true;
+    }
+
+    public function join-server() {
+        bookmark-form = Bridge.edit-bookmark(-1);
+        join-open = true;
+        bookmark-open = true;
+    }
+
+    // The members panel of the current server.
+    public function show-members() {
+        show(Page.server);
+        pins-open = false;
+        topics-open = false;
+        right-panel-open = true;
+    }
+
+    public function close-settings() {
+        show(Page.server);
+    }
+
+    public function open-about() {
+        Bridge.open-about();
+        about-open = true;
+    }
+
+    public function open-share() {
+        share-form = Bridge.open-share();
+        share-open = true;
+    }
+
+    public function add-server() {
+        bookmark-form = Bridge.edit-bookmark(-1);
+        join-open = false;
+        bookmark-open = true;
+    }
+
+    public function edit-server(id: int) {
+        bookmark-form = Bridge.edit-bookmark(id);
+        join-open = false;
+        bookmark-open = true;
+    }
+
+    public function open-client(id: int) {
+        if Bridge.open-client(id) {
+            client-open = true;
+        }
+    }
+
+    // The Stream Studio: its page, or its window when it has one.
+    public function open-studio() {
+        if StudioBridge.status.detached {
+            StudioBridge.open();
+        } else {
+            show(Page.studio);
+        }
+    }
+
+    // The pins and the topics share the drawer, so opening one closes the
+    // other.
+    public function show-pins(on: bool) {
+        pins-open = on;
+        if on {
+            topics-open = false;
+            Bridge.open-pins();
+        }
+    }
+
+    public function show-topics(on: bool) {
+        topics-open = on;
+        if on {
+            pins-open = false;
+            Bridge.open-topics();
+        }
+    }
+
+    // The members button: back from a drawer, or the panel on and off.
+    public function toggle-members() {
+        if pins-open || topics-open {
+            pins-open = false;
+            topics-open = false;
+            right-panel-open = true;
+        } else {
+            right-panel-open = !right-panel-open;
+        }
+    }
+
+    // The voice channel view, or back to the chat (Rust opens the
+    // channel's chat and puts the people in it first in the panel).
+    public function show-voice(on: bool) {
+        voice-view = on;
+        Bridge.show-voice-view(on);
+    }
+
+    public function start-topic(key: int) {
+        topic-form-key = key;
+        topic-form-title = "";
+        topic-form-open = true;
+    }
+
+    public function select-server(id: int) {
+        show(Page.server);
+        Bridge.select-server(id);
+    }
+}

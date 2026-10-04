@@ -2,13 +2,15 @@
 //! (MIT-SHM and GetImage), checks pixels, and sends a window capture through
 //! VP8 and back.
 //!
-//! Needs `DISPLAY` (e.g. `Xvfb :101 -screen 0 1280x720x24 & DISPLAY=:101
-//! cargo test -p voelin-media --test x11_capture`); skipped without it.
+//! Needs a test X server in `VOELIN_X11_TEST_DISPLAY`, never the desktop's
+//! `DISPLAY` (it maps windows and moves the pointer): e.g. `xvfb-run -a bash
+//! -c 'VOELIN_X11_TEST_DISPLAY=$DISPLAY cargo test -p voelin-media --test
+//! x11_capture'`, as CI does; skipped without it.
 #![cfg(all(target_os = "linux", feature = "x11", feature = "vpx"))]
 
 use std::time::Duration;
 
-use voelin_media::capture::x11::X11Capture;
+use voelin_media::capture::x11::{self, X11Capture};
 use voelin_media::{
 	CaptureOptions, Codec, Codecs, EncoderConfig, FrameReceiver, ScreenCapture, SourceId,
 	VideoFrame, convert,
@@ -150,8 +152,9 @@ async fn check_monitor(capture: &mut X11Capture, scene: &Scene) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn x11_capture_end_to_end() {
-	let Some(display) = std::env::var("DISPLAY").ok().filter(|d| !d.is_empty()) else {
-		eprintln!("skipped: DISPLAY is not set");
+	let Some(display) = std::env::var("VOELIN_X11_TEST_DISPLAY").ok().filter(|d| !d.is_empty())
+	else {
+		eprintln!("skipped: VOELIN_X11_TEST_DISPLAY is not set");
 		return;
 	};
 	let scene = Scene::create(&display);
@@ -167,6 +170,23 @@ async fn x11_capture_end_to_end() {
 		.unwrap_or_else(|| panic!("test window not listed in {sources:?}"));
 	assert_eq!(window.id, SourceId::Window(scene.test_window.into()));
 	assert_eq!((window.width, window.height), (u32::from(WW), u32::from(WH)));
+
+	// The window's process, for capturing its audio.
+	let window_id = u64::from(scene.test_window);
+	assert_eq!(x11::window_pid(Some(&display), window_id), None, "no _NET_WM_PID yet");
+	let net_wm_pid = scene.conn.intern_atom(false, b"_NET_WM_PID").unwrap().reply().unwrap().atom;
+	scene
+		.conn
+		.change_property32(
+			PropMode::REPLACE,
+			scene.test_window,
+			net_wm_pid,
+			AtomEnum::CARDINAL,
+			&[std::process::id()],
+		)
+		.unwrap();
+	scene.conn.sync().unwrap();
+	assert_eq!(x11::window_pid(Some(&display), window_id), Some(std::process::id()));
 
 	// Same pixels through MIT-SHM and through GetImage.
 	check_monitor(&mut capture, &scene).await;

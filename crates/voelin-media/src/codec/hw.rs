@@ -1,38 +1,54 @@
-//! Hardware video encoders.
+//! Encoder and decoder factories found at runtime.
 //!
-//! The streamer prefers a GPU encoder over software VP8 / OpenH264. None is
-//! implemented yet; the factories below mark where they plug in:
-//!
-//! - Linux: VA-API (H.264 Constrained High / VP8 / VP9 on Intel and AMD), e.g.
-//!   through `cros-libva`. TODO.
-//! - Windows: Media Foundation H.264 encoder MFT (NVENC / QuickSync / AMF
-//!   behind it). TODO.
+//! - FFmpeg (feature `ffmpeg`, desktop): VA-API, NVENC, Quick Sync, AMF,
+//!   Media Foundation and VideoToolbox encoders, plus software ones FFmpeg
+//!   wraps (x264, OpenH264, SVT-AV1, rav1e, libaom); one factory per backend
+//!   that passed its self-test ([`crate::ffmpeg::probe`]). Decoders likewise:
+//!   VA-API, NVDEC, D3D11VA, DXVA2 and VideoToolbox, then dav1d and FFmpeg's
+//!   own ([`crate::ffmpeg::decoder::probe`]).
 //! - Android: MediaCodec ([`super::mediacodec`]).
 
 use crate::Result;
-use crate::codec::{Codec, EncoderConfig, VideoEncoder};
+use crate::codec::{
+	Codec, DecoderBackend, EncoderBackend, EncoderConfig, VideoDecoder, VideoEncoder,
+};
 
-/// Creates encoders of one hardware API.
-pub trait HardwareEncoderFactory: Send + Sync {
-	/// Short name for logs and settings (`"vaapi"`, `"mediafoundation"`).
+/// Creates encoders of one backend.
+pub trait EncoderFactory: Send + Sync {
+	/// Short name for logs and settings (`"h264_vaapi"`, `"mediacodec"`).
 	fn name(&self) -> &'static str;
 
-	/// Codecs this device can encode, best first.
+	/// Codecs this backend encodes, best first.
 	fn codecs(&self) -> Vec<Codec>;
 
 	fn create(&self, codec: Codec, config: &EncoderConfig) -> Result<Box<dyn VideoEncoder>>;
+
+	/// A GPU / OS encoder (the default), as opposed to a software encoder
+	/// reached through the same API (FFmpeg's libx264, ...).
+	fn is_hardware(&self) -> bool {
+		true
+	}
+
+	/// Whether the automatic choice may use it (not for encoders with a long
+	/// delay; those are used only when named in the settings).
+	fn is_automatic(&self) -> bool {
+		true
+	}
+
+	/// The backend its encoders report.
+	fn backend(&self) -> EncoderBackend {
+		EncoderBackend::Hardware(self.name())
+	}
 }
 
-/// Hardware encoders usable on this machine (none yet).
-pub fn probe() -> Vec<Box<dyn HardwareEncoderFactory>> {
-	let mut found: Vec<Box<dyn HardwareEncoderFactory>> = Vec::new();
-	#[cfg(target_os = "linux")]
-	if let Some(f) = vaapi::probe() {
-		found.push(Box::new(f));
-	}
-	#[cfg(windows)]
-	if let Some(f) = media_foundation::probe() {
-		found.push(Box::new(f));
+/// Encoder factories usable on this machine: FFmpeg's backends that passed
+/// their self-test, then MediaCodec (Android).
+pub fn probe() -> Vec<Box<dyn EncoderFactory>> {
+	#[allow(unused_mut)]
+	let mut found: Vec<Box<dyn EncoderFactory>> = Vec::new();
+	#[cfg(feature = "ffmpeg")]
+	for factory in crate::ffmpeg::FfmpegFactory::available() {
+		found.push(Box::new(factory));
 	}
 	#[cfg(target_os = "android")]
 	if let Some(f) = super::mediacodec::probe() {
@@ -41,64 +57,31 @@ pub fn probe() -> Vec<Box<dyn HardwareEncoderFactory>> {
 	found
 }
 
-#[cfg(target_os = "linux")]
-mod vaapi {
-	use super::*;
-	use crate::Error;
+/// Creates decoders of one backend for one codec: FFmpeg's, or one an
+/// application adds ([`Codecs::with_decoder`](super::Codecs::with_decoder)).
+pub trait DecoderFactory: Send + Sync {
+	/// The backend its decoders are (for the ladder, logs and settings).
+	fn backend(&self) -> DecoderBackend;
 
-	pub struct Vaapi;
+	fn codec(&self) -> Codec;
 
-	/// TODO: open the DRM render node, query VAProfileH264ConstrainedBaseline /
-	/// VAProfileH264High / VP8 / VP9 encode entrypoints.
-	pub fn probe() -> Option<Vaapi> {
-		None
-	}
+	/// The API or library behind it (`VA-API`, `dav1d`, ...), for the UI.
+	fn api(&self) -> &'static str;
 
-	impl HardwareEncoderFactory for Vaapi {
-		fn name(&self) -> &'static str {
-			"vaapi"
-		}
+	/// A GPU decoder: left out when hardware decoding is off.
+	fn is_hardware(&self) -> bool;
 
-		fn codecs(&self) -> Vec<Codec> {
-			Vec::new()
-		}
-
-		fn create(&self, codec: Codec, _: &EncoderConfig) -> Result<Box<dyn VideoEncoder>> {
-			Err(Error::CodecUnavailable {
-				codec,
-				reason: "VA-API encoding is not implemented".into(),
-			})
-		}
-	}
+	fn create(&self) -> Result<Box<dyn VideoDecoder>>;
 }
 
-#[cfg(windows)]
-mod media_foundation {
-	use super::*;
-	use crate::Error;
-
-	pub struct MediaFoundation;
-
-	/// TODO: enumerate hardware H.264 encoder MFTs (`MFTEnumEx` with
-	/// `MFT_ENUM_FLAG_HARDWARE`).
-	pub fn probe() -> Option<MediaFoundation> {
-		None
+/// Decoder factories usable on this machine: FFmpeg's decoders that passed
+/// their self-test, hardware first.
+pub fn probe_decoders() -> Vec<Box<dyn DecoderFactory>> {
+	#[allow(unused_mut)]
+	let mut found: Vec<Box<dyn DecoderFactory>> = Vec::new();
+	#[cfg(feature = "ffmpeg")]
+	for factory in crate::ffmpeg::decoder::FfmpegDecoderFactory::available() {
+		found.push(Box::new(factory));
 	}
-
-	impl HardwareEncoderFactory for MediaFoundation {
-		fn name(&self) -> &'static str {
-			"mediafoundation"
-		}
-
-		fn codecs(&self) -> Vec<Codec> {
-			Vec::new()
-		}
-
-		fn create(&self, codec: Codec, _: &EncoderConfig) -> Result<Box<dyn VideoEncoder>> {
-			Err(Error::CodecUnavailable {
-				codec,
-				reason: "Media Foundation encoding is not implemented".into(),
-			})
-		}
-	}
+	found
 }

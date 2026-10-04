@@ -14,16 +14,22 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "6"
 futures = "0.3"
+md5 = "0.8"
 png = "0.18"
 serde_json = "1"
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-thread", "signal", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tsclientlib = { path = "../../crates/proto/tsclientlib" }
+# `unstable`: the raw connection, for the command log of `probe-stream`.
+tsclientlib = { path = "../../crates/proto/tsclientlib", features = ["unstable"] }
+tsproto = { path = "../../crates/proto/tsproto" }
 tsproto-packets = { path = "../../crates/proto/tsproto-packets" }
 voelin-model = { path = "../../crates/voelin-model" }
 voelin-query = { path = "../../crates/voelin-query" }
 voelin-observer = { path = "../../crates/voelin-observer" }
+# The client database (`identity import`/`export`) and where it lives.
+voelin-store = { path = "../../crates/voelin-store" }
+voelin-platform = { path = "../../crates/voelin-platform", default-features = false }
 voelin-audio = { path = "../../crates/voelin-audio", default-features = false }
 # The stream media pipeline (capture, VP8, decoding), without audio devices.
 voelin-core = { path = "../../crates/voelin-core", default-features = false, features = ["media-desktop"] }
