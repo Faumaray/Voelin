@@ -32,6 +32,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "0"
+  # In particular, do not compile the generated UI lib and lib-test together.
+  CARGO_BUILD_JOBS: "1"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   lint:
@@ -47,11 +50,17 @@ jobs:
       # and have known clippy findings (cleanup is milestone M1), so the strict
       # checks cover our own crates only.
       - name: rustfmt (own crates)
-        run: cargo fmt $(scripts/own-crates.sh) --check
+        run: |
+          packages=$(scripts/own-crates.sh)
+          read -r -a packages <<< "$packages"
+          cargo fmt "${packages[@]}" --check
       - name: clippy (own crates, deny warnings)
-        run: cargo clippy $(scripts/own-crates.sh) --all-targets --no-deps -- -D warnings
+        run: |
+          packages=$(scripts/own-crates.sh)
+          read -r -a packages <<< "$packages"
+          cargo clippy "${packages[@]}" --all-targets --no-deps --locked -- -D warnings
       - name: clippy (workspace, report only)
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets --locked
 
   # Under Xvfb, so X11 tests (screen capture, global hotkeys through XTEST
   # input) run instead of skipping. Windows tests run in release.yml.
@@ -67,7 +76,10 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets --locked
       - name: Test
-        run: xvfb-run -a bash -c 'VOELIN_X11_TEST_DISPLAY="$DISPLAY" cargo test --workspace --locked'
+        run: |
+          # DISPLAY is assigned by xvfb-run, then expanded by the inner shell.
+          # shellcheck disable=SC2016
+          xvfb-run -a bash -c 'VOELIN_X11_TEST_DISPLAY="$DISPLAY" cargo test --workspace --locked'
 
   # Windows-only code compiles and is lint-clean (MSVC, libvpx from vcpkg).
   clippy-windows:
@@ -81,7 +93,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: clippy (own crates, deny warnings)
         shell: bash
-        run: cargo clippy $(scripts/own-crates.sh) --all-targets --no-deps --locked -- -D warnings
+        run: |
+          packages=$(scripts/own-crates.sh)
+          read -r -a packages <<< "$packages"
+          cargo clippy "${packages[@]}" --all-targets --no-deps --locked -- -D warnings
 
   # The Android-only code (docs/android.md), for the Android target. The APKs
   # are built by release.yml.
@@ -106,13 +121,17 @@ jobs:
           java-version: 17
       - name: Android SDK packages
         run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          # sdkmanager closes stdin after the last license; ignore only yes's
+          # SIGPIPE, not a failure from sdkmanager (also works with pipefail).
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || test "${PIPESTATUS[1]}" -eq 0
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
             "ndk;$NDK_VERSION" "platforms;android-36" > /dev/null
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
-          # CMake (libopus) and Slint's Java helper.
-          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
-          echo "ANDROID_JAR=$ANDROID_HOME/platforms/android-36/android.jar" >> "$GITHUB_ENV"
+          {
+            echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION"
+            # CMake (libopus) and Slint's Java helper.
+            echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$NDK_VERSION"
+            echo "ANDROID_JAR=$ANDROID_HOME/platforms/android-36/android.jar"
+          } >> "$GITHUB_ENV"
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked --version 4.1.2
       - name: clippy (Android target, deny warnings)

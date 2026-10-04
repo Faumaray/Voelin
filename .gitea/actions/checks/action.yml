@@ -1,0 +1,62 @@
+name: Linux checks
+description: Shared Linux validation for Gitea CI and release packaging.
+runs:
+  using: composite
+  steps:
+  - uses: ./.github/actions/system-deps
+  - name: Install pinned Rust toolchain
+    run: |
+      set -euo pipefail
+      export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+      export PATH="$CARGO_HOME/bin:$PATH"
+      if ! command -v rustup >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+          sh -s -- -y --profile minimal --default-toolchain none
+      fi
+      if [[ -f "$CARGO_HOME/env" ]]; then
+        # shellcheck source=/dev/null
+        source "$CARGO_HOME/env"
+      fi
+      echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+      rustup toolchain install
+    shell: bash
+  - name: rustfmt (own crates)
+    run: |
+      set -euo pipefail
+      packages=$(scripts/own-crates.sh)
+      read -r -a packages <<< "$packages"
+      cargo fmt "${packages[@]}" --check
+    shell: bash
+  - name: clippy (own crates, deny warnings)
+    run: |
+      set -euo pipefail
+      packages=$(scripts/own-crates.sh)
+      read -r -a packages <<< "$packages"
+      cargo clippy "${packages[@]}" --all-targets --no-deps --locked -- -D warnings
+    shell: bash
+  - name: clippy (workspace, report warnings)
+    run: cargo clippy --workspace --all-targets --locked
+    shell: bash
+  - name: Build
+    run: cargo build --workspace --all-targets --locked
+    shell: bash
+  - name: Test (X11 enabled)
+    run: |
+      # DISPLAY is assigned by xvfb-run, then expanded by the inner shell.
+      # shellcheck disable=SC2016
+      xvfb-run -a bash -c 'VOELIN_X11_TEST_DISPLAY="$DISPLAY" cargo test --workspace --locked'
+    shell: bash
+  - name: Install cargo-deny and cargo-about
+    run: |
+      cargo install cargo-deny --locked --version 0.20.2
+      cargo install cargo-about --locked --version 0.9.2 --features cli
+    shell: bash
+  - name: Dependency policy
+    run: cargo deny --locked --workspace check
+    shell: bash
+  - name: Third-party notices
+    run: scripts/notices.sh --check
+    shell: bash
+  - name: Release tooling regressions
+    run: python3 scripts/test-gitea-release.py
+    shell: bash

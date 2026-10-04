@@ -109,7 +109,7 @@ for ((buildType, release) in listOf("debug" to false, "release" to true)) {
         workingDir = workspace
         val command = mutableListOf("cargo", "ndk", "--platform", "29", "-o", out.get().asFile.path)
         abis.forEach { command += listOf("-t", it) }
-        command += listOf("build", "-p", "voelin-android")
+        command += listOf("build", "--locked", "-p", "voelin-android")
         if (release) command += "--release"
         commandLine(command)
         val ndk = android.ndkDirectory.path
