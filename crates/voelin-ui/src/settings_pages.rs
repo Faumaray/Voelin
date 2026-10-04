@@ -333,8 +333,11 @@ impl App {
 			fetch_images: p.get(&CACHE_FETCH_IMAGES),
 			progress_ms: p.get(&FILES_PROGRESS_MS).to_string().into(),
 			preview_kb: p.get(&UI_IMAGE_PREVIEW_KB).to_string().into(),
-			logs: "Logs go to the terminal the app was started from (standard error); RUST_LOG=voelin_core=debug,voelin_ui=debug shows more.".into(),
-			crash_dir: voelin_platform::crash::dir().map(|d| d.display().to_string()).unwrap_or_default().into(),
+			logs: log_text().into(),
+			crash_dir: voelin_platform::crash::dir()
+				.map(|d| d.display().to_string())
+				.unwrap_or_default()
+				.into(),
 		});
 		self.refresh_account();
 	}
@@ -722,8 +725,14 @@ impl App {
 		self.refresh_pages();
 	}
 
+	/// The folder with the log files.
 	pub(crate) fn open_logs(&mut self) {
-		self.open_crash_folder();
+		let dir = voelin_platform::logs::current().and_then(std::path::Path::parent);
+		let result = dir.ok_or_else(|| "no log file".to_owned());
+		if let Err(e) = result.and_then(|dir| crate::app::open_path(dir).map_err(|e| e.to_string()))
+		{
+			self.set_status(format!("Cannot open the log folder: {e}"));
+		}
 	}
 
 	// Integrations.
@@ -1417,5 +1426,19 @@ mod tests {
 		let rule = PermRule { everyone: false, server_groups: vec![6], channel_groups: vec![] };
 		assert_eq!(rule_text(&rule), "server groups 6");
 		assert_eq!(rule_text(&PermRule::default()), "nobody");
+	}
+}
+
+/// Where the logs go, for the Advanced page.
+fn log_text() -> String {
+	match voelin_platform::logs::current() {
+		Some(path) => format!(
+			"This run logs to {} (the previous runs' next to it, the last as voelin.1.log). \
+			 VOELIN_LOG=voelin_core=debug,voelin_ui=debug logs more; warnings also go to the terminal.",
+			path.display()
+		),
+		None => "Logs go to the terminal the app was started from (standard error); \
+			 RUST_LOG=voelin_core=debug,voelin_ui=debug shows more."
+			.into(),
 	}
 }
