@@ -383,8 +383,9 @@ Not turned on, with the evidence:
   and decodes 90 of 90 frames, and its ClientHello also offers 1.2, which
   is what our 1.2-only peers get. But a DTLS handshake that fails closes
   the connection without a version step (a reconnect uses the same
-  settings), the official client's DTLS 1.3 is untried, and 1.3 gains a
-  round trip at connect, nothing for the stream. It stays off.
+  settings), the official client's DTLS 1.3 is untried, and all 1.3 would
+  save is one round trip while connecting, nothing for the stream. It
+  stays off.
 
 ## Settings
 
