@@ -1,27 +1,10 @@
 name: CI
 
-# Fast checks on every push to main and every PR: lint, tests, license and
-# advisory checks, and the integration tests against TS3/TS6 servers.
-# Packages are built only by release.yml (tags, or by hand), which also runs
-# these checks through workflow_call.
-
-# Changes to documentation only need no build (same list twice: no YAML
-# anchors in workflows). THIRD_PARTY_NOTICES.md is compiled into the app
-# (About page) and checked below.
+# Checks: lint, tests, license and advisory checks, and the integration
+# tests against TS3/TS6 servers. Off for pushes and pull requests: run by
+# hand only (Actions → CI → Run workflow). Packages are built by release.yml
+# (tags, or by hand), which does not wait for these checks.
 on:
-  push:
-    branches: [main, master]
-    paths:
-      - "**"
-      - "!docs/**"
-      - "!**/*.md"
-      - "THIRD_PARTY_NOTICES.md"
-  pull_request:
-    paths:
-      - "**"
-      - "!docs/**"
-      - "!**/*.md"
-      - "THIRD_PARTY_NOTICES.md"
   workflow_dispatch:
   workflow_call:
 

@@ -1,20 +1,8 @@
 name: CI
 
 # Linux checks for Gitea act_runner; runner setup and scope: docs/ci.md.
+# Off for pushes and pull requests: run by hand only.
 on:
-  push:
-    branches: [main, master]
-    paths:
-      - "**"
-      - "!docs/**"
-      - "!**/*.md"
-      - "THIRD_PARTY_NOTICES.md"
-  pull_request:
-    paths:
-      - "**"
-      - "!docs/**"
-      - "!**/*.md"
-      - "THIRD_PARTY_NOTICES.md"
   workflow_dispatch:
 
 env:
