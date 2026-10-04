@@ -13,8 +13,8 @@ use tracing::warn;
 use voelin_core::media::voelin_media::capture::{CaptureSource, SourceId};
 use voelin_core::media::voelin_media::{Codec, Codecs, EncoderReport, VideoFrame, convert};
 use voelin_core::media::{
-	self, AudioSourceSpec, EncoderPreference, Latest, LocalPreview, Streamer, StreamerConfig,
-	StreamerConfigUpdate, Viewer, peer_config, preferred_codec, stream_codec,
+	self, AudioSourceSpec, DecoderPreference, EncoderPreference, Latest, LocalPreview, Streamer,
+	StreamerConfig, StreamerConfigUpdate, Viewer, peer_config, preferred_codec, stream_codec,
 };
 use voelin_core::stream::{LayerSpec, PeerConfig};
 use voelin_core::studio::Studio;
@@ -62,6 +62,9 @@ pub(crate) struct Video {
 	/// automatic), from the settings.
 	encoder: EncoderPreference,
 	codec: Option<Codec>,
+	/// Which decoders to use (`stream.hardware_decoding`,
+	/// `stream.decoder_backend`).
+	decoder: DecoderPreference,
 	/// Sources of the share dialog, by index.
 	sources: Vec<ShareEntry>,
 }
@@ -75,6 +78,7 @@ impl Video {
 			codecs: Arc::new(Codecs::new()),
 			encoder: EncoderPreference::default(),
 			codec: None,
+			decoder: DecoderPreference::default(),
 			#[cfg(not(target_os = "android"))]
 			openh264_dir: data_dir.join("openh264"),
 			#[cfg(not(target_os = "android"))]
@@ -108,7 +112,19 @@ impl Video {
 		self.codec = codec;
 	}
 
-	/// Every encoder backend, what works and why the rest does not.
+	/// Decode with other decoders (`stream.hardware_decoding`,
+	/// `stream.decoder_backend`): streams watched from now on.
+	pub fn set_decoder_preference(&mut self, decoder: DecoderPreference) {
+		if decoder != self.decoder {
+			let mut codecs = (*self.codecs).clone();
+			codecs.set_decoder_preference(decoder.clone());
+			self.codecs = Arc::new(codecs);
+			self.decoder = decoder;
+		}
+	}
+
+	/// Every encoder and decoder backend, what works and why the rest does
+	/// not.
 	#[allow(dead_code, reason = "for the integrations page")]
 	pub fn encoder_report(&self) -> EncoderReport {
 		self.codecs.report()
@@ -140,7 +156,11 @@ impl Video {
 			use openh264::State;
 			if !enabled {
 				self.h264 = State::Off;
-				self.codecs = Arc::new(Codecs::new().with_preference(self.encoder.clone()));
+				self.codecs = Arc::new(
+					Codecs::new()
+						.with_preference(self.encoder.clone())
+						.with_decoder_preference(self.decoder.clone()),
+				);
 				return;
 			}
 			if matches!(self.h264, State::Loaded(_) | State::Downloading) {
@@ -156,8 +176,12 @@ impl Video {
 	#[cfg(not(target_os = "android"))]
 	fn loaded(&mut self, library: openh264::OpenH264) {
 		self.h264 = openh264::State::Loaded(library.path().to_owned());
-		self.codecs =
-			Arc::new(Codecs::new().with_openh264(library).with_preference(self.encoder.clone()));
+		self.codecs = Arc::new(
+			Codecs::new()
+				.with_openh264(library)
+				.with_preference(self.encoder.clone())
+				.with_decoder_preference(self.decoder.clone()),
+		);
 	}
 
 	/// Download Cisco's OpenH264 (only on the user's request). `done` runs
@@ -344,8 +368,8 @@ impl Video {
 fn deliver(
 	pictures: Arc<Latest<Picture>>,
 	wake: impl Fn() + Send + Sync + 'static,
-) -> impl FnMut(VideoFrame) + Send + 'static {
-	move |frame: VideoFrame| {
+) -> impl FnMut(Arc<VideoFrame>) + Send + 'static {
+	move |frame: Arc<VideoFrame>| {
 		let mut buffer = Picture::new(frame.width, frame.height);
 		let stride = frame.width as usize * 4;
 		if let Err(e) = convert::to_rgba(&frame, buffer.make_mut_bytes(), stride) {
