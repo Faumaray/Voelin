@@ -69,6 +69,7 @@ use voelin_stream::{
 };
 
 use crate::settings::{AudioSourceKindSetting, AudioSourceSetting};
+pub use crate::stream::LayerFormat;
 use crate::stream::StreamSink;
 use crate::{Command, Engine, SessionId};
 
@@ -326,12 +327,14 @@ pub trait MediaSink: Send + Sync {
 		let _ = out;
 	}
 
-	/// Layer `layer` has an automatic bitrate and is encoded at `bitrate`
-	/// bit/s ([`auto_bitrate`] of its size and frame rate): told with its
-	/// first frame and whenever it changes, so the stream's connections can
-	/// probe for it.
-	fn auto_bitrate(&self, layer: LayerId, bitrate: u64) {
-		let _ = (layer, bitrate);
+	/// What layer `layer` is encoded at: size, frame rate and bitrate (an
+	/// automatic one, [`auto_bitrate`] of its size and frame rate, so marked).
+	/// Told when the sink is attached (from the size captured so far), with
+	/// the layer's first frame, and whenever it changes, so the stream's
+	/// connections can probe for the bitrate and offers can declare the
+	/// H.264 level the stream needs.
+	fn layer_format(&self, layer: LayerId, format: LayerFormat) {
+		let _ = (layer, format);
 	}
 }
 
@@ -360,8 +363,8 @@ impl MediaSink for StreamSink {
 		StreamSink::layer_bitrate(self, layer)
 	}
 
-	fn auto_bitrate(&self, layer: LayerId, bitrate: u64) {
-		StreamSink::auto_bitrate(self, layer, bitrate);
+	fn layer_format(&self, layer: LayerId, format: LayerFormat) {
+		StreamSink::layer_format(self, layer, format);
 	}
 }
 
@@ -810,6 +813,17 @@ impl Layer {
 	fn stopped(&self) -> bool {
 		self.stop.load(Ordering::Relaxed)
 	}
+
+	/// What the layer encodes pictures of `size` at: its bitrate, or the
+	/// automatic one for that size and its frame rate.
+	fn format(&self, (width, height): (u32, u32)) -> LayerFormat {
+		let fps = self.fps.load(Ordering::Relaxed);
+		let (bitrate, automatic) = match self.bitrate.load(Ordering::Relaxed) {
+			0 => (auto_bitrate(width, height, fps), true),
+			bitrate => (bitrate, false),
+		};
+		LayerFormat { width, height, fps, bitrate, automatic }
+	}
 }
 
 /// The frame rate a layer encodes at: its cap, within the capture's.
@@ -1249,6 +1263,15 @@ impl Streamer {
 
 	/// Start encoding into `sink` (replacing an earlier one).
 	pub fn attach(&self, sink: Arc<dyn MediaSink>) {
+		// What the layers are, from the size captured so far: a viewer may
+		// join before the first frame is encoded.
+		let size = self.shared.size.load(Ordering::Relaxed);
+		if size != 0 {
+			for layer in lock(&self.shared.layers).iter() {
+				let picture = lock(&layer.spec).output_size((size >> 32) as u32, size as u32);
+				sink.layer_format(layer.id, layer.format(picture));
+			}
+		}
 		*lock(&self.shared.sink) = Some(sink);
 	}
 
@@ -2198,8 +2221,8 @@ fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 	let mut generation = shared.encoders_generation.load(Ordering::Relaxed);
 	// Whether the stream codec was encoded for the last frame.
 	let mut primary_on = true;
-	// The automatic bitrate last told, and to which sink.
-	let mut told: Option<(u64, *const ())> = None;
+	// What the layer was last told to be, and to which sink.
+	let mut told: Option<(LayerFormat, *const ())> = None;
 	// The last picture, and when it came: a static screen sends no frames,
 	// so keyframe requests are answered by encoding it again.
 	let mut last: Option<(Picture, Instant)> = None;
@@ -2303,19 +2326,13 @@ fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 			None => continue,
 		};
 		// Follow the layer's bitrate, or what the viewers' estimates allow.
-		let configured = match layer.bitrate.load(Ordering::Relaxed) {
-			0 => {
-				let (width, height) = picture.size();
-				let auto = auto_bitrate(width, height, layer.fps.load(Ordering::Relaxed));
-				let to = Arc::as_ptr(&sink).cast::<()>();
-				if told != Some((auto, to)) {
-					told = Some((auto, to));
-					sink.auto_bitrate(layer.id, auto);
-				}
-				auto
-			}
-			bitrate => bitrate,
-		};
+		let format = layer.format(picture.size());
+		let to = Arc::as_ptr(&sink).cast::<()>();
+		if told != Some((format, to)) {
+			told = Some((format, to));
+			sink.layer_format(layer.id, format);
+		}
+		let configured = format.bitrate;
 		let cap = match layer.max_bitrate.load(Ordering::Relaxed) {
 			0 => u64::MAX,
 			max => max,
@@ -3420,8 +3437,8 @@ mod tests {
 		codecs: Mutex<Vec<VideoFormat>>,
 		frames: Mutex<Vec<(VideoFormat, EncodedFrame)>>,
 		keyframe: AtomicBool,
-		/// What [`MediaSink::auto_bitrate`] told, in order.
-		auto: Mutex<Vec<(LayerId, u64)>>,
+		/// What [`MediaSink::layer_format`] told, in order.
+		formats: Mutex<Vec<(LayerId, LayerFormat)>>,
 	}
 
 	impl MediaSink for CodecSink {
@@ -3442,8 +3459,8 @@ mod tests {
 			out.extend(lock(&self.codecs).iter());
 		}
 
-		fn auto_bitrate(&self, layer: LayerId, bitrate: u64) {
-			lock(&self.auto).push((layer, bitrate));
+		fn layer_format(&self, layer: LayerId, format: LayerFormat) {
+			lock(&self.formats).push((layer, format));
 		}
 	}
 
@@ -3464,8 +3481,8 @@ mod tests {
 	}
 
 	/// Bitrate 0 is automatic: the encoder runs at the stream's own
-	/// automatic bitrate, which the sink is told, and follows a new frame
-	/// rate.
+	/// automatic bitrate, and the sink is told the layer's format (once per
+	/// change, not per frame), which follows a new frame rate.
 	#[cfg(feature = "media-desktop")]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn an_automatic_bitrate_follows_the_stream() {
@@ -3481,30 +3498,53 @@ mod tests {
 		let streamer = Streamer::start(&codecs, config).await.unwrap();
 		let sink = Arc::new(CodecSink::default());
 		streamer.attach(sink.clone());
-		let told = |bitrate: u64| {
+		let told = |fps: u32| {
 			let sink = sink.clone();
+			let format = LayerFormat {
+				width: 640,
+				height: 480,
+				fps,
+				bitrate: auto_bitrate(640, 480, fps),
+				automatic: true,
+			};
 			async move {
 				let deadline = Instant::now() + Duration::from_secs(10);
-				while lock(&sink.auto).last() != Some(&(0, bitrate)) {
-					assert!(Instant::now() < deadline, "{:?}", lock(&sink.auto));
+				while lock(&sink.formats).last() != Some(&(0, format)) {
+					assert!(Instant::now() < deadline, "{:?}", lock(&sink.formats));
 					tokio::time::sleep(Duration::from_millis(20)).await;
 				}
 			}
 		};
-		told(auto_bitrate(640, 480, 30)).await;
+		told(30).await;
 		assert_eq!(streamer.bitrate_kbps(), 1105);
-		// Told once, not per frame.
+		// Not per frame.
+		let count = lock(&sink.formats).len();
 		tokio::time::sleep(Duration::from_millis(200)).await;
-		assert_eq!(lock(&sink.auto).len(), 1);
+		assert_eq!(lock(&sink.formats).len(), count);
 		assert_eq!(streamer.stats().layers[0].bitrate, auto_bitrate(640, 480, 30));
 		let update = StreamerConfigUpdate { fps: Some(15), ..StreamerConfigUpdate::default() };
 		streamer.reconfigure(&codecs, update).unwrap();
-		told(auto_bitrate(640, 480, 15)).await;
+		told(15).await;
 		// A typed bitrate is not automatic.
 		let update =
 			StreamerConfigUpdate { bitrate_kbps: Some(2000), ..StreamerConfigUpdate::default() };
 		streamer.reconfigure(&codecs, update).unwrap();
 		assert_eq!(streamer.bitrate_kbps(), 2000);
+		let typed = LayerFormat {
+			fps: 15,
+			bitrate: 2_000_000,
+			automatic: false,
+			..lock(&sink.formats)[0].1
+		};
+		let deadline = Instant::now() + Duration::from_secs(10);
+		while lock(&sink.formats).last() != Some(&(0, typed)) {
+			assert!(Instant::now() < deadline, "{:?}", lock(&sink.formats));
+			tokio::time::sleep(Duration::from_millis(20)).await;
+		}
+		// A new sink is told at once, from the size captured.
+		let next = Arc::new(CodecSink::default());
+		streamer.attach(next.clone());
+		assert_eq!(lock(&next.formats).first(), Some(&(0, typed)));
 	}
 
 	impl CodecSink {

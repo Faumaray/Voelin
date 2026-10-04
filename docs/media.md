@@ -145,7 +145,7 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   the encoder thread works it out from each picture's size and the layer's
   frame rate, so a resolution or frame-rate change moves it at once. The
   sink is told with the first frame and whenever it changes
-  (`MediaSink::auto_bitrate`); the engine's `StreamSink` puts it into the
+  (`MediaSink::layer_format`); the engine's `StreamSink` puts it into the
   live stream's layer, so new connections start their bandwidth estimate at
   it and all of them probe for it. `Streamer::bitrate_kbps()` is what to
   announce in `setupstream` (the share dialog and the studio do, up to the
@@ -216,7 +216,16 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   at the level the stream needs (`PeerConfig::h264_profile_level_ids`,
   `set_h264_format(width, height, fps, bitrate)`: macroblocks per second
   and per frame, and bitrate, per H.264 Table A-1; never below 3.1, the
-  level offered before). A viewer that takes both answers High (the
+  level offered before, and never above 5.2, the highest libwebrtc and
+  str0m parse: a viewer answered an offer of 6.0 without video). The app's
+  streams set it from what the encoder makes: every layer's encoder tells
+  its size, frame rate and bitrate (`MediaSink::layer_format`, from the
+  size captured so far when the sink is attached, then with the layer's
+  first frame and every change), and the stream task offers new viewers
+  the level of the largest (a layer's bitrate at its `max_bitrate` if
+  higher), in both profiles. Before, an app stream always offered 3.1,
+  also for 4K and high frame rates. A stream that needs 6.x is offered as
+  5.2 and carries its real level in the SPS. A viewer that takes both answers High (the
   streamer writes the first of its own order the answer lists); one that
   takes only Baseline gets frames from an encoder in Constrained Baseline
   (above). str0m's other H.264 variants are only accepted, never offered,

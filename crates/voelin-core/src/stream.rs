@@ -76,6 +76,19 @@ pub struct StreamFrame {
 	pub frame: MediaFrame,
 }
 
+/// What a simulcast layer of our stream is encoded at
+/// ([`StreamSink::layer_format`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayerFormat {
+	pub width: u32,
+	pub height: u32,
+	pub fps: u32,
+	/// Bit/s: the layer's bitrate, or its automatic one.
+	pub bitrate: u64,
+	/// The bitrate is automatic (from the size and frame rate).
+	pub automatic: bool,
+}
+
 /// Hands encoded frames of our stream to the engine, e.g. from an encoder
 /// thread, and tells the encoders what the viewers need per simulcast layer:
 /// keyframes and bitrates. Those are read lock-free from the stream session.
@@ -124,12 +137,13 @@ impl StreamSink {
 		self.feedback.bitrate(layer)
 	}
 
-	/// The encoder of `layer` runs at `bitrate` bit/s by itself (an
-	/// automatic bitrate, from the size and frame rate it encodes): the
-	/// stream's layer takes it, so new connections start at it and every
-	/// connection probes for it.
-	pub fn auto_bitrate(&self, layer: LayerId, bitrate: u64) {
-		let _ = self.tx.send(StreamInput::AutoBitrate { layer, bitrate });
+	/// What the encoder of `layer` makes. An automatic bitrate goes into the
+	/// stream's layer, so new connections start at it and every connection
+	/// probes for it; the largest layer sets the H.264 level of new offers
+	/// (`PeerConfig::set_h264_format`), so the offer declares what the
+	/// encoder writes into its SPS, also for 4K, 8K and high frame rates.
+	pub fn layer_format(&self, layer: LayerId, format: LayerFormat) {
+		let _ = self.tx.send(StreamInput::LayerFormat { layer, format });
 	}
 
 	pub fn is_live(&self) -> bool {
@@ -181,11 +195,10 @@ pub(crate) enum StreamInput {
 	},
 	/// Simulcast layers of our stream (now and for streams started later).
 	Layers(Vec<LayerSpec>),
-	/// The bitrate an encoder chose for a layer of the live stream
-	/// ([`StreamSink::auto_bitrate`]).
-	AutoBitrate {
+	/// What a layer of our stream is encoded at ([`StreamSink::layer_format`]).
+	LayerFormat {
 		layer: LayerId,
-		bitrate: u64,
+		format: LayerFormat,
 	},
 	/// SRTP profile order of new connections.
 	SrtpProfiles(Vec<SrtpProfile>),
@@ -298,6 +311,7 @@ impl StreamHandle {
 			settings,
 			own,
 			setup: None,
+			formats: BTreeMap::new(),
 			live: None,
 			viewers: 0,
 			clients: BTreeMap::new(),
@@ -311,6 +325,25 @@ impl StreamHandle {
 	pub fn send(&self, input: StreamInput) {
 		let _ = self.tx.send(input);
 	}
+}
+
+/// What an offer's H.264 level must hold: the largest size, frame rate and
+/// bitrate of the stream's layers that are encoded (`formats`), a layer's
+/// bitrate taken at its `max_bitrate` when that is higher, since bandwidth
+/// estimates may raise the encoder to it. `None` before any is.
+fn offer_format(
+	formats: &BTreeMap<LayerId, LayerFormat>,
+	layers: &[LayerSpec],
+) -> Option<(u32, u32, u32, u64)> {
+	formats.iter().filter(|(id, _)| layers.iter().any(|l| l.id == **id)).fold(
+		None,
+		|most, (id, f)| {
+			let max = layers.iter().find(|l| l.id == *id).and_then(|l| l.max_bitrate);
+			let bitrate = f.bitrate.max(max.unwrap_or(0));
+			let (w, h, fps, b) = most.unwrap_or((0, 0, 0, 0));
+			Some((w.max(f.width), h.max(f.height), fps.max(f.fps), b.max(bitrate)))
+		},
+	)
 }
 
 struct StreamTask {
@@ -333,6 +366,8 @@ struct StreamTask {
 	own: mpsc::UnboundedSender<OwnStreamEvent>,
 	/// The setup of our stream since `Start`.
 	setup: Option<StreamSetup>,
+	/// What each layer of our stream is encoded at, since `Start`.
+	formats: BTreeMap<LayerId, LayerFormat>,
 	/// Our live stream's id.
 	live: Option<String>,
 	/// Connected viewers of our stream, as last told.
@@ -370,11 +405,42 @@ impl StreamTask {
 		let _ = self.events.send(event);
 	}
 
+	/// A layer of our stream is encoded at `format` (see
+	/// [`StreamSink::layer_format`]).
+	fn layer_format(
+		&mut self,
+		layer: LayerId,
+		format: LayerFormat,
+	) -> Result<(), voelin_stream::SessionError> {
+		// The live stream's layers only; the configured ones (for streams
+		// started later) keep their automatic bitrate.
+		let Some(mut layers) = self.streams.streamer().map(|s| s.layers().to_vec()) else {
+			return Ok(());
+		};
+		self.formats.insert(layer, format);
+		if let Some((width, height, fps, bitrate)) = offer_format(&self.formats, &layers) {
+			let mut config = self.streams.peer_config().clone();
+			config.set_h264_format(width, height, fps, bitrate);
+			if config.h264_profile_level_ids != self.streams.peer_config().h264_profile_level_ids {
+				debug!(width, height, fps, bitrate, "H.264 offered for the stream's largest layer");
+				self.streams.set_peer_config(config);
+			}
+		}
+		match layers.iter_mut().find(|l| l.id == layer) {
+			Some(spec) if format.automatic && spec.bitrate != format.bitrate => {
+				spec.bitrate = format.bitrate;
+				self.streams.set_layers(layers)
+			}
+			_ => Ok(()),
+		}
+	}
+
 	async fn input(&mut self, input: StreamInput) {
 		let session = self.session;
 		let result = match input {
 			StreamInput::Start { setup, auto_accept } => {
 				self.setup = Some(setup.clone());
+				self.formats.clear();
 				let layers = self.layers.clone();
 				let options = StreamerOptions { setup, auto_accept, layers, ..Default::default() };
 				self.streams.start(options).map(|()| {
@@ -408,21 +474,7 @@ impl StreamTask {
 					Ok(())
 				}
 			}
-			StreamInput::AutoBitrate { layer, bitrate } => {
-				// The live stream's layers only; the configured ones (for
-				// streams started later) keep their automatic bitrate.
-				let layers = self.streams.streamer().map(|s| s.layers().to_vec());
-				match layers {
-					Some(mut layers) => match layers.iter_mut().find(|l| l.id == layer) {
-						Some(spec) if spec.bitrate != bitrate => {
-							spec.bitrate = bitrate;
-							self.streams.set_layers(layers)
-						}
-						_ => Ok(()),
-					},
-					None => Ok(()),
-				}
-			}
+			StreamInput::LayerFormat { layer, format } => self.layer_format(layer, format),
 			StreamInput::SrtpProfiles(profiles) => {
 				self.streams.set_srtp_profiles(profiles);
 				Ok(())
@@ -666,8 +718,17 @@ mod tests {
 	const CLIENTS: [u16; 2] = [5, 6];
 
 	/// The notifications the server sends for `request` from `from`, per receiver.
+	/// Every offer the fake server relayed, from all tests of this process.
+	fn lock_offers() -> std::sync::MutexGuard<'static, Vec<String>> {
+		static OFFERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+		OFFERS.lock().unwrap_or_else(PoisonError::into_inner)
+	}
+
 	fn relay(from: u16, request: Request) -> Vec<(u16, StreamNotification)> {
 		let both = |n: StreamNotification| CLIENTS.map(|c| (c, n.clone())).to_vec();
+		if let Request::Respond { offer: Some(sdp), .. } = &request {
+			lock_offers().push(sdp.clone());
+		}
 		match request {
 			Request::Setup(setup) => CLIENTS
 				.map(|c| {
@@ -757,11 +818,11 @@ mod tests {
 		audio: Option<AudioHandle>,
 		settings: &Settings,
 	) -> (Handles, broadcast::Receiver<Event>, broadcast::Receiver<StreamFrame>) {
-		let (handles, rx, frames, _) = pair_full(audio, settings, false);
+		let (handles, rx, frames, _) = pair_full(audio, settings, false, PeerConfig::loopback());
 		(handles, rx, frames)
 	}
 
-	/// [`pair_with`]; with `late`, the server does not tell the viewer
+	/// [`pair_with`] with peers of `config`; with `late`, the server does not tell the viewer
 	/// (session 2) about streams, as for a client that joined after the
 	/// stream started, and does not answer lookups. Also returns what the
 	/// streamer (session 1) reports about its own stream.
@@ -769,6 +830,7 @@ mod tests {
 		audio: Option<AudioHandle>,
 		settings: &Settings,
 		late: bool,
+		config: PeerConfig,
 	) -> (
 		Handles,
 		broadcast::Receiver<Event>,
@@ -783,7 +845,7 @@ mod tests {
 		let mut audio = audio;
 		for (i, clid) in CLIENTS.into_iter().enumerate() {
 			let (voice, voice_rx) = mpsc::unbounded_channel();
-			let config = PeerConfig::loopback();
+			let config = config.clone();
 			let session = i as u64 + 1;
 			handles.push(StreamHandle::spawn(
 				session,
@@ -996,20 +1058,56 @@ mod tests {
 		feeder.await.unwrap();
 	}
 
-	/// An encoder's automatic bitrate reaches the live stream's layer (which
-	/// asks the viewer's layer for a keyframe, as every layer change does);
-	/// the same bitrate again changes nothing.
+	/// What the encoder tells about a layer reaches the live stream: the
+	/// largest layer's size, frame rate and bitrate set the H.264 level of
+	/// the next offer (both profiles), and an automatic bitrate goes into the
+	/// layer (which asks the viewer's layer for a keyframe, as every layer
+	/// change does); the same again changes nothing.
 	#[tokio::test(flavor = "multi_thread")]
-	async fn automatic_bitrates_reach_the_live_stream() {
-		let (handles, mut rx, _frames) = pair(None);
-		let sink = live_and_watching(&handles, &mut rx).await;
+	async fn layer_formats_reach_the_live_stream() {
+		// The streamer offers H.264 (and the viewer takes it).
+		let config = PeerConfig { video_codecs: vec![VideoCodec::H264], ..PeerConfig::loopback() };
+		let (handles, mut rx, _frames, _) = pair_full(None, &Settings::in_memory(), false, config);
+		let setup = StreamSetup { name: "4K120".into(), ..Default::default() };
+		handles[0].send(StreamInput::Start { setup, auto_accept: true });
+		// Live for the streamer and listed for the viewer, in either order.
+		let (mut sink, mut listed) = (None, false);
+		wait(&mut rx, |e| {
+			match e {
+				Event::StreamState { session: 1, state: StreamState::Live { sink: s, .. } } => {
+					sink = Some(s);
+				}
+				Event::StreamsChanged { session: 2, streams } => listed = streams.len() == 1,
+				_ => {}
+			}
+			(sink.is_some() && listed).then_some(())
+		})
+		.await;
+		let sink = sink.unwrap();
+		let format =
+			|bitrate| LayerFormat { width: 3840, height: 2160, fps: 60, bitrate, automatic: true };
+		// Before the viewer asks: its offer is made after this.
+		sink.layer_format(0, format(60_000_000));
+		handles[1].send(StreamInput::Watch { stream_id: "s-1".into() });
+		wait(&mut rx, |e| match e {
+			Event::WatchState { session: 2, state: WatchState::Connected, .. } => Some(()),
+			_ => None,
+		})
+		.await;
+		// 3840x2160 at 60 fps is level 5.2 (0x34) in both profiles.
+		let offers = lock_offers().clone();
+		assert!(
+			offers.iter().any(|o| o.contains("profile-level-id=640c34") && o.contains("42e034")),
+			"{offers:?}"
+		);
+
 		let keyframes = || {
 			let mut layers = LayerSet::new();
 			sink.take_layer_keyframes(&mut layers);
 			layers.contains(0)
 		};
 		keyframes();
-		sink.auto_bitrate(0, 9_000_000);
+		sink.layer_format(0, format(9_000_000));
 		timeout(Duration::from_secs(5), async {
 			while !keyframes() {
 				tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1017,10 +1115,34 @@ mod tests {
 		})
 		.await
 		.expect("the layer did not change");
-		sink.auto_bitrate(0, 9_000_000);
+		sink.layer_format(0, format(9_000_000));
 		tokio::time::sleep(Duration::from_millis(200)).await;
 		assert!(!keyframes(), "nothing changed");
 		handles[0].send(StreamInput::Stop);
+	}
+
+	#[test]
+	fn the_offer_covers_the_largest_layer() {
+		let format = |width, height, fps, bitrate| LayerFormat {
+			width,
+			height,
+			fps,
+			bitrate,
+			automatic: false,
+		};
+		let layers = [
+			LayerSpec { max_bitrate: Some(12_000_000), ..LayerSpec::single(8_000_000) },
+			LayerSpec { id: 1, scale: 0.5, ..LayerSpec::single(2_000_000) },
+		];
+		let mut formats = BTreeMap::new();
+		assert_eq!(offer_format(&formats, &layers), None);
+		formats.insert(1, format(960, 540, 120, 2_000_000));
+		formats.insert(0, format(1920, 1080, 60, 8_000_000));
+		// Layer 0's size and its bitrate at its maximum, layer 1's rate.
+		assert_eq!(offer_format(&formats, &layers), Some((1920, 1080, 120, 12_000_000)));
+		// A layer the stream no longer has does not count.
+		formats.insert(7, format(7680, 4320, 30, 60_000_000));
+		assert_eq!(offer_format(&formats, &layers), Some((1920, 1080, 120, 12_000_000)));
 	}
 
 	/// A viewer that was not told about a running stream, and whose server
@@ -1028,7 +1150,9 @@ mod tests {
 	/// watches it; the streamer reports its stream's life for the directory.
 	#[tokio::test(flavor = "multi_thread")]
 	async fn late_viewer_finds_the_stream_in_the_gateway_directory() {
-		let (handles, mut rx, _frames, mut own) = pair_full(None, &Settings::in_memory(), true);
+		let loopback = PeerConfig::loopback();
+		let (handles, mut rx, _frames, mut own) =
+			pair_full(None, &Settings::in_memory(), true, loopback);
 		let setup = StreamSetup {
 			name: "directory test".into(),
 			kind: StreamKind::Window,
