@@ -390,6 +390,10 @@ async fn run_inner(
 				None => anyhow::bail!("connection closed"),
 			}
 			if identity.has_changed().unwrap_or(true) {
+				// Connected already: leave properly, or the server keeps a
+				// client with the old account until it times out, next to
+				// the new one.
+				let _ = shutdown_connection(con).await;
 				continue;
 			}
 			return Ok(con);

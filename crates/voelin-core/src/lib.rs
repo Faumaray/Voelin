@@ -861,7 +861,16 @@ async fn run(
 		};
 		let id = match command {
 			Command::SetMytsIdentity(identity) => {
-				myts_identity.send_replace(identity);
+				// Still no account is no change: every notification restarts
+				// handshakes and sends `updatemytsid` on every connection. Any
+				// account is (each connection's proof is signed anew).
+				myts_identity.send_if_modified(|current| {
+					if current.is_none() && identity.is_none() {
+						return false;
+					}
+					*current = identity;
+					true
+				});
 				continue;
 			}
 			Command::SetAudioSettings(new) => {

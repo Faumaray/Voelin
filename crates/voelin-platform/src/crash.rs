@@ -126,6 +126,11 @@ pub fn set_app_version(version: impl Into<String>) {
 	config().version = version.into();
 }
 
+/// The app's version ([`set_app_version`]), also what it tells servers.
+pub fn app_version() -> String {
+	config().version.clone()
+}
+
 /// How many reports to keep (at least one).
 pub fn set_keep(keep: usize) {
 	config().keep = keep.max(1);

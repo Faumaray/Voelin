@@ -108,7 +108,8 @@ fn compatibility_version(os: &str) -> Result<Version> {
 pub fn client_metadata() -> String {
 	serde_json::json!({
 		"name": "Voelin",
-		"version": env!("CARGO_PKG_VERSION"),
+		// The app's version (it sets it at start), not this library's.
+		"version": voelin_platform::crash::app_version(),
 		"platform": std::env::consts::OS,
 	})
 	.to_string()
@@ -151,7 +152,7 @@ mod tests {
 	fn metadata_identifies_voelin_without_changing_signed_version() {
 		let metadata: serde_json::Value = serde_json::from_str(&client_metadata()).unwrap();
 		assert_eq!(metadata["name"], "Voelin");
-		assert_eq!(metadata["version"], env!("CARGO_PKG_VERSION"));
+		assert_eq!(metadata["version"], voelin_platform::crash::app_version());
 		assert_eq!(metadata["platform"], std::env::consts::OS);
 	}
 
