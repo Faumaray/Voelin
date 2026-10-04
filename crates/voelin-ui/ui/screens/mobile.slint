@@ -195,35 +195,24 @@ export component YouPage inherits ScrollView {
             text: @tr("Settings");
             small: true;
         }
-        NavItem {
-            icon: Icons.mic;
-            text: @tr("Voice & Video");
+        // Every section, in the order of the phone's settings design.
+        for item in [
+            { icon: Icons.user-round, text: @tr("My Account"), section: SettingsSection.account },
+            { icon: Icons.users, text: @tr("Profiles"), section: SettingsSection.profiles },
+            { icon: Icons.palette, text: @tr("Appearance"), section: SettingsSection.appearance },
+            { icon: Icons.mic, text: @tr("Voice & Video"), section: SettingsSection.voice },
+            { icon: Icons.radio, text: @tr("Streaming"), section: SettingsSection.streaming },
+            { icon: Icons.bell, text: @tr("Notifications"), section: SettingsSection.notifications },
+            { icon: Icons.shield, text: @tr("Privacy & Safety"), section: SettingsSection.privacy },
+            { icon: Icons.smartphone, text: @tr("Devices"), section: SettingsSection.devices },
+            { icon: Icons.keyboard, text: @tr("Keybinds"), section: SettingsSection.keybinds },
+            { icon: Icons.puzzle, text: @tr("Integrations"), section: SettingsSection.integrations },
+            { icon: Icons.settings, text: @tr("Advanced"), section: SettingsSection.advanced },
+        ]: NavItem {
+            icon: item.icon;
+            text: item.text;
             chevron: true;
-            clicked => { Nav.open-settings(SettingsSection.voice); }
-        }
-        NavItem {
-            icon: Icons.keyboard;
-            text: @tr("Keybinds");
-            chevron: true;
-            clicked => { Nav.open-settings(SettingsSection.keybinds); }
-        }
-        NavItem {
-            icon: Icons.radio;
-            text: @tr("Streaming");
-            chevron: true;
-            clicked => { Nav.open-settings(SettingsSection.streaming); }
-        }
-        NavItem {
-            icon: Icons.shield;
-            text: @tr("Privacy & Safety");
-            chevron: true;
-            clicked => { Nav.open-settings(SettingsSection.privacy); }
-        }
-        NavItem {
-            icon: Icons.palette;
-            text: @tr("Appearance");
-            chevron: true;
-            clicked => { Nav.open-settings(SettingsSection.appearance); }
+            clicked => { Nav.open-settings(item.section); }
         }
         NavItem {
             icon: Icons.info;

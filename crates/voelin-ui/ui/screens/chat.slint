@@ -147,16 +147,18 @@ component FileCard inherits Rectangle {
         padding: Theme.space-3;
         padding-left: Theme.space-4;
         spacing: Theme.space-4;
+        // A document in red, a picture in blue (as in the profile panel's
+        // shared files and the design's file cards).
         Rectangle {
             width: 40px;
             height: 40px;
             y: (parent.height - self.height) / 2;
-            border-radius: 20px;
-            background: Theme.surface-4;
+            border-radius: Theme.radius-md;
+            background: file.picture ? Theme.accent-soft : Theme.danger-soft;
             Icon {
                 source: file.picture ? Icons.image : Icons.file-text;
                 size: Theme.icon-md;
-                tint: Theme.accent-text;
+                tint: file.picture ? Theme.accent-text : Theme.danger;
             }
         }
         VerticalLayout {
