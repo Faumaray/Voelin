@@ -424,15 +424,31 @@ the window's size so the pointer is not over the window, and passes
 
 ## Server and channel pictures
 
-The server card shows the host banner. TeamSpeak 6 channel banners appear
-above their tree rows, the desktop chat and voice headers, and the phone's
-chat and voice headers. Artwork has a separate area from titles and controls,
-so bright pictures remain visible without reducing text contrast. Areas follow
-the picture's aspect ratio, capped at 180 pixels for the host, 112 for tree
-rows, 160 for desktop headers and 120 for phone headers. The server's sizing
-mode is preserved: 0 centres the original picture (clipped to the bounded
-area), 1 stretches it, and 2 fits it while keeping its aspect ratio.
-Missing or refused pictures leave the normal background in place.
+The compact server card shows its icon over the host banner. TeamSpeak 6
+channel banners sit behind their titles in fixed-height tree rows (34 pixels),
+and behind desktop and phone chat/voice headers. Artwork uses centred cover
+cropping without distortion; it never adds height to navigation. Custom channel
+icons lead the title, and recognized `[cspacerN]` labels are centred without
+showing the prefix. A theme-aware surface gradient (74% to 66% opacity) keeps
+primary text above 4.5:1 contrast even on all-white or all-black artwork, while
+leaving the image visible. Missing pictures retain the normal background.
+
+Bookmarks remember the server icon ID and the address that supplied it. The
+server list, search results and server header load its cached bytes before
+connecting, including after restarting the app. Editing a server address
+invalidates the association; queued details from the old address cannot replace
+it. A missing or evicted image falls back to initials. This requires no
+ServerQuery configuration and starts no background voice connection.
+
+First-visit icon downloads before login remain unverified. On a private TS6
+6.0.0-beta13.1 fixture, the native encrypted handshake completed without
+`clientinit`, but pre-login `serverinfo`, `getserverinfo`, `servergetvariables`,
+`ftinitdownload` and `ftgetchannelfilehttptoken scid=icons` probes each received
+no response within three seconds. The installed official client's UI code
+populates its bookmark icon cache from connected server properties. Its clean
+profile requires account setup before the server list, so no fresh-profile
+network capture was obtained. These observations do not establish that every
+server or client version lacks a pre-login mechanism.
 
 The engine downloads HTTP(S) banners only while `cache.fetch_images` is
 enabled. Up to eight distinct banners download concurrently; duplicate URLs
@@ -455,8 +471,10 @@ no extension. Raster pictures larger than 16,384 pixels on either axis or
 thread. SVG uses Slint's vector loader and the existing vector-cache cost.
 Avatars and server, channel, client and group icons use the same image cache.
 
-The focused checks are the `voelin-core`, `voelin-model`, `voelin-observer`
-and `voelin-ui` library tests. The live `ts6_banners` test checks disabled
+The focused checks are the `voelin-core`, `voelin-model`, `voelin-observer`,
+`voelin-store` and `voelin-ui` library tests. They cover offline icon restoration,
+bookmark compatibility, cache misses and old-address event rejection. The live
+`ts6_banners` test checks disabled
 fetching, recovery from HTTP 503 without another presence update, all three
 modes, channel URL replacement and removal, and a fresh host download after
 the 60-second interval. `ts6_avatars` uploads an avatar with one client and
@@ -472,9 +490,11 @@ VOELIN_BANNER_QUERY_ADDR=127.0.0.1:20022 \
 cargo test --locked -p voelin-core --test live ts6_banners -- --exact
 ```
 
-The 2026-10-04 check passed 176 focused library tests and both live scenarios
-against a private TS6 6.0.0-beta13.1 instance, including its real reload
-interval. These screenshots use sample data on Xvfb with Slint's software
+The 2026-10-04 follow-up passed all 200 focused library tests. The download
+checks passed both live scenarios against a private
+TS6 6.0.0-beta13.1 instance, including its real reload interval. The compact
+layout passed seven headless screenshot scenarios. These screenshots use
+sample data on Xvfb with Slint's software
 renderer; the phone layouts are desktop renders, not Android device tests.
 
 | Desktop | Phone layout |

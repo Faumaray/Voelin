@@ -6,7 +6,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge } from "../bridge.slint";
 import { Nav, Page, MobileTab, SettingsSection } from "../nav.slint";
-import { Icon, IconButton, CountBadge, PopupMenu, MenuEntry, BannerPicture, BannerLayout } from "../components/index.slint";
+import { Icon, IconButton, CountBadge, PopupMenu, MenuEntry, BannerPicture } from "../components/index.slint";
 import { PhoneVoice } from "../screens/mobile-voice.slint";
 
 // One entry of the bottom navigation.
@@ -107,7 +107,6 @@ export component MobileShell inherits Rectangle {
     in property <string> title;
     in property <string> subtitle;
     in property <image> banner;
-    in property <int> banner-mode;
     // Total unread messages (the Chat tab's badge).
     in property <int> unread;
     // Show a back arrow (sub-pages such as the settings).
@@ -121,15 +120,12 @@ export component MobileShell inherits Rectangle {
     callback go-back();
     background: Theme.backdrop;
     VerticalLayout {
-        if root.banner.width > 0: BannerPicture {
-            height: BannerLayout.artwork-height(root.banner, self.width, root.banner-mode, 120px);
-            source: root.banner;
-            mode: root.banner-mode;
-        }
         // Top bar.
         Rectangle {
             height: 60px;
             accessible-role: AccessibleRole.banner;
+            clip: true;
+            if root.banner.width > 0: BannerPicture { source: root.banner; }
             HorizontalLayout {
                 padding-left: Theme.space-4;
                 padding-right: Theme.space-3;
@@ -160,7 +156,7 @@ export component MobileShell inherits Rectangle {
                     }
                     if root.subtitle != "": Text {
                         text: root.subtitle;
-                        color: Theme.accent-text;
+                        color: root.banner.width > 0 ? Theme.text : Theme.accent-text;
                         font-size: Theme.font-sm;
                         overflow: elide;
                     }

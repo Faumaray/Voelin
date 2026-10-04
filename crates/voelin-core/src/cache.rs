@@ -115,6 +115,11 @@ impl Cache {
 		self.touch(&mut index, key)
 	}
 
+	/// The cached server, channel, group or client icon, if available.
+	pub fn icon(&self, id: u32) -> Option<PathBuf> {
+		(id != 0).then(|| self.get(&icon_key(id))).flatten()
+	}
+
 	fn touch(&self, index: &mut Index, key: &str) -> Option<PathBuf> {
 		let path = self.dir.join(key);
 		let tick = index.entries.get(key)?.tick;

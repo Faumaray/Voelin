@@ -215,6 +215,8 @@ pub(crate) struct SessionView {
 	/// The server's icon id as its voice connection last told it
 	/// ([`Event::ServerDetails`]); kept while disconnected, for the rail.
 	pub server_icon: u32,
+	/// Bookmark address that supplied this session's icon.
+	pub icon_address: Option<String>,
 	/// The server groups in display order ([`Event::Groups`]).
 	pub server_groups: Vec<GroupInfo>,
 	/// The channel groups ([`Event::Groups`]).
@@ -250,6 +252,7 @@ impl Default for SessionView {
 			icons: HashMap::new(),
 			pictures: HashMap::new(),
 			server_icon: 0,
+			icon_address: None,
 			server_groups: Vec::new(),
 			channel_groups: Vec::new(),
 			gateway_caps: Vec::new(),
@@ -317,6 +320,16 @@ impl SessionView {
 		crate::vm::avatar::image(
 			self.icons.get(&self.server_icon).filter(|_| self.server_icon != 0),
 		)
+	}
+
+	/// Icons stay associated with the address that supplied them, including
+	/// while a reconnect to an edited bookmark is pending or has failed.
+	pub fn server_icon_for(&self, address: &str) -> slint::Image {
+		if self.icon_address.as_deref() == Some(address) {
+			self.server_icon()
+		} else {
+			slint::Image::default()
+		}
 	}
 }
 
@@ -942,12 +955,10 @@ impl App {
 					self.refresh_tree();
 				}
 			}
-			Event::ServerDetails { session, details } => {
-				let view = self.sessions.entry(session as i64).or_default();
-				if view.server_icon != details.icon {
-					view.server_icon = details.icon;
-					self.refresh_servers();
-				}
+			Event::ServerDetails { session, address, details } => {
+				self.remember_server_icon(session as i64, &address, details.icon);
+				self.refresh_servers();
+				self.refresh_toolbar();
 			}
 			// Pictures can arrive after the rows were built: draw them again.
 			Event::AvatarReady { session, client_uid, path, .. } => {
@@ -967,6 +978,7 @@ impl App {
 				self.refresh_servers();
 				if self.current == Some(session as i64) {
 					self.refresh_tree();
+					self.refresh_toolbar();
 				}
 			}
 			Event::PictureReady { session, url, path } => {

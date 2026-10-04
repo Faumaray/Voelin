@@ -7,7 +7,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, MemberItem, StreamItem } from "../bridge.slint";
 import { Nav, MobileTab } from "../nav.slint";
-import { Icon, IconButton, Button, ButtonKind, Avatar, LiveBadge, Select, Slider, SpeakingBars, ScrollView, BannerPicture, BannerLayout } from "../components/index.slint";
+import { Icon, IconButton, Button, ButtonKind, Avatar, LiveBadge, Select, Slider, SpeakingBars, ScrollView, BannerPicture } from "../components/index.slint";
 import { MessageList, Composer } from "chat.slint";
 import { StudioBridge } from "../studio-bridge.slint";
 
@@ -21,18 +21,15 @@ export global PhoneVoice {
     }
 }
 
-// The channel artwork above its name, topic, Back and Leave.
+// Channel background behind its name, topic, Back and Leave.
 component ChannelBar inherits Rectangle {
-    property <length> artwork-height: BannerLayout.artwork-height(Bridge.own-channel-banner, root.width, Bridge.own-channel-banner-mode, 120px);
-    height: 56px + root.artwork-height;
+    height: 56px;
+    clip: true;
     if Bridge.own-channel-banner.width > 0: BannerPicture {
         y: 0;
-        height: root.artwork-height;
         source: Bridge.own-channel-banner;
-        mode: Bridge.own-channel-banner-mode;
     }
     HorizontalLayout {
-        y: root.artwork-height;
         height: 56px;
         padding-left: Theme.space-3;
         padding-right: Theme.space-3;
@@ -64,7 +61,7 @@ component ChannelBar inherits Rectangle {
             }
             if Bridge.own-channel-topic != "": Text {
                 text: Bridge.own-channel-topic;
-                color: Theme.text-secondary;
+                color: Bridge.own-channel-banner.width > 0 ? Theme.text : Theme.text-secondary;
                 font-size: Theme.font-sm;
                 overflow: elide;
             }

@@ -6,6 +6,12 @@ use voelin_store::Bookmark;
 use crate::app::ServerItem;
 use crate::vm::avatar;
 
+/// Restore a known server icon before any session exists. A missing/evicted
+/// cache file falls back to initials; the bookmark stores no filesystem path.
+pub fn cached_icon(bookmark: &Bookmark, cache: &voelin_core::Cache) -> slint::Image {
+	avatar::image(bookmark.server_icon_id().and_then(|id| cache.icon(id)).as_ref())
+}
+
 /// "offline", "connecting", "observing" or "connected".
 pub fn status(state: &SessionState) -> &'static str {
 	match (state.voice, state.observe) {
@@ -91,6 +97,40 @@ pub fn invite_link(address: &str, path: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn server_icon_is_visible_before_connection_and_missing_files_fall_back() {
+		let dir =
+			std::env::temp_dir().join(format!("voelin-server-icon-model-{}", std::process::id()));
+		std::fs::create_dir_all(dir.join("icons")).unwrap();
+		let path = dir.join("icons/1234");
+		let mut bytes = Vec::new();
+		let mut encoder = png::Encoder::new(&mut bytes, 4, 4);
+		encoder.set_color(png::ColorType::Rgba);
+		encoder.set_depth(png::BitDepth::Eight);
+		encoder.write_header().unwrap().write_image_data(&[200; 64]).unwrap();
+		std::fs::write(&path, bytes).unwrap();
+		let cache = voelin_core::Cache::new(&dir);
+		let mut bookmark = Bookmark { address: "example.test".into(), ..Default::default() };
+		bookmark.remember_server_icon(1234);
+		let server = item(
+			&bookmark,
+			&SessionState::default(),
+			0,
+			false,
+			String::new(),
+			String::new(),
+			cached_icon(&bookmark, &cache),
+		);
+		assert_eq!(server.status.as_str(), "offline");
+		assert_eq!(server.icon.size().width, 4);
+		bookmark.address = "different.test".into();
+		assert_eq!(cached_icon(&bookmark, &cache).size().width, 0);
+		bookmark.address = "example.test".into();
+		std::fs::remove_file(path).unwrap();
+		assert_eq!(cached_icon(&bookmark, &cache).size().width, 0);
+		std::fs::remove_dir_all(dir).unwrap();
+	}
 
 	#[test]
 	fn invite_links() {

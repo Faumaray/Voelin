@@ -593,6 +593,9 @@ pub enum Event {
 	/// The server's details changed (also in [`Presence::server`]; voice).
 	ServerDetails {
 		session: SessionId,
+		/// The requested voice address that supplied these details. A queued
+		/// event may outlive a reconnect to another address in this session.
+		address: String,
 		details: Arc<ServerDetails>,
 	},
 	/// The server or channel groups changed (also in the presence; voice),

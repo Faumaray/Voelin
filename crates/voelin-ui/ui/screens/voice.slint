@@ -5,7 +5,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, MemberItem, StreamItem } from "../bridge.slint";
 import { Nav, SettingsSection } from "../nav.slint";
-import { Icon, IconButton, Button, ButtonKind, Avatar, LiveBadge, Chip, SpeakingBars, BannerPicture, BannerLayout } from "../components/index.slint";
+import { Icon, IconButton, Button, ButtonKind, Avatar, LiveBadge, Chip, SpeakingBars, BannerPicture } from "../components/index.slint";
 import { MessageList, Composer } from "chat.slint";
 
 // One person: a large avatar with a ring (green while talking, blue while
@@ -212,14 +212,12 @@ component StreamCard inherits Rectangle {
 
 // The voice channel view (desktop): header, people, streams, chat.
 export component VoiceView inherits VerticalLayout {
-    // The title with the buttons beside it; the topic and the count below
-    // take the whole width. Artwork sits above the title on its own surface.
-    if Bridge.own-channel-banner.width > 0: BannerPicture {
-        height: BannerLayout.artwork-height(Bridge.own-channel-banner, self.width, Bridge.own-channel-banner-mode, 160px);
-        source: Bridge.own-channel-banner;
-        mode: Bridge.own-channel-banner-mode;
-    }
+    // Banner shares the header; it does not push people and streams down.
     Rectangle {
+        clip: true;
+        if Bridge.own-channel-banner.width > 0: BannerPicture {
+            source: Bridge.own-channel-banner;
+        }
         HorizontalLayout {
             padding-left: Theme.space-7;
             padding-right: Theme.space-5;
@@ -271,7 +269,7 @@ export component VoiceView inherits VerticalLayout {
                 }
                 if Bridge.own-channel-topic != "": Text {
                     text: Bridge.own-channel-topic;
-                    color: Theme.text-secondary;
+                    color: Bridge.own-channel-banner.width > 0 ? Theme.text : Theme.text-secondary;
                     font-size: Theme.font-md;
                     overflow: elide;
                 }
@@ -288,7 +286,7 @@ export component VoiceView inherits VerticalLayout {
                         text: Bridge.own-channel-limit >= 0
                             ? @tr("{} in voice  /  {} total", Bridge.members.length, Bridge.own-channel-limit)
                             : @tr("{} in voice", Bridge.members.length);
-                        color: Theme.text-secondary;
+                        color: Bridge.own-channel-banner.width > 0 ? Theme.text : Theme.text-secondary;
                         font-size: Theme.font-body;
                     }
                 }

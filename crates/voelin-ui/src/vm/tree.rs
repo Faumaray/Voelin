@@ -102,28 +102,43 @@ fn talking(input: &TreeInput, client: &ClientInfo) -> bool {
 	input.talking.contains(&client.id) || client.talking == Some(true)
 }
 
+/// Centered spacer prefixes are presentation metadata, not part of the title.
+/// Leave other names untouched rather than guessing at the full spacer syntax.
+fn channel_label(name: &str) -> (&str, bool) {
+	if let Some((suffix, label)) = name.strip_prefix("[cspacer").and_then(|s| s.split_once(']')) {
+		if suffix.bytes().all(|b| b.is_ascii_digit()) {
+			return (label, true);
+		}
+	}
+	(name, false)
+}
+
 /// The rows of the tree, channels with their clients below.
 pub fn rows(input: &TreeInput) -> Vec<TreeItem> {
 	let p = input.presence;
 	let rows: Vec<TreeItem> = tree_rows(p, &|cid| input.collapsed.contains(&cid))
 		.into_iter()
 		.map(|row| match row {
-			TreeRow::Channel { depth, channel } => TreeItem {
-				is_channel: true,
-				depth: depth as i32,
-				id: channel.id as i32,
-				name: channel.name.clone().into(),
-				own: input.own_channel == Some(channel.id),
-				locked: channel.has_password,
-				collapsed: input.collapsed.contains(&channel.id),
-				local_volume: 100,
-				members: p.members(channel.id).count() as i32,
-				max_members: channel.max_clients.filter(|m| *m >= 0).unwrap_or(-1),
-				icon: input.icon(channel.icon).unwrap_or_default(),
-				banner: banner(input.pictures, channel.banner_gfx_url.as_deref()),
-				banner_mode: banner_mode(channel.banner_mode),
-				..Default::default()
-			},
+			TreeRow::Channel { depth, channel } => {
+				let (name, centered_spacer) = channel_label(&channel.name);
+				TreeItem {
+					centered_spacer,
+					is_channel: true,
+					depth: depth as i32,
+					id: channel.id as i32,
+					name: name.into(),
+					own: input.own_channel == Some(channel.id),
+					locked: channel.has_password,
+					collapsed: input.collapsed.contains(&channel.id),
+					local_volume: 100,
+					members: p.members(channel.id).count() as i32,
+					max_members: channel.max_clients.filter(|m| *m >= 0).unwrap_or(-1),
+					icon: input.icon(channel.icon).unwrap_or_default(),
+					banner: banner(input.pictures, channel.banner_gfx_url.as_deref()),
+					banner_mode: banner_mode(channel.banner_mode),
+					..Default::default()
+				}
+			}
 			TreeRow::Client { depth, client } => {
 				let playback = client
 					.uid
@@ -478,6 +493,23 @@ mod tests {
 		assert_eq!((width(&games.icon), width(&games.banner), games.banner_mode), (0, 0, 0));
 		assert_eq!(width(&rows[3].avatar), 0);
 		std::fs::remove_dir_all(dir).unwrap();
+	}
+
+	#[test]
+	fn centered_spacer_titles_keep_tree_identity_and_search() {
+		let mut p = presence();
+		p.channels.get_mut(&2).unwrap().name = "[cspacer12]Гамесы".into();
+		let (t, c, pb) = (HashSet::new(), HashSet::from([2]), ClientPlaybackMap::new());
+		let e = Extras::default();
+		let rows = rows(&input(&p, &t, &c, &pb, "Гамесы", &e));
+		assert_eq!(rows.len(), 1);
+		assert_eq!(rows[0].name, "Гамесы");
+		assert!(rows[0].centered_spacer && rows[0].collapsed);
+		assert_eq!(rows[0].id, 2);
+		assert_eq!(channel_label("[cspacer]Games"), ("Games", true));
+		for name in ["[cspacerx]Games", "[cspacer2Games", "Games", "[spacer0]Games"] {
+			assert_eq!(channel_label(name), (name, false));
+		}
 	}
 
 	#[test]

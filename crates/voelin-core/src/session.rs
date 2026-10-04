@@ -148,6 +148,7 @@ struct Session {
 	state: SessionState,
 	generation: u64,
 	voice: Option<(u64, mpsc::UnboundedSender<VoiceCmd>)>,
+	voice_address: String,
 	voice_presence: Option<Presence>,
 	nickname: String,
 	gateway: Option<(u64, mpsc::UnboundedSender<GatewayCmd>)>,
@@ -239,6 +240,7 @@ impl Session {
 			state: SessionState::default(),
 			generation: 0,
 			voice: None,
+			voice_address: String::new(),
 			voice_presence: None,
 			nickname: String::new(),
 			gateway: None,
@@ -332,6 +334,8 @@ impl Session {
 				}
 				self.stop_streams("voice reconnecting");
 				let generation = self.next_generation();
+				self.voice_address = options.address.clone();
+				self.details = None;
 				self.nickname = options.nickname.clone();
 				self.stream_peer = options.stream_peer.clone();
 				if let Some(profiles) = &self.srtp_profiles {
@@ -1089,7 +1093,11 @@ impl Session {
 		if self.details.as_deref() != Some(&p.server) {
 			let details = Arc::new(p.server.clone());
 			self.details = Some(details.clone());
-			self.emit(Event::ServerDetails { session: self.id, details });
+			self.emit(Event::ServerDetails {
+				session: self.id,
+				address: self.voice_address.clone(),
+				details,
+			});
 		}
 		let sorted = |groups| -> Arc<Vec<GroupInfo>> {
 			Arc::new(Presence::sorted_groups(groups).into_iter().cloned().collect())
@@ -1865,6 +1873,31 @@ mod banner_tests {
 			contacts: Contacts::new(events.clone(), history),
 		};
 		(Session::new(1, events, frames, AudioSettings::default(), shared), receiver)
+	}
+
+	#[tokio::test]
+	async fn server_details_keep_source_address_and_repeat_after_reconnect() {
+		let (mut session, mut events) = session("details-address");
+		let mut presence = Presence::default();
+		presence.server.icon = 1234;
+		// Tasks are never polled in this test; the test runtime drops them
+		// without opening any network connections.
+		for address in ["a.test", "b.test", "b.test"] {
+			let mut options = crate::VoiceOptions::new(address, "test");
+			options.audio = false;
+			session.command(Command::ConnectVoice { session: 1, options: Box::new(options) });
+			session.report_details(&presence);
+			let mut reported = Vec::new();
+			while let Ok(event) = events.try_recv() {
+				if let Event::ServerDetails { address, details, .. } = event {
+					reported.push((address, details.icon));
+				}
+			}
+			assert_eq!(reported, vec![(address.to_owned(), 1234)]);
+			session.report_details(&presence);
+			assert!(events.try_recv().is_err());
+		}
+		session.stop_all();
 	}
 
 	#[tokio::test]

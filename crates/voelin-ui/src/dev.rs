@@ -369,6 +369,7 @@ fn demo_ui(app: &mut App) {
 		gateway_url: None,
 		query: None,
 		client_version: None,
+		cached_server_icon: None,
 	};
 	app.bookmarks = vec![
 		Bookmark {
@@ -385,7 +386,7 @@ fn demo_ui(app: &mut App) {
 	p.server.welcome_message =
 		"Welcome to [b]Nightfall Guild[/b]! Raids on Tuesdays and Fridays, all levels welcome."
 			.into();
-	// The host banner, a server icon, banners above three channels and an icon
+	// The host banner, a server icon, backgrounds on three channels and an icon
 	// on another; the pictures arrive below (`demo_pictures`).
 	p.server.banner_gfx_url = DEMO_HOST_BANNER.into();
 	p.server.banner_mode = BannerMode::KeepAspect;
@@ -407,7 +408,7 @@ fn demo_ui(app: &mut App) {
 	for c in [
 		channel(1, 0, 0, "Lobby"),
 		chill,
-		channel(3, 0, 2, "Gaming"),
+		channel(3, 0, 2, "[cspacer0]Gaming"),
 		raid,
 		music,
 		channel(6, 0, 5, "AFK"),
@@ -1024,6 +1025,7 @@ fn demo_pictures(app: &mut App) {
 	};
 	let mut events = vec![Event::ServerDetails {
 		session,
+		address: app.bookmarks.iter().find(|b| b.id == DEMO).unwrap().address.clone(),
 		details: Arc::new(voelin_model::ServerDetails {
 			icon: DEMO_SERVER_ICON,
 			..Default::default()

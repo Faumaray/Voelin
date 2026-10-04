@@ -1,29 +1,25 @@
 import { Theme } from "../theme.slint";
 
-// Native artwork keeps its pixel size; resized artwork gets an aspect-aware
-// area. Bound unusually tall pictures so navigation remains usable.
-export global BannerLayout {
-    public pure function artwork-height(source: image, width: length, mode: int, limit: length) -> length {
-        return source.width <= 0 ? 0px : min(limit, max(32px,
-            mode == 0 ? source.height * 1px : width * source.height / source.width));
-    }
-}
-
-// Artwork has its own area: titles and controls use the solid surface below.
-// Wire modes: 0 native (centred), 1 stretched, 2 aspect-preserving fit.
+// Banners decorate their owning row/header; they never add layout height.
+// Cover keeps artwork undistorted while cropping its centre to the surface.
 export component BannerPicture inherits Rectangle {
     in property <image> source;
-    in property <int> mode;
     clip: true;
-    background: Theme.surface-2;
     accessible-role: AccessibleRole.none;
     Image {
         width: 100%;
         height: 100%;
         source: root.source;
-        image-fit: root.mode == 1 ? ImageFit.fill : root.mode == 2 ? ImageFit.contain : ImageFit.preserve;
+        image-fit: cover;
         horizontal-alignment: center;
         vertical-alignment: center;
         accessible-role: AccessibleRole.none;
+    }
+    // Even a white picture behind dark-theme text (or black behind light
+    // text) retains >4.5:1 contrast for Theme.text at the weakest stop.
+    Rectangle {
+        background: @linear-gradient(90deg,
+            Theme.surface.transparentize(0.26) 0%,
+            Theme.surface.transparentize(0.34) 100%);
     }
 }

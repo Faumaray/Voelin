@@ -27,6 +27,8 @@ export struct ServerItem {
 
 export struct TreeItem {
     is-channel: bool,
+    // Recognized centred TeamSpeak spacer; name excludes its wire prefix.
+    centered-spacer: bool,
     depth: int,
     id: int,
     name: string,
@@ -52,14 +54,14 @@ export struct TreeItem {
     // Channels: clients inside, and the limit (-1: none).
     members: int,
     max-members: int,
-    // Icons at the end of the row, empty where there is none: a channel's
+    // Leading channel icon or trailing client icons, empty where absent: a channel's
     // icon; a client's server group icons, its channel group's and its own,
     // in that order (the first three).
     icon: image,
     icon-2: image,
     icon-3: image,
     // A channel's banner picture (TeamSpeak 6), drawn behind the row;
-    // banner-mode: 0 as it is, 1 stretched, 2 scaled keeping its aspect.
+    // Wire sizing metadata; compact decorative backgrounds always cover.
     banner: image,
     banner-mode: int,
 }
@@ -819,6 +821,7 @@ export global Bridge {
     in property <string> server-stats;
     // The server's host banner, empty without one (the server card shows its
     // painted art then); mode as TreeItem.banner-mode.
+    in property <image> server-icon;
     in property <image> server-banner;
     in property <int> server-banner-mode;
     // Our nickname on the current server, our avatar there (empty without

@@ -7,7 +7,7 @@ use voelin_core::identity::LaunchImport;
 use voelin_core::{Command, ObserveState, Source, VoiceOptions, VoiceState};
 use voelin_store::{Bookmark, QueryConfig, QueryTransport};
 
-use crate::app::{App, BookmarkForm, Bridge, later};
+use crate::app::{App, BookmarkForm, Bridge, SessionView, later};
 use crate::vm;
 
 /// The name of the identity the app creates when it has none.
@@ -44,6 +44,9 @@ fn bookmark_from_form(
 	let mut bookmark = old.cloned().unwrap_or_default();
 	bookmark.id = form.id as i64;
 	bookmark.address = form.address.trim().to_string();
+	if old.is_some_and(|old| old.address != bookmark.address) {
+		bookmark.cached_server_icon = None;
+	}
 	bookmark.name = match form.name.trim() {
 		"" => bookmark.address.clone(),
 		name => name.to_string(),
@@ -82,6 +85,24 @@ fn bookmark_from_form(
 		}
 	};
 	bookmark
+}
+
+/// Apply only details originating from the bookmark's current address.
+/// Returns whether its persisted metadata changed.
+fn apply_server_icon(
+	bookmark: &mut Bookmark,
+	view: &mut SessionView,
+	address: &str,
+	icon: u32,
+) -> bool {
+	if bookmark.address != address {
+		return false;
+	}
+	view.icon_address = Some(address.to_owned());
+	view.server_icon = icon;
+	let before = bookmark.cached_server_icon.clone();
+	bookmark.remember_server_icon(icon);
+	bookmark.cached_server_icon != before
 }
 
 impl App {
@@ -305,6 +326,33 @@ impl App {
 		self.refresh_all();
 	}
 
+	/// Keep only metadata supplied by the bookmark's current server.
+	pub(crate) fn remember_server_icon(&mut self, id: i64, address: &str, icon: u32) {
+		let Some(bookmark) = self.bookmarks.iter_mut().find(|b| b.id == id) else {
+			return;
+		};
+		let changed =
+			apply_server_icon(bookmark, self.sessions.entry(id).or_default(), address, icon);
+		if changed && !self.demo_ui {
+			if let Err(error) = self.store.update_bookmark(bookmark) {
+				warn!(%error, "could not keep the server icon");
+			}
+		}
+	}
+
+	pub(crate) fn server_list_icon(&self, bookmark: &Bookmark) -> slint::Image {
+		let current = self
+			.sessions
+			.get(&bookmark.id)
+			.map(|view| view.server_icon_for(&bookmark.address))
+			.unwrap_or_default();
+		if current.size().width > 0 {
+			current
+		} else {
+			vm::servers::cached_icon(bookmark, &self.engine.cache())
+		}
+	}
+
 	/// The rail: servers with their state, unread count and streams.
 	pub(crate) fn refresh_servers(&self) {
 		let Some(ui) = self.ui.upgrade() else { return };
@@ -322,7 +370,7 @@ impl App {
 					.map(|v| vm::tree::stats(&v.presence))
 					.unwrap_or_default();
 				let flavor = view.map(|v| v.extra.flavor.clone()).unwrap_or_default();
-				let icon = view.map(|v| v.server_icon()).unwrap_or_default();
+				let icon = self.server_list_icon(b);
 				vm::servers::item(b, &state, unread, live, detail, flavor, icon)
 			})
 			.collect();
@@ -338,6 +386,7 @@ impl App {
 		let bookmark = self.current.and_then(|id| self.bookmark(id));
 		let view = self.view();
 		let state = view.map(|v| v.state.clone()).unwrap_or_default();
+		bridge.set_server_icon(bookmark.map(|b| self.server_list_icon(b)).unwrap_or_default());
 		bridge.set_server_title(
 			bookmark.map_or("No server selected".into(), |b| b.name.clone()).into(),
 		);
@@ -499,6 +548,45 @@ mod tests {
 	use super::*;
 
 	#[test]
+	fn edited_server_rejects_queued_icons_and_failed_reconnect_keeps_them_hidden() {
+		let path = std::env::temp_dir()
+			.join(format!("voelin-server-icon-provenance-{}.svg", std::process::id()));
+		std::fs::write(&path, r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="red"/></svg>"#).unwrap();
+		let mut bookmark = Bookmark { address: "a.test".into(), ..Default::default() };
+		let mut view = SessionView::default();
+		view.icons.insert(1234, path.clone());
+		assert!(apply_server_icon(&mut bookmark, &mut view, "a.test", 1234));
+		assert_eq!(view.server_icon_for(&bookmark.address).size().width, 4);
+
+		bookmark = bookmark_from_form(
+			Some(&bookmark),
+			&BookmarkForm { address: "b.test".into(), ..Default::default() },
+			|| "Me".into(),
+		);
+		// Connecting does not retag received imagery. A failed B connection
+		// must not make A's image appear under B's name.
+		for state in [VoiceState::Connecting, VoiceState::Disconnected] {
+			view.state.voice = state;
+			assert_eq!(view.server_icon_for(&bookmark.address).size().width, 0);
+		}
+		assert!(!apply_server_icon(&mut bookmark, &mut view, "a.test", 4321));
+		assert_eq!(view.server_icon, 1234);
+		assert_eq!(view.icon_address.as_deref(), Some("a.test"));
+		assert!(bookmark.server_icon_id().is_none());
+
+		// Equal icon IDs on the next server still need new provenance.
+		assert!(apply_server_icon(&mut bookmark, &mut view, "b.test", 1234));
+		assert_eq!(bookmark.server_icon_id(), Some(1234));
+		assert_eq!(view.server_icon_for(&bookmark.address).size().width, 4);
+		assert!(!apply_server_icon(&mut bookmark, &mut view, "a.test", 0));
+		assert_eq!(bookmark.server_icon_id(), Some(1234));
+		assert!(apply_server_icon(&mut bookmark, &mut view, "b.test", 0));
+		assert!(bookmark.server_icon_id().is_none());
+		assert_eq!(view.server_icon_for(&bookmark.address).size().width, 0);
+		std::fs::remove_file(path).unwrap();
+	}
+
+	#[test]
 	fn the_address_alone_makes_a_server() {
 		let form = BookmarkForm {
 			id: -1,
@@ -527,6 +615,10 @@ mod tests {
 			gateway_url: Some("ws://gw.example.test:7788/v1".into()),
 			query: Some(QueryConfig { server_port: Some(9988), ..Default::default() }),
 			client_version: Some("linux".into()),
+			cached_server_icon: Some(voelin_store::CachedServerIcon {
+				address: "old.example.test".into(),
+				id: 1234,
+			}),
 		};
 		let form = BookmarkForm {
 			id: 7,
@@ -543,6 +635,7 @@ mod tests {
 		let b = bookmark_from_form(Some(&old), &form, || unreachable!("a nickname was given"));
 		assert_eq!((b.id, b.name.as_str(), b.nickname.as_str()), (7, "Mine", "Other"));
 		assert_eq!(b.address, "new.example.test:9988");
+		assert!(b.cached_server_icon.is_none());
 		assert_eq!((b.identity, b.default_channel), (Some(2), Some("Lobby/Sub".into())));
 		assert_eq!(b.client_version.as_deref(), Some("linux"));
 		assert_eq!(b.gateway_url, None);
