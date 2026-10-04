@@ -176,6 +176,11 @@ pub fn picture(key: &str, bytes: &[u8]) -> Image {
 	CACHE.with(|c| c.borrow_mut().get_or_load(&cache_key, || decode(bytes))).unwrap_or_default()
 }
 
+/// Forget the decoded picture kept by `key` (a changed account avatar).
+pub fn forget_picture(key: &str) {
+	CACHE.with(|c| c.borrow_mut().remove(&format!("picture:{key}")));
+}
+
 /// A Twemoji by key; an empty image if there is none.
 pub fn emoji(key: &str) -> Image {
 	if key.is_empty() {

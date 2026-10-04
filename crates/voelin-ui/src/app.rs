@@ -662,7 +662,7 @@ pub fn run(options: RunOptions) -> Result<()> {
 		#[cfg(not(target_os = "android"))]
 		runtime: runtime.clone(),
 		#[cfg(not(target_os = "android"))]
-		myts: Default::default(),
+		myts: crate::myts::Account::new(dir.join("account")),
 		ui: ui.as_weak(),
 		store,
 		// The sample data of VOELIN_DEMO_UI never reaches the system keyring.

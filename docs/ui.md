@@ -192,12 +192,20 @@ Settings sections (`settings:<section>`):
 Settings controls read and write `voelin_core::settings` and apply at once;
 numbers are typed freely next to the presets.
 
-Desktop startup shows the shared myTeamSpeak login page until a saved session
-is validated, a login succeeds, or the user chooses Continue without an account.
-The signed-in username/email becomes the primary app profile in the desktop
-user card and mobile You page; it does not replace server identities or bookmark
-nicknames. Settings → My Account reuses the form, supports retry/OTP/sign-out,
-and opens official browser flows for registration, activation, recovery and
+Desktop startup shows the myTeamSpeak login page (`LoginPage` in
+`screens/account.slint`: the artwork and what an account gives beside the
+form on wide windows, the form alone on narrow ones; email, password with a
+show button, the one-time code when asked, Sign in, password recovery and
+registration on the website) only when no session is saved and Continue
+without an account was never chosen (`ui.skip_account_prompt`). A saved
+session is checked in the background; only an expired one brings the page
+back. The signed-in username/email and the account's avatar become the
+primary app profile in the desktop user card and mobile You page; they do
+not replace server identities or bookmark nicknames. Settings → My Account
+shows the profile from the account service (avatar, name, email,
+description, member since, previous sign-in, badges, signed-in devices, the
+account and myTS ids) or the sign-in form, supports retry/OTP/sign-out, and
+opens official browser flows for registration, activation, recovery and
 account management. Account and renewal material live only in the keyring;
 passwords and one-time codes are cleared after submission. Expired sessions
 require fresh sign-in because password login supplies no renewal auth token.

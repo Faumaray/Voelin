@@ -769,8 +769,20 @@ export struct MytsForm {
     identity-status: int,
     available: bool,
     signed_in: bool,
+    // A saved session is being checked: its profile shows meanwhile.
+    restoring: bool,
     email: string,
     username: string,
+    // From the account service: the avatar, the initials without one, the
+    // description, dates as YYYY-MM-DD ("" when not known), badge names and
+    // the signed-in devices ("name · region · date").
+    avatar: image,
+    initials: string,
+    description: string,
+    member-since: string,
+    last-login: string,
+    badges: [string],
+    devices: [string],
     status: int,
     persistence-status: int,
     busy: bool,
@@ -1104,7 +1116,7 @@ export global Bridge {
     callback settings-section(int);
     in property <AccountForm> account;
     in property <MytsForm> myts;
-    in property <string> primary-name: myts.signed-in ? (myts.username != "" ? myts.username : myts.email) : nickname != "" ? nickname : app-name;
+    in property <string> primary-name: myts.signed-in || myts.restoring ? (myts.username != "" ? myts.username : myts.email) : nickname != "" ? nickname : app-name;
     callback myts-dismiss();
     callback myts-retry();
     callback myts-portal(int);

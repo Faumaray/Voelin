@@ -49,6 +49,30 @@ impl Transport {
 		}
 	}
 
+	/// GET a file from a link the service handed out (a signed avatar link),
+	/// at most `max` bytes.
+	pub(crate) async fn download(&self, url: &str, max: usize) -> Result<Vec<u8>, Error> {
+		tokio::time::timeout(self.timeout, async {
+			let mut response = self.client.get(url).send().await?;
+			if !response.status().is_success() {
+				return Err(Error::Http(response.status().as_u16()));
+			}
+			if response.content_length().is_some_and(|length| length > max as u64) {
+				return Err(Error::ResponseTooLarge);
+			}
+			let mut bytes = Vec::new();
+			while let Some(chunk) = response.chunk().await? {
+				if chunk.len() > max - bytes.len() {
+					return Err(Error::ResponseTooLarge);
+				}
+				bytes.extend_from_slice(&chunk);
+			}
+			Ok(bytes)
+		})
+		.await
+		.map_err(|_| Error::Timeout)?
+	}
+
 	pub(crate) async fn call(
 		&self,
 		service: &str,

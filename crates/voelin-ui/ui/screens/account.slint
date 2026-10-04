@@ -1,8 +1,11 @@
-// Shared account form for first launch and Settings → My Account.
+// The myTeamSpeak account: the login page at start (not shown while a saved
+// session exists) and the card in Settings → My Account. Both use the same
+// sign-in form; signed in, the card shows the account's profile.
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge } from "../bridge.slint";
-import { Button, TextField, Field, Card, ScrollView } from "../components/index.slint";
+import { Nav } from "../nav.slint";
+import { Icon, Spinner, Button, ButtonKind, IconButton, TextField, Field, Card, Divider, Banner, Avatar, Status, Chip, ScrollView } from "../components/index.slint";
 
 component Note inherits Text {
     // Keep wrapped account copy in the card’s layout bounds.
@@ -12,9 +15,66 @@ component Note inherits Text {
     wrap: word-wrap;
 }
 
-component LoginForm inherits VerticalLayout {
+// What happened last, for `MytsForm.status`.
+global AccountText {
+    pure public function status(code: int) -> string {
+        return code == 2 ? @tr("Saved session could not be validated. Your saved credentials were retained; sign in again or clear them.") :
+            code == 3 ? @tr("Enter your password again and the one-time code.") :
+            code == 4 ? @tr("Sign-in failed. Check your credentials and connection; the experimental service may be unavailable.") :
+            code == 7 ? @tr("Signed out.") :
+            code == 9 ? @tr("Signed out and saved credentials cleared. Remote session revocation failed.") :
+            code == 10 ? @tr("Could not open your browser. Visit myteamspeak.com to manage your account.") :
+            code == 11 ? @tr("Account website opened in your browser. When finished, return here and sign in again to apply changes.") :
+            code == 13 ? @tr("Your email address has not been verified. Activate your account using the link in your email, or request a new activation email.") :
+            code == 14 ? @tr("The one-time code was not accepted. Enter your password and a new code.") :
+            code == 15 ? @tr("Your saved session has expired. Sign in again.") :
+            code == 16 ? @tr("Email or password was not accepted. Check your details and try again.") :
+            code == 17 ? @tr("Too many requests. Wait a while before trying again.") : "";
+    }
+
+    // Information rather than a problem.
+    pure public function is-info(code: int) -> bool {
+        return code == 7 || code == 11;
+    }
+
+    pure public function persistence(code: int) -> string {
+        return code == 1 ? @tr("Saved account credentials could not be read. Unlock the keyring or clear the saved session.") :
+            code == 5 ? @tr("Account credentials could not be saved. This session will not be restored after restarting.") :
+            code == 6 ? @tr("Account credentials could not be saved, and older credentials could not be removed. Unlock your keyring and clear the saved session.") :
+            code == 8 ? @tr("Signed out locally, but saved credentials could not be removed. Unlock your keyring and clear the saved session again.") : "";
+    }
+}
+
+// The last result as a banner, and the keyring's problems.
+component AccountNotices inherits VerticalLayout {
     spacing: Theme.space-3;
+    property <string> status: AccountText.status(Bridge.myts.status);
+    property <string> persistence: AccountText.persistence(Bridge.myts.persistence-status);
+    if root.status != "": Banner {
+        text: root.status;
+        icon: AccountText.is-info(Bridge.myts.status) ? Icons.info : Icons.triangle-alert;
+        tone: AccountText.is-info(Bridge.myts.status) ? Theme.info : Theme.warning;
+    }
+    if Bridge.myts.status == 13: Button {
+        text: @tr("Resend activation email in browser");
+        icon: Icons.mail;
+        small: true;
+        enabled: !Bridge.myts.busy;
+        clicked => { Bridge.myts-portal(3); }
+    }
+    if root.persistence != "": Banner {
+        text: root.persistence;
+        icon: Icons.key-round;
+        tone: Theme.danger;
+    }
+}
+
+// Email, password (and the one-time code when asked for), Sign in, and
+// the website's registration and password recovery.
+component LoginForm inherits VerticalLayout {
+    spacing: Theme.space-4;
     property <string> otp-text;
+    property <bool> show-password;
     function submit() {
         // The one-time code is asked for, never required to submit: another
         // account needs none, and without it a 2FA account is asked again.
@@ -22,185 +82,512 @@ component LoginForm inherits VerticalLayout {
             Bridge.myts-login(email.text, password.text, otp-text);
             password.clear();
             otp-text = "";
+            show-password = false;
         }
     }
     Field {
         label: @tr("Email");
         email := TextField {
             text: Bridge.myts.email;
-            placeholder: @tr("Email");
+            placeholder: @tr("you@example.com");
+            label: @tr("Email");
+            icon: Icons.mail;
             enabled: !Bridge.myts.busy;
-            accepted(_) => { root.submit(); }
+            accepted(_) => { password.focus(); }
         }
     }
     Field {
         label: @tr("Password");
-        password := TextField {
-            placeholder: @tr("Password");
-            input-type: InputType.password;
-            enabled: !Bridge.myts.busy;
-            accepted(_) => { root.submit(); }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            password := TextField {
+                placeholder: @tr("Password");
+                label: @tr("Password");
+                icon: Icons.lock;
+                input-type: root.show-password ? InputType.text : InputType.password;
+                enabled: !Bridge.myts.busy;
+                accepted(_) => { root.submit(); }
+            }
+            IconButton {
+                icon: root.show-password ? Icons.eye-off : Icons.eye;
+                label: root.show-password ? @tr("Hide password") : @tr("Show password");
+                checked: root.show-password;
+                clicked => { root.show-password = !root.show-password; }
+            }
         }
     }
     if Bridge.myts.otp-required: Field {
         label: @tr("One-time code");
+        hint: @tr("The code from your authenticator app.");
         TextField {
             text <=> root.otp-text;
-            placeholder: @tr("One-time code");
-            input-type: InputType.password;
+            placeholder: "123456";
+            label: @tr("One-time code");
+            icon: Icons.key-round;
+            input-type: InputType.number;
             enabled: !Bridge.myts.busy;
             accepted(_) => { root.submit(); }
         }
     }
     Button {
-        text: @tr("Sign in");
+        kind: ButtonKind.primary;
+        icon: Icons.log-in;
+        text: Bridge.myts.busy ? @tr("Signing in…") : @tr("Sign in");
         enabled: !Bridge.myts.busy && email.text != "" && password.text != "";
         clicked => { root.submit(); }
     }
-    Button {
-        text: @tr("Create account in browser");
-        enabled: !Bridge.myts.busy;
-        clicked => { Bridge.myts-portal(0); }
+    HorizontalLayout {
+        spacing: Theme.space-2;
+        Button {
+            kind: ButtonKind.ghost;
+            small: true;
+            text: @tr("Forgot password?");
+            enabled: !Bridge.myts.busy;
+            clicked => { Bridge.myts-portal(1); }
+        }
+        Rectangle { horizontal-stretch: 1; }
+        Button {
+            kind: ButtonKind.ghost;
+            small: true;
+            icon: Icons.user-plus;
+            text: @tr("Create an account");
+            enabled: !Bridge.myts.busy;
+            clicked => { Bridge.myts-portal(0); }
+        }
     }
-    Button {
-        text: @tr("Forgot password?");
-        enabled: !Bridge.myts.busy;
-        clicked => { Bridge.myts-portal(1); }
-    }
-    Note { text: @tr("Registration and password recovery open the official myTeamSpeak website. Return here to sign in when finished."); }
 }
 
-export component AccountCard inherits Card {
-    title: @tr("myTeamSpeak");
-    icon: Icons.user;
-    property <string> account-status: Bridge.myts.status == 2 ? @tr("Saved session could not be validated. Your saved credentials were retained; sign in again or clear them.") :
-        Bridge.myts.status == 3 ? @tr("Enter your password again and the one-time code.") :
-        Bridge.myts.status == 4 ? @tr("Sign-in failed. Check your credentials and connection; the experimental service may be unavailable.") :
-        Bridge.myts.status == 7 ? @tr("Signed out.") :
-        Bridge.myts.status == 9 ? @tr("Signed out and saved credentials cleared. Remote session revocation failed.") :
-        Bridge.myts.status == 10 ? @tr("Could not open your browser. Visit myteamspeak.com to manage your account.") :
-        Bridge.myts.status == 11 ? @tr("Account website opened in your browser. When finished, return here and sign in again to apply changes.") :
-        Bridge.myts.status == 13 ? @tr("Your email address has not been verified. Activate your account using the link in your email, or request a new activation email.") :
-        Bridge.myts.status == 14 ? @tr("The one-time code was not accepted. Enter your password and a new code.") :
-        Bridge.myts.status == 15 ? @tr("Your saved session has expired. Sign in again.") :
-        Bridge.myts.status == 16 ? @tr("Email or password was not accepted. Check your details and try again.") :
-        Bridge.myts.status == 17 ? @tr("Too many requests. Wait a while before trying again.") : "";
-    if !Bridge.myts.available: Note { text: @tr("Account sign-in is available on desktop."); }
-    if Bridge.myts.available && !Bridge.myts.signed-in: LoginForm { }
-    if Bridge.myts.signed-in: VerticalLayout {
-        spacing: Theme.space-3;
-        Note { text: @tr("Primary account"); }
+// A labelled line of the profile: an icon, a label and its value.
+component ProfileRow inherits HorizontalLayout {
+    in property <image> icon;
+    in property <string> label;
+    in property <string> value;
+    spacing: Theme.space-3;
+    Icon {
+        source: root.icon;
+        size: Theme.icon-sm;
+        tint: Theme.text-muted;
+        y: (parent.height - self.height) / 2;
+    }
+    Text {
+        text: root.label;
+        color: Theme.text-secondary;
+        font-size: Theme.font-sm;
+        vertical-alignment: center;
+    }
+    Text {
+        text: root.value;
+        color: Theme.text;
+        font-size: Theme.font-sm;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+        overflow: elide;
+    }
+}
+
+// Avatar, name, email and what state the account is in.
+component ProfileHeader inherits HorizontalLayout {
+    in property <length> avatar-size: 72px;
+    spacing: Theme.space-5;
+    Avatar {
+        size: root.avatar-size;
+        image: Bridge.myts.avatar;
+        initials: Bridge.myts.initials;
+        tint: Theme.accent;
+        label: Bridge.primary-name;
+        status: Bridge.myts.signed-in ? Status.online : Status.idle;
+        y: (parent.height - self.height) / 2;
+    }
+    VerticalLayout {
+        alignment: center;
+        spacing: Theme.space-2;
+        horizontal-stretch: 1;
         Text {
             text: Bridge.primary-name;
             color: Theme.text;
-            font-size: Theme.font-lg;
+            font-size: Theme.font-2xl;
             font-weight: Theme.weight-semibold;
-            wrap: word-wrap;
+            overflow: elide;
         }
-        Note { text: Bridge.myts.email; }
-        if Bridge.myts.uuid != "": Field {
+        if Bridge.myts.email != "": Text {
+            text: Bridge.myts.email;
+            color: Theme.text-secondary;
+            overflow: elide;
+        }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            alignment: start;
+            if Bridge.myts.restoring: Chip {
+                text: @tr("Checking session…");
+                icon: Icons.loader;
+            }
+            if Bridge.myts.signed-in: Chip {
+                text: @tr("Signed in");
+                icon: Icons.circle-check;
+                tint: Theme.success;
+                fill: Theme.success-soft;
+            }
+            if Bridge.myts.signed-in && Bridge.myts.identity-status == 1: Chip {
+                text: @tr("myTS ID active");
+                icon: Icons.shield-check;
+                tint: Theme.accent-text;
+                fill: Theme.accent-soft;
+            }
+        }
+    }
+}
+
+// What the account service tells: description, dates, badges, devices.
+component ProfileDetails inherits VerticalLayout {
+    spacing: Theme.space-3;
+    if Bridge.myts.description != "": Text {
+        text: Bridge.myts.description;
+        color: Theme.text;
+        font-italic: true;
+        wrap: word-wrap;
+    }
+    if Bridge.myts.member-since != "": ProfileRow {
+        icon: Icons.calendar;
+        label: @tr("Member since");
+        value: Bridge.myts.member-since;
+    }
+    if Bridge.myts.last-login != "": ProfileRow {
+        icon: Icons.clock;
+        label: @tr("Previous sign-in");
+        value: Bridge.myts.last-login;
+    }
+    if Bridge.myts.badges.length > 0: VerticalLayout {
+        spacing: Theme.space-2;
+        Text {
+            text: @tr("Badges");
+            color: Theme.text-secondary;
+            font-size: Theme.font-sm;
+            font-weight: Theme.weight-medium;
+        }
+        for badge in Bridge.myts.badges: HorizontalLayout {
+            spacing: Theme.space-3;
+            Icon {
+                source: Icons.star;
+                size: Theme.icon-sm;
+                tint: Theme.gold;
+            }
+            Text {
+                text: badge;
+                color: Theme.text;
+                font-size: Theme.font-sm;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+        }
+    }
+    if Bridge.myts.devices.length > 0: VerticalLayout {
+        spacing: Theme.space-2;
+        Text {
+            text: @tr("Signed-in devices");
+            color: Theme.text-secondary;
+            font-size: Theme.font-sm;
+            font-weight: Theme.weight-medium;
+        }
+        for device in Bridge.myts.devices: HorizontalLayout {
+            spacing: Theme.space-3;
+            Icon {
+                source: Icons.monitor;
+                size: Theme.icon-sm;
+                tint: Theme.text-muted;
+            }
+            Text {
+                text: device;
+                color: Theme.text;
+                font-size: Theme.font-sm;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+        }
+    }
+}
+
+// The signed-in account (or the saved one being checked).
+component AccountProfile inherits VerticalLayout {
+    spacing: Theme.space-5;
+    ProfileHeader { }
+    ProfileDetails { }
+    Divider { }
+    if Bridge.myts.uuid != "": Field {
+        label: @tr("Account ID");
+        TextField {
+            text: Bridge.myts.uuid;
+            read-only: true;
             label: @tr("Account ID");
-            TextField {
-                text: Bridge.myts.uuid;
-                read-only: true;
-                label: @tr("Account ID");
-            }
+            icon: Icons.id-card;
         }
-        if Bridge.myts.myts-id != "": Field {
+    }
+    if Bridge.myts.myts-id != "": Field {
+        label: @tr("myTS ID");
+        TextField {
+            text: Bridge.myts.myts-id;
+            read-only: true;
             label: @tr("myTS ID");
-            TextField {
-                text: Bridge.myts.myts-id;
-                read-only: true;
-                label: @tr("myTS ID");
-            }
+            icon: Icons.shield-check;
         }
-        if Bridge.myts.identity-status == 1: Note {
-            text: @tr("Your account identity is available for authentication on voice servers.");
-        }
-        if Bridge.myts.identity-status == 2: Note {
-            text: @tr("Sign out and sign in with your password to enable your myTS ID on voice servers.");
-        }
-        if Bridge.myts.identity-status == 3: Note {
-            text: @tr("Signed in, but the account identity could not be unlocked. Voice servers will not receive your myTS ID. Try signing in again; older account encryption may be unsupported.");
-        }
-        Note { text: @tr("This is your main app profile. Server identities and server nicknames are managed separately."); }
-        Note { text: @tr("Account management opens the official website. Check which account is signed in there. Sign in again here after making changes."); }
-        Button {
-            text: @tr("Manage account in browser");
-            enabled: !Bridge.myts.busy;
-            clicked => { Bridge.myts-portal(2); }
-        }
-        for action in [
-            { text: @tr("Change username"), portal: 4 },
-            { text: @tr("Change email"), portal: 5 },
-            { text: @tr("Change password"), portal: 6 },
-            { text: @tr("Two-factor authentication"), portal: 7 },
-            { text: @tr("Manage account deletion"), portal: 8 },
-            { text: @tr("Export account data"), portal: 9 },
-        ]: Button {
-            text: action.text;
+    }
+    if Bridge.myts.signed-in && Bridge.myts.identity-status == 1: Note {
+        text: @tr("Your account identity is available for authentication on voice servers.");
+    }
+    if Bridge.myts.signed-in && Bridge.myts.identity-status == 2: Note {
+        text: @tr("Sign out and sign in with your password to enable your myTS ID on voice servers.");
+    }
+    if Bridge.myts.signed-in && Bridge.myts.identity-status == 3: Note {
+        text: @tr("Signed in, but the account identity could not be unlocked. Voice servers will not receive your myTS ID. Try signing in again; older account encryption may be unsupported.");
+    }
+    Note { text: @tr("This is your main app profile. Server identities and server nicknames are managed separately."); }
+}
+
+// Changes are made on the official website.
+component AccountManagement inherits VerticalLayout {
+    spacing: Theme.space-3;
+    Text {
+        text: @tr("Manage your account");
+        color: Theme.text;
+        font-weight: Theme.weight-semibold;
+    }
+    Note { text: @tr("Account management opens the official website. Check which account is signed in there. Sign in again here after making changes."); }
+    Button {
+        icon: Icons.external-link;
+        text: @tr("Manage account in browser");
+        enabled: !Bridge.myts.busy;
+        clicked => { Bridge.myts-portal(2); }
+    }
+    for row in [
+        [{ text: @tr("Change username"), icon: Icons.user, portal: 4 }, { text: @tr("Change email"), icon: Icons.mail, portal: 5 }],
+        [{ text: @tr("Change password"), icon: Icons.lock, portal: 6 }, { text: @tr("Two-factor authentication"), icon: Icons.key-round, portal: 7 }],
+        [{ text: @tr("Export account data"), icon: Icons.download, portal: 9 }, { text: @tr("Manage account deletion"), icon: Icons.trash-2, portal: 8 }],
+    ]: HorizontalLayout {
+        spacing: Theme.space-3;
+        for action in row: Button {
+            horizontal-stretch: 1;
+            kind: ButtonKind.ghost;
             small: true;
+            centered: false;
+            icon: action.icon;
+            text: action.text;
             enabled: !Bridge.myts.busy;
             clicked => { Bridge.myts-portal(action.portal); }
         }
     }
-    if Bridge.myts.busy: Note { text: @tr("Contacting account service…"); }
-    if root.account-status != "": Note { text: root.account-status; }
-    if Bridge.myts.persistence-status == 1: Note {
-        text: @tr("Saved account credentials could not be read. Unlock the keyring or clear the saved session.");
+}
+
+// Retry a saved session, sign out or clear what is stored.
+component SessionActions inherits HorizontalLayout {
+    spacing: Theme.space-3;
+    alignment: start;
+    if Bridge.myts.busy: Spinner {
+        size: 18px;
+        y: (parent.height - self.height) / 2;
     }
-    if Bridge.myts.persistence-status == 5: Note {
-        text: @tr("Account credentials could not be saved. This session will not be restored after restarting.");
-    }
-    if Bridge.myts.persistence-status == 6: Note {
-        text: @tr("Account credentials could not be saved, and older credentials could not be removed. Unlock your keyring and clear the saved session.");
-    }
-    if Bridge.myts.persistence-status == 8: Note {
-        text: @tr("Signed out locally, but saved credentials could not be removed. Unlock your keyring and clear the saved session again.");
-    }
-    if Bridge.myts.status == 13: Button {
-        text: @tr("Resend activation email in browser");
-        enabled: !Bridge.myts.busy;
-        clicked => { Bridge.myts-portal(3); }
+    if Bridge.myts.busy: Text {
+        text: Bridge.myts.restoring ? @tr("Checking your saved session…") : @tr("Contacting account service…");
+        color: Theme.text-secondary;
+        font-size: Theme.font-sm;
+        vertical-alignment: center;
     }
     if Bridge.myts.can-forget && !Bridge.myts.busy: Button {
+        icon: Icons.refresh-cw;
+        small: true;
         text: Bridge.myts.signed-in ? @tr("Check session") : @tr("Retry saved session");
         clicked => { Bridge.myts-retry(); }
     }
     if Bridge.myts.can-forget || Bridge.myts.busy: Button {
+        kind: Bridge.myts.signed-in ? ButtonKind.secondary : ButtonKind.danger;
+        icon: Icons.log-out;
+        small: true;
         text: Bridge.myts.busy ? @tr("Cancel and clear session") : Bridge.myts.signed-in ? @tr("Sign out") : @tr("Clear saved session");
         clicked => { Bridge.myts-logout(); }
     }
 }
 
-export component LoginPage inherits ScrollView {
+// Settings → My Account.
+export component AccountCard inherits Card {
+    title: @tr("myTeamSpeak");
+    icon: Icons.user;
+    subtitle: Bridge.myts.signed-in ? @tr("Your account") : Bridge.myts.restoring ? @tr("Checking your saved session") : @tr("Sign in to make your account your main profile");
+    if !Bridge.myts.available: Note { text: @tr("Account sign-in is available on desktop."); }
+    if Bridge.myts.signed-in || Bridge.myts.restoring: AccountProfile { }
+    if Bridge.myts.available && !Bridge.myts.signed-in && !Bridge.myts.restoring: LoginForm { }
+    AccountNotices { }
+    SessionActions { }
+    if Bridge.myts.signed-in: Divider { }
+    if Bridge.myts.signed-in: AccountManagement { }
+}
+
+// The artwork beside the form: the night landscape, what an account gives.
+component LoginHero inherits Rectangle {
+    clip: true;
+    border-radius: Theme.radius-xl;
+    background: @linear-gradient(150deg, #0e1d5c 0%, #1c1470 45%, #3a1f86 75%, #0b2a6b 100%);
+    property <float> ratio: art.source.width * 1.0 / max(1, art.source.height);
+    art := Image {
+        source: Icons.art-banner;
+        // Cover the panel, the moon (right) kept.
+        width: max(root.width, root.height * root.ratio);
+        height: self.width / root.ratio;
+        x: root.width - self.width;
+        y: root.height - self.height;
+        image-fit: fill;
+        accessible-role: AccessibleRole.none;
+    }
+    Rectangle {
+        background: @linear-gradient(180deg, #060c2ce0 0%, #060c2c90 45%, #060c2c30 100%);
+    }
     VerticalLayout {
-        width: root.visible-width;
-        padding: Theme.space-4;
-        spacing: Theme.space-5;
+        padding: Theme.space-8;
+        spacing: Theme.space-6;
         alignment: start;
         HorizontalLayout {
-            Rectangle { horizontal-stretch: 1; }
-            VerticalLayout {
-                max-width: 480px;
-                horizontal-stretch: 1;
-                spacing: Theme.space-4;
-                Text {
-                    text: @tr("Welcome to {}", Bridge.app-name);
-                    color: Theme.text;
-                    font-size: Theme.font-xl;
-                    font-weight: Theme.weight-semibold;
-                    wrap: word-wrap;
-                }
-                Note { text: @tr("Sign in to make your myTeamSpeak account your main profile."); }
-                AccountCard { }
-                Button {
-                    text: @tr("Continue without an account");
-                    clicked => { Bridge.myts-dismiss(); }
-                }
-                Note { text: @tr("You can connect to servers without an account and sign in later in Settings → My Account."); }
+            spacing: Theme.space-4;
+            alignment: start;
+            Image {
+                width: 48px;
+                height: 48px;
+                source: Icons.logo;
             }
-            Rectangle { horizontal-stretch: 1; }
+            Text {
+                text: Bridge.app-name;
+                color: #ffffff;
+                font-size: Theme.font-3xl;
+                font-weight: Theme.weight-bold;
+                vertical-alignment: center;
+            }
+        }
+        Text {
+            text: @tr("Your TeamSpeak account, everywhere you talk.");
+            color: #ffffff;
+            font-size: Theme.font-2xl;
+            font-weight: Theme.weight-semibold;
+            wrap: word-wrap;
+        }
+        for feature in [
+            { icon: Icons.user-check, text: @tr("Your myTeamSpeak name and avatar become your profile.") },
+            { icon: Icons.shield-check, text: @tr("Voice servers recognise you by your myTS ID.") },
+            { icon: Icons.star, text: @tr("Your badges and devices at a glance.") },
+        ]: HorizontalLayout {
+            spacing: Theme.space-4;
+            Rectangle {
+                width: 36px;
+                height: 36px;
+                border-radius: Theme.radius-md;
+                background: #ffffff1f;
+                Icon {
+                    source: feature.icon;
+                    tint: #ffffff;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                }
+            }
+            Text {
+                text: feature.text;
+                color: #e4e9ff;
+                vertical-alignment: center;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+            }
+        }
+    }
+}
+
+// First launch without a saved session: sign in or go on without.
+export component LoginPage inherits Rectangle {
+    background: Theme.backdrop;
+    // The window's width (`Nav.narrow`), not this page's: the artwork's
+    // width is part of the page's own layout.
+    property <bool> wide: !Nav.narrow;
+    HorizontalLayout {
+        padding: root.wide ? Theme.space-6 : 0px;
+        spacing: Theme.space-6;
+        // Half the window at most, by stretch (a width from the page's own
+        // width would loop through its layout).
+        if root.wide: LoginHero {
+            horizontal-stretch: 1;
+            min-width: 320px;
+            max-width: 600px;
+        }
+        scroll := ScrollView {
+            horizontal-stretch: 1;
+            VerticalLayout {
+                width: scroll.visible-width;
+                min-height: scroll.visible-height;
+                padding: Theme.space-6;
+                alignment: center;
+                HorizontalLayout {
+                    Rectangle { horizontal-stretch: 1; }
+                    VerticalLayout {
+                        max-width: 440px;
+                        horizontal-stretch: 1;
+                        spacing: Theme.space-5;
+                        if !root.wide: HorizontalLayout {
+                            spacing: Theme.space-3;
+                            alignment: start;
+                            Image {
+                                width: 36px;
+                                height: 36px;
+                                source: Icons.logo;
+                            }
+                            Text {
+                                text: Bridge.app-name;
+                                color: Theme.text;
+                                font-size: Theme.font-2xl;
+                                font-weight: Theme.weight-bold;
+                                vertical-alignment: center;
+                            }
+                        }
+                        VerticalLayout {
+                            spacing: Theme.space-2;
+                            Text {
+                                text: @tr("Sign in");
+                                color: Theme.text;
+                                font-size: Theme.font-3xl;
+                                font-weight: Theme.weight-bold;
+                            }
+                            Note { text: @tr("Use your myTeamSpeak account to make it your main profile in {}.", Bridge.app-name); }
+                        }
+                        Rectangle {
+                            border-radius: Theme.radius-xl;
+                            background: Theme.surface;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            VerticalLayout {
+                                padding: Theme.space-7;
+                                spacing: Theme.space-5;
+                                if !Bridge.myts.available: Note { text: @tr("Account sign-in is available on desktop."); }
+                                if Bridge.myts.available: LoginForm { }
+                                AccountNotices { }
+                                SessionActions { }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: Theme.space-3;
+                            Divider { y: (parent.height - self.height) / 2; }
+                            Text {
+                                text: @tr("or");
+                                color: Theme.text-muted;
+                                font-size: Theme.font-sm;
+                                horizontal-stretch: 0;
+                            }
+                            Divider { y: (parent.height - self.height) / 2; }
+                        }
+                        Button {
+                            icon: Icons.arrow-right;
+                            text: @tr("Continue without an account");
+                            clicked => { Bridge.myts-dismiss(); }
+                        }
+                        Note {
+                            text: @tr("Servers work without an account. You can sign in later in Settings → My Account; this page will not ask again.");
+                            horizontal-alignment: center;
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
         }
     }
 }
