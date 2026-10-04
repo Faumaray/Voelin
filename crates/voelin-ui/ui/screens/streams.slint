@@ -457,6 +457,8 @@ export component StreamViewer inherits Rectangle {
             icon: Icons.volume-2;
             title: Bridge.own-channel != "" ? Bridge.own-channel : Bridge.viewer-title;
             description: Bridge.own-channel-topic;
+            banner: Bridge.own-channel-banner;
+            banner-mode: Bridge.own-channel-banner-mode;
             if Bridge.members.length > 0: Button {
                 icon: Icons.users;
                 text: @tr("{} in voice", Bridge.members.length);

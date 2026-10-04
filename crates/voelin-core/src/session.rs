@@ -110,7 +110,9 @@ enum SourceEvent {
 	/// Our avatar file is uploaded (its MD5) or failed: announce it.
 	AvatarUploaded(u64, RequestId, Result<String, String>),
 	/// Time to fetch the host banner again (`banner_gfx_interval_s`).
-	ReloadBanner,
+	ReloadBanner(String),
+	/// A failed picture can be tried again on the next presence update.
+	PictureFailed(String),
 }
 
 /// Our live stream, for the gateway's directory.
@@ -813,8 +815,9 @@ impl Session {
 	/// Fetch the banners of the presence shown (any source) that are new,
 	/// and have the host banner reloaded as often as the server asks.
 	fn fetch_pictures(&mut self, p: &Presence) {
+		let enabled = self.settings.current().get(&CACHE_FETCH_IMAGES);
 		let reload = Some((&p.server.banner_gfx_url, p.server.banner_gfx_interval_s))
-			.filter(|(url, every)| !url.is_empty() && *every > 0);
+			.filter(|(url, every)| enabled && cache::picture_key(url).is_some() && *every > 0);
 		if self.banner_reload.as_ref().map(|(url, every, _)| (url, *every)) != reload {
 			if let Some((.., timer)) = self.banner_reload.take() {
 				timer.abort();
@@ -822,13 +825,15 @@ impl Session {
 			if let Some((url, every_s)) = reload {
 				let every = std::time::Duration::from_secs(every_s).max(web::MIN_RELOAD);
 				let tx = self.sources_tx.clone();
-				// Ends with the session (nobody receives).
+				let address = url.clone();
+				// Aborted when the banner changes or the session closes.
 				let timer = tokio::spawn(async move {
 					let start = tokio::time::Instant::now() + every;
 					let mut tick = tokio::time::interval_at(start, every);
+					tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 					loop {
 						tick.tick().await;
-						if tx.send(SourceEvent::ReloadBanner).is_err() {
+						if tx.send(SourceEvent::ReloadBanner(address.clone())).is_err() {
 							break;
 						}
 					}
@@ -836,12 +841,12 @@ impl Session {
 				self.banner_reload = Some((url.clone(), every_s, timer.abort_handle()));
 			}
 		}
-		if !self.settings.current().get(&CACHE_FETCH_IMAGES) {
+		if !enabled {
 			return;
 		}
 		let urls = std::iter::once(&p.server.banner_gfx_url)
 			.chain(p.channels.values().filter_map(|c| c.banner_gfx_url.as_ref()));
-		for url in urls.filter(|u| !u.is_empty()) {
+		for url in urls.filter(|u| cache::picture_key(u).is_some()) {
 			if self.pictures.insert(url.clone()) {
 				self.fetch_picture(url, false);
 			}
@@ -851,11 +856,15 @@ impl Session {
 	/// Get the picture at `url` into the cache (again with `fresh`).
 	fn fetch_picture(&self, url: &str, fresh: bool) {
 		let (session, events, address) = (self.id, self.events.clone(), url.to_owned());
+		let sources = self.sources_tx.clone();
 		let waiter: Waiter = Box::new(move |result| match result {
 			Ok(path) => {
 				let _ = events.send(Event::PictureReady { session, url: address, path });
 			}
-			Err(e) => debug!(url = %address, "no picture: {e}"),
+			Err(e) => {
+				debug!(url = %address, "no picture: {e}");
+				let _ = sources.send(SourceEvent::PictureFailed(address));
+			}
 		});
 		web::fetch(self.cache.current(), url, fresh, max_cache_bytes(&self.settings), waiter);
 	}
@@ -1288,6 +1297,9 @@ impl Session {
 	}
 
 	fn stop_all(&mut self) {
+		if let Some((.., timer)) = self.banner_reload.take() {
+			timer.abort();
+		}
 		self.stop_streams("session closed");
 		if let Some((_, tx)) = self.voice.take() {
 			let _ = tx.send(VoiceCmd::Disconnect);
@@ -1363,8 +1375,12 @@ impl Session {
 					self.emit(Event::RequestDone { session: self.id, request, result });
 				}
 			},
-			SourceEvent::ReloadBanner => {
+			SourceEvent::PictureFailed(url) => {
+				self.pictures.remove(&url);
+			}
+			SourceEvent::ReloadBanner(address) => {
 				if let Some((url, ..)) = &self.banner_reload
+					&& *url == address
 					&& self.settings.current().get(&CACHE_FETCH_IMAGES)
 				{
 					self.fetch_picture(url, true);
@@ -1685,5 +1701,93 @@ impl Session {
 		let presence = Arc::new(presence);
 		self.contacts.presence(self.id, presence.clone());
 		self.emit(Event::Presence { session: self.id, presence });
+	}
+}
+
+#[cfg(test)]
+mod banner_tests {
+	use super::*;
+	use crate::cache::Cache;
+	use crate::settings::Settings;
+
+	fn session(tag: &str) -> (Session, broadcast::Receiver<Event>) {
+		let (events, receiver) = broadcast::channel(16);
+		let (frames, _) = broadcast::channel(1);
+		let history = SharedHistory::default();
+		let dir = std::env::temp_dir()
+			.join(format!("voelin-session-banner-{tag}-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&dir);
+		let shared = Shared {
+			settings: SharedSettings::new(Settings::default()),
+			history: history.clone(),
+			cache: SharedCache::new(Cache::new(dir)),
+			contacts: Contacts::new(events.clone(), history),
+		};
+		(Session::new(1, events, frames, AudioSettings::default(), shared), receiver)
+	}
+
+	#[tokio::test]
+	async fn failed_picture_is_retried_on_next_presence() {
+		let (mut session, mut events) = session("retry");
+		let mut presence = Presence::default();
+		presence.server.banner_gfx_url = "https://example.com/banner.png".into();
+		let url = &presence.server.banner_gfx_url;
+		let key = cache::picture_key(url).unwrap();
+		let cache = session.cache.current();
+		// Own the download so this exercises session completion without network I/O.
+		let Fetch::Download(temp) = cache.fetch(&key, false, Box::new(|_| {})) else {
+			panic!("first download");
+		};
+		session.fetch_pictures(&presence);
+		assert!(session.pictures.contains(url));
+		cache.finish(&key, &temp, Err("temporary failure".into()), 0);
+		let failure = session.sources_rx.as_mut().unwrap().recv().await.unwrap();
+		session.source_event(failure);
+		assert!(!session.pictures.contains(url));
+
+		let Fetch::Download(temp) = cache.fetch(&key, false, Box::new(|_| {})) else {
+			panic!("retry download");
+		};
+		session.fetch_pictures(&presence);
+		std::fs::create_dir_all(temp.parent().unwrap()).unwrap();
+		std::fs::write(&temp, b"picture").unwrap();
+		cache.finish(&key, &temp, Ok(()), 0);
+		assert!(
+			matches!(events.try_recv(), Ok(Event::PictureReady { url: ready, .. }) if ready == *url)
+		);
+		assert!(session.pictures.contains(url));
+		std::fs::remove_dir_all(cache.dir()).unwrap();
+	}
+
+	#[tokio::test]
+	async fn reload_timer_obeys_policy_and_is_stopped_with_session() {
+		let (mut session, _) = session("timer");
+		let mut presence = Presence::default();
+		presence.server.banner_gfx_url = "https://example.com/banner.png".into();
+		presence.server.banner_gfx_interval_s = 60;
+		session.settings.current().set(&CACHE_FETCH_IMAGES, false).unwrap();
+		session.fetch_pictures(&presence);
+		assert!(session.banner_reload.is_none());
+		assert!(session.pictures.is_empty());
+
+		let cache = session.cache.current();
+		let key = cache::picture_key(&presence.server.banner_gfx_url).unwrap();
+		let _pending = cache.fetch(&key, false, Box::new(|_| {}));
+		session.settings.current().set(&CACHE_FETCH_IMAGES, true).unwrap();
+		session.fetch_pictures(&presence);
+		let timer = session.banner_reload.as_ref().unwrap().2.clone();
+		session.settings.current().set(&CACHE_FETCH_IMAGES, false).unwrap();
+		session.fetch_pictures(&presence);
+		assert!(session.banner_reload.is_none());
+		tokio::task::yield_now().await;
+		assert!(timer.is_finished());
+
+		session.settings.current().set(&CACHE_FETCH_IMAGES, true).unwrap();
+		session.fetch_pictures(&presence);
+		let timer = session.banner_reload.as_ref().unwrap().2.clone();
+		session.stop_all();
+		assert!(session.banner_reload.is_none());
+		tokio::task::yield_now().await;
+		assert!(timer.is_finished());
 	}
 }

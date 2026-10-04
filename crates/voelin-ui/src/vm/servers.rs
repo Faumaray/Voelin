@@ -19,7 +19,7 @@ pub fn status(state: &SessionState) -> &'static str {
 /// A server of the rail and the home page. `unread`: messages in its
 /// chats; `live`: streams on it; `detail`: who is there ("9 online · 7
 /// channels"), empty for its address; `flavor`: "TeamSpeak 6" once
-/// reached.
+/// reached; `icon`: the server's icon (empty: its initials).
 pub fn item(
 	bookmark: &Bookmark,
 	state: &SessionState,
@@ -27,6 +27,7 @@ pub fn item(
 	live: bool,
 	detail: String,
 	flavor: String,
+	icon: slint::Image,
 ) -> ServerItem {
 	ServerItem {
 		id: bookmark.id as i32,
@@ -35,6 +36,7 @@ pub fn item(
 		status: status(state).into(),
 		initials: avatar::initials(&bookmark.name).into(),
 		tint: avatar::tint(&bookmark.name),
+		icon,
 		unread,
 		live,
 		detail: if detail.is_empty() { bookmark.address.clone() } else { detail }.into(),

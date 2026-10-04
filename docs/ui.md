@@ -422,6 +422,55 @@ the window's size so the pointer is not over the window, and passes
 | ![friends](screenshots/mobile-friends.png) | ![messages](screenshots/mobile-messages.png) | ![events](screenshots/mobile-events.png) | ![the bell](screenshots/mobile-notifications.png) | ![streaming settings](screenshots/mobile-settings-streaming.png) |
 | ![add server](screenshots/mobile-add-server.png) | | | | |
 
+## Server and channel pictures
+
+The server card shows the host banner. TeamSpeak 6 channel banners appear
+behind their tree rows, the desktop chat and voice headers, and the phone's
+chat and voice headers. The server's sizing mode is preserved: 0 centres
+the original picture, 1 stretches it, and 2 fits it while keeping its aspect
+ratio. A theme-coloured wash keeps the text readable over bright pictures.
+Missing or refused pictures leave the normal background in place.
+
+The engine downloads HTTP(S) banners only while `cache.fetch_images` is
+enabled. Downloads have a 4 MiB limit, a 10-second connection timeout and
+a 30-second overall timeout. Failed downloads can retry on a later
+presence update. A host banner's reload interval is at least 60 seconds;
+failed refreshes preserve the previous cached picture. Closing the session
+stops its reload timer. `PictureReady` invalidates the decoded image before
+refreshing the visible models, including when the URL and cache path stay
+the same.
+
+PNG, JPEG, GIF, WebP and SVG are decoded by content, since cached files have
+no extension. Raster pictures larger than 16,384 pixels on either axis or
+64 MiB of decoded RGBA are refused before pixel allocation on the UI
+thread. SVG uses Slint's vector loader and the existing vector-cache cost.
+Avatars and server, channel, client and group icons use the same image cache.
+
+The focused checks are the `voelin-core`, `voelin-model`, `voelin-observer`
+and `voelin-ui` library tests. The live `ts6_banners` test checks disabled
+fetching, initial downloads, all three modes, channel URL replacement and
+removal, and a fresh host download after the 60-second interval. It uses
+the development TS6 server by default; a private fixture can override its
+endpoints without changing the other live tests:
+
+```sh
+VOELIN_LIVE=1 \
+VOELIN_BANNER_VOICE_ADDR=127.0.0.1:19988 \
+VOELIN_BANNER_QUERY_ADDR=127.0.0.1:20022 \
+cargo test --locked -p voelin-core --test live ts6_banners -- --exact
+```
+
+The 2026-10-04 check passed 168 focused library tests and the live scenario
+against a private TS6 6.0.0-beta13.1 instance, including its real reload
+interval. These screenshots use sample data on Xvfb with Slint's software
+renderer; the phone layouts are desktop renders, not Android device tests.
+
+| Desktop | Phone layout |
+|---|---|
+| ![Dark chat and channel banners](screenshots/banners-desktop-dark.png) | ![Channel banner in the mobile chat header](screenshots/banners-mobile-chat.png) |
+| ![Light chat and channel banners](screenshots/banners-desktop-light.png) | ![Light server list](screenshots/banners-mobile-servers.png) |
+| ![Banner in the desktop voice header](screenshots/banners-desktop-voice.png) | ![Banner in the mobile voice header](screenshots/banners-mobile-voice.png) |
+
 ## Limits
 
 - No drop shadows or blur (the software renderer draws none): glows are

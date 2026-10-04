@@ -322,7 +322,8 @@ impl App {
 					.map(|v| vm::tree::stats(&v.presence))
 					.unwrap_or_default();
 				let flavor = view.map(|v| v.extra.flavor.clone()).unwrap_or_default();
-				vm::servers::item(b, &state, unread, live, detail, flavor)
+				let icon = view.map(|v| v.server_icon()).unwrap_or_default();
+				vm::servers::item(b, &state, unread, live, detail, flavor, icon)
 			})
 			.collect();
 		vm::list::sync(&self.models.servers, &items);
@@ -349,11 +350,24 @@ impl App {
 				.into(),
 		);
 		bridge.set_nickname(bookmark.map(|b| b.nickname.clone()).unwrap_or_default().into());
+		let own = view.zip(state.own_client).and_then(|(v, c)| v.avatar(c));
+		bridge.set_own_avatar(vm::avatar::image(own));
+		let banner = |url: Option<&str>| {
+			view.map(|v| vm::tree::banner(&v.pictures, url)).unwrap_or_default()
+		};
+		let details = view.map(|v| &v.presence.server);
+		bridge.set_server_banner(banner(details.map(|d| d.banner_gfx_url.as_str())));
+		bridge.set_server_banner_mode(details.map_or(0, |d| vm::tree::banner_mode(d.banner_mode)));
 		let own_channel =
 			view.and_then(|v| state.own_channel.and_then(|c| v.presence.channels.get(&c)));
 		bridge.set_own_channel(own_channel.map(|c| c.name.clone()).unwrap_or_default().into());
 		bridge.set_own_channel_topic(
 			own_channel.and_then(|c| c.topic.clone()).unwrap_or_default().into(),
+		);
+		bridge
+			.set_own_channel_banner(banner(own_channel.and_then(|c| c.banner_gfx_url.as_deref())));
+		bridge.set_own_channel_banner_mode(
+			own_channel.map_or(0, |c| vm::tree::banner_mode(c.banner_mode)),
 		);
 		bridge.set_own_channel_limit(
 			own_channel.and_then(|c| c.max_clients).filter(|m| *m >= 0).unwrap_or(-1),
@@ -401,7 +415,9 @@ impl App {
 			filter: "",
 			avatars: &view.avatars,
 			icons: &view.icons,
+			pictures: &view.pictures,
 			groups: &view.server_groups,
+			channel_groups: &view.channel_groups,
 		};
 		vm::list::sync(&self.models.tree, &vm::tree::rows(&input));
 		let connected = view.state.voice == VoiceState::Connected;

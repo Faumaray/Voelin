@@ -180,6 +180,7 @@ export component UserCard inherits Rectangle {
             Avatar {
                 size: 38px;
                 initials: Bridge.nickname != "" ? "" : "?";
+                image: Bridge.own-avatar;
                 tint: Theme.accent;
                 label: Bridge.nickname;
                 // Green ring while our voice goes out.
@@ -189,7 +190,7 @@ export component UserCard inherits Rectangle {
                     source: Icons.user;
                     size: 20px;
                     tint: #ffffff;
-                    visible: Bridge.nickname != "";
+                    visible: Bridge.nickname != "" && Bridge.own-avatar.width == 0;
                 }
             }
         }

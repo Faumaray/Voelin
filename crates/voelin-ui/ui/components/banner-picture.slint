@@ -1,0 +1,29 @@
+import { Theme } from "../theme.slint";
+
+// A server's banner picture (the host banner, a TeamSpeak 6 channel banner)
+// filling its area, behind other content. `mode` as the server sets it:
+// 0 as it is (centred), 1 stretched, 2 scaled to fit keeping its aspect
+// ratio. A wash of `scrim-color` at `scrim` opacity over it keeps text on
+// top readable.
+export component BannerPicture inherits Rectangle {
+    in property <image> source;
+    in property <int> mode;
+    in property <color> scrim-color: Theme.surface;
+    // Keep small text readable over even a solid white/black banner in
+    // both themes. Text-free artwork can explicitly turn this off.
+    in property <float> scrim: 0.9;
+    clip: true;
+    accessible-role: AccessibleRole.none;
+    Image {
+        width: 100%;
+        height: 100%;
+        source: root.source;
+        image-fit: root.mode == 1 ? ImageFit.fill : root.mode == 2 ? ImageFit.contain : ImageFit.preserve;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        accessible-role: AccessibleRole.none;
+    }
+    if root.scrim > 0: Rectangle {
+        background: root.scrim-color.transparentize(1 - root.scrim);
+    }
+}

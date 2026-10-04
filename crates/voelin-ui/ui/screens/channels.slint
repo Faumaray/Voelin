@@ -5,7 +5,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, TreeItem } from "../bridge.slint";
 import { Nav } from "../nav.slint";
-import { Icon, Button, ButtonKind, IconButton, Avatar, LiveBadge, Chip, SectionHeader, SpeakingBars, PopupMenu, MenuEntry, ListView } from "../components/index.slint";
+import { Icon, Button, ButtonKind, IconButton, Avatar, LiveBadge, Chip, SectionHeader, SpeakingBars, PopupMenu, MenuEntry, ListView, BannerPicture } from "../components/index.slint";
 
 // The banner at the top of the sidebar: server name, counts, a menu.
 export component ServerHeader inherits Rectangle {
@@ -15,8 +15,24 @@ export component ServerHeader inherits Rectangle {
     background: Theme.surface-2;
     accessible-role: AccessibleRole.groupbox;
     accessible-label: Bridge.server-title;
-    // Painted banner: a night sky gradient with a horizon glow.
-    Rectangle {
+    // The server's host banner, fading into the card.
+    if Bridge.server-banner.width > 0: Rectangle {
+        height: 72px;
+        y: 0;
+        BannerPicture {
+            source: Bridge.server-banner;
+            mode: Bridge.server-banner-mode;
+            scrim: 0;
+        }
+        Rectangle {
+            y: parent.height - 30px;
+            height: 30px;
+            background: @linear-gradient(180deg, transparent 0%, Theme.surface-2 100%);
+        }
+    }
+    // Without one, a painted banner: a night sky gradient with a horizon
+    // glow.
+    if Bridge.server-banner.width == 0: Rectangle {
         height: 72px;
         y: 0;
         background: @linear-gradient(180deg, #1a2d7a 0%, #3a2a8f 45%, #0b1330 100%);
@@ -117,6 +133,20 @@ export component ConnectActions inherits HorizontalLayout {
     }
 }
 
+// A server's icon (channel, group, client) at the end of a tree row, in its
+// own colours.
+component RowIcon inherits VerticalLayout {
+    in property <image> source;
+    alignment: center;
+    Image {
+        width: 16px;
+        height: 16px;
+        source: root.source;
+        image-fit: contain;
+        accessible-role: AccessibleRole.none;
+    }
+}
+
 // One row of the tree: a channel or a client.
 component TreeRow inherits Rectangle {
     in property <TreeItem> item;
@@ -136,6 +166,14 @@ component TreeRow inherits Rectangle {
         } else {
             client-clicked(item.id);
         }
+    }
+    // The channel's banner behind its row, washed so the name stays
+    // readable (the own channel's tint over it).
+    if item.is-channel && item.banner.width > 0: BannerPicture {
+        border-radius: root.border-radius;
+        source: item.banner;
+        mode: item.banner-mode;
+        scrim-color: item.own ? Theme.accent-soft : area.has-hover ? Theme.surface-3 : Theme.surface;
     }
     area := TouchArea {
         mouse-cursor: MouseCursor.pointer;
@@ -178,11 +216,15 @@ component TreeRow inherits Rectangle {
         }
         Text {
             text: item.name;
-            color: item.own ? Theme.text : Theme.text-secondary;
-            font-weight: item.own ? Theme.weight-semibold : Theme.weight-medium;
+            // Full contrast over a banner.
+            color: item.own || item.banner.width > 0 ? Theme.text : Theme.text-secondary;
+            font-weight: item.own || item.banner.width > 0 ? Theme.weight-semibold : Theme.weight-medium;
             vertical-alignment: center;
             horizontal-stretch: 1;
             overflow: elide;
+        }
+        if item.icon.width > 0: RowIcon {
+            source: item.icon;
         }
         if item.members > 0 || item.max-members >= 0: HorizontalLayout {
             spacing: 3px;
@@ -194,7 +236,7 @@ component TreeRow inherits Rectangle {
             }
             Text {
                 text: item.max-members >= 0 ? item.members + "/" + item.max-members : item.members;
-                color: item.own ? Theme.text : Theme.text-muted;
+                color: item.own ? Theme.text : item.banner.width > 0 ? Theme.text-secondary : Theme.text-muted;
                 font-size: Theme.font-sm;
                 vertical-alignment: center;
             }
@@ -210,6 +252,7 @@ component TreeRow inherits Rectangle {
                 size: 22px;
                 initials: item.initials;
                 tint: item.tint;
+                image: item.avatar;
                 speaking: item.talking;
                 label: item.name;
             }
@@ -282,6 +325,16 @@ component TreeRow inherits Rectangle {
             color: Theme.text-muted;
             font-size: Theme.font-xs;
             vertical-alignment: center;
+        }
+        // Group and client icons.
+        if item.icon.width > 0: RowIcon {
+            source: item.icon;
+        }
+        if item.icon-2.width > 0: RowIcon {
+            source: item.icon-2;
+        }
+        if item.icon-3.width > 0: RowIcon {
+            source: item.icon-3;
         }
     }
 }

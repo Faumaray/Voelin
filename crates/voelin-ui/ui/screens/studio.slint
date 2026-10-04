@@ -17,6 +17,7 @@ component StudioUser inherits HorizontalLayout {
         Avatar {
             size: 38px;
             initials: Bridge.nickname != "" ? "" : "?";
+            image: Bridge.own-avatar;
             tint: Theme.accent;
             label: Bridge.nickname;
             crown: StudioBridge.status.live;
@@ -25,7 +26,7 @@ component StudioUser inherits HorizontalLayout {
                 source: Icons.user;
                 size: 20px;
                 tint: #ffffff;
-                visible: Bridge.nickname != "";
+                visible: Bridge.nickname != "" && Bridge.own-avatar.width == 0;
             }
         }
     }

@@ -291,6 +291,7 @@ component HomeBanner inherits Rectangle {
                 size: root.compact ? 44px : 56px;
                 square: true;
                 initials: root.server.initials;
+                image: root.server.icon;
                 tint: root.server.tint;
                 label: root.server.name;
                 status: root.server.status == "connected" ? Status.online : root.server.status == "observing" ? Status.info : root.server.status == "connecting" ? Status.idle : Status.none;

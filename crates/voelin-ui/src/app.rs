@@ -210,8 +210,15 @@ pub(crate) struct SessionView {
 	pub avatars: HashMap<String, PathBuf>,
 	/// Icons in the engine's cache, by icon id ([`Event::IconReady`]).
 	pub icons: HashMap<u32, PathBuf>,
+	/// Banners in the engine's cache, by address ([`Event::PictureReady`]).
+	pub pictures: HashMap<String, PathBuf>,
+	/// The server's icon id as its voice connection last told it
+	/// ([`Event::ServerDetails`]); kept while disconnected, for the rail.
+	pub server_icon: u32,
 	/// The server groups in display order ([`Event::Groups`]).
 	pub server_groups: Vec<GroupInfo>,
+	/// The channel groups ([`Event::Groups`]).
+	pub channel_groups: Vec<GroupInfo>,
 	/// What the session's gateway offers (`voelin_gateway_proto::feature`).
 	pub gateway_caps: Vec<String>,
 	/// The client whose member card is open.
@@ -241,7 +248,10 @@ impl Default for SessionView {
 			applied_playback: HashSet::new(),
 			avatars: HashMap::new(),
 			icons: HashMap::new(),
+			pictures: HashMap::new(),
+			server_icon: 0,
 			server_groups: Vec::new(),
+			channel_groups: Vec::new(),
 			gateway_caps: Vec::new(),
 			member_card: None,
 			stream_viewers: HashMap::new(),
@@ -300,6 +310,13 @@ impl SessionView {
 	pub fn avatar(&self, client: u16) -> Option<&PathBuf> {
 		let uid = self.presence.clients.get(&client)?.uid.as_deref()?;
 		self.avatars.get(uid)
+	}
+
+	/// The server's icon, if it has one and the engine fetched it.
+	pub fn server_icon(&self) -> slint::Image {
+		crate::vm::avatar::image(
+			self.icons.get(&self.server_icon).filter(|_| self.server_icon != 0),
+		)
 	}
 }
 
@@ -915,28 +932,52 @@ impl App {
 				self.gateway_extra(session as i64, &update);
 				self.gateway_update(session as i64, update);
 			}
-			Event::Groups { session, server_groups, .. } => {
+			Event::Groups { session, server_groups, channel_groups } => {
 				let view = self.sessions.entry(session as i64).or_default();
 				view.server_groups = (*server_groups).clone();
 				// Display order, as TeamSpeak sorts them.
 				view.server_groups.sort_by_key(|g| (g.sort_id, g.id));
+				view.channel_groups = (*channel_groups).clone();
 				if self.current == Some(session as i64) {
 					self.refresh_tree();
 				}
 			}
+			Event::ServerDetails { session, details } => {
+				let view = self.sessions.entry(session as i64).or_default();
+				if view.server_icon != details.icon {
+					view.server_icon = details.icon;
+					self.refresh_servers();
+				}
+			}
+			// Pictures can arrive after the rows were built: draw them again.
 			Event::AvatarReady { session, client_uid, path, .. } => {
 				let view = self.sessions.entry(session as i64).or_default();
 				view.avatars.insert(client_uid, path);
 				if self.current == Some(session as i64) {
 					self.refresh_tree();
 					self.refresh_chat();
+					self.refresh_toolbar();
+					self.refresh_member_card();
+					self.refresh_streams();
 				}
 			}
 			Event::IconReady { session, icon, path } => {
 				let view = self.sessions.entry(session as i64).or_default();
 				view.icons.insert(icon, path);
+				self.refresh_servers();
 				if self.current == Some(session as i64) {
 					self.refresh_tree();
+				}
+			}
+			Event::PictureReady { session, url, path } => {
+				let view = self.sessions.entry(session as i64).or_default();
+				// The host banner reloads into the same file.
+				crate::images::forget(&path);
+				view.pictures.insert(url, path);
+				if self.current == Some(session as i64) {
+					self.refresh_toolbar();
+					self.refresh_tree();
+					self.refresh_chat();
 				}
 			}
 			Event::Transfer { session, transfer, state } => {

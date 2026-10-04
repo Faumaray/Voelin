@@ -375,6 +375,28 @@ mod tests {
 	}
 
 	#[test]
+	fn failed_picture_refresh_keeps_previous_file_and_can_retry() {
+		let dir = temp_dir("refresh-fail");
+		let cache = Cache::new(&dir);
+		let key = picture_key("https://example.com/banner.png").unwrap();
+		let path = put(&cache, &key, 32, 0);
+		let (tx, rx) = mpsc::channel();
+		let Fetch::Download(temp) = cache.fetch(&key, true, Box::new(move |r| tx.send(r).unwrap()))
+		else {
+			panic!("refresh download");
+		};
+		std::fs::write(&temp, b"partial download").unwrap();
+		cache.finish(&key, &temp, Err("connection lost".into()), 0);
+		assert_eq!(rx.recv().unwrap(), Err("connection lost".into()));
+		assert!(!temp.exists());
+		assert_eq!(cache.get(&key), Some(path.clone()));
+		assert_eq!(std::fs::read(&path).unwrap(), vec![0u8; 32]);
+		assert_eq!(cache.size(), 32);
+		assert!(matches!(cache.fetch(&key, true, Box::new(|_| {})), Fetch::Download(_)));
+		std::fs::remove_dir_all(dir).unwrap();
+	}
+
+	#[test]
 	fn evicts_least_recently_used_and_survives_restart() {
 		let dir = temp_dir("lru");
 		let cache = Cache::new(&dir);

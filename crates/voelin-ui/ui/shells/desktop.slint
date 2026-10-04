@@ -46,6 +46,7 @@ component RailServer inherits Rectangle {
         size: 46px;
         square: true;
         initials: server.initials;
+        image: server.icon;
         tint: server.tint;
         label: server.name;
         status: server.status == "connected" ? Status.online : server.status == "observing" ? Status.info : server.status == "connecting" ? Status.idle : Status.none;

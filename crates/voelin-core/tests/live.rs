@@ -129,13 +129,16 @@ const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+
 /// An HTTP server on 127.0.0.1 that answers every request with `body`;
 /// returns its address. The engine fetches banners itself (the server only
 /// passes their addresses on), so it reaches this one.
-async fn serve(body: Vec<u8>) -> String {
+async fn serve(body: Vec<u8>) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
 	use tokio::io::{AsyncReadExt, AsyncWriteExt};
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let addr = listener.local_addr().unwrap();
+	let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+	let count = requests.clone();
 	tokio::spawn(async move {
 		while let Ok((mut socket, _)) = listener.accept().await {
 			let body = body.clone();
+			let count = count.clone();
 			tokio::spawn(async move {
 				let mut request = Vec::new();
 				let mut buf = [0u8; 1024];
@@ -145,6 +148,7 @@ async fn serve(body: Vec<u8>) -> String {
 						Ok(n) => request.extend_from_slice(&buf[..n]),
 					}
 				}
+				count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 				let head = format!(
 					"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
 					body.len()
@@ -154,95 +158,187 @@ async fn serve(body: Vec<u8>) -> String {
 			});
 		}
 	});
-	format!("http://{addr}")
+	(format!("http://{addr}"), requests)
 }
 
-/// The host banner and a channel banner set through ServerQuery reach the
-/// engine's cache (`Event::PictureReady`); the server is put back after.
+/// Banner policy, channel edits/removal and the host refresh against a real TS6.
+/// Override only this test's endpoints to use a private fixture. Server settings
+/// and the temporary channel are restored even when the assertions panic.
 #[tokio::test(flavor = "multi_thread")]
 async fn ts6_banners() {
 	use base64::Engine as _;
+	use std::sync::atomic::Ordering;
+	use voelin_core::settings::CACHE_FETCH_IMAGES;
 	use voelin_model::BannerMode;
 	use voelin_query::{Command as Query, QueryClient};
 	if !live() {
 		return;
 	}
+	let voice_addr =
+		std::env::var("VOELIN_BANNER_VOICE_ADDR").unwrap_or_else(|_| "127.0.0.1:9988".into());
+	let query_addr =
+		std::env::var("VOELIN_BANNER_QUERY_ADDR").unwrap_or_else(|_| "127.0.0.1:10022".into());
 	let png = base64::prelude::BASE64_STANDARD.decode(PNG).unwrap();
-	let base = serve(png.clone()).await;
+	let (base, requests) = serve(png.clone()).await;
 	let (host_url, channel_url) = (format!("{base}/host.png"), format!("{base}/channel.png"));
-	let (admin, _) = QueryClient::connect(&query(voelin_query::Transport::Ssh, "127.0.0.1:10022"))
-		.await
-		.unwrap();
+	let (admin, _) =
+		QueryClient::connect(&query(voelin_query::Transport::Ssh, &query_addr)).await.unwrap();
 	let info = admin.send(&Query::new("serverinfo")).await.unwrap().remove(0);
 	let before = |key: &str| info.get(key).unwrap_or_default().to_owned();
-	let (old_url, old_mode) =
-		(before("virtualserver_hostbanner_gfx_url"), before("virtualserver_hostbanner_mode"));
-	let edit = Query::new("serveredit")
-		.arg("virtualserver_hostbanner_gfx_url", &host_url)
-		.arg("virtualserver_hostbanner_mode", 2);
-	admin.send(&edit).await.unwrap();
+	let restore = Query::new("serveredit")
+		.arg("virtualserver_hostbanner_gfx_url", before("virtualserver_hostbanner_gfx_url"))
+		.arg("virtualserver_hostbanner_mode", before("virtualserver_hostbanner_mode"))
+		.arg(
+			"virtualserver_hostbanner_gfx_interval",
+			before("virtualserver_hostbanner_gfx_interval"),
+		);
 	let created = admin
 		.send(
 			&Query::new("channelcreate")
 				.arg("channel_name", format!("banner-{}", std::process::id()))
+				.arg("channel_flag_permanent", 1)
 				.arg("channel_banner_gfx_url", &channel_url)
 				.arg("channel_banner_mode", 1),
 		)
-		.await;
-
+		.await
+		.unwrap();
+	let cid = created[0].get("cid").unwrap().to_owned();
+	let channel_id: u64 = cid.parse().unwrap();
+	let engine = Engine::start();
+	engine.settings().set(&CACHE_FETCH_IMAGES, false).unwrap();
+	let dir = std::env::temp_dir().join(format!("voelin-live-banners-{}", std::process::id()));
+	engine.send(Command::AttachCache(dir.clone()));
 	let check = {
-		let (host_url, channel_url) = (host_url.clone(), channel_url.clone());
+		let (admin, engine, cid) = (admin.clone(), engine.clone(), cid.clone());
 		tokio::spawn(async move {
-			let engine = Engine::start();
-			let dir =
-				std::env::temp_dir().join(format!("voelin-live-banners-{}", std::process::id()));
-			engine.send(Command::AttachCache(dir.clone()));
+			admin
+				.send(
+					&Query::new("serveredit")
+						.arg("virtualserver_hostbanner_gfx_url", &host_url)
+						.arg("virtualserver_hostbanner_mode", 2)
+						.arg("virtualserver_hostbanner_gfx_interval", 60),
+				)
+				.await
+				.unwrap();
 			let mut events = engine.subscribe();
 			engine.send(Command::ConnectVoice {
 				session: 1,
-				options: Box::new(VoiceOptions::new("127.0.0.1:9988", "banner-check")),
+				options: Box::new(VoiceOptions::new(&voice_addr, "banner-check")),
 			});
-			let mut seen = std::collections::HashMap::new();
-			let mut channel_mode = None;
-			wait_for(&mut events, "both banners", |e| {
+			wait_for(&mut events, "banner metadata with fetching disabled", |e| {
+				assert!(
+					!matches!(e, Event::PictureReady { .. }),
+					"disabled image fetching emitted a picture"
+				);
+				matches!(e, Event::Presence { presence, .. }
+					if presence.server.banner_gfx_url == host_url
+					&& presence.server.banner_mode == BannerMode::KeepAspect
+					&& presence.channels.get(&channel_id).is_some_and(|c|
+						c.banner_gfx_url.as_deref() == Some(channel_url.as_str())
+						&& c.banner_mode == BannerMode::IgnoreAspect))
+			})
+			.await;
+			assert_eq!(
+				requests.load(Ordering::SeqCst),
+				0,
+				"disabled policy must prevent HTTP requests"
+			);
+
+			// A new presence after opting in must fetch both existing banners.
+			engine.settings().set(&CACHE_FETCH_IMAGES, true).unwrap();
+			admin
+				.send(&Query::new("channeledit").arg("cid", &cid).arg("channel_banner_mode", 2))
+				.await
+				.unwrap();
+			let mut seen = std::collections::HashSet::new();
+			let mut changed_mode = false;
+			wait_for(&mut events, "both images and changed sizing mode", |e| {
 				match e {
 					Event::PictureReady { url, path, .. } => {
-						seen.insert(url.clone(), std::fs::read(path).unwrap());
+						assert_eq!(std::fs::read(path).unwrap(), png);
+						seen.insert(url.clone());
 					}
 					Event::Presence { presence, .. } => {
-						channel_mode = presence
+						changed_mode = presence
 							.channels
-							.values()
-							.find(|c| c.banner_gfx_url.as_deref() == Some(channel_url.as_str()))
-							.map(|c| c.banner_mode);
-						assert_eq!(presence.server.banner_mode, BannerMode::KeepAspect);
+							.get(&channel_id)
+							.is_some_and(|c| c.banner_mode == BannerMode::KeepAspect);
 					}
 					_ => {}
 				}
-				seen.contains_key(&host_url) && seen.contains_key(&channel_url)
+				changed_mode && seen.contains(&host_url) && seen.contains(&channel_url)
 			})
 			.await;
-			assert_eq!(channel_mode, Some(BannerMode::IgnoreAspect));
-			assert!(seen.values().all(|bytes| *bytes == png));
-			engine.send(Command::CloseSession { session: 1 });
-			tokio::time::sleep(Duration::from_millis(500)).await;
-			let _ = std::fs::remove_dir_all(dir);
+
+			let replacement = format!("{base}/replacement.png");
+			admin
+				.send(
+					&Query::new("channeledit")
+						.arg("cid", &cid)
+						.arg("channel_banner_gfx_url", &replacement)
+						.arg("channel_banner_mode", 0),
+				)
+				.await
+				.unwrap();
+			let (mut metadata, mut image) = (false, false);
+			wait_for(&mut events, "replacement channel banner", |e| {
+				match e {
+					Event::Presence { presence, .. } => {
+						metadata = presence.channels.get(&channel_id).is_some_and(|c| {
+							c.banner_gfx_url.as_deref() == Some(replacement.as_str())
+								&& c.banner_mode == BannerMode::NoAdjust
+						});
+					}
+					Event::PictureReady { url, path, .. } if *url == replacement => {
+						assert_eq!(std::fs::read(path).unwrap(), png);
+						image = true;
+					}
+					_ => {}
+				}
+				metadata && image
+			})
+			.await;
+			admin
+				.send(&Query::new("channeledit").arg("cid", &cid).arg("channel_banner_gfx_url", ""))
+				.await
+				.unwrap();
+			wait_for(&mut events, "channel banner removed", |e| {
+				matches!(e, Event::Presence { presence, .. } if
+					presence.channels.get(&channel_id).is_some_and(|c|
+						c.banner_gfx_url.as_deref().is_none_or(str::is_empty)))
+			})
+			.await;
+
+			// The same host URL must be downloaded again, bypassing its cached file.
+			let before_reload = requests.load(Ordering::SeqCst);
+			let deadline = Instant::now() + Duration::from_secs(75);
+			loop {
+				let event = timeout_at(deadline, events.recv())
+					.await
+					.expect("host banner did not reload after its 60-second interval")
+					.unwrap();
+				if let Event::PictureReady { url, path, .. } = event
+					&& url == host_url
+				{
+					assert_eq!(std::fs::read(path).unwrap(), png);
+					assert!(
+						requests.load(Ordering::SeqCst) > before_reload,
+						"reload must make a fresh HTTP request"
+					);
+					break;
+				}
+			}
 		})
 	};
 	let result = check.await;
-
-	if let Ok(rows) = &created
-		&& let Some(cid) = rows.first().and_then(|r| r.get("cid"))
-	{
-		let delete = Query::new("channeldelete").arg("cid", cid).arg("force", 1);
-		admin.send(&delete).await.unwrap();
-	}
-	let restore = Query::new("serveredit")
-		.arg("virtualserver_hostbanner_gfx_url", old_url)
-		.arg("virtualserver_hostbanner_mode", old_mode);
-	admin.send(&restore).await.unwrap();
-	created.unwrap();
-	if let Err(e) = result {
-		std::panic::resume_unwind(e.into_panic());
+	engine.send(Command::CloseSession { session: 1 });
+	// Attempt both cleanup operations before reporting either failure.
+	let deleted = admin.send(&Query::new("channeldelete").arg("cid", &cid).arg("force", 1)).await;
+	let restored = admin.send(&restore).await;
+	let _ = std::fs::remove_dir_all(dir);
+	deleted.unwrap();
+	restored.unwrap();
+	if let Err(error) = result {
+		std::panic::resume_unwind(error.into_panic());
 	}
 }

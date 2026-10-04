@@ -1,4 +1,4 @@
-//! Decoded images by key (emoji now; avatars and server icons later): each
+//! Decoded images by key (emoji, avatars, icons and banners): each
 //! is decoded once and kept while it fits the budget (setting
 //! `ui.image_cache_mb`); the least recently used go first.
 //!
@@ -8,6 +8,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::io::Cursor;
 
 use slint::Image;
 
@@ -67,6 +68,14 @@ impl<V: Clone> Lru<V> {
 		Some(value)
 	}
 
+	/// Drop `key`, so the next use loads it again.
+	pub fn remove(&mut self, key: &str) {
+		if let Some((_, cost, tick)) = self.entries.remove(key) {
+			self.order.remove(&tick);
+			self.used -= cost;
+		}
+	}
+
 	fn evict(&mut self) {
 		while self.used > self.budget {
 			let Some((_, key)) = self.order.pop_first() else { break };
@@ -112,27 +121,52 @@ pub fn file(path: &std::path::Path) -> Image {
 				// (`avatars/<md5>`, `icons/<id>`), and servers keep PNG, JPEG
 				// and SVG icons alike.
 				let bytes = std::fs::read(path).ok()?;
-				let image = Image::load_from_data(&bytes, None).ok()?;
-				let size = image.size();
-				Some((image, size.width as usize * size.height as usize * 4))
+				decode(&bytes)
 			})
 		})
 		.unwrap_or_default()
+}
+
+/// Forget the decoded picture of a file that changed (a reloaded banner).
+pub fn forget(path: &std::path::Path) {
+	CACHE.with(|c| c.borrow_mut().remove(&path.to_string_lossy()));
+}
+
+/// Compressed pictures can be small on disk but huge when decoded. Check
+/// raster dimensions before Slint allocates pixels on the UI thread. SVGs
+/// keep Slint's native vector loader and are rasterized at the displayed size.
+fn decode(bytes: &[u8]) -> Option<(Image, usize)> {
+	let reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?;
+	let cost = if reader.format().is_some() {
+		let (width, height) = reader.into_dimensions().ok()?;
+		// At most the default decoded-image cache (64 MiB of RGBA).
+		if width == 0
+			|| height == 0
+			|| width > 16_384
+			|| height > 16_384
+			|| u64::from(width) * u64::from(height) * 4 > 64 << 20
+		{
+			tracing::debug!(width, height, "image exceeds the decoded raster size limit");
+			return None;
+		}
+		width as usize * height as usize * 4
+	} else {
+		let start = bytes.trim_ascii_start();
+		if !start.starts_with(b"<svg") && !start.starts_with(b"<?xml") {
+			return None;
+		}
+		// Intrinsic SVG dimensions describe coordinates, not an allocated
+		// pixel buffer. Use the same vector cost as the emoji cache.
+		svg_cost(bytes.len())
+	};
+	Image::load_from_data(bytes, None).ok().map(|image| (image, cost))
 }
 
 /// A picture from encoded bytes (PNG, JPEG, GIF, WebP), decoded once and
 /// kept by `key`; an empty image if it cannot be decoded.
 pub fn picture(key: &str, bytes: &[u8]) -> Image {
 	let cache_key = format!("picture:{key}");
-	CACHE
-		.with(|c| {
-			c.borrow_mut().get_or_load(&cache_key, || {
-				let image = Image::load_from_data(bytes, None).ok()?;
-				let size = image.size();
-				Some((image, size.width as usize * size.height as usize * 4))
-			})
-		})
-		.unwrap_or_default()
+	CACHE.with(|c| c.borrow_mut().get_or_load(&cache_key, || decode(bytes))).unwrap_or_default()
 }
 
 /// A Twemoji by key; an empty image if there is none.
@@ -182,6 +216,13 @@ mod tests {
 		assert_eq!(lru.usage(), (0, 0));
 		// Unknown keys are not cached.
 		assert_eq!(lru.get_or_load("none", || None), None);
+		lru.set_budget(10);
+		get(&mut lru, "a", 4);
+		lru.remove("a");
+		lru.remove("never");
+		assert_eq!((lru.usage(), lru.len()), ((0, 10), 0));
+		get(&mut lru, "a", 4);
+		assert_eq!(loads.get(), 7, "loaded again after remove");
 	}
 
 	#[test]
@@ -193,6 +234,47 @@ mod tests {
 		encoder.write_header().unwrap().write_image_data(&[200; 32]).unwrap();
 		assert_eq!(picture("test:4x2", &png).size().width, 4);
 		assert_eq!(picture("test:junk", b"not a picture").size().width, 0);
+	}
+
+	#[test]
+	fn large_svg_coordinates_do_not_overflow_the_cache_cost() {
+		let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="3000000000" height="3000000000"><rect width="1" height="1"/></svg>"#;
+		let (image, cost) = decode(svg).unwrap();
+		assert!(image.size().width > 0);
+		assert_eq!(cost, svg_cost(svg.len()));
+		assert!(picture("test:large-svg", svg).size().width > 0);
+	}
+
+	#[test]
+	fn oversized_rasters_are_refused_before_pixels_are_read() {
+		use std::io::Write;
+		for (width, height) in [(6000, 6000), (16_385, 1), (1, 16_385)] {
+			let mut bytes = Vec::new();
+			let mut encoder = png::Encoder::new(&mut bytes, width, height);
+			encoder.set_color(png::ColorType::Rgba);
+			encoder.set_depth(png::BitDepth::Eight);
+			let mut writer = encoder.write_header().unwrap();
+			let mut stream = writer.stream_writer().unwrap();
+			let row = vec![255; width as usize * 4];
+			for _ in 0..height {
+				stream.write_all(&row).unwrap();
+			}
+			stream.finish().unwrap();
+			writer.finish().unwrap();
+			// A valid solid picture fits the download cap but not the
+			// decoded budget. Generate it a row at a time, without ever
+			// allocating the large pixel buffer this test guards against.
+			assert!(bytes.len() < 4 << 20);
+			assert_eq!(
+				image::ImageReader::new(Cursor::new(&bytes))
+					.with_guessed_format()
+					.unwrap()
+					.into_dimensions()
+					.unwrap(),
+				(width, height)
+			);
+			assert!(decode(&bytes).is_none());
+		}
 	}
 
 	/// Cached avatars and icons are named without an extension.
@@ -207,11 +289,38 @@ mod tests {
 		encoder.write_header().unwrap().write_image_data(&[90; 24]).unwrap();
 		let svg = br#"<?xml version="1.0" encoding="iso-8859-1"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16"/></svg>"#;
-		for (name, bytes, width) in [("287478770", &png[..], 3), ("413901487", &svg[..], 16)] {
+		// GIF avatars and banners are common on TeamSpeak 3 servers.
+		let gif = b"GIF89a\x01\0\x01\0\x80\0\0\xff\xff\xff\0\0\0!\xf9\x04\x01\0\0\0\0,\0\0\0\0\x01\0\x01\0\0\x02\x02D\x01\0;";
+		let mut webp = Vec::new();
+		image::ImageEncoder::write_image(
+			image::codecs::webp::WebPEncoder::new_lossless(&mut webp),
+			&[90; 24],
+			3,
+			2,
+			image::ExtendedColorType::Rgba8,
+		)
+		.unwrap();
+		for (name, bytes, width) in [
+			("287478770", &png[..], 3),
+			("413901487", &svg[..], 16),
+			("gif", &gif[..], 1),
+			("webp", &webp[..], 3),
+		] {
 			let path = dir.join(name);
 			std::fs::write(&path, bytes).unwrap();
 			assert_eq!(file(&path).size().width, width, "{name}");
 		}
+		// A file that changed is decoded again once forgotten.
+		let path = dir.join("287478770");
+		let mut wider = Vec::new();
+		let mut encoder = png::Encoder::new(&mut wider, 5, 2);
+		encoder.set_color(png::ColorType::Rgba);
+		encoder.set_depth(png::BitDepth::Eight);
+		encoder.write_header().unwrap().write_image_data(&[90; 40]).unwrap();
+		std::fs::write(&path, wider).unwrap();
+		assert_eq!(file(&path).size().width, 3, "kept until forgotten");
+		forget(&path);
+		assert_eq!(file(&path).size().width, 5);
 		std::fs::remove_dir_all(dir).unwrap();
 	}
 
