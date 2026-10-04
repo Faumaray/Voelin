@@ -7,6 +7,7 @@ mod chat;
 mod dev;
 mod emoji;
 mod hotkey;
+mod identities;
 mod images;
 mod inbox;
 mod members;

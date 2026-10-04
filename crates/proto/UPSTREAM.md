@@ -100,3 +100,9 @@ against or offered back to upstream.
    (RFC 2782 order). A CNAME among the SRV answers no longer panics. The lookups
    are injectable inside the module, and the tests use a fake TSDNS server and
    fake names; the upstream tests that need DNS and the internet are `#[ignore]`d.
+12. **Private keys with leading zero bytes** (`tsproto-types/src/crypto.rs`,
+   "Voelin patch"). The TeamSpeak export stores the private scalar as a DER
+   integer, which drops leading zero bytes, and `EccKeyPrivP256::from_tomcrypt`
+   handed those fewer than 32 bytes to `from_short`, which refused them: one
+   identity in 256 (the official client's ones included) could not be imported.
+   The scalar is padded to 32 bytes now; a test round-trips such keys.

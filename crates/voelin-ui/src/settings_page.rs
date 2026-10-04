@@ -41,6 +41,7 @@ impl App {
 		bridge.set_h264_enabled(self.settings.openh264);
 		bridge.set_image_cache_usage(crate::images::usage_text().into());
 		self.refresh_h264();
+		self.refresh_identities();
 	}
 
 	pub(crate) fn close_settings(&mut self) {

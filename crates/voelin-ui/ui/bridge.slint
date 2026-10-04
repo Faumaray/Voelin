@@ -276,6 +276,19 @@ export struct ShareForm {
     auto-accept: bool,
 }
 
+// An identity in Settings → Identities.
+export struct IdentityItem {
+    id: int,
+    name: string,
+    // "From TeamSpeak · level 8"
+    detail: string,
+    // The unique id servers know it by (TeamSpeak 3 form).
+    uid: string,
+    initials: string,
+    tint: color,
+    is-default: bool,
+}
+
 export struct AudioForm {
     // 0 = system default, then the devices.
     input-index: int,
@@ -448,6 +461,12 @@ export global Bridge {
     in property <string> crash-notice;
     // Third-party notices, one entry per line, for the About page.
     in property <[string]> notices;
+    // Settings → Identities: who servers see us as, and the import of the
+    // official clients' identities on start (identity.import_from_teamspeak).
+    in property <[IdentityItem]> identities;
+    in-out property <bool> identity-import;
+    callback use-identity(int);
+    callback set-identity-import(bool);
 
     callback select-server(int);
     // The search field of the top bar: filters the channel tree.

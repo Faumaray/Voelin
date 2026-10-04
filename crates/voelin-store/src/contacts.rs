@@ -274,8 +274,7 @@ mod tests {
 			db.execute_batch("INSERT INTO settings (key, value) VALUES ('k', '1');").unwrap();
 		}
 		let store = Store::open(&path).unwrap();
-		assert_eq!(store.schema_version().unwrap(), 3);
-		assert_eq!(Store::SCHEMA_VERSION, 3);
+		assert_eq!(store.schema_version().unwrap(), Store::SCHEMA_VERSION);
 		assert_eq!(store.setting::<u32>("k").unwrap(), Some(1));
 		store.put_contact(&friend("a=")).unwrap();
 		drop(store);

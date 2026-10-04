@@ -171,14 +171,27 @@ voelinctl identity export <id> <path> [--store <db>]
 **On every start** the app does the same as `import --auto`
 (`voelin_core::identity::import_new`): identities found in the default
 locations that the client database does not have yet are added, the files
-are only read. The identity the official client uses by default (field 5 of
-its payload, below) goes in first, so when Voelin has no identity of its own
-yet, that one becomes Voelin's default (the first identity) and servers see
-the same unique id; otherwise Voelin's default stays. What was imported is
-shown once, in the status line (the toast on desktop), by nickname. The
-runtime setting `identity.import_from_teamspeak` (default on) turns it off,
-e.g. `--set identity.import_from_teamspeak=false`. The sample data of
-`VOELIN_DEMO_UI` never imports.
+are only read. The user should appear as on the official client, so the
+identity the official client uses by default (field 5 of its payload, below;
+TeamSpeak 6's before TeamSpeak 3's) becomes Voelin's default when Voelin has
+none, or only the one it created on its own the first time it started,
+which nobody chose. That happens once: the created identity is kept, and
+choosing it again in Settings → Identities makes it the user's own, which
+no import replaces; identities that were imported or chosen are never
+replaced. The store keeps where each identity came from and which one is the
+default (`identities.origin`: `created`, `imported`, `user`;
+`identities.is_default`; schema version 4, which marks the first identity
+named `Default` of an older database as created). What happened is shown
+once in the status line (the toast on desktop), by nickname, e.g. "You now
+use your TeamSpeak identity "X"; your previous one is kept". The runtime
+setting `identity.import_from_teamspeak` (default on, also in Settings →
+Identities) turns it off, e.g. `--set identity.import_from_teamspeak=false`.
+The sample data of `VOELIN_DEMO_UI` never imports.
+
+**Settings → Identities** lists the stored identities with where they came
+from, their security level and unique id; "Use as default" picks the one
+servers see from the next connection on. `voelinctl identity list` shows
+the same (origin and default).
 
 - **Import** prints what it found as nickname, unique id and security level —
   all three are public, everything else in an identity is the private key —

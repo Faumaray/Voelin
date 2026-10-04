@@ -52,4 +52,10 @@ pub(super) fn wire(ui: &MainWindow) {
 	bridge.on_open_about(|| {
 		with_app(|app| app.load_notices());
 	});
+	bridge.on_use_identity(|id| {
+		with_app(|app| app.use_identity(id as i64));
+	});
+	bridge.on_set_identity_import(|on| {
+		with_app(|app| app.set_identity_import(on));
+	});
 }

@@ -227,6 +227,12 @@ server is saved without one and when it connects
 and one found is stored as if typed. `bookmark` and `bookmark:edit` open
 it (below).
 
+Settings → Identities (`IdentitiesSection` in `screens/settings.slint`,
+`identities.rs`) lists the stored identities, marks the default and has
+"Use as default" for the others, plus the switch for importing the
+official clients' identities on start ([identity.md](identity.md)).
+`settings:identities` opens it.
+
 ## Adding a screen
 
 1. Write the screen in `ui/screens/<name>.slint` from the components
@@ -288,7 +294,7 @@ Environment variables (see `src/dev.rs`):
 
 - `VOELIN_DEMO_UI=1`: sample servers, channels, members, chat with emoji and
   a stream, without a server (nothing is stored).
-- `VOELIN_OPEN=<what>[,<what>...]`: `home`, `server`, `settings[:voice|keybinds|streaming|privacy|appearance]`,
+- `VOELIN_OPEN=<what>[,<what>...]`: `home`, `server`, `settings[:voice|keybinds|streaming|privacy|appearance|identities]`,
   `about`, `share[:live]`, `bookmark[:edit]`, `emoji`, `client`, `panel`, `no-panel`,
   `voice`, `pins`, `topics`, `topic:<id>`, `member`, `watch`, `popout`
   (the server page, above), `tab:<home|servers|chat|activity|you>` (phone
@@ -344,6 +350,7 @@ the window's size so the pointer is not over the window, and passes
 | ![emoji](screenshots/desktop-emoji-picker.png) | ![volume](screenshots/desktop-client-volume.png) |
 | ![share](screenshots/desktop-share-dialog.png) | ![sharing](screenshots/desktop-share-live.png) |
 | ![add server](screenshots/desktop-add-server.png) | ![about](screenshots/desktop-about.png) |
+| ![identities](screenshots/desktop-settings-identities.png) | |
 
 | Phone layout | | | | |
 |---|---|---|---|---|
