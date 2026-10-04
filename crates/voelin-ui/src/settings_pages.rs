@@ -17,10 +17,10 @@ use voelin_core::settings::{
 	CHAT_DEDUPE_TOLERANCE_MS, CHAT_HISTORY_PAGE, CHAT_RETENTION_DAYS, CHAT_STORE_HISTORY,
 	CaptureChoice, CodecChoice, FILES_PROGRESS_MS, Key, LayerSetting, PRIVACY_BLOCK_MODE,
 	PRIVACY_POKES, PRIVACY_PRIVATE_MESSAGES, SRTP_PROFILES, STREAM_AUDIO_SOURCES,
-	STREAM_BITRATE_KBPS, STREAM_CAPTURE_BACKEND, STREAM_CODEC, STREAM_ENCODER_BACKEND, STREAM_FPS,
-	STREAM_HARDWARE_ACCELERATION, STREAM_LAYERS, STREAM_PERMISSIONS, STREAM_SRTP_PROFILES,
-	STUDIO_RECORDING_DIR, STUDIO_REPLAY_MEMORY_MB, STUDIO_REPLAY_SECONDS, Source as SettingSource,
-	StreamPermissions,
+	STREAM_BITRATE_KBPS, STREAM_CAPTURE_BACKEND, STREAM_CODEC, STREAM_DECODER_BACKEND,
+	STREAM_ENCODER_BACKEND, STREAM_FPS, STREAM_HARDWARE_ACCELERATION, STREAM_HARDWARE_DECODING,
+	STREAM_LAYERS, STREAM_PERMISSIONS, STREAM_SRTP_PROFILES, STUDIO_RECORDING_DIR,
+	STUDIO_REPLAY_MEMORY_MB, STUDIO_REPLAY_SECONDS, Source as SettingSource, StreamPermissions,
 };
 use voelin_core::{Command, GatewayRequest};
 use voelin_gateway_proto::{Action, ConfigSource, PermRule, UniqueIds, feature};
@@ -304,6 +304,8 @@ impl App {
 		bridge.set_advanced(AdvancedForm {
 			encoder: p.get(&STREAM_ENCODER_BACKEND).into(),
 			hardware: p.get(&STREAM_HARDWARE_ACCELERATION),
+			decoder: p.get(&STREAM_DECODER_BACKEND).into(),
+			hardware_decoding: p.get(&STREAM_HARDWARE_DECODING),
 			store_history: p.get(&CHAT_STORE_HISTORY),
 			history_page: p.get(&CHAT_HISTORY_PAGE).to_string().into(),
 			dedupe_ms: p.get(&CHAT_DEDUPE_TOLERANCE_MS).to_string().into(),
@@ -592,6 +594,10 @@ impl App {
 			self.put(&STREAM_ENCODER_BACKEND, form.encoder.trim().to_owned());
 		}
 		self.put(&STREAM_HARDWARE_ACCELERATION, form.hardware);
+		if !form.decoder.trim().is_empty() {
+			self.put(&STREAM_DECODER_BACKEND, form.decoder.trim().to_owned());
+		}
+		self.put(&STREAM_HARDWARE_DECODING, form.hardware_decoding);
 		self.put(&CHAT_STORE_HISTORY, form.store_history);
 		if let Some(v) = number(&form.history_page) {
 			self.put(&CHAT_HISTORY_PAGE, v as u32);
@@ -863,25 +869,30 @@ impl App {
 			}
 			.into(),
 		);
-		let items: Vec<EncoderItem> = report
-			.encoders
-			.iter()
-			.map(|e| EncoderItem {
-				name: e.name.clone().into(),
-				api: e.api.clone().into(),
-				codec: format!("{:?}", e.codec).to_uppercase().into(),
-				hardware: e.hardware,
-				ok: e.status.is_ok(),
-				status: match (&e.status, e.rank) {
-					(Err(why), _) => why.clone(),
-					(Ok(()), Some(0)) => format!("{} · used first", e.api),
-					(Ok(()), Some(n)) => format!("{} · choice {}", e.api, n + 1),
-					(Ok(()), None) => format!("{} · not used", e.api),
-				}
-				.into(),
-			})
-			.collect();
-		bridge.set_encoders(model(items));
+		// A decoder's entry is an encoder's (its rank: the place in its
+		// codec's ladder).
+		let items = |list: &[voelin_core::media::voelin_media::EncoderInfo]| {
+			let items: Vec<EncoderItem> = list
+				.iter()
+				.map(|e| EncoderItem {
+					name: e.name.clone().into(),
+					api: e.api.clone().into(),
+					codec: format!("{:?}", e.codec).to_uppercase().into(),
+					hardware: e.hardware,
+					ok: e.status.is_ok(),
+					status: match (&e.status, e.rank) {
+						(Err(why), _) => why.clone(),
+						(Ok(()), Some(0)) => format!("{} · used first", e.api),
+						(Ok(()), Some(n)) => format!("{} · choice {}", e.api, n + 1),
+						(Ok(()), None) => format!("{} · not used", e.api),
+					}
+					.into(),
+				})
+				.collect();
+			model(items)
+		};
+		bridge.set_encoders(items(&report.encoders));
+		bridge.set_decoders(items(&report.decoders));
 	}
 
 	/// The screens and windows that can be shared (Devices).

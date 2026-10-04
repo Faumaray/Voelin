@@ -725,6 +725,9 @@ export struct RecordingItem {
 export struct AdvancedForm {
     encoder: string,
     hardware: bool,
+    // `stream.decoder_backend`, `stream.hardware_decoding`.
+    decoder: string,
+    hardware-decoding: bool,
     store-history: bool,
     history-page: string,
     dedupe-ms: string,
@@ -1100,6 +1103,8 @@ export global Bridge {
     in property <string> ffmpeg-status;
     in property <string> zero-copy-status;
     in property <[EncoderItem]> encoders;
+    // The decoders, each codec's in the order they are tried.
+    in property <[EncoderItem]> decoders;
     in property <bool> encoders-loading;
     callback gateway-admin(int);
     callback config-set(string, string);

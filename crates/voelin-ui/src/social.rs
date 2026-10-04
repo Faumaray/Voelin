@@ -156,8 +156,6 @@ pub(crate) struct Social {
 	pub found: Vec<Found>,
 	/// Our unique ids (TeamSpeak 3 and 6 of every identity).
 	pub own_uids: HashSet<String>,
-	/// Watch a friend's stream once it shows (we moved to their channel).
-	pub pending_watch: Option<(i64, u16)>,
 	/// The direct messages (`messages.rs`).
 	pub dm: crate::messages::Dms,
 }
@@ -552,22 +550,17 @@ impl App {
 		}
 	}
 
-	/// Watch someone's stream: in our channel at once, else move there
-	/// first and watch once it shows.
+	/// Watch someone's stream: from any channel of a server we are on with
+	/// voice (once the lookup brings it), else join them first and watch it
+	/// when it shows.
 	fn watch_person(&mut self, spots: &[Spot]) {
 		let Some(s) = spots.iter().find(|s| s.streaming).cloned() else { return };
 		self.show_server(s.session);
-		let view = &self.sessions[&s.session];
-		let ours = view.state.own_channel == Some(s.channel);
-		match view.streams.iter().find(|st| st.streamer.0 == s.client) {
-			Some(stream) if ours => {
-				let id = stream.id.clone();
-				self.watch_stream(id);
-			}
-			_ => {
-				self.social.pending_watch = Some((s.session, s.client));
-				self.join_person(&[s]);
-			}
+		if s.voice {
+			self.watch_client(s.client);
+		} else {
+			self.pending_watch = Some((s.session, s.client));
+			self.join_person(&[s]);
 		}
 	}
 
@@ -588,21 +581,6 @@ impl App {
 				f(&ui.global::<Nav>());
 			}
 		});
-	}
-
-	/// The pending watch (see [`Self::watch_person`]) once its stream shows.
-	fn pending_watch(&mut self) {
-		let Some((session, client)) = self.social.pending_watch else { return };
-		let Some(view) = self.sessions.get(&session) else { return };
-		let ours = view.presence.clients.get(&client).map(|c| c.channel) == view.state.own_channel;
-		if let Some(stream) = view.streams.iter().find(|s| s.streamer.0 == client).filter(|_| ours)
-		{
-			let id = stream.id.clone();
-			self.social.pending_watch = None;
-			if self.current == Some(session) {
-				self.watch_stream(id);
-			}
-		}
 	}
 
 	// The bell.
@@ -903,7 +881,6 @@ impl App {
 	pub(crate) fn social_refresh(&mut self, touched: Touched) {
 		if touched.people {
 			self.refresh_people();
-			self.pending_watch();
 		}
 		if touched.chats {
 			self.ask_inboxes();

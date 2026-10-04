@@ -998,7 +998,7 @@ export component HomePage inherits Rectangle {
                 action-clicked => { Nav.add-server(); }
             }
             if root.compact && Bridge.servers.length == 0: Text {
-                text: @tr("No servers yet. Add one with its address and your nickname.");
+                text: @tr("No servers yet. Add one with its address.");
                 color: Theme.text-muted;
                 font-size: Theme.font-sm;
                 wrap: word-wrap;
@@ -1060,7 +1060,7 @@ export component HomePage inherits Rectangle {
                 action-clicked => { Nav.add-server(); }
             }
             if !root.compact && Bridge.servers.length == 0: Text {
-                text: @tr("No servers yet. Add one with its address and your nickname.");
+                text: @tr("No servers yet. Add one with its address.");
                 color: Theme.text-muted;
                 font-size: Theme.font-sm;
                 wrap: word-wrap;

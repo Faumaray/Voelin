@@ -5,7 +5,7 @@
 
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
-import { Bridge, IdentityItem, LayerItem, AudioSourceItem, ConfigItem, PermItem, SettingItem } from "../bridge.slint";
+import { Bridge, IdentityItem, LayerItem, AudioSourceItem, ConfigItem, PermItem, SettingItem, EncoderItem } from "../bridge.slint";
 import { Nav, SettingsSection } from "../nav.slint";
 import { Icon, Button, ButtonKind, IconButton, TextField, Field, Select, Toggle, ToggleRow, Slider, SegmentedTabs, Card, Divider, Chip, Banner, Spinner, SearchBox, ScrollView } from "../components/index.slint";
 
@@ -847,6 +847,40 @@ component PermRow inherits HorizontalLayout {
     }
 }
 
+// An encoder or decoder: works or not, its codec, name and why.
+component CodecRow inherits HorizontalLayout {
+    in property <EncoderItem> item;
+    spacing: Theme.space-3;
+    Icon {
+        source: root.item.ok ? Icons.circle-check : Icons.circle-x;
+        size: Theme.icon-sm;
+        tint: root.item.ok ? Theme.success : Theme.text-disabled;
+        y: (parent.height - self.height) / 2;
+    }
+    Text {
+        width: Nav.narrow ? 54px : 90px;
+        text: root.item.codec;
+        color: Theme.text;
+        font-weight: Theme.weight-medium;
+        vertical-alignment: center;
+    }
+    Text {
+        width: Nav.narrow ? 110px : 170px;
+        text: root.item.name + (root.item.hardware ? " · GPU" : "");
+        color: Theme.text-secondary;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    Text {
+        text: root.item.status;
+        color: root.item.ok ? Theme.text-secondary : Theme.text-muted;
+        font-size: Theme.font-sm;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+        overflow: elide;
+    }
+}
+
 export component IntegrationsSection inherits VerticalLayout {
     alignment: start;
     spacing: Theme.space-5;
@@ -937,7 +971,7 @@ export component IntegrationsSection inherits VerticalLayout {
         }
     }
     Card {
-        title: @tr("Video encoders");
+        title: @tr("Video encoders and decoders");
         icon: Icons.cpu;
         HorizontalLayout {
             spacing: Theme.space-3;
@@ -965,36 +999,24 @@ export component IntegrationsSection inherits VerticalLayout {
             font-size: Theme.font-sm;
             wrap: word-wrap;
         }
-        for e in Bridge.encoders: HorizontalLayout {
-            spacing: Theme.space-3;
-            Icon {
-                source: e.ok ? Icons.circle-check : Icons.circle-x;
-                size: Theme.icon-sm;
-                tint: e.ok ? Theme.success : Theme.text-disabled;
-                y: (parent.height - self.height) / 2;
-            }
-            Text {
-                width: 90px;
-                text: e.codec;
-                color: Theme.text;
-                font-weight: Theme.weight-medium;
-                vertical-alignment: center;
-            }
-            Text {
-                width: 170px;
-                text: e.name + (e.hardware ? " · GPU" : "");
-                color: Theme.text-secondary;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-            Text {
-                text: e.status;
-                color: e.ok ? Theme.text-secondary : Theme.text-muted;
-                font-size: Theme.font-sm;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
-                overflow: elide;
-            }
+        Text {
+            text: @tr("Encoders");
+            color: Theme.text;
+            font-weight: Theme.weight-semibold;
+        }
+        for e in Bridge.encoders: CodecRow {
+            item: e;
+        }
+        Text {
+            text: @tr("Decoders");
+            color: Theme.text;
+            font-weight: Theme.weight-semibold;
+        }
+        Hint {
+            text: @tr("Each codec's decoders in the order they are tried: when one fails the next takes over.");
+        }
+        for e in Bridge.decoders: CodecRow {
+            item: e;
         }
     }
 }
@@ -1058,7 +1080,7 @@ export component AdvancedSection inherits VerticalLayout {
     alignment: start;
     spacing: Theme.space-5;
     Card {
-        title: @tr("Video encoding");
+        title: @tr("Video encoding and decoding");
         icon: Icons.cpu;
         Field {
             label: @tr("Encoder");
@@ -1074,10 +1096,31 @@ export component AdvancedSection inherits VerticalLayout {
         }
         ToggleRow {
             text: @tr("Hardware acceleration");
-            description: @tr("GPU encoders and decoders where available");
+            description: @tr("GPU encoders where available");
             checked: Bridge.advanced.hardware;
             toggled(on) => {
                 Bridge.advanced.hardware = on;
+                Bridge.advanced-changed(Bridge.advanced);
+            }
+        }
+        Field {
+            label: @tr("Decoder");
+            hint: @tr("auto, software, or the name of a decoder from Integrations; for streams watched from now on. Press Enter to apply.");
+            TextField {
+                text: Bridge.advanced.decoder;
+                label: @tr("Decoder backend");
+                accepted(t) => {
+                    Bridge.advanced.decoder = t;
+                    Bridge.advanced-changed(Bridge.advanced);
+                }
+            }
+        }
+        ToggleRow {
+            text: @tr("Hardware decoding");
+            description: @tr("GPU decoders where available, before the software ones");
+            checked: Bridge.advanced.hardware-decoding;
+            toggled(on) => {
+                Bridge.advanced.hardware-decoding = on;
                 Bridge.advanced-changed(Bridge.advanced);
             }
         }

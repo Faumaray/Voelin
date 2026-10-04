@@ -26,8 +26,9 @@ fn kind_label(kind: &str) -> String {
 }
 
 impl App {
-	/// Streams on our servers: those in our channel (we can watch them at
-	/// once), the gateways' directories, and clients flagged streaming.
+	/// Streams on our servers: those the server lists (any channel; we can
+	/// watch them at once), the gateways' directories, and clients flagged
+	/// streaming.
 	fn live_rooms(&self) -> Vec<LiveItem> {
 		let mut rooms = Vec::new();
 		for b in &self.bookmarks {
@@ -68,7 +69,7 @@ impl App {
 					let title =
 						if s.name.is_empty() { format!("{name}'s stream") } else { s.name.clone() };
 					let mut room = item(s.id.clone(), title, Some(s.streamer.0), None, name);
-					room.channel = channel_of(view.state.own_channel).into();
+					room.channel = channel_of(view.channel_of(s.streamer.0)).into();
 					room.viewers = view.stream_viewers.get(&s.id).map_or(0, |v| *v as i32);
 					room.kind = match s.kind {
 						voelin_core::stream::StreamKind::Screen => "Screen",
@@ -212,16 +213,9 @@ impl App {
 			.find(|e| e.id == id)
 			.and_then(|e| e.client_id)
 			.or_else(|| id.strip_prefix("client/").and_then(|c| c.parse().ok()));
-		let Some(uid) =
-			client.and_then(|c| view.presence.clients.get(&c)).and_then(|c| c.uid.clone())
-		else {
-			self.set_status("Join the streamer's channel with voice to watch.");
-			return;
-		};
-		if view.state.voice == VoiceState::Connected {
-			self.contact_action(&uid, "watch");
-		} else {
-			self.set_status("Connect with voice and join the streamer's channel to watch.");
+		match client {
+			Some(client) if view.state.voice == VoiceState::Connected => self.watch_client(client),
+			_ => self.set_status("Connect with voice to watch."),
 		}
 	}
 

@@ -99,7 +99,7 @@ export component SettingsNav inherits VerticalLayout {
             NavItem {
                 icon: Icons.puzzle;
                 text: @tr("Integrations");
-                subtitle: @tr("Gateways, encoders");
+                subtitle: @tr("Gateways, encoders, decoders");
                 selected: Nav.settings-section == SettingsSection.integrations;
                 clicked => { Nav.open-settings(SettingsSection.integrations); }
             }
@@ -1117,7 +1117,7 @@ export component SettingsPage inherits Rectangle {
         : s == SettingsSection.profiles ? @tr("Your identities: each is a unique id on every server.")
         : s == SettingsSection.devices ? @tr("Microphones, speakers, cameras and screens.")
         : s == SettingsSection.notifications ? @tr("What the bell and the desktop tell you.")
-        : s == SettingsSection.integrations ? @tr("Gateways of your servers and the video encoders here.")
+        : s == SettingsSection.integrations ? @tr("Gateways of your servers, the video encoders and decoders here.")
         : s == SettingsSection.advanced ? @tr("Encoding, encryption, history, cache, every setting.")
         : @tr("Theme, text size and layout. Changes apply at once.");
     accessible-role: AccessibleRole.groupbox;
