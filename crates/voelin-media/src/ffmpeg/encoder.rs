@@ -245,6 +245,98 @@ fn h264_level(profile: H264Profile, width: u32, height: u32, fps: u32, bitrate: 
 		.map_or(H264_LEVELS[H264_LEVELS.len() - 1].0, |l| l.0)
 }
 
+/// An HEVC level (ITU-T H.265 Table A.8 and A.9): `general_level_idc` (30
+/// times the level), luma samples per picture and per second, Main and High
+/// tier bitrate in kbit/s (High from level 4 on).
+type HevcLevel = (i64, u64, u64, u64, u64);
+
+const HEVC_LEVELS: [HevcLevel; 13] = [
+	(30, 36_864, 552_960, 128, 0),
+	(60, 122_880, 3_686_400, 1_500, 0),
+	(63, 245_760, 7_372_800, 3_000, 0),
+	(90, 552_960, 16_588_800, 6_000, 0),
+	(93, 983_040, 33_177_600, 10_000, 0),
+	(120, 2_228_224, 66_846_720, 12_000, 30_000),
+	(123, 2_228_224, 133_693_440, 20_000, 50_000),
+	(150, 8_912_896, 267_386_880, 25_000, 100_000),
+	(153, 8_912_896, 534_773_760, 40_000, 160_000),
+	(156, 8_912_896, 1_069_547_520, 60_000, 240_000),
+	(180, 35_651_584, 1_069_547_520, 60_000, 240_000),
+	(183, 35_651_584, 2_139_095_040, 120_000, 480_000),
+	(186, 35_651_584, 4_278_190_080, 240_000, 800_000),
+];
+
+/// An AV1 level (AV1 specification A.3): `seq_level_idx`, samples per
+/// picture, width, height, samples per second (MaxDisplayRate), frame
+/// headers per second, Main and High tier bitrate in kbit/s (High from 4.0
+/// on).
+type Av1Level = (i64, u64, u32, u32, u64, u32, u64, u64);
+
+const AV1_LEVELS: [Av1Level; 14] = [
+	(0, 147_456, 2048, 1152, 4_423_680, 150, 1_500, 0),
+	(1, 278_784, 2816, 1584, 8_363_520, 150, 3_000, 0),
+	(4, 665_856, 4352, 2448, 19_975_680, 150, 6_000, 0),
+	(5, 1_065_024, 5504, 3096, 31_950_720, 150, 10_000, 0),
+	(8, 2_359_296, 6144, 3456, 70_778_880, 300, 12_000, 30_000),
+	(9, 2_359_296, 6144, 3456, 141_557_760, 300, 20_000, 50_000),
+	(12, 8_912_896, 8192, 4352, 267_386_880, 300, 30_000, 100_000),
+	(13, 8_912_896, 8192, 4352, 534_773_760, 300, 40_000, 160_000),
+	(14, 8_912_896, 8192, 4352, 1_069_547_520, 300, 60_000, 240_000),
+	(15, 8_912_896, 8192, 4352, 1_069_547_520, 300, 60_000, 240_000),
+	(16, 35_651_584, 16384, 8704, 1_069_547_520, 300, 60_000, 240_000),
+	(17, 35_651_584, 16384, 8704, 2_139_095_040, 300, 100_000, 480_000),
+	(18, 35_651_584, 16384, 8704, 4_278_190_080, 300, 160_000, 800_000),
+	(19, 35_651_584, 16384, 8704, 4_278_190_080, 300, 160_000, 800_000),
+];
+
+/// The lowest level of `levels` (`fits` its picture and rate limits) whose
+/// Main tier holds `kbps`, else the lowest whose High tier does: Main is
+/// what more decoders take. `None` beyond every level.
+fn tiered_level<L: Copy>(
+	levels: &[L],
+	fits: impl Fn(&L) -> bool,
+	tiers: impl Fn(&L) -> (i64, u64, u64),
+	kbps: u64,
+) -> Option<(i64, bool)> {
+	let fitting = || levels.iter().filter(|l| fits(l)).map(&tiers);
+	let main = fitting().find(|&(_, main, _)| kbps <= main).map(|(level, ..)| (level, false));
+	main.or_else(|| fitting().find(|&(.., high)| kbps <= high).map(|(level, ..)| (level, true)))
+}
+
+/// HEVC `general_level_idc` and High tier for this stream (see
+/// [`tiered_level`]); beyond every level 8.5 (255) in the High tier, as
+/// FFmpeg's own guess does.
+fn hevc_level(width: u32, height: u32, fps: u32, bitrate: u32) -> (i64, bool) {
+	let picture = u64::from(width) * u64::from(height);
+	let rate = picture * u64::from(fps.max(1));
+	let side = u64::from(width.max(height));
+	let fits = |&(_, max_picture, max_rate, ..): &HevcLevel| {
+		picture <= max_picture && side * side <= 8 * max_picture && rate <= max_rate
+	};
+	let tiers = |&(level, .., main, high): &HevcLevel| (level, main, high);
+	tiered_level(&HEVC_LEVELS, fits, tiers, u64::from(bitrate).div_ceil(1000))
+		.unwrap_or((255, true))
+}
+
+/// AV1 `seq_level_idx` and High tier for this stream (see
+/// [`tiered_level`]); beyond every level 31, which has no limits, as
+/// FFmpeg's own guess does. Unlike that guess this counts the frame rate:
+/// FFmpeg's wrappers read it from `AVCodecContext.framerate`, which has no
+/// AVOption.
+fn av1_level(width: u32, height: u32, fps: u32, bitrate: u32) -> (i64, bool) {
+	let picture = u64::from(width) * u64::from(height);
+	let rate = picture * u64::from(fps.max(1));
+	let fits = |&(_, max_picture, max_w, max_h, max_rate, headers, ..): &Av1Level| {
+		picture <= max_picture
+			&& width <= max_w
+			&& height <= max_h
+			&& rate <= max_rate
+			&& fps <= headers
+	};
+	let tiers = |&(level, .., main, high): &Av1Level| (level, main, high);
+	tiered_level(&AV1_LEVELS, fits, tiers, u64::from(bitrate).div_ceil(1000)).unwrap_or((31, true))
+}
+
 /// The backend's realtime settings (besides size, format, time base and
 /// rate, which every backend gets).
 fn settings(spec: &BackendSpec, config: &EncoderConfig, low_power: bool) -> Vec<Setting> {
@@ -855,9 +947,12 @@ impl FfmpegEncoder {
 			// 7.9 % at 1440p60 / 10 Mbit/s (RX 7900 GRE, desktop pattern);
 			// with two it lands within 1.2 % at both and at 720p30, no frame
 			// skipped, the largest 68 KB against 64 KB at 1440p60.
+			// `bufsize` is an int: from 1 Gbit/s (2.1 for one second) the
+			// buffer stays at the most it holds rather than failing the open.
 			generic(
 				"bufsize",
-				u64::from(bitrate) * if self.spec.name == "av1_vaapi" { 2 } else { 1 },
+				(u64::from(bitrate) * if self.spec.name == "av1_vaapi" { 2 } else { 1 })
+					.min(i32::MAX as u64),
 			),
 			generic("g", gop),
 			generic("bf", 0),
@@ -878,6 +973,21 @@ impl FfmpegEncoder {
 				h264_level(self.config.h264_profile, width, height, fps, bitrate).to_string();
 			list.push(generic("level", &level));
 			list.push(Setting { values: vec![level], ..opt("level", &[]) });
+		}
+		// HEVC and AV1 through VA-API: the level and tier the stream needs.
+		// Left to FFmpeg, a 4K240 stream declares a 4K60 level (neither guess
+		// counts the frame rate, and the HEVC one ignores it entirely). Only
+		// VA-API, whose `level` is `general_level_idc` and `seq_level_idx`;
+		// other wrappers count levels differently (Quick Sync in tenths).
+		let tiered = match self.spec.codec {
+			Codec::H265 if self.spec.is_vaapi() => Some(hevc_level(width, height, fps, bitrate)),
+			Codec::Av1 if self.spec.is_vaapi() => Some(av1_level(width, height, fps, bitrate)),
+			_ => None,
+		};
+		if let Some((level, high)) = tiered {
+			list.push(generic("level", level));
+			list.push(Setting { values: vec![level.to_string()], ..opt("level", &[]) });
+			list.push(opt("tier", &[if high { "high" } else { "main" }]));
 		}
 		list.extend(settings(self.spec, &self.config, low_power));
 		for setting in &list {
@@ -1883,6 +1993,7 @@ impl EncoderFactory for FfmpegFactory {
 
 #[cfg(test)]
 mod tests {
+	use super::gpu::Exported;
 	use super::*;
 
 	#[test]
@@ -2026,112 +2137,6 @@ mod tests {
 		probe().iter().any(|s| s.spec.name == name && s.available.is_ok())
 	}
 
-	/// A VA-API surface of `sw_format` (holding `picture`, BGRA, if given)
-	/// exported as a DRM PRIME DMA-BUF: what a compositor hands over,
-	/// tiling modifier and all. The buffer is valid while this lives.
-	struct Exported {
-		pool: Ptr,
-		surface: Ptr,
-		drm: Ptr,
-		frame: DmaBufRef,
-	}
-
-	impl Exported {
-		fn new(
-			(width, height): (u32, u32),
-			sw_format: c_int,
-			fourcc: u32,
-			picture: Option<&VideoFrame>,
-		) -> Self {
-			let ffmpeg = Ffmpeg::get().unwrap();
-			let api = &ffmpeg.api;
-			let pool = vaapi_pool(ffmpeg, width, height, sw_format).expect("a VA-API surface pool");
-			// SAFETY: `pool` is a live frames context of this process's
-			// VA-API device; the frames are ours and freed by the drop. The
-			// exported frame's `data[0]` is the AVDRMFrameDescriptor FFmpeg
-			// filled, valid while the frame holds the mapping.
-			unsafe {
-				let mut exported = Exported {
-					pool,
-					surface: (api.av_frame_alloc)(),
-					drm: (api.av_frame_alloc)(),
-					frame: DmaBufRef {
-						width,
-						height,
-						timestamp: Duration::ZERO,
-						fourcc,
-						modifier: 0,
-						fd: -1,
-						size: 0,
-						planes: [(0, 0); 4],
-						plane_count: 0,
-					},
-				};
-				let (surface, drm) = (exported.surface, exported.drm);
-				assert!(!surface.is_null() && !drm.is_null());
-				let ret = (api.av_hwframe_get_buffer)(pool, surface, 0);
-				assert!(ret >= 0, "av_hwframe_get_buffer: {}", api.error_text(ret));
-				if let Some(picture) = picture {
-					let FrameData::Bgra(pixels) = &picture.data else { panic!("BGRA only") };
-					let mut sw = (api.av_frame_alloc)();
-					let head = sw.cast::<FrameHead>();
-					((*head).width, (*head).height) = (width as c_int, height as c_int);
-					(*head).format = sw_format;
-					assert!((api.av_frame_get_buffer)(sw, 0) >= 0);
-					let stride = (*head).linesize[0] as usize;
-					let rows =
-						std::slice::from_raw_parts_mut((*head).data[0], stride * height as usize);
-					for (y, row) in rows.chunks_exact_mut(stride).enumerate() {
-						row[..width as usize * 4]
-							.copy_from_slice(pixels.row(y, width as usize * 4));
-					}
-					let ret = (api.av_hwframe_transfer_data)(surface, sw, 0);
-					(api.av_frame_free)(&mut sw);
-					assert!(ret >= 0, "upload: {}", api.error_text(ret));
-				}
-				(*drm.cast::<FrameHead>()).format = ffmpeg.pix.drm_prime.expect("DRM PRIME");
-				let ret = (api.av_hwframe_map)(
-					drm,
-					surface,
-					sys::HWFRAME_MAP_READ | sys::HWFRAME_MAP_DIRECT,
-				);
-				assert!(ret >= 0, "this driver cannot export a VA-API surface as a DMA-BUF");
-				let descriptor =
-					*(*drm.cast::<FrameHead>()).data[0].cast::<sys::DrmFrameDescriptor>();
-				assert_eq!(descriptor.nb_objects, 1, "one buffer object");
-				// The driver may describe a surface one plane per layer (NV12
-				// as R8 for Y and GR88 for UV) rather than as one layer, which
-				// is how a compositor hands it over. Both name the same bytes
-				// of the same object, so flatten the layers into planes.
-				let object = descriptor.objects[0];
-				let frame = &mut exported.frame;
-				for layer in &descriptor.layers[..descriptor.nb_layers as usize] {
-					for plane in &layer.planes[..layer.nb_planes as usize] {
-						frame.planes[frame.plane_count] =
-							(plane.offset as usize, plane.pitch as usize);
-						frame.plane_count += 1;
-					}
-				}
-				(frame.modifier, frame.fd, frame.size) =
-					(object.format_modifier, object.fd, object.size);
-				assert!(frame.fd >= 0 && frame.size > 0);
-				exported
-			}
-		}
-	}
-
-	impl Drop for Exported {
-		fn drop(&mut self) {
-			let api = &Ffmpeg::get().unwrap().api;
-			// SAFETY: ours; the mapping goes before the surface it maps.
-			unsafe {
-				(api.av_frame_free)(&mut self.drm);
-				(api.av_frame_free)(&mut self.surface);
-				(api.av_buffer_unref)(&mut self.pool);
-			}
-		}
-	}
-
 	/// The picture of a GPU frame, read back into memory as I420.
 	fn download(frame: &GpuFrame) -> VideoFrame {
 		let ffmpeg = Ffmpeg::get().unwrap();
@@ -2185,7 +2190,8 @@ mod tests {
 		);
 		let picture = screen.frame(5, 30);
 		let rgb =
-			Exported::new(SIZE, ffmpeg.pix.bgr0.unwrap(), drm_fourcc(b"XR24"), Some(&picture));
+			Exported::new(SIZE, ffmpeg.pix.bgr0.unwrap(), drm_fourcc(b"XR24"), Some(&picture))
+				.unwrap();
 		let mut converter = GpuConverter::new().expect("VA-API video processing");
 		eprintln!("tiled RGB modifiers the import takes: {:x?}", converter.modifiers());
 		let layers = [
@@ -2270,7 +2276,7 @@ mod tests {
 			return;
 		}
 		let nv12 = Ffmpeg::get().unwrap().pix.nv12;
-		let exported = Exported::new((320, 240), nv12, drm_fourcc(b"NV12"), None);
+		let exported = Exported::new((320, 240), nv12, drm_fourcc(b"NV12"), None).unwrap();
 		let frame = exported.frame;
 		assert_eq!(frame.plane_count, 2, "NV12 has two planes");
 		let mut encoder = FfmpegEncoder::new("h264_vaapi", EncoderConfig::default()).unwrap();
@@ -2311,7 +2317,8 @@ mod tests {
 		);
 		let picture = screen.frame(3, 30);
 		let rgb =
-			Exported::new(SIZE, ffmpeg.pix.bgr0.unwrap(), drm_fourcc(b"XR24"), Some(&picture));
+			Exported::new(SIZE, ffmpeg.pix.bgr0.unwrap(), drm_fourcc(b"XR24"), Some(&picture))
+				.unwrap();
 		assert_eq!(rgb.frame.plane_count, 1);
 
 		// The conversion alone: the GPU's NV12 against the CPU's I420.
@@ -2497,12 +2504,152 @@ mod tests {
 		drop(encoder);
 
 		let rgb =
-			Exported::new(SIZE, ffmpeg.pix.bgr0.unwrap(), drm_fourcc(b"XR24"), Some(&picture));
+			Exported::new(SIZE, ffmpeg.pix.bgr0.unwrap(), drm_fourcc(b"XR24"), Some(&picture))
+				.unwrap();
 		let mut encoder = FfmpegEncoder::new("h264_vaapi", config).unwrap();
 		measure("GPU: RGB DMA-BUF imported and converted", &mut |timestamp| {
 			let frame = DmaBufRef { timestamp, ..rgb.frame };
 			encoder.encode_dmabuf(&frame, false, &mut |_| {}).unwrap();
 		});
+	}
+
+	/// A picture in memory, BGRx (a screen) or RGBx (the studio's
+	/// composite), copied into a surface and converted on the GPU: the same
+	/// picture as the CPU's conversion, at full and half size.
+	#[test]
+	fn memory_pictures_are_converted_on_the_gpu() {
+		const SIZE: (u32, u32) = (1280, 720);
+		if !usable("h264_vaapi") {
+			eprintln!("no usable h264_vaapi, skipped");
+			return;
+		}
+		let screen = crate::capture::synthetic::SyntheticScreen::with_pattern(
+			SIZE.0,
+			SIZE.1,
+			crate::capture::synthetic::Pattern::Desktop,
+		);
+		let bgra = screen.frame(7, 30);
+		let FrameData::Bgra(pixels) = &bgra.data else { unreachable!() };
+		let mut swapped = pixels.data.clone();
+		for px in swapped.chunks_exact_mut(4) {
+			px.swap(0, 2);
+		}
+		let rgba = VideoFrame::from_rgba(SIZE.0, SIZE.1, pixels.stride, swapped).unwrap();
+		let cpu = convert::to_i420(&bgra).unwrap().into_owned();
+		let mut half = VideoFrame::black_i420(SIZE.0 / 2, SIZE.1 / 2);
+		let mut workers = crate::workers::Workers::new("voelin-test-scale", 1);
+		crate::scale::scale_i420(&mut workers, &cpu, &mut half).unwrap();
+		let mut converter = GpuConverter::new().expect("VA-API video processing");
+		let layers = [
+			GpuLayer { size: SIZE, alignment: (2, 2), due: true },
+			GpuLayer { size: (SIZE.0 / 2, SIZE.1 / 2), alignment: (2, 2), due: true },
+		];
+		for picture in [&bgra, &rgba] {
+			let mut out = [None, None];
+			assert!(converter.takes(&picture.view().pixels));
+			converter.convert_memory(&picture.view(), &layers, &mut out).expect("converted");
+			for (frame, reference) in out.iter().flatten().zip([&cpu, &half]) {
+				let psnr = convert::psnr(reference, &download(frame)).unwrap();
+				eprintln!("{}x{}: PSNR {psnr:.1} dB against the CPU's", frame.width, frame.height);
+				assert!(psnr > 30.0, "{}x{}: {psnr:.1} dB", frame.width, frame.height);
+			}
+		}
+		// Not RGB: the caller converts it.
+		let i420 = VideoFrame::black_i420(64, 64);
+		assert!(!converter.takes(&i420.view().pixels));
+	}
+
+	/// What the GPU path costs per captured frame: the DMA-BUF import alone,
+	/// and the whole conversion (import, VPP to NV12, the wait for the GPU),
+	/// from a buffer of the driver's own (video memory, tiled) and from a
+	/// LINEAR one of ordinary memory where `/dev/udmabuf` allows its size.
+	/// `cargo test -p voelin-media --release --lib gpu_conversion_cost --
+	/// --ignored --nocapture`.
+	#[cfg(feature = "pipewire")]
+	#[test]
+	#[ignore = "a measurement, not a check"]
+	fn gpu_conversion_cost() {
+		if !usable("h264_vaapi") {
+			eprintln!("no usable h264_vaapi, skipped");
+			return;
+		}
+		// CPU time of every thread of the process.
+		let cpu_time = || -> Duration {
+			let tasks = std::fs::read_dir("/proc/self/task").unwrap().flatten();
+			tasks
+				.filter_map(|t| std::fs::read_to_string(t.path().join("schedstat")).ok())
+				.filter_map(|s| s.split_whitespace().next()?.parse().ok())
+				.map(Duration::from_nanos)
+				.sum()
+		};
+		let ffmpeg = Ffmpeg::get().unwrap();
+		for size in [(1920, 1080), (3840, 2160), (7680, 4320)] {
+			let screen = crate::capture::synthetic::SyntheticScreen::with_pattern(
+				size.0,
+				size.1,
+				crate::capture::synthetic::Pattern::Desktop,
+			);
+			let picture = screen.frame(3, 60);
+			let vram =
+				Exported::new(size, ffmpeg.pix.bgr0.unwrap(), drm_fourcc(b"XR24"), Some(&picture))
+					.unwrap();
+			let len = size.0 as usize * size.1 as usize * 4;
+			let mut ram = crate::capture::dmabuf::Udmabuf::new(len).ok();
+			if let Some(ram) = &mut ram {
+				let FrameData::Bgra(pixels) = &picture.data else { unreachable!() };
+				ram.bytes_mut().copy_from_slice(&pixels.data[..len]);
+			}
+			let linear = ram.as_ref().map(|ram| DmaBufRef {
+				fd: ram.fd(),
+				size: ram.len(),
+				modifier: crate::capture::DRM_MOD_LINEAR,
+				planes: [(0, size.0 as usize * 4), (0, 0), (0, 0), (0, 0)],
+				plane_count: 1,
+				..vram.frame
+			});
+			let mut converter = GpuConverter::new().unwrap();
+			let layer = [GpuLayer { size, alignment: (2, 2), due: true }];
+			let mut out = [None];
+			for (what, frame) in [("video memory", Some(vram.frame)), ("udmabuf", linear)] {
+				let Some(frame) = frame else {
+					eprintln!("{}x{} {what}: no buffer of that size", size.0, size.1);
+					continue;
+				};
+				converter.convert(&frame, &layer, &mut out).unwrap();
+				let started = Instant::now();
+				for _ in 0..100 {
+					converter.import_only(&frame).unwrap();
+				}
+				let import = started.elapsed() / 100;
+				let started = Instant::now();
+				for _ in 0..100 {
+					converter.convert(&frame, &layer, &mut out).unwrap();
+				}
+				let convert = started.elapsed() / 100;
+				eprintln!(
+					"{}x{} {what}: import {:.2} ms, whole conversion {:.2} ms",
+					size.0,
+					size.1,
+					import.as_secs_f64() * 1e3,
+					convert.as_secs_f64() * 1e3
+				);
+			}
+			// The same picture in memory, copied into a surface.
+			let view = picture.view();
+			converter.convert_memory(&view, &layer, &mut out).unwrap();
+			let (cpu, started) = (cpu_time(), Instant::now());
+			for _ in 0..50 {
+				converter.convert_memory(&view, &layer, &mut out).unwrap();
+			}
+			let (wall, cpu) = (started.elapsed() / 50, (cpu_time() - cpu) / 50);
+			eprintln!(
+				"{}x{} memory: {:.2} ms, {:.2} ms CPU per frame",
+				size.0,
+				size.1,
+				wall.as_secs_f64() * 1e3,
+				cpu.as_secs_f64() * 1e3
+			);
+		}
 	}
 
 	/// On Linux an AMF encoder is not even made unless asked for, so AMF's
@@ -2526,6 +2673,39 @@ mod tests {
 		if Ffmpeg::get().is_ok() {
 			assert!(FfmpegEncoder::new("h264_vaapi", EncoderConfig::default()).is_ok());
 		}
+	}
+
+	/// Levels and tiers per H.265 Table A.8 and AV1 A.3, with the frame rate
+	/// and the bitrate counted.
+	#[test]
+	fn hevc_and_av1_levels() {
+		// 1080p60 at 8 Mbit/s: 4.1 Main; 4K60 at 60 Mbit/s: 5.1's Main
+		// tier holds 40, so 5.2 Main.
+		assert_eq!(hevc_level(1920, 1080, 60, 8_000_000), (123, false));
+		assert_eq!(hevc_level(3840, 2160, 60, 60_000_000), (156, false));
+		// 4K240 needs 6.1 for its sample rate; 8K30, 8K60, 8K120: 6, 6.1, 6.2.
+		assert_eq!(hevc_level(3840, 2160, 240, 60_000_000), (183, false));
+		assert_eq!(hevc_level(7680, 4320, 30, 60_000_000), (180, false));
+		assert_eq!(hevc_level(7680, 4320, 60, 60_000_000), (183, false));
+		assert_eq!(hevc_level(7680, 4320, 120, 60_000_000), (186, false));
+		// Beyond the Main tier of every level: High.
+		assert_eq!(hevc_level(1920, 1080, 30, 300_000_000), (183, true));
+		// Beyond every level: 8.5.
+		assert_eq!(hevc_level(7680, 4320, 320, 60_000_000), (255, true));
+		assert_eq!(hevc_level(16384, 16384, 30, 60_000_000), (255, true));
+
+		// AV1: 1080p60 at 6 Mbit/s 4.1; 4K60 at 60 Mbit/s 5.2 (5.1 Main
+		// holds 40).
+		assert_eq!(av1_level(1920, 1080, 60, 6_000_000), (9, false));
+		assert_eq!(av1_level(3840, 2160, 60, 60_000_000), (14, false));
+		// The frame rate counts: 4K240 6.1, 1440p240 5.2, 8K60 6.1.
+		assert_eq!(av1_level(3840, 2160, 240, 60_000_000), (17, false));
+		assert_eq!(av1_level(2560, 1440, 240, 60_000_000), (14, false));
+		assert_eq!(av1_level(7680, 4320, 60, 60_000_000), (17, false));
+		// 8K30 at 100 Mbit/s: 6.1 Main rather than 6.0 High.
+		assert_eq!(av1_level(7680, 4320, 30, 100_000_000), (17, false));
+		// More than 300 frame headers a second is beyond every level.
+		assert_eq!(av1_level(1920, 1080, 320, 60_000_000), (31, true));
 	}
 
 	#[test]

@@ -30,6 +30,8 @@ mod layout;
 pub mod sys;
 mod vpp;
 
+#[cfg(target_os = "linux")]
+pub(crate) use gpu::Exported;
 pub(crate) use gpu::Surface;
 pub use gpu::{GpuConverter, GpuLayer};
 
@@ -51,6 +53,8 @@ pub(crate) struct PixFmts {
 	pub drm_prime: Option<c_int>,
 	/// `bgr0`: B, G, R, x in memory, the DRM `XR24` of captured screens.
 	pub bgr0: Option<c_int>,
+	/// `rgb0`: R, G, B, x in memory (`XB24`), the studio's composite.
+	pub rgb0: Option<c_int>,
 }
 
 /// libavformat's I/O functions and where a write error lands
@@ -128,6 +132,7 @@ impl Ffmpeg {
 			vaapi: api.pix_fmt("vaapi").or_else(|| api.pix_fmt("vaapi_vld")),
 			drm_prime: api.pix_fmt("drm_prime"),
 			bgr0: api.pix_fmt("bgr0"),
+			rgb0: api.pix_fmt("rgb0"),
 		};
 		let hw_fields = layout::codec_hw_fields(&api);
 		let codec_hw_frames = hw_fields.clone().map(|(frames, _)| frames);

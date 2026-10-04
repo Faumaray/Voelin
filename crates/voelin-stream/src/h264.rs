@@ -92,8 +92,18 @@ pub fn profile_level_id(profile: H264Profile, level_idc: u8) -> u32 {
 /// offer official clients know stays the same for small streams.
 pub const MIN_OFFER_LEVEL: u8 = 31;
 
+/// The highest level an offer declares (5.2): libwebrtc (the official
+/// client's stack; `H264Level` in `h264_profile_level_id.h`, main branch
+/// 2026-10) and str0m 0.23 (`H264LevelIdc`) know no level above it, and a
+/// `profile-level-id` they cannot parse matches nothing: a viewer answered
+/// such an offer without video (tried with str0m: `m=video 0`, no payload
+/// type). Streams that need 6.0-6.2 (3840x2160 above 60 fps, 7680x4320,
+/// 1080p above 250 fps) are offered as 5.2 and still carry their real level
+/// in the SPS, which decoders size themselves from.
+pub const MAX_OFFER_LEVEL: u8 = 52;
+
 /// `profile-level-id` for a stream of this size, frame rate and bitrate,
-/// at least level 3.1.
+/// at least level 3.1 and at most [`MAX_OFFER_LEVEL`].
 pub fn offer_profile_level_id(
 	profile: H264Profile,
 	width: u32,
@@ -101,8 +111,8 @@ pub fn offer_profile_level_id(
 	fps: u32,
 	bitrate: u64,
 ) -> u32 {
-	let level = level_idc(profile, width, height, fps, bitrate).max(MIN_OFFER_LEVEL);
-	profile_level_id(profile, level)
+	let level = level_idc(profile, width, height, fps, bitrate);
+	profile_level_id(profile, level.clamp(MIN_OFFER_LEVEL, MAX_OFFER_LEVEL))
 }
 
 #[cfg(test)]
@@ -142,6 +152,11 @@ mod tests {
 		assert_eq!(profile_level_id(HIGH, 31), 0x640c1f);
 		assert_eq!(profile_level_id(H264Profile::ConstrainedBaseline, 31), 0x42e01f);
 		assert_eq!(offer_profile_level_id(HIGH, 320, 240, 15, 200_000), 0x640c1f);
+		// 4K60 is 5.2; 4K120 and 8K need 6.x, which peers cannot parse: 5.2.
+		assert_eq!(offer_profile_level_id(HIGH, 3840, 2160, 60, 60_000_000), 0x640c34);
+		assert_eq!(offer_profile_level_id(HIGH, 3840, 2160, 120, 60_000_000), 0x640c34);
+		let baseline = H264Profile::ConstrainedBaseline;
+		assert_eq!(offer_profile_level_id(baseline, 7680, 4320, 60, 60_000_000), 0x42e034);
 		assert_eq!(offer_profile_level_id(HIGH, 1920, 1080, 60, 8_000_000), 0x640c2a);
 		// Back from the SDP, at any level; other profiles are not ours.
 		assert_eq!(H264Profile::from_profile_level_id(0x640c2a), Some(HIGH));

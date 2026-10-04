@@ -391,10 +391,11 @@ component ShareCard inherits Modal {
                 HorizontalLayout {
                     spacing: Theme.space-2;
                     Select {
-                        model: [@tr("15 fps"), @tr("30 fps"), @tr("60 fps")];
+                        // FPS_CHOICES (settings.rs).
+                        model: [@tr("15 fps"), @tr("30 fps"), @tr("60 fps"), @tr("120 fps"), @tr("144 fps"), @tr("240 fps"), @tr("320 fps")];
                         current-index <=> form.fps-index;
                         label: @tr("Frame rate");
-                        selected => { form.fps = [15, 30, 60][self.current-index]; }
+                        selected => { form.fps = [15, 30, 60, 120, 144, 240, 320][self.current-index]; }
                     }
                     TextField {
                         text <=> form.fps;
@@ -412,15 +413,16 @@ component ShareCard inherits Modal {
                 HorizontalLayout {
                     spacing: Theme.space-2;
                     Select {
-                        model: [@tr("Low (2.5 Mbit/s)"), @tr("Standard (4.6 Mbit/s)"), @tr("High (8 Mbit/s)"), @tr("Best (10 Mbit/s)")];
+                        // BITRATE_CHOICES (settings.rs); Auto leaves the field empty.
+                        model: [@tr("Auto (up to 60 Mbit/s)"), @tr("Low (2.5 Mbit/s)"), @tr("Standard (4.6 Mbit/s)"), @tr("High (8 Mbit/s)"), @tr("10 Mbit/s"), @tr("20 Mbit/s"), @tr("40 Mbit/s"), @tr("Best (60 Mbit/s)")];
                         current-index <=> form.bitrate-index;
                         label: @tr("Quality");
-                        selected => { form.bitrate = [2500, 4608, 8000, 10000][self.current-index]; }
+                        selected => { form.bitrate = self.current-index == 0 ? "" : "\{[0, 2500, 4608, 8000, 10000, 20000, 40000, 60000][self.current-index]}"; }
                     }
                     TextField {
                         text <=> form.bitrate;
                         input-type: number;
-                        placeholder: @tr("kbit/s");
+                        placeholder: form.bitrate-index == 0 ? @tr("auto") : @tr("kbit/s");
                         label: @tr("Bitrate in kbit/s");
                         // On a phone both pairs fit side by side.
                         width: Nav.narrow ? 60px : 80px;

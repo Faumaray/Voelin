@@ -76,12 +76,19 @@ impl LeaveReason {
 	}
 }
 
+/// The most `setupstream` announces, in kbit/s: TeamSpeak 6 servers keep
+/// the bitrate in 16 bits and wrap anything above (6.0.0-beta13.1 announced
+/// 100000 as 34464), but enforce nothing, so a stream sends its real rate
+/// peer to peer whatever the announcement says.
+pub const MAX_ANNOUNCED_BITRATE: u32 = u16::MAX as u32;
+
 /// Parameters of `setupstream`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamSetup {
 	pub name: String,
 	pub kind: StreamKind,
-	/// kbit/s; the server caps streams at 10 Mbit/s.
+	/// The stream's video bitrate in kbit/s (the single layer's without
+	/// simulcast); announced as at most [`MAX_ANNOUNCED_BITRATE`].
 	pub bitrate: u32,
 	/// `accessibility`: the official client and ts6-manager send 1.
 	pub accessibility: u8,
@@ -301,7 +308,7 @@ pub fn setup(setup: &StreamSetup) -> OutCommand {
 	c2s::OutSetupStreamMessage::new(&mut iter::once(c2s::OutSetupStreamPart {
 		stream_name: Cow::Borrowed(&setup.name),
 		stream_type: setup.kind.to_u8(),
-		bitrate: setup.bitrate,
+		bitrate: setup.bitrate.min(MAX_ANNOUNCED_BITRATE),
 		access: setup.accessibility,
 		stream_mode: setup.mode,
 		viewer_limit: setup.viewer_limit,
@@ -442,6 +449,11 @@ mod tests {
 			"setupstream name=my\\sscreen type=3 bitrate=4608 accessibility=1 mode=1 viewer_limit=0 \
 			 audio=1"
 		);
+		// 60 Mbit/s is announced as it is; beyond 16 bits, the most the
+		// server keeps instead of a wrapped value.
+		let fast = |bitrate| text(setup(&StreamSetup { bitrate, ..s.clone() }));
+		assert!(fast(60_000).contains(" bitrate=60000 "));
+		assert!(fast(100_000).contains(" bitrate=65535 "));
 		assert_eq!(
 			text(join_request("u-1", ClientId(5), "", false)),
 			"joinstreamrequest id=u-1 clid=5 msg is_remove=0"

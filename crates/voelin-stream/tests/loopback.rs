@@ -5,7 +5,7 @@
 use std::time::{Duration, Instant};
 
 use tokio::time::timeout;
-use voelin_stream::{MediaKind, MediaTime, Peer, PeerConfig, PeerEvent, SrtpProfile};
+use voelin_stream::{MediaKind, MediaTime, OfferOptions, Peer, PeerConfig, PeerEvent, SrtpProfile};
 
 mod relay;
 use relay::{Relay, Rule};
@@ -246,6 +246,57 @@ async fn losses_are_repaired_by_retransmission() {
 	assert!(lost >= 30, "the relay lost too little: {lost} of {media}");
 	assert_eq!(received.frames, 90, "{received:?}");
 	assert_eq!(received.gaps, 0, "a loss reached the viewer: {received:?}");
+}
+
+/// A 60 Mbit/s stream with bandwidth estimation: the pacer lets it out at
+/// that rate and the estimate stays near it. Before the peer task handled a
+/// due timeout at once, tokio's millisecond timer let the pacer out one
+/// packet a millisecond (9.5 Mbit/s at 1188 bytes), and a 4K60 stream's
+/// estimate through the TeamSpeak 6 server fell from 60 to 9 Mbit/s.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_pacer_keeps_up_with_60_mbits() {
+	let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
+	let config = PeerConfig::loopback();
+	// The streamer starts at the stream's bitrate, as a session does.
+	let options = OfferOptions {
+		start_bitrate: Some(60_000_000),
+		desired_bitrate: Some(72_000_000),
+		..OfferOptions::default()
+	};
+	let (mut streamer, offer) = Peer::offer_with(&config, "fast", &options).await.unwrap();
+	let (mut viewer, answer) = Peer::answer(&config, &offer).await.unwrap();
+	streamer.accept_answer(&answer).await.unwrap();
+	tokio::join!(wait_connected(&mut streamer), wait_connected(&mut viewer));
+	// 60 Mbit/s at 60 fps: 125 KB a frame, keyframes of 1 MB every second.
+	let sender = tokio::spawn(async move {
+		let start = Instant::now();
+		let mut estimates = Vec::new();
+		let mut streamer = streamer;
+		for i in 0..300u64 {
+			let keyframe = i % 60 == 0;
+			let data = noise_frame(i, if keyframe { 1_000_000 } else { 125_000 }, keyframe);
+			streamer.write(MediaKind::Video, MediaTime::from_90khz(i * 1500), data);
+			while let Some(event) = streamer.try_next_event() {
+				if let PeerEvent::BitrateEstimate(b) = event {
+					estimates.push(b);
+				}
+			}
+			tokio::time::sleep_until((start + Duration::from_micros((i + 1) * 16_667)).into())
+				.await;
+		}
+		estimates
+	});
+	let (mut bytes, start) = (0usize, Instant::now());
+	while let Ok(Some(event)) = timeout(Duration::from_secs(1), viewer.next_event()).await {
+		if let PeerEvent::Media(f) = event {
+			bytes += f.data.len();
+		}
+	}
+	let mbits = bytes as f64 * 8.0 / start.elapsed().as_secs_f64() / 1e6;
+	let estimates = sender.await.unwrap();
+	let last = estimates.last().copied().unwrap_or(0);
+	eprintln!("received {mbits:.1} Mbit/s; estimates {estimates:?}");
+	assert!(last >= 40_000_000, "the estimate fell to {last} bit/s");
 }
 
 /// UDP receive errors of this host so far (`RcvbufErrors` in

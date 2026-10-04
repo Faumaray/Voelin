@@ -180,7 +180,7 @@ Settings sections (`settings:<section>`):
 | `account` | The identity in use (nickname, TeamSpeak 3 and 6 unique ids, security level) and why there is no myTeamSpeak sign-in |
 | `profiles` (also `identities`) | Identities with where they came from: rename, use as default (the store's default, `Store::set_default_identity`), export as a TeamSpeak 3 .ini, delete, raise the security level on every core; the import of the official clients' identities on start (`identity.import_from_teamspeak`) and by hand from their settings and .ini files (key material is never shown); the identity per server |
 | `appearance` | Theme, text size, the phone layout's width, the image cache |
-| `voice` | Microphone (device, test, level, noise suppression, echo cancellation, automatic gain), output (device, test sound, volume), streaming permissions, camera (device, preview with the background effect), video settings (resolution, frame rate, codec, hardware acceleration, mirror), stream quality presets with free bitrate entry and the upload it takes |
+| `voice` | Microphone (device, test, level, noise suppression, echo cancellation, automatic gain), output (device, test sound, volume), streaming permissions, camera (device, preview with the background effect), video settings (resolution, frame rate 15 to 320 fps, codec, hardware acceleration, mirror), stream quality presets (Auto, 720p to 8K) with free bitrate entry (slider up to 60 Mbit/s, empty: automatic) and the upload it takes |
 | `streaming` | Frame rate, bitrate, codec, capture backend, simulcast layers, the stream's audio sources (desktop without Voelin, applications, the shared window's application, microphone; gain and mute each), recording and replay |
 | `devices` | Microphones, speakers, cameras and what can be shared |
 | `notifications` | Each kind of notification: off, in the app, on the desktop; a test notification |
@@ -214,7 +214,7 @@ work before going live.
 | Preview | `studio`, `studio:live`, `studio:record` | The composite, LIVE and the time (or PREVIEW, REC), watching and joined viewers, title • destination | `Studio::preview` turned into pictures on a thread of its own, latest wins; `State` |
 | Audio mixer | `studio`, `studio:audio` | One row per `stream.audio_sources` entry: meter, gain (dB), mute, a menu; + adds the microphone, desktop audio without Voelin, the shared window's application or an application that plays | the mixer's meters (lock-free, about 15 times a second); `Streamer::reconfigure` follows the setting |
 | Stream chat | `studio` | The chat of the channel the stream goes to and a composer | the destination tab's stored messages, made into lines as the chat view does |
-| Stream settings | `studio` | Destination (the voice channel of each TeamSpeak 6 server we are in), title, game, go-live message (sent to the channel when the stream is up), Show Viewer Count / Chat Overlay / Now Playing, Enable Stream Audio, Advanced Settings, output size and rate (presets or any numbers), bitrate or simulcast layers | `studio.ui`, `stream.bitrate_kbps`, `stream.layers`, `SetOutput` |
+| Stream settings | `studio` | Destination (the voice channel of each TeamSpeak 6 server we are in), title, game, go-live message (sent to the channel when the stream is up), Show Viewer Count / Chat Overlay / Now Playing, Enable Stream Audio, Advanced Settings, output size and rate (presets 720p to 8K and 30 to 240 fps, or any numbers), bitrate (empty: automatic, up to 60 Mbit/s) or simulcast layers | `studio.ui`, `stream.bitrate_kbps`, `stream.layers`, `SetOutput` |
 | Bottom bar | `studio`, `studio:settings` | Share Window, Share Screen, Record Clip (and start or stop a recording, the replay length, the folder), Go Live, End Stream, Studio Settings (replay seconds and memory, folder, preview size) | `SaveClip`, `StartRecording`, `StopRecording`, `studio.*`, `SetPreview`; `Command::StartStream`, `Streamer::attach`, `GoLive`, `EndStream` |
 | Window of its own | `studio:window` | The same pieces, compact | — |
 
@@ -228,6 +228,17 @@ game"), which is also what the gateway's directory shows. With sample data
 (`VOELIN_DEMO_UI`) the studio runs from synthetic sources (the test pattern,
 the synthetic camera with background blur, text, colours) and test tones,
 on settings in memory, and recordings go to a temporary folder.
+
+### Frame rate and quality in the quick share
+
+The share dialog's lists (`FPS_CHOICES`, `BITRATE_CHOICES` in
+`src/settings.rs`, the same lists in `dialogs.slint`) offer 15, 30, 60,
+120, 144, 240 and 320 fps, and Auto (the default: from the size and frame
+rate shared, up to 60 Mbit/s, the bitrate field left empty), 2.5, 4.6, 8,
+10, 20, 40 and 60 Mbit/s; any other number can be typed, with no maximum.
+Both are the settings `stream.fps` and `stream.bitrate_kbps` (0:
+automatic). The `ui` blob keeps the index of the closest entry of the old
+three- and four-entry lists for older versions.
 
 ### Sound in the quick share
 

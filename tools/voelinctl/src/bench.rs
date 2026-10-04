@@ -85,6 +85,13 @@ struct BenchArgs {
 	/// encoders the frames are then converted and scaled on the GPU.
 	#[arg(long)]
 	dmabuf: bool,
+	/// The pattern drawn in advance into DMA-BUFs in video memory (VA-API
+	/// surfaces in the driver's layout), as a compositor hands over the
+	/// screen; implies --dmabuf. Without it the DMA-BUFs are ordinary
+	/// memory, which the GPU reads over the bus several times slower, and
+	/// which `/dev/udmabuf` limits to 64 MiB (7680x4320 needs 132).
+	#[arg(long)]
+	vram: bool,
 	/// Video codec: vp8, vp9, h264, av1 or h265 [default: the codec of
 	/// --encoder if named, else the first the encoder choice gives].
 	#[arg(long)]
@@ -101,8 +108,9 @@ struct BenchArgs {
 	/// k/M suffixes); repeatable. Without it: one layer at --bitrate.
 	#[arg(long = "layer")]
 	layers: Vec<String>,
-	/// Bitrate in kbit/s without --layer.
-	#[arg(long, default_value_t = 4608)]
+	/// Bitrate in kbit/s without --layer; 0: automatic, from the size and
+	/// frame rate (up to 60 Mbit/s).
+	#[arg(long, default_value_t = 0)]
 	bitrate: u32,
 	/// Measured time in seconds (after the warm-up).
 	#[arg(long, default_value_t = 10)]
@@ -332,7 +340,8 @@ struct Sample {
 	layers: Vec<(LayerId, LayerSnapshot)>,
 	sent: u64,
 	captured: u64,
-	/// Captured frames converted on the GPU (never read by the CPU).
+	/// Captured frames converted on the GPU (DMA-BUFs, or pictures in memory
+	/// copied into a surface).
 	gpu: u64,
 	/// Frames the handoffs to the encoders dropped, per layer.
 	dropped: Vec<(LayerId, u64)>,
@@ -387,7 +396,8 @@ fn bench(args: BenchArgs) -> Result<()> {
 		source: source.clone(),
 		synthetic_size: (width, height),
 		synthetic_pattern: pattern,
-		synthetic_dmabuf: args.dmabuf,
+		synthetic_dmabuf: args.dmabuf || args.vram,
+		synthetic_video_memory: args.vram,
 		fps: args.fps,
 		bitrate_kbps: args.bitrate,
 		codec,
@@ -458,7 +468,7 @@ fn bench(args: BenchArgs) -> Result<()> {
 	let ms = |d: Duration| d.as_secs_f64() * 1000.0;
 	println!(
 		"capture: {:.1} fps; convert + scale: CPU {} frames, {:.2} ms per frame on {} threads; \
-		 GPU (DMA-BUF, never read by the CPU) {gpu} frames, {:.2} ms per frame",
+		 GPU {gpu} frames, {:.2} ms per frame",
 		captured as f64 / secs,
 		captured - gpu.min(captured),
 		ms(stats.convert_time),

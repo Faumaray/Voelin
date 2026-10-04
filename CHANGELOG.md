@@ -40,6 +40,14 @@ The first release is in preparation.
   without the SRTP profile or the codec it used; host addresses hidden
   behind mDNS names (as browsers send them) are resolved; larger socket
   buffers keep high-bitrate streams from losing packets in bursts.
+- Streams up to 60 Mbit/s, 8K and 320 fps where the hardware can: an
+  automatic bitrate by default (from the size and frame rate, up to 60
+  Mbit/s; any bitrate can be typed), share and studio presets up to 8K,
+  320 fps and 60 Mbit/s, and screens in memory converted on the GPU for
+  VA-API encoders. A stream's bandwidth estimate no longer stops near 10
+  Mbit/s (packets were let out one a millisecond), and H.264 offers
+  declare the level the stream needs (up to 5.2) instead of 3.1. Setting:
+  `stream.bitrate_kbps` (0: automatic).
 - `tsgw`: companion gateway for server admins (presence, channel chat
   relay, history).
 - Chat history: messages are kept on the device and, with a gateway, what

@@ -148,7 +148,8 @@ pub enum H264Profile {
 pub struct EncoderConfig {
 	/// Expected frame rate (rate control; timestamps come from the frames).
 	pub fps: u32,
-	/// Target bitrate in bits per second. TeamSpeak caps streams at 10 Mbit/s.
+	/// Target bitrate in bits per second (no limit; TeamSpeak 6 servers
+	/// enforce none, see `voelin_stream::proto::MAX_ANNOUNCED_BITRATE`).
 	pub bitrate_bps: u32,
 	/// Maximum frames between keyframes; `None` sends keyframes only at the
 	/// start and on request (PLI), like WebRTC.
