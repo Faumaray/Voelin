@@ -394,14 +394,23 @@ impl EccKeyPrivP256 {
 				if (*len != 1 && *len != 2) || content[0] & 0x80 == 0 {
 					return Err(Error::NoPrivateKey);
 				}
+				// Voelin patch: DER drops the leading zero bytes of a scalar
+				// below 2^248 (one key in 256), which `from_short` refused.
+				let short = |i: &BigInt| -> Result<Self> {
+					let bytes = i.to_bytes_be().1;
+					let mut padded = [0u8; 32];
+					let start = padded.len().checked_sub(bytes.len()).ok_or(Error::NoShortKey)?;
+					padded[start..].copy_from_slice(&bytes);
+					Self::from_short(&padded)
+				};
 				if *len == 1 {
 					if let Some(ASN1Block::Integer(_, i)) = blocks.get(4) {
-						Self::from_short(&i.to_bytes_be().1)
+						short(i)
 					} else {
 						Err(Error::NoPrivateKey)
 					}
 				} else if let Some(ASN1Block::Integer(_, i)) = blocks.get(2) {
-					Self::from_short(&i.to_bytes_be().1)
+					short(i)
 				} else {
 					Err(Error::NoPrivateKey)
 				}
@@ -600,6 +609,21 @@ mod tests {
 		let key = EccKeyPrivP256::from_short(short.as_slice()).unwrap();
 		let short2 = key.to_short();
 		assert_eq!(short, short2);
+	}
+
+	/// Voelin patch: a private key whose first bytes are zero survives the
+	/// TeamSpeak export (DER stores the scalar without them).
+	#[test]
+	fn small_priv_key_round_trips() {
+		for leading_zeros in [1, 2, 31] {
+			let mut short = [0x5au8; 32];
+			short[..leading_zeros].fill(0);
+			let key = EccKeyPrivP256::from_short(&short).unwrap();
+			let back = EccKeyPrivP256::from_ts(&key.to_ts()).unwrap();
+			assert_eq!(back.to_short().as_slice(), short);
+			let back = EccKeyPrivP256::from_ts_obfuscated(&key.to_ts_obfuscated()).unwrap();
+			assert_eq!(back.to_short().as_slice(), short);
+		}
 	}
 
 	#[test]
