@@ -3,6 +3,8 @@
 ;   makensis /DVERSION=0.1.0 packaging\windows\installer.nsi
 ;
 ; Paths are relative to this file. Optional defines:
+;   VERSION_NUMERIC  VERSION without a pre-release (0.0.1 for 0.0.1-alpha),
+;             for the numeric file version (default: VERSION)
 ;   BINARY    the executable (default ..\..\target\release\voelin.exe)
 ;   OUTDIR    where the installer goes (default: next to this file)
 ;   SIGN      a signing command; "%1" is replaced by the file to sign, e.g.
@@ -14,6 +16,9 @@ SetCompressor /SOLID lzma
 
 !ifndef VERSION
 	!define VERSION "0.1.0"
+!endif
+!ifndef VERSION_NUMERIC
+	!define VERSION_NUMERIC "${VERSION}"
 !endif
 !ifndef BINARY
 	!define BINARY "..\..\target\release\voelin.exe"
@@ -40,7 +45,7 @@ InstallDir "$PROGRAMFILES64\${APP_NAME}"
 InstallDirRegKey HKLM "${UNINSTALL_KEY}" "InstallLocation"
 RequestExecutionLevel admin
 
-VIProductVersion "${VERSION}.0"
+VIProductVersion "${VERSION_NUMERIC}.0"
 VIAddVersionKey "ProductName" "${APP_NAME}"
 VIAddVersionKey "ProductVersion" "${VERSION}"
 VIAddVersionKey "FileVersion" "${VERSION}"

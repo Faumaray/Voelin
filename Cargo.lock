@@ -9648,7 +9648,7 @@ dependencies = [
 
 [[package]]
 name = "voelin-android"
-version = "0.1.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "jni 0.22.4",
@@ -9910,7 +9910,7 @@ dependencies = [
 
 [[package]]
 name = "voelin-ui"
-version = "0.1.0"
+version = "0.0.1-alpha"
 dependencies = [
  "anyhow",
  "chrono",

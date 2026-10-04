@@ -1,6 +1,6 @@
 [package]
 name = "voelin-ui"
-version = "0.1.0"
+version = "0.0.1-alpha"
 description = "Slint user interface and the desktop binary."
 edition.workspace = true
 rust-version.workspace = true

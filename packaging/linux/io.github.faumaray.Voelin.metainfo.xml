@@ -39,9 +39,11 @@
     <control>pointing</control>
   </recommends>
   <releases>
-    <release version="0.1.0" date="2026-09-26">
+    <release version="0.0.1-alpha" date="2026-10-04" type="development">
       <description>
-        <p>First packaged build.</p>
+        <p>The first alpha: servers and bookmarks, voice, channel and server chat,
+        TeamSpeak 6 streams, observing servers through the tsgw gateway,
+        myTeamSpeak account sign-in, and host and channel banners.</p>
       </description>
     </release>
   </releases>

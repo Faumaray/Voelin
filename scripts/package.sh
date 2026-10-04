@@ -69,7 +69,8 @@ make_deb() {
 	EOF
 	mkdir -p "$root/DEBIAN"
 	{
-		printf 'Package: %s\nVersion: %s\nArchitecture: %s\n' "$pkg" "$ver" "$deb_arch"
+		# A pre-release sorts before its release in Debian with ~ (0.0.1~alpha).
+		printf 'Package: %s\nVersion: %s\nArchitecture: %s\n' "$pkg" "${ver/-/\~}" "$deb_arch"
 		printf 'Maintainer: Faumaray <23194470+Faumaray@users.noreply.github.com>\n'
 		printf 'Section: net\nPriority: optional\nHomepage: %s\n' "$homepage"
 		printf 'Depends: %s\n' "$depends"
@@ -167,7 +168,8 @@ package_windows() {
 		return
 	fi
 	# Absolute paths: makensis changes into the script's directory.
-	"$makensis" -V2 -DVERSION="$version" -DOUTDIR="$(native_path "$out")" \
+	"$makensis" -V2 -DVERSION="$version" -DVERSION_NUMERIC="${version%%-*}" \
+		-DOUTDIR="$(native_path "$out")" \
 		-DBINARY="$(native_path "$(cd "$bin" && pwd)/voelin.exe")" packaging/windows/installer.nsi
 	files+=("voelin-$version-setup.exe")
 }
