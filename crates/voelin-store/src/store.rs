@@ -22,7 +22,21 @@ const MIGRATIONS: &[Migration] = &[
 	Migration::Sql(SCHEMA_1),
 	Migration::Code(crate::chat::migrate_2),
 	Migration::Sql(crate::contacts::SCHEMA_3),
+	Migration::Sql(SCHEMA_4),
 ];
+
+/// Version 4: where each identity came from ([`IdentityOrigin`]) and which
+/// one is the default. Until now the app created an identity named
+/// `Default` when it had none, and the only other way in was an import;
+/// the default was the first identity.
+const SCHEMA_4: &str = r#"
+	ALTER TABLE identities ADD COLUMN origin TEXT NOT NULL DEFAULT 'user';
+	ALTER TABLE identities ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0;
+	UPDATE identities SET origin = 'imported';
+	UPDATE identities SET origin = 'created'
+		WHERE id = (SELECT MIN(id) FROM identities) AND name = 'Default';
+	UPDATE identities SET is_default = 1 WHERE id = (SELECT MIN(id) FROM identities);
+"#;
 
 /// Version 1: identities, bookmarks, settings and a first chat cache.
 pub(crate) const SCHEMA_1: &str = r#"
@@ -62,6 +76,39 @@ pub struct IdentityEntry {
 	pub name: String,
 	pub uid: String,
 	pub level: u8,
+	pub origin: IdentityOrigin,
+	/// The identity the app connects with.
+	pub is_default: bool,
+}
+
+/// Where an identity came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentityOrigin {
+	/// Made by the app on its own because it had none; nobody chose it, so
+	/// the official client's identity may take its place as the default.
+	Created,
+	/// From another client (`voelin_core::identity`).
+	Imported,
+	/// Made or chosen as the default by the user.
+	User,
+}
+
+impl IdentityOrigin {
+	fn as_str(self) -> &'static str {
+		match self {
+			Self::Created => "created",
+			Self::Imported => "imported",
+			Self::User => "user",
+		}
+	}
+
+	fn parse(text: &str) -> Self {
+		match text {
+			"created" => Self::Created,
+			"imported" => Self::Imported,
+			_ => Self::User,
+		}
+	}
 }
 
 /// How to reach a server's ServerQuery for invisible presence and relay chat.
@@ -179,26 +226,69 @@ impl Store {
 
 	// Identities
 
-	pub fn add_identity(&self, name: &str, identity: &Identity) -> Result<i64> {
+	/// Store an identity; it is the default when no other one is.
+	pub fn add_identity(
+		&self,
+		name: &str,
+		identity: &Identity,
+		origin: IdentityOrigin,
+	) -> Result<i64> {
 		let uid = identity.key().to_pub().get_uid();
 		self.db.execute(
-			"INSERT INTO identities (name, uid, data) VALUES (?1, ?2, ?3)",
-			params![name, uid, serde_json::to_string(identity)?],
+			"INSERT INTO identities (name, uid, data, origin, is_default)
+			 VALUES (?1, ?2, ?3, ?4, NOT EXISTS (SELECT 1 FROM identities WHERE is_default))",
+			params![name, uid, serde_json::to_string(identity)?, origin.as_str()],
 		)?;
 		Ok(self.db.last_insert_rowid())
 	}
 
 	pub fn identities(&self) -> Result<Vec<IdentityEntry>> {
-		let mut stmt = self.db.prepare("SELECT id, name, uid, data FROM identities ORDER BY id")?;
+		let mut stmt = self.db.prepare(
+			"SELECT id, name, uid, data, origin, is_default FROM identities ORDER BY id",
+		)?;
 		let rows = stmt.query_map([], |r| {
-			Ok((r.get::<_, i64>(0)?, r.get(1)?, r.get(2)?, r.get::<_, String>(3)?))
+			Ok((
+				r.get::<_, i64>(0)?,
+				r.get(1)?,
+				r.get(2)?,
+				r.get::<_, String>(3)?,
+				r.get::<_, String>(4)?,
+				r.get(5)?,
+			))
 		})?;
 		rows.map(|row| {
-			let (id, name, uid, data) = row?;
+			let (id, name, uid, data, origin, is_default) = row?;
 			let identity: Identity = serde_json::from_str(&data)?;
-			Ok(IdentityEntry { id, name, uid, level: identity.level() })
+			let origin = IdentityOrigin::parse(&origin);
+			Ok(IdentityEntry { id, name, uid, level: identity.level(), origin, is_default })
 		})
 		.collect()
+	}
+
+	/// The identity the app connects with: the one marked as the default,
+	/// else the first.
+	pub fn default_identity(&self) -> Result<Option<IdentityEntry>> {
+		let identities = self.identities()?;
+		Ok(identities.iter().find(|i| i.is_default).or(identities.first()).cloned())
+	}
+
+	/// Make `id` the default identity. `by_user`: the user chose it, so one
+	/// the app created on its own becomes theirs ([`IdentityOrigin::User`])
+	/// and is never replaced by an import again.
+	pub fn set_default_identity(&self, id: i64, by_user: bool) -> Result<()> {
+		let tx = self.db.unchecked_transaction()?;
+		if tx.execute("UPDATE identities SET is_default = 1 WHERE id = ?1", [id])? == 0 {
+			return Err(Error::NotFound("identity", id));
+		}
+		tx.execute("UPDATE identities SET is_default = 0 WHERE id <> ?1", [id])?;
+		if by_user {
+			tx.execute(
+				"UPDATE identities SET origin = 'user' WHERE id = ?1 AND origin = 'created'",
+				[id],
+			)?;
+		}
+		tx.commit()?;
+		Ok(())
 	}
 
 	pub fn identity(&self, id: i64) -> Result<Identity> {
@@ -337,20 +427,84 @@ mod tests {
 	fn identities() {
 		let store = Store::open_in_memory().unwrap();
 		let identity = Identity::create();
-		let id = store.add_identity("main", &identity).unwrap();
+		let id = store.add_identity("main", &identity, IdentityOrigin::Imported).unwrap();
 		let list = store.identities().unwrap();
 		assert_eq!(list.len(), 1);
 		assert_eq!(list[0].name, "main");
 		assert_eq!(list[0].uid, identity.key().to_pub().get_uid());
 		assert!(list[0].level >= 8);
+		assert_eq!(list[0].origin, IdentityOrigin::Imported);
 		let loaded = store.identity(id).unwrap();
 		assert_eq!(loaded.counter(), identity.counter());
 		// The same key twice is rejected (uid is unique).
-		assert!(store.add_identity("dup", &identity).is_err());
+		assert!(store.add_identity("dup", &identity, IdentityOrigin::User).is_err());
 		store.rename_identity(id, "renamed").unwrap();
 		assert_eq!(store.identities().unwrap()[0].name, "renamed");
 		store.delete_identity(id).unwrap();
 		assert!(matches!(store.identity(id), Err(Error::NotFound(..))));
+	}
+
+	#[test]
+	fn the_default_identity() {
+		let store = Store::open_in_memory().unwrap();
+		assert_eq!(store.default_identity().unwrap(), None);
+		let made = store.add_identity("Default", &Identity::create(), IdentityOrigin::Created);
+		let made = made.unwrap();
+		let other = store.add_identity("Other", &Identity::create(), IdentityOrigin::Imported);
+		let other = other.unwrap();
+		// The first one is the default.
+		let default = store.default_identity().unwrap().unwrap();
+		assert_eq!((default.id, default.origin), (made, IdentityOrigin::Created));
+		// An import moves the default without making the old one the user's.
+		store.set_default_identity(other, false).unwrap();
+		assert_eq!(store.default_identity().unwrap().unwrap().id, other);
+		assert_eq!(store.identities().unwrap()[0].origin, IdentityOrigin::Created);
+		// The user's choice makes the created one theirs.
+		store.set_default_identity(made, true).unwrap();
+		let list = store.identities().unwrap();
+		assert_eq!((list[0].is_default, list[0].origin), (true, IdentityOrigin::User));
+		assert_eq!((list[1].is_default, list[1].origin), (false, IdentityOrigin::Imported));
+		assert!(matches!(store.set_default_identity(99, true), Err(Error::NotFound(..))));
+		assert_eq!(store.default_identity().unwrap().unwrap().id, made);
+	}
+
+	/// A database of version 3 learns where its identities came from: the
+	/// first one, named `Default`, is the one the app made; the others were
+	/// imported; the first stays the default.
+	#[test]
+	fn migrates_version_3_identities() {
+		let dir = std::env::temp_dir().join(format!("voelin-store-v3-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&dir);
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("client.db");
+		let (made, imported) = (Identity::create(), Identity::create());
+		{
+			let mut db = rusqlite::Connection::open(&path).unwrap();
+			db.execute_batch(SCHEMA_1).unwrap();
+			let tx = db.transaction().unwrap();
+			crate::chat::migrate_2(&tx).unwrap();
+			tx.commit().unwrap();
+			db.execute_batch(crate::contacts::SCHEMA_3).unwrap();
+			db.pragma_update(None, "user_version", 3).unwrap();
+			for (name, identity) in [("Default", &made), ("Main", &imported)] {
+				let uid = identity.key().to_pub().get_uid();
+				let data = serde_json::to_string(identity).unwrap();
+				db.execute(
+					"INSERT INTO identities (name, uid, data) VALUES (?1, ?2, ?3)",
+					params![name, uid, data],
+				)
+				.unwrap();
+			}
+		}
+		let store = Store::open(&path).unwrap();
+		assert_eq!(store.schema_version().unwrap(), Store::SCHEMA_VERSION);
+		let list = store.identities().unwrap();
+		assert_eq!((list[0].origin, list[0].is_default), (IdentityOrigin::Created, true));
+		assert_eq!((list[1].origin, list[1].is_default), (IdentityOrigin::Imported, false));
+		// The keys are untouched.
+		assert_eq!(store.identity(list[1].id).unwrap().counter(), imported.counter());
+		drop(store);
+		std::fs::remove_dir_all(dir).unwrap();
 	}
 
 	#[test]

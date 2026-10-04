@@ -21,7 +21,7 @@ pub use contacts::{Contact, ContactSeen, Relation};
 #[cfg(feature = "keyring")]
 pub use secrets::KeyringSecrets;
 pub use secrets::{MemorySecrets, Secrets};
-pub use store::{Bookmark, IdentityEntry, QueryConfig, QueryTransport, Store};
+pub use store::{Bookmark, IdentityEntry, IdentityOrigin, QueryConfig, QueryTransport, Store};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
