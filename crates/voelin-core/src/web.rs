@@ -4,24 +4,36 @@
 //! They go into the engine's cache ([`crate::cache`], named by the MD5 hash
 //! of the address) like avatars and icons, and only with
 //! `cache.fetch_images`: fetching one contacts a host the server chose, as
-//! the official client does. A picture is at most [`MAX_BYTES`], arrives
-//! within [`TIMEOUT`] (connected within [`CONNECT_TIMEOUT`]) and is kept
-//! only if its content is a picture the UI shows (PNG, JPEG, GIF, WebP,
-//! SVG), whatever its address or the server say. The client is the
-//! workspace's reqwest with rustls: system proxies (`HTTPS_PROXY`,
+//! the official client does. A picture is at most
+//! [`cache::MAX_PICTURE_BYTES`] and goes to disk as it arrives; it connects
+//! within [`CONNECT_TIMEOUT`], and a download fails when nothing arrives for
+//! [`READ_TIMEOUT`] or, after [`GRACE`], when it averages less than
+//! [`cache::MIN_PICTURE_RATE`]: a large banner on a slow host still arrives.
+//! It is kept only if its content is a picture the UI shows (PNG, JPEG,
+//! GIF, WebP, SVG), whatever its address or the server say. The client is
+//! the workspace's reqwest with rustls: system proxies (`HTTPS_PROXY`,
 //! `NO_PROXY`, …) and the platform's certificate store.
+//!
+//! Banners in the server's own files (`ts3image://`) come through the voice
+//! connection instead ([`crate::files::server_image`]).
 
 use std::path::Path;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use tokio::io::AsyncWriteExt;
+
 use crate::cache::{self, Cache, Fetch, Waiter};
 
-/// Allow larger GIF/PNG banners while bounding each buffered response.
-pub(crate) const MAX_BYTES: u64 = 16 << 20;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const READ_TIMEOUT: Duration = Duration::from_secs(10);
-const TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const READ_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a download may start slowly before its rate counts.
+const GRACE: Duration = Duration::from_secs(30);
+/// The first bytes, enough to tell a picture from an error page.
+const SNIFF: usize = 1024;
+/// The pictures the UI decodes, so a host choosing between formats
+/// (`Accept`) does not answer with one it cannot show (AVIF, JPEG XL).
+const ACCEPT: &str = "image/png,image/jpeg,image/gif,image/webp,image/svg+xml;q=0.9,*/*;q=0.1";
 /// Fetch independent URLs in parallel without letting a large channel tree
 /// open unbounded connections or buffer unbounded image data.
 static DOWNLOADS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
@@ -33,7 +45,6 @@ static CLIENT: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(|| {
 	reqwest::Client::builder()
 		.connect_timeout(CONNECT_TIMEOUT)
 		.read_timeout(READ_TIMEOUT)
-		.timeout(TIMEOUT)
 		.user_agent(concat!("Voelin/", env!("CARGO_PKG_VERSION")))
 		.build()
 		.map_err(|e| e.to_string())
@@ -51,39 +62,69 @@ pub(crate) fn fetch(cache: Cache, url: &str, fresh: bool, max_cache_bytes: u64, 
 	let url = url.to_owned();
 	tokio::spawn(async move {
 		let _permit = DOWNLOADS.acquire().await.expect("download semaphore stays open");
-		let result = download(&url, &temp, MAX_BYTES).await;
+		let result = download(&url, &temp, &LIMITS).await;
 		cache.finish(&key, &temp, result, max_cache_bytes);
 	});
 }
 
-/// Download the picture at `url` into `to`: at most `max_bytes`, and only
-/// if it is a picture.
-async fn download(url: &str, to: &Path, max_bytes: u64) -> Result<(), String> {
+/// How large and how slow a download may be.
+struct Limits {
+	max_bytes: u64,
+	grace: Duration,
+	/// Bytes a second, on average since the start, once `grace` is over.
+	min_rate: u64,
+}
+
+const LIMITS: Limits =
+	Limits { max_bytes: cache::MAX_PICTURE_BYTES, grace: GRACE, min_rate: cache::MIN_PICTURE_RATE };
+
+/// Download the picture at `url` into `to` within `limits`, and only if it
+/// is a picture (what arrived stays in `to` on failure; the cache removes it).
+async fn download(url: &str, to: &Path, limits: &Limits) -> Result<(), String> {
 	let client = CLIENT.as_ref().map_err(Clone::clone)?;
-	let too_big = || format!("larger than {} KiB", max_bytes >> 10);
+	let too_big = || format!("larger than {} KiB", limits.max_bytes >> 10);
 	let mut response = client
 		.get(url)
+		.header(reqwest::header::ACCEPT, ACCEPT)
 		.send()
 		.await
 		.and_then(reqwest::Response::error_for_status)
 		.map_err(|e| e.to_string())?;
-	if response.content_length().is_some_and(|n| n > max_bytes) {
+	if response.content_length().is_some_and(|n| n > limits.max_bytes) {
 		return Err(too_big());
-	}
-	let mut data = Vec::new();
-	while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
-		if (data.len() + chunk.len()) as u64 > max_bytes {
-			return Err(too_big());
-		}
-		data.extend_from_slice(&chunk);
-	}
-	if !is_picture(&data) {
-		return Err("not a picture".into());
 	}
 	if let Some(dir) = to.parent() {
 		tokio::fs::create_dir_all(dir).await.map_err(|e| e.to_string())?;
 	}
-	tokio::fs::write(to, &data).await.map_err(|e| e.to_string())
+	let mut file = tokio::fs::File::create(to).await.map_err(|e| e.to_string())?;
+	let started = tokio::time::Instant::now();
+	let mut head = Vec::with_capacity(SNIFF);
+	let mut received = 0u64;
+	while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+		received += chunk.len() as u64;
+		if received > limits.max_bytes {
+			return Err(too_big());
+		}
+		if head.len() < SNIFF {
+			head.extend_from_slice(&chunk[..chunk.len().min(SNIFF - head.len())]);
+			// An error page is refused without waiting for all of it.
+			if head.len() == SNIFF && !is_picture(&head) {
+				return Err("not a picture".into());
+			}
+		}
+		let elapsed = started.elapsed();
+		let expected = limits.min_rate.saturating_mul(elapsed.as_millis() as u64) / 1000;
+		if elapsed > limits.grace && received < expected {
+			return Err(format!("too slow: {} KiB in {} s", received >> 10, elapsed.as_secs()));
+		}
+		file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+	}
+	file.flush().await.map_err(|e| e.to_string())?;
+	drop(file);
+	if !is_picture(&head) {
+		return Err("not a picture".into());
+	}
+	Ok(())
 }
 
 /// Whether `data` is a picture the UI decodes, told by its content as the
@@ -134,11 +175,17 @@ mod tests {
 						"/svg" => {
 							("200 OK", true, b"<svg xmlns='http://www.w3.org/2000/svg'/>".to_vec())
 						}
-						"/large-banner" => ("200 OK", true, [PNG, &vec![0; 5 << 20]].concat()),
+						// Above the earlier limits of 4 and 16 MiB.
+						"/large-banner" => ("200 OK", true, [PNG, &vec![0; 20 << 20]].concat()),
 						// Too big, as announced or as it comes.
 						"/big" => ("200 OK", true, [PNG, &[0; 4000]].concat()),
 						"/big-unannounced" => ("200 OK", false, [PNG, &[0; 4000]].concat()),
 						"/page" => ("200 OK", true, b"<!DOCTYPE html><html></html>".to_vec()),
+						"/long-page" => {
+							("200 OK", false, [b"<!DOCTYPE html>", &[b' '; 4000][..]].concat())
+						}
+						// A picture, then a byte every 100 ms.
+						"/slow" => ("200 OK", true, [PNG, &[0; 20]].concat()),
 						_ => ("404 Not Found", true, b"no".to_vec()),
 					};
 					let mut head = format!("HTTP/1.1 {status}\r\nConnection: close\r\n");
@@ -147,6 +194,17 @@ mod tests {
 					}
 					head += "\r\n";
 					let _ = socket.write_all(head.as_bytes()).await;
+					if path == "/slow" {
+						let (picture, rest) = body.split_at(PNG.len());
+						let _ = socket.write_all(picture).await;
+						for byte in rest {
+							tokio::time::sleep(Duration::from_millis(100)).await;
+							if socket.write_all(&[*byte]).await.is_err() {
+								return;
+							}
+						}
+						return;
+					}
 					let _ = socket.write_all(&body).await;
 				});
 			}
@@ -165,21 +223,25 @@ mod tests {
 		let base = server().await;
 		let dir = temp_dir("download");
 		let to = dir.join("tmp/x.part");
-		download(&format!("{base}/banner"), &to, 1000).await.unwrap();
+		let limits = Limits { max_bytes: 1000, ..LIMITS };
+		download(&format!("{base}/banner"), &to, &limits).await.unwrap();
 		assert_eq!(std::fs::read(&to).unwrap(), PNG);
-		download(&format!("{base}/svg"), &to, 1000).await.unwrap();
+		download(&format!("{base}/svg"), &to, &limits).await.unwrap();
 		for (path, error) in [
 			("/big", "larger than"),
 			("/big-unannounced", "larger than"),
 			("/page", "not a picture"),
 			("/missing", "404"),
 		] {
-			let e = download(&format!("{base}{path}"), &to, 1000).await.unwrap_err();
+			let e = download(&format!("{base}{path}"), &to, &limits).await.unwrap_err();
 			assert!(e.contains(error), "{path}: {e}");
 		}
+		// An error page longer than the first bytes looked at, unannounced.
+		let e = download(&format!("{base}/long-page"), &to, &LIMITS).await.unwrap_err();
+		assert!(e.contains("not a picture"), "{e}");
 		// Nothing listens there.
 		let port = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap().port();
-		assert!(download(&format!("http://127.0.0.1:{port}/b"), &to, 1000).await.is_err());
+		assert!(download(&format!("http://127.0.0.1:{port}/b"), &to, &limits).await.is_err());
 		std::fs::remove_dir_all(dir).unwrap();
 	}
 
@@ -211,12 +273,26 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn banners_above_the_old_four_megabyte_limit_are_downloaded() {
+	async fn banners_above_the_old_limits_are_downloaded() {
 		let base = server().await;
 		let dir = temp_dir("large-banner");
 		let path = dir.join("large");
-		download(&format!("{base}/large-banner"), &path, MAX_BYTES).await.unwrap();
-		assert!(std::fs::metadata(&path).unwrap().len() > 4 << 20);
+		download(&format!("{base}/large-banner"), &path, &LIMITS).await.unwrap();
+		assert!(std::fs::metadata(&path).unwrap().len() > 16 << 20);
+		std::fs::remove_dir_all(dir).unwrap();
+	}
+
+	#[tokio::test]
+	async fn a_trickling_download_ends_after_its_grace() {
+		let base = server().await;
+		let dir = temp_dir("slow");
+		let to = dir.join("slow");
+		// Slow, but within its grace: it arrives.
+		let patient = Limits { grace: Duration::from_secs(60), ..LIMITS };
+		download(&format!("{base}/slow"), &to, &patient).await.unwrap();
+		let strict = Limits { grace: Duration::from_millis(150), min_rate: 1 << 20, ..LIMITS };
+		let e = download(&format!("{base}/slow"), &to, &strict).await.unwrap_err();
+		assert!(e.contains("too slow"), "{e}");
 		std::fs::remove_dir_all(dir).unwrap();
 	}
 

@@ -28,6 +28,7 @@ use voelin_model::{ChannelId, ChatMessage, ChatTarget, Presence, ServerFlavor};
 use voelin_stream::{PeerConfig, Request, StreamNotification};
 
 use crate::book::presence_from_book;
+use crate::cache;
 use crate::files::{self, FileEntry, Report, RequestId, Sink, TransferId, TransferState};
 use crate::offline::{OfflineMessage, OfflineMessageInfo};
 use crate::settings::{FILES_PROGRESS_MS, SharedSettings};
@@ -284,6 +285,13 @@ impl Job {
 	}
 }
 
+/// How long a picture of `size` bytes may take to arrive: half a minute,
+/// plus its size at [`cache::MIN_PICTURE_RATE`], so large banners arrive on
+/// slow links while a stalled transfer still ends.
+fn image_download_time(size: u64) -> Duration {
+	Duration::from_secs(30 + size / cache::MIN_PICTURE_RATE)
+}
+
 /// Bound background image handshakes without imposing a deadline on user transfers.
 fn expire_image_jobs(jobs: &mut HashMap<FiletransferHandle, Job>, now: Instant) {
 	jobs.retain(|_, job| {
@@ -495,9 +503,17 @@ impl Voice {
 				if let Some(Job::Download { transfer, offset, sink, report, .. }) =
 					self.jobs.remove(&handle)
 				{
+					// Pictures (avatars, icons, banners): bounded like the
+					// banners on the web, the user's own files are not.
+					if transfer.is_none() && download.size > cache::MAX_PICTURE_BYTES {
+						let limit = cache::MAX_PICTURE_BYTES >> 20;
+						report(TransferState::Failed(format!("larger than {limit} MiB")));
+						return Ok(());
+					}
 					let part = sink.part().map(ToOwned::to_owned);
 					let progress = self.progress_every();
 					let task_report = report.clone();
+					let deadline = image_download_time(download.size);
 					let task = tokio::spawn(async move {
 						let receive = files::download(
 							download.stream,
@@ -509,7 +525,7 @@ impl Voice {
 						);
 						if transfer.is_some() {
 							receive.await;
-						} else if timeout(Duration::from_secs(30), receive).await.is_err() {
+						} else if timeout(deadline, receive).await.is_err() {
 							task_report(TransferState::Failed("image download timed out".into()));
 						}
 					});
@@ -995,5 +1011,13 @@ mod image_download_tests {
 		);
 		expire_image_jobs(&mut jobs, started + Duration::from_secs(60));
 		assert_eq!(reports.lock().unwrap().len(), 1);
+	}
+
+	#[test]
+	fn large_pictures_get_time_to_arrive() {
+		assert_eq!(image_download_time(0), Duration::from_secs(30));
+		assert_eq!(image_download_time(100 << 10), Duration::from_secs(33));
+		// The largest picture, at the slowest rate allowed.
+		assert_eq!(image_download_time(cache::MAX_PICTURE_BYTES), Duration::from_secs(30 + 2048));
 	}
 }

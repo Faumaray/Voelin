@@ -838,12 +838,12 @@ impl Session {
 		let Some(key) = cache::avatar_key(hash) else { return };
 		let waiter = self
 			.image_waiter(ImageRequest::Avatar { uid: uid.into(), hash: hash.into() }, requested);
-		self.fetch_image(key, files::avatar_path(uid), waiter);
+		self.fetch_image(key, files::avatar_path(uid).map(|path| (0, path)), false, waiter);
 	}
 
 	fn fetch_icon(&self, icon: u32) {
 		let waiter = self.image_waiter(ImageRequest::Icon(icon), false);
-		self.fetch_image(cache::icon_key(icon), Some(files::icon_path(icon)), waiter);
+		self.fetch_image(cache::icon_key(icon), Some((0, files::icon_path(icon))), false, waiter);
 	}
 
 	fn wants_image(&self, request: &ImageRequest) -> bool {
@@ -959,12 +959,19 @@ impl Session {
 		}
 	}
 
+	/// Whether the picture at `url` can be fetched now: on the web, or in
+	/// the server's files (`ts3image://`) while connected with voice.
+	fn can_fetch_picture(&self, url: &str) -> bool {
+		cache::picture_key(url).is_some()
+			|| (self.voice_presence.is_some() && files::server_image(url).is_some())
+	}
+
 	/// Fetch the banners of the presence shown (any source) that are new,
 	/// and have the host banner reloaded as often as the server asks.
 	fn fetch_pictures(&mut self, p: &Presence) {
 		let enabled = self.settings.current().get(&CACHE_FETCH_IMAGES);
 		let reload = Some((&p.server.banner_gfx_url, p.server.banner_gfx_interval_s))
-			.filter(|(url, every)| enabled && cache::picture_key(url).is_some() && *every > 0);
+			.filter(|(url, every)| enabled && self.can_fetch_picture(url) && *every > 0);
 		if self.banner_reload.as_ref().map(|(url, every, _)| (url, *every)) != reload {
 			if let Some((.., timer)) = self.banner_reload.take() {
 				timer.abort();
@@ -993,7 +1000,7 @@ impl Session {
 		}
 		let urls: HashSet<_> = std::iter::once(&p.server.banner_gfx_url)
 			.chain(p.channels.values().filter_map(|c| c.banner_gfx_url.as_ref()))
-			.filter(|u| cache::picture_key(u).is_some())
+			.filter(|u| self.can_fetch_picture(u))
 			.cloned()
 			.collect();
 		self.pictures.retain(|url| urls.contains(url));
@@ -1004,18 +1011,26 @@ impl Session {
 		}
 	}
 
-	/// Get the picture at `url` into the cache (again with `fresh`).
+	/// Get the picture at `url` into the cache (again with `fresh`): from
+	/// the web, or from the server's files through the voice connection.
 	fn fetch_picture(&self, url: &str, fresh: bool) {
 		let waiter = self.image_waiter(ImageRequest::Picture(url.into()), false);
-		web::fetch(self.cache.current(), url, fresh, max_cache_bytes(&self.settings), waiter);
+		if let Some(file) = files::server_image(url) {
+			let server = self.state.server_uid.as_deref().unwrap_or(self.voice_address.as_str());
+			let key = cache::server_picture_key(server, url);
+			self.fetch_image(key, Some(file), fresh, waiter);
+		} else {
+			web::fetch(self.cache.current(), url, fresh, max_cache_bytes(&self.settings), waiter);
+		}
 	}
 
-	/// Get `key` from the cache, downloading `path` of channel 0 once.
-	fn fetch_image(&self, key: String, path: Option<String>, waiter: Waiter) {
+	/// Get `key` from the cache, downloading `file` (channel and path) once
+	/// (again with `fresh`).
+	fn fetch_image(&self, key: String, file: Option<(u64, String)>, fresh: bool, waiter: Waiter) {
 		let cache = self.cache.current();
-		let Fetch::Download(temp) = cache.fetch(&key, false, waiter) else { return };
+		let Fetch::Download(temp) = cache.fetch(&key, fresh, waiter) else { return };
 		let settings = self.settings.clone();
-		let (Some(path), Some((_, voice))) = (path, &self.voice) else {
+		let (Some((channel, path)), Some((_, voice))) = (file, &self.voice) else {
 			cache.finish(&key, &temp, Err(NO_VOICE.into()), max_cache_bytes(&settings));
 			return;
 		};
@@ -1032,7 +1047,7 @@ impl Session {
 			_ => {}
 		});
 		let sink = Sink::File { part: temp.clone(), dest: temp, append: false };
-		let file = Remote { channel: 0, password: None, path };
+		let file = Remote { channel, password: None, path };
 		let failed = report.clone();
 		if voice.send(VoiceCmd::Download { transfer: None, file, sink, report }).is_err() {
 			failed(TransferState::Failed(NO_VOICE.into()));
@@ -1979,6 +1994,50 @@ mod banner_tests {
 		}
 		assert!(matches!(events.try_recv(), Ok(Event::AvatarReady { .. })));
 		assert!(matches!(events.try_recv(), Ok(Event::IconReady { icon: 1234, .. })));
+		std::fs::remove_dir_all(session.cache.current().dir()).unwrap();
+	}
+
+	/// A banner in the server's files (`ts3image://`) comes through the
+	/// voice connection's file transfer, from its channel and path.
+	#[tokio::test]
+	async fn banners_in_the_server_files_come_through_voice() {
+		let (mut session, mut events) = session("server-files");
+		let url = "ts3image://ts.example.test?port=9987&channel=7&path=%2Fbanners&filename=raid%20night.png";
+		let mut presence = Presence::default();
+		let channel = voelin_model::ChannelInfo {
+			id: 7,
+			banner_gfx_url: Some(url.into()),
+			..Default::default()
+		};
+		presence.channels.insert(7, channel);
+		// Observed without voice: no file transfer to ask yet.
+		session.fetch_pictures(&presence);
+		assert!(session.pictures.is_empty());
+		let (tx, mut commands) = mpsc::unbounded_channel();
+		session.voice = Some((1, tx));
+		session.voice_presence = Some(presence.clone());
+		session.state.server_uid = Some("server-a".into());
+		session.fetch_pictures(&presence);
+		assert!(session.pictures.contains(url));
+		let VoiceCmd::Download { file, sink: Sink::File { part, .. }, report, .. } =
+			commands.try_recv().unwrap()
+		else {
+			panic!("expected a file download");
+		};
+		assert_eq!((file.channel, file.path.as_str()), (7, "/banners/raid night.png"));
+		std::fs::create_dir_all(part.parent().unwrap()).unwrap();
+		std::fs::write(&part, b"banner").unwrap();
+		report(TransferState::Done { size: 6, path: Some(part), data: None });
+		let completion = session.sources_rx.as_mut().unwrap().recv().await.unwrap();
+		session.source_event(completion);
+		let Ok(Event::PictureReady { url: ready, path, .. }) = events.try_recv() else {
+			panic!("expected the banner");
+		};
+		assert_eq!(ready, url);
+		// Named by the server too: the same address elsewhere is another file.
+		let key = cache::server_picture_key("server-a", url);
+		assert_eq!(path, session.cache.current().dir().join(key));
+		assert_eq!(std::fs::read(path).unwrap(), b"banner");
 		std::fs::remove_dir_all(session.cache.current().dir()).unwrap();
 	}
 

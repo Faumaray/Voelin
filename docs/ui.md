@@ -450,15 +450,26 @@ profile requires account setup before the server list, so no fresh-profile
 network capture was obtained. These observations do not establish that every
 server or client version lacks a pre-login mechanism.
 
-The engine downloads HTTP(S) banners only while `cache.fetch_images` is
-enabled. Up to eight distinct banners download concurrently; duplicate URLs
-share a request. Downloads have a 16 MiB limit, a 5-second connection
-timeout, a 10-second read timeout and a 30-second overall timeout. Failed
+The engine downloads banners only while `cache.fetch_images` is enabled.
+Banners on the web (`http`, `https`) come from their host; banners in the
+server's own files, linked as `ts3image://` (TeamSpeak 5 and 6:
+`ts3image://<host>?port=…&channel=…&path=…&filename=…`, the file browser's
+`ts3file://` link with its scheme changed; TeamSpeak 3:
+`ts3image://<name>?channel=…&path=…`), come through the voice connection's
+file transfer, so they need voice and the server's file permissions. Their
+cache entry is named by the server too, as the same address names another
+file elsewhere. Up to eight distinct web banners download concurrently;
+duplicate URLs share a request. A picture may be up to 64 MiB, avatars and
+icons too, and goes to disk as it arrives. Web downloads have a 10-second
+connection timeout and fail after 20 seconds without data or when, after
+their first 30 seconds, they average less than 32 KiB/s; there is no
+fixed overall deadline, so large banners on slow hosts still arrive. Failed
 avatars, icons and banners receive up to three automatic retries after
 1, 4 and 16 seconds,
-without waiting for a presence update. Avatar/icon negotiation expires after
-15 seconds and their image download after 30 seconds. User file transfers
-retain their existing timing. Replaced images and closed sessions discard
+without waiting for a presence update. Avatar/icon/banner file-transfer
+negotiation expires after 15 seconds, and the download after 30 seconds
+plus its size at 32 KiB/s. User file transfers retain their existing
+timing. Replaced images and closed sessions discard
 obsolete results. A host banner's reload interval is at least 60 seconds;
 failed refreshes preserve the previous cached picture. Closing the session
 stops its reload timer. `PictureReady` invalidates the decoded image before
