@@ -499,6 +499,15 @@ export component ClientAudioDialog inherits Modal {
             Bridge.client-audio-changed(Bridge.client-audio);
         }
     }
+    if Bridge.client-audio.streaming: Button {
+        kind: ButtonKind.primary;
+        icon: Icons.monitor;
+        text: @tr("Watch {}'s stream", Bridge.client-audio.name);
+        clicked => {
+            Bridge.watch-client(Bridge.client-audio.id);
+            done();
+        }
+    }
     Rectangle { vertical-stretch: 1; }
     Footer {
         Button {

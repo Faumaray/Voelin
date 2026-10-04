@@ -179,10 +179,19 @@ impl App {
 					.iter()
 					.find(|s| view.state.own_client != Some(s.streamer.0))
 					.map(|s| s.id.clone());
+				// A client whose stream was asked for while it was looked up.
+				let pending = self
+					.pending_watch
+					.filter(|(s, _)| *s == session as i64)
+					.and_then(|(_, client)| streams.iter().find(|s| s.streamer.0 == client))
+					.map(|s| s.id.clone());
 				view.streams = streams;
 				self.refresh_streams();
 				self.refresh_servers();
-				if autowatch && let Some(id) = first {
+				if let Some(id) = pending {
+					self.pending_watch = None;
+					self.watch_stream(id);
+				} else if autowatch && let Some(id) = first {
 					self.watch_stream(id);
 				}
 			}
@@ -761,6 +770,27 @@ impl App {
 		self.refresh_streams();
 		// The people in our channel lead the members panel beside the viewer.
 		self.refresh_tree();
+	}
+
+	/// Watch the stream of `client` (a click on a streaming user in the
+	/// channel tree or the members): at once if it is known, else as soon as
+	/// the lookup brings it (it may have started in another channel or
+	/// before we joined).
+	pub(crate) fn watch_client(&mut self, client: u16) {
+		let Some(session) = self.current else { return };
+		let Some(view) = self.sessions.get(&session) else { return };
+		if view.state.own_client == Some(client) {
+			return;
+		}
+		if let Some(id) = view.streams.iter().find(|s| s.streamer.0 == client).map(|s| s.id.clone())
+		{
+			self.pending_watch = None;
+			self.watch_stream(id);
+		} else if view.presence.clients.get(&client).is_some_and(|c| c.streaming == Some(true)) {
+			let name = view.nickname(client);
+			self.pending_watch = Some((session, client));
+			self.set_status(format!("Looking up {name}'s stream…"));
+		}
 	}
 
 	/// `VOELIN_OPEN=watch`: watch the first stream of our channel.
