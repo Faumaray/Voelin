@@ -2332,9 +2332,14 @@ fn encode_loop(shared: &Shared, layer: &Layer, encoder: Box<dyn VideoEncoder>) {
 			told = Some((format, to));
 			sink.layer_format(layer.id, format);
 		}
+		// Estimates move it down, and back up to the layer's bitrate or its
+		// `max_bitrate` (`LayerSpec::bitrate`), never beyond: an automatic
+		// bitrate stays within `AUTO_BITRATE_MAX`, a typed one is what was
+		// typed. With the pacer no longer held to one packet a millisecond,
+		// a 60 Mbit/s stream's estimate rose to 110 Mbit/s on loopback.
 		let configured = format.bitrate;
 		let cap = match layer.max_bitrate.load(Ordering::Relaxed) {
-			0 => u64::MAX,
+			0 => configured,
 			max => max,
 		};
 		let target = sink.layer_bitrate(layer.id).unwrap_or(configured).clamp(1, cap);
@@ -4027,16 +4032,24 @@ mod tests {
 
 		// A viewer's estimate lowers layer 5's encoder bitrate only.
 		source.set_layer_bitrate(5, 150_000);
-		let target = |id| {
+		let target = |source: &EncodedSource, id| {
 			let stats = source.streamer().stats();
 			stats.layers.iter().find(|l| l.id == id).map(|l| l.bitrate)
 		};
 		let deadline = Instant::now() + Duration::from_secs(5);
-		while target(5) != Some(150_000) {
-			assert!(Instant::now() < deadline, "layer 5 at {:?}", target(5));
+		while target(&source, 5) != Some(150_000) {
+			assert!(Instant::now() < deadline, "layer 5 at {:?}", target(&source, 5));
 			tokio::time::sleep(Duration::from_millis(20)).await;
 		}
-		assert_eq!(target(0), Some(800_000));
+		assert_eq!(target(&source, 0), Some(800_000));
+		// A higher one raises it back to its bitrate, not beyond.
+		source.set_layer_bitrate(5, 50_000_000);
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while target(&source, 5) == Some(150_000) {
+			assert!(Instant::now() < deadline, "layer 5 at {:?}", target(&source, 5));
+			tokio::time::sleep(Duration::from_millis(20)).await;
+		}
+		assert_eq!(target(&source, 5), Some(300_000));
 
 		// VP9, layer 5 gone, a new layer 7 at a fixed size.
 		let fixed = LayerSpec { size: Some((96, 64)), ..layer(7, 1.0, None, 200_000) };
