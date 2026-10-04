@@ -108,7 +108,11 @@ pub fn file(path: &std::path::Path) -> Image {
 	CACHE
 		.with(|c| {
 			c.borrow_mut().get_or_load(&key, || {
-				let image = Image::load_from_path(path).ok()?;
+				// By content, not by name: the cache's files have no extension
+				// (`avatars/<md5>`, `icons/<id>`), and servers keep PNG, JPEG
+				// and SVG icons alike.
+				let bytes = std::fs::read(path).ok()?;
+				let image = Image::load_from_data(&bytes, None).ok()?;
 				let size = image.size();
 				Some((image, size.width as usize * size.height as usize * 4))
 			})
@@ -189,6 +193,26 @@ mod tests {
 		encoder.write_header().unwrap().write_image_data(&[200; 32]).unwrap();
 		assert_eq!(picture("test:4x2", &png).size().width, 4);
 		assert_eq!(picture("test:junk", b"not a picture").size().width, 0);
+	}
+
+	/// Cached avatars and icons are named without an extension.
+	#[test]
+	fn cached_files_decode_by_content() {
+		let dir = std::env::temp_dir().join(format!("voelin-images-{}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		let mut png = Vec::new();
+		let mut encoder = png::Encoder::new(&mut png, 3, 2);
+		encoder.set_color(png::ColorType::Rgba);
+		encoder.set_depth(png::BitDepth::Eight);
+		encoder.write_header().unwrap().write_image_data(&[90; 24]).unwrap();
+		let svg = br#"<?xml version="1.0" encoding="iso-8859-1"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16"/></svg>"#;
+		for (name, bytes, width) in [("287478770", &png[..], 3), ("413901487", &svg[..], 16)] {
+			let path = dir.join(name);
+			std::fs::write(&path, bytes).unwrap();
+			assert_eq!(file(&path).size().width, width, "{name}");
+		}
+		std::fs::remove_dir_all(dir).unwrap();
 	}
 
 	#[test]
