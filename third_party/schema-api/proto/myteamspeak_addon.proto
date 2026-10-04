@@ -1,0 +1,80 @@
+syntax = "proto3";
+
+package com.teamspeak.myteamspeak.proto.addon;
+
+option java_generic_services = true;
+option cc_generic_services = true;
+option optimize_for = SPEED;
+
+service UserAddonService {
+    rpc requestDownload(GetDownload) returns (Download);
+}
+
+message GetDownload {
+    string addonUUID = 1;
+    int32 currentVersion = 2;
+    Platform platform = 3;
+    ClientApi clientapi = 4;
+    ClientApi minClientapi = 5;
+}
+
+message Download {
+    FileData downloadInfo = 1;
+    int32 currentVersion = 2;
+    ReturnCode returnCode = 3;
+    repeated string addonList = 4;
+    string hostUrl = 5;
+}
+
+message ClientApi {
+    int32 plugin = 1;
+    int32 style = 2;
+    int32 soundpack = 3;
+    int32 translation = 4;
+    int32 iconpack = 5;
+}
+
+message FileData {
+    string url = 1;
+    int32 size = 2;
+    string sha1 = 3;
+}
+
+enum ApiType {
+    UNKNOWN_APITYPE = 0;
+    PLUGIN = 1;
+    STYLE = 2;
+    SOUNDPACK = 3;
+    TRANSLATION = 4;
+    ICONPACK = 5;
+    GROUPADDON = 6;
+}
+
+enum ReturnCode {
+    UNKNOWN_RETURNCODE = 0;
+    ADDON_NOT_FOUND = 1;
+    PLATFORM_NOT_FOUND = 2;
+    UPTODATE = 3;
+    UPDATE = 4;
+    GROUP = 5;
+}
+
+enum Platform {
+    UNKNOWN_PLATFORM = 0;
+    WINDOWS_X86 = 1;
+    WINDOWS_X86_64 = 2;
+    LINUX_X86 = 3;
+    LINUX_X86_64 = 4;
+    OSX_X86 = 5;
+    OSX_X86_64 = 6;
+}
+
+enum Status {
+    UNKNOWN_STATUS = 0;
+    DRAFT = 1;
+    PENDING = 2;
+    APPROVED = 3;
+    REJECTED = 4;
+    REVIEW = 5;
+    TRASHED = 6;
+}

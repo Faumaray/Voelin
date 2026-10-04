@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package com.teamspeak.blacklist;
+
+message BlacklistInfoRequest {
+    bytes ip_address = 1;
+    string domain_name = 2;
+    string virtual_server_id = 3;
+    string public_license_id = 4;
+    uint32 port = 5;
+    uint64 timestamp = 6;
+    bool valid_token_present = 7;
+    bool slots_ok = 8;
+    string updated_virtual_server_id = 9;
+}
+
+message BlacklistInfoResponse {
+    Result status_ip = 1;
+    enum Result {
+        INVALID = 0;
+        BLACKLISTED = 1;
+        GREYLISTED = 2;
+        NOT_LISTED = 3;
+    }
+    
+    Result status_domain = 2;
+    Result status_virtual_server_id = 3;
+    Result Status_public_license_id = 4;
+}

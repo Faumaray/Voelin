@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package com.teamspeak.myteamspeak.proto;
+
+import "google/protobuf/any.proto";
+
+option java_generic_services = true;
+option cc_generic_services = true;
+option optimize_for = SPEED;
+
+message AvatarData {
+    AvatarInfo info = 1;
+    uint64 timestamp = 2;
+    bytes sign = 3;
+    google.protobuf.Any optional = 4;
+}
+
+message OptionalAvatarDataContactInfo {
+    bytes mytsid = 1;
+    bytes user_cert = 2;
+}
+
+message AvatarInfo {
+    repeated AvatarMap map = 1;
+    message AvatarMap {
+        AvatarState state = 1;
+        string name = 2;
+    }
+}
+
+enum AvatarError {
+    AVATAR_ERROR_INVALID = 0;
+    AVATAR_ERROR_OK = 1;
+    AVATAR_ERROR_CRITICAL = 2;
+    AVATAR_SESSION_INVALID = 3;
+}
+
+enum AvatarState {
+    AVATAR_STATE_INVALID = 0;
+    AVATAR_STATE_DND = 1;
+    AVATAR_STATE_ONLINE = 2;
+    AVATAR_STATE_AWAY = 3;
+    AVATAR_STATE_OFFLINE = 4;
+}

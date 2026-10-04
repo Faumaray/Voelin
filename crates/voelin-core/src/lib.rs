@@ -61,13 +61,14 @@ pub mod settings;
 pub mod stream;
 #[cfg(feature = "media")]
 pub mod studio;
+pub mod versions;
 mod voice;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 pub use voelin_audio::settings::TransmitMode;
 pub use voelin_audio::{AudioSettings, ProcessingSettings, VadSettings};
 use voelin_model::{
@@ -98,6 +99,8 @@ pub type SessionId = u64;
 /// What the UI asks for.
 #[derive(Clone, Debug)]
 pub enum Command {
+	/// Main account proof for every current and future voice connection.
+	SetMytsIdentity(Option<Arc<tsproto::myts::Identity>>),
 	ConnectVoice {
 		session: SessionId,
 		options: Box<VoiceOptions>,
@@ -795,6 +798,7 @@ async fn run(
 	// Before any command: a contact set meanwhile would be lost.
 	contacts.load().await;
 	let mut sessions: HashMap<SessionId, session::SessionHandle> = HashMap::new();
+	let (myts_identity, _) = watch::channel(None);
 	let mut current = shared.current();
 	// Pruning: at start, then hourly (and when the setting changes).
 	let mut prune = tokio::time::interval(std::time::Duration::from_secs(3600));
@@ -839,6 +843,10 @@ async fn run(
 			},
 		};
 		let id = match command {
+			Command::SetMytsIdentity(identity) => {
+				myts_identity.send_replace(identity);
+				continue;
+			}
 			Command::SetAudioSettings(new) => {
 				settings = (*new).clone();
 				for s in sessions.values() {
@@ -914,6 +922,7 @@ async fn run(
 					frames.clone(),
 					settings.clone(),
 					engine.clone(),
+					myts_identity.subscribe(),
 				);
 				if let Some(profiles) = &srtp_profiles {
 					s.send(Command::SetSrtpProfiles(profiles.clone()));
@@ -991,7 +1000,8 @@ fn command_session(command: &Command) -> SessionId {
 		| Command::DeleteOfflineMessage { session, .. }
 		| Command::SetOfflineMessageRead { session, .. }
 		| Command::CloseSession { session } => *session,
-		Command::SetAudioSettings(_)
+		Command::SetMytsIdentity(_)
+		| Command::SetAudioSettings(_)
 		| Command::SetSrtpProfiles(_)
 		| Command::TestMicrophone { .. }
 		| Command::SetSetting { .. }

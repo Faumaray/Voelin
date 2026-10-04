@@ -164,7 +164,7 @@ export component VoiceButtons inherits HorizontalLayout {
     }
 }
 
-// Who we are on the current server, and the voice buttons.
+// The primary app profile, with current server voice status and controls.
 export component UserCard inherits Rectangle {
     min-height: 60px;
     border-radius: Theme.radius-lg;
@@ -179,9 +179,9 @@ export component UserCard inherits Rectangle {
             alignment: center;
             Avatar {
                 size: 38px;
-                initials: Bridge.nickname != "" ? "" : "?";
+                initials: Bridge.myts.signed-in || Bridge.nickname != "" ? "" : "?";
                 tint: Theme.accent;
-                label: Bridge.nickname;
+                label: Bridge.primary-name;
                 // Green ring while our voice goes out.
                 speaking: Bridge.transmitting;
                 status: Bridge.voice-connected ? Status.online : Bridge.observing ? Status.info : Status.offline;
@@ -189,7 +189,7 @@ export component UserCard inherits Rectangle {
                     source: Icons.user;
                     size: 20px;
                     tint: #ffffff;
-                    visible: Bridge.nickname != "";
+                    visible: Bridge.myts.signed-in || Bridge.nickname != "";
                 }
             }
         }
@@ -197,7 +197,7 @@ export component UserCard inherits Rectangle {
             alignment: center;
             horizontal-stretch: 1;
             Text {
-                text: Bridge.nickname != "" ? Bridge.nickname : Bridge.app-name;
+                text: Bridge.primary-name;
                 color: Theme.text;
                 font-weight: Theme.weight-semibold;
                 overflow: elide;

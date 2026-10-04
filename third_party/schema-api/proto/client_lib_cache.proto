@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+package com.teamspeak.proto.client_cache;
+
+import "revoke_cache.proto";
+
+message ClientLibCache {
+    revocation.RevokeListCachedData revoke_list_cache_certificates = 1;
+    revocation.RevokeListCachedData revoke_list_cache_mytsid_data = 2;
+}

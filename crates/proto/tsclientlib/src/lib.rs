@@ -44,6 +44,7 @@ use tsproto_packets::packets::{InCommandBuf, OutCommand, OutPacket, PacketType};
 
 #[cfg(feature = "audio")]
 pub mod audio;
+mod myts;
 pub mod prelude;
 pub mod resolver;
 pub mod sync;
@@ -382,9 +383,11 @@ impl Connection {
 			address: address.into(),
 			local_address: None,
 			identity: None,
+			myts_identity: None,
 			server: None,
 			name: "TeamSpeakUser".into(),
 			version: Version::Windows_3_X_X__1,
+			metadata: Cow::Borrowed(""),
 			hardware_id: "923f136fb1e22ae6ce95e60255529c00,d13231b1bc33edfecfb9169cc7a63bcc".into(),
 			channel: None,
 			channel_password: None,
@@ -536,7 +539,7 @@ impl Connection {
 			.as_ref()
 			.map(|p| tsproto_types::crypto::encode_password(p.as_bytes()))
 			.unwrap_or_default();
-		let packet = c2s::OutClientInitMessage::new(&mut iter::once(c2s::OutClientInitPart {
+		let mut packet = c2s::OutClientInitMessage::new(&mut iter::once(c2s::OutClientInitPart {
 			name: Cow::Borrowed(options.name.as_ref()),
 			version: Cow::Borrowed(client_version),
 			platform: Cow::Borrowed(client_platform),
@@ -549,7 +552,7 @@ impl Connection {
 			default_channel: Cow::Borrowed(options.channel.as_deref().unwrap_or_default()),
 			default_channel_password: Cow::Borrowed(default_channel_password.as_ref()),
 			password: Cow::Borrowed(password.as_ref()),
-			metadata: "".into(),
+			metadata: Cow::Borrowed(options.metadata.as_ref()),
 			version_sign: Cow::Borrowed(client_version_sign.as_ref()),
 			client_key_offset: counter,
 			phonetic_name: "".into(),
@@ -563,6 +566,13 @@ impl Connection {
 			my_team_speak_id: None,
 			security_hash: None,
 		}));
+
+		// Voelin patch: account proof is bound to this transport's negotiated IV.
+		// The generated legacy client_myteamspeak_id field stays absent.
+		if let Some(identity) = &options.myts_identity {
+			let params = client.params.as_ref().ok_or(Error::InitserverParamsMissing)?;
+			identity.proof(&params.shared_iv).write_to(&mut packet);
+		}
 
 		client.send_packet(packet.into_packet()).map_err(Error::SendClientinit)?;
 
@@ -1711,9 +1721,11 @@ pub struct ConnectOptions {
 	address: ServerAddress,
 	local_address: Option<SocketAddr>,
 	identity: Option<Identity>,
+	myts_identity: Option<tsproto::myts::Identity>,
 	server: Option<UidBuf>,
 	name: Cow<'static, str>,
 	version: Version,
+	metadata: Cow<'static, str>,
 	hardware_id: Cow<'static, str>,
 	channel: Option<Cow<'static, str>>,
 	channel_password: Option<Cow<'static, str>>,
@@ -1850,6 +1862,13 @@ impl ConnectOptions {
 	#[inline]
 	pub fn version(mut self, version: Version) -> Self {
 		self.version = version;
+		self
+	}
+
+	/// Application metadata, independently of the signed compatibility version.
+	/// Voelin patch: carries the actual application name/build to the server.
+	pub fn metadata<S: Into<Cow<'static, str>>>(mut self, metadata: S) -> Self {
+		self.metadata = metadata.into();
 		self
 	}
 

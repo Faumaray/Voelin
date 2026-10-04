@@ -106,3 +106,15 @@ against or offered back to upstream.
    handed those fewer than 32 bytes to `from_short`, which refused them: one
    identity in 256 (the official client's ones included) could not be imported.
    The scalar is padded to 32 bytes now; a test round-trips such keys.
+13. **myTeamSpeak connection identity** (`tsproto/src/myts.rs`,
+    `tsclientlib/src/myts.rs`, `tsclientlib/src/lib.rs`). Validated, redacted account
+    credentials retain the original raw signing scalar and validate again when
+    deserialized from a credential store. Connection-bound account proofs use the
+    negotiated shared IV and the official raw-scalar signing construction, not
+    Ed25519 seed expansion. `clientinit` and `updatemytsid` carry the six official
+    case-sensitive proof fields; clearing an account sends only an empty
+    `myTeamspeakId`. Connection options retain the latest account for reconnects;
+    callers cancel and rebuild an in-flight attempt when its snapshot changes.
+    Tests cover an independent signature vector, persistence validation/redaction,
+    wire field names, clearing and reconnect snapshot replacement. The account
+    UUID and the ordinary server identity remain separate.

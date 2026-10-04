@@ -168,6 +168,31 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 	for open in &switches.open {
 		let (what, arg) = open.split_once(':').unwrap_or((open.as_str(), ""));
 		match what {
+			"login" if switches.demo_ui => {
+				let bridge = ui.global::<Bridge>();
+				let mut account = bridge.get_myts();
+				account.available = true;
+				account.prompt = arg != "account";
+				if arg == "account" {
+					account.signed_in = true;
+					account.username = "Alex Example".into();
+					account.email = "alex@example.test".into();
+					account.uuid = "00000000-0000-0000-0000-000000000001".into();
+					account.myts_id = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB".into();
+					account.identity_status = 1;
+					nav.invoke_open_settings(SettingsSection::Account);
+				}
+				account.otp_required = arg == "otp";
+				account.can_forget = arg == "saved" || arg == "account";
+				account.status = if arg == "otp" {
+					3
+				} else if arg == "saved" {
+					2
+				} else {
+					0
+				};
+				bridge.set_myts(account);
+			}
 			"home" => nav.invoke_show(Page::Home),
 			"server" => nav.invoke_show(Page::Server),
 			"settings" => nav.invoke_open_settings(section(arg)),

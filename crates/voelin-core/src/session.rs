@@ -81,9 +81,12 @@ impl SessionHandle {
 		frames: broadcast::Sender<StreamFrame>,
 		audio_settings: AudioSettings,
 		shared: Shared,
+		myts_identity: watch::Receiver<Option<Arc<tsproto::myts::Identity>>>,
 	) -> Self {
 		let (tx, rx) = mpsc::unbounded_channel();
-		tokio::spawn(Session::new(id, events, frames, audio_settings, shared).run(rx));
+		tokio::spawn(
+			Session::new(id, events, frames, audio_settings, shared, myts_identity).run(rx),
+		);
 		Self { tx }
 	}
 
@@ -120,6 +123,7 @@ struct OwnStream {
 }
 
 struct Session {
+	myts_identity: watch::Receiver<Option<Arc<tsproto::myts::Identity>>>,
 	id: SessionId,
 	events: broadcast::Sender<Event>,
 	state: SessionState,
@@ -184,11 +188,13 @@ impl Session {
 		frames: broadcast::Sender<StreamFrame>,
 		audio_settings: AudioSettings,
 		shared: Shared,
+		myts_identity: watch::Receiver<Option<Arc<tsproto::myts::Identity>>>,
 	) -> Self {
 		let (sources_tx, sources_rx) = mpsc::unbounded_channel();
 		let Shared { settings, history, cache, contacts } = shared;
 		let contacts_rx = Some(contacts.watch());
 		Self {
+			myts_identity,
 			cache,
 			contacts,
 			contacts_rx,
@@ -310,6 +316,7 @@ impl Session {
 					self.forward(audio_rx, move |e| SourceEvent::Audio(generation, e));
 				}
 				let link = VoiceLink {
+					myts_identity: self.myts_identity.clone(),
 					session: self.id,
 					events: self.events.clone(),
 					settings: self.settings.clone(),
@@ -620,7 +627,8 @@ impl Session {
 				self.voice_request(Some(request), VoiceCmd::OfflineFlag { request, id, read });
 			}
 			// Engine-wide.
-			Command::CloseSession { .. }
+			Command::SetMytsIdentity(_)
+			| Command::CloseSession { .. }
 			| Command::TestMicrophone { .. }
 			| Command::SetSetting { .. }
 			| Command::ResetSetting { .. }

@@ -99,6 +99,15 @@ impl App {
 			return;
 		}
 		let mut options = VoiceOptions::new(&b.address, &b.nickname);
+		if let Some(spec) = &b.client_version {
+			match voelin_core::versions::resolve(spec) {
+				Ok(version) => options.client_version = version,
+				Err(error) => {
+					self.set_status(format!("Invalid client compatibility version: {error}"));
+					return;
+				}
+			}
+		}
 		options.identity = Some(self.identity_for(Some(b.id)));
 		options.server_password = self.secrets.get(&b.server_password_key()).ok().flatten();
 		options.channel = channel;

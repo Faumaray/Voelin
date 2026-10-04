@@ -1,0 +1,220 @@
+syntax = "proto2";
+
+package com.teamspeak.sync.proto;
+
+import "synchronization_common.proto";
+
+message Bookmark_Data {
+    optional string name = 1;
+    optional string address = 2;
+    optional uint32 port = 3;
+    optional string nickname = 4;
+    optional string phonetic_nickname = 5;
+    optional string identity = 6;
+    optional string server_password = 7;
+    optional string default_channel = 8;
+    optional string default_channel_password = 9;
+    optional uint64 default_channel_id = 10;
+    optional string capture_profile = 11;
+    optional string playback_profile = 12;
+    optional string hotkey_profile = 13;
+    optional bool autoconnect = 14;
+    optional string server_uid = 15;
+    optional string server_icon = 16;
+    optional string sound_pack = 17;
+    optional bool show_server_query_clients = 18;
+    
+    optional SubscriptionMode subscription_mode = 19;
+    enum SubscriptionMode {
+        Undefined = 0;
+        All = 1;
+        Current = 2;
+    }
+    
+    repeated uint64 subscribed_channel_ids = 20;
+    
+    repeated ChannelPassword channel_passwords = 21;
+    message ChannelPassword {
+        optional uint64 channel_id = 1;
+        optional string password = 2;
+    }
+    
+    optional bool send_mytsid_on_server = 22 [default = true];
+    optional bool announce_to_chat = 23 [default = false];
+    optional string resolved_server_nickname = 24;
+    optional bool connect_muted = 25 [default = false];
+}
+
+message Identity_Data {
+    optional string unique_identity = 1;
+    optional string id_name = 2;
+    optional string nickname = 3;
+    optional string phonetic_nickname = 4;
+    optional bool is_default = 5 [default = false];
+}
+
+message Whisper_list_data {
+    optional string uuid = 1;
+    optional string name = 2;
+    
+    optional WhisperListType type = 3;
+    enum WhisperListType {
+        WLT_INVALID = 0;
+        WLT_LIST = 1;
+        WLT_PREDEFINED = 2;
+    }
+    
+    optional int32 groupType = 4;
+    optional int32 groupTargetMode = 5;
+    optional uint64 targetGroupID = 6;
+    optional string targetGroupName = 7;
+    optional string targetServerUid = 8;
+    optional string targetServerName = 9;
+    
+    repeated WhisperEntry whisperListEntries = 10;
+    message WhisperEntry {
+        optional WhisperEntryType type = 1;
+        enum WhisperEntryType {
+            WET_INVALID = 0;
+            WET_CLIENT = 1;
+            WET_CHANNEL = 2;
+        }
+        
+        optional string name = 2;
+        optional string uid = 3;
+    }
+}
+
+message HotkeyProfile_data {
+    optional string uuid = 1;
+    optional string name = 2;
+    
+    repeated Hotkey hotkeys = 3;
+    message Hotkey {
+        optional OS os = 3;
+        enum OS {
+            Windows = 0;
+            OSX = 1;
+            Linux = 2;
+        }
+        
+        optional int32 event_type = 4;
+        optional string event_uuid = 5;
+        optional string event_mode = 6;
+        
+        repeated KeyDef keys = 7;
+        message KeyDef {
+            optional string identifier = 1;
+            optional string key = 2;
+        }
+        
+        optional uint32 action_type = 8;
+        optional string action_uuid = 9;
+        optional bool action_discard = 10 [default = false];
+        optional string action_mode = 11;
+        optional string action_flag = 12;
+        optional string action_description = 13;
+        optional string action_plugin = 14;
+        optional string action_away_message = 15;
+        optional string action_soundpack = 16;
+        optional string action_plugincommand = 17;
+        optional string action_plugindescription = 18;
+        optional string action_deviceuid = 19;
+        optional string action_devicename = 20;
+        optional string action_target = 21;
+        optional bool action_auto = 22 [default = false];
+        optional string action_profiles = 23;
+        optional bool action_active_tab = 24 [default = false];
+    }
+    
+    optional bool is_default = 4 [default = false];
+}
+
+message Add_on_data {
+    optional string uuid = 1;
+    optional bool enabled = 2;
+}
+
+message Chat_Credentials {
+    optional string domain = 1;
+    optional string username = 2;
+    optional string password = 3;
+}
+
+message Config_data {
+    optional int32 default_subscribe_mode = 1;
+    repeated string user_badges = 2;
+    optional bool show_user_badges = 3;
+    optional bytes global_presence_token = 4;
+    optional Chat_Credentials tschat_credentials = 5;
+    repeated TSCHAT_DE_Data tschat_de_data = 7;
+}
+
+message Item_Folder {
+    optional string folder_name = 1;
+    optional myteamspeak.proto.synchronization.Item_Class folder_type = 2;
+}
+
+message Group_Chats {
+    optional string category_name = 1;
+}
+
+message Contact {
+    optional string chat_room_id = 1;
+    optional string custom_name = 2;
+    optional string custom_category = 3;
+    
+    optional NotificationPreference notification_preference = 4;
+    enum NotificationPreference {
+        NOTIFY_ALWAYS = 0;
+        NOTIFY_EVERYONE_AND_SELF = 1;
+        NOTIFY_SELF = 2;
+        NOTIFY_NONE = 3;
+    }
+    
+    optional bool is_favourite = 5;
+    optional bool is_direct_chat = 6;
+    optional string mytsid = 7;
+    optional string chat_member_id = 8;
+}
+
+message Item_Data {
+    optional string item_uuid = 2;
+    optional string sync_version_uuid = 3;
+    
+    optional Manipulation_Flag manipulated = 4;
+    enum Manipulation_Flag {
+        ITEM_ADDED = 0;
+        ITEM_CHANGED = 1;
+        ITEM_DELETED = 2;
+        ITEM_NOT_MANIPULATED = 3;
+    }
+    
+    optional string last_known_version = 5;
+    optional uint32 item_type = 6;
+    optional string parent = 7;
+    optional string sort_order = 8;
+    optional uint64 timestamp = 9;
+    
+    oneof item_content {
+        Bookmark_Data bookmark = 16;
+        Identity_Data identity = 17;
+        Whisper_list_data whisperlist = 18;
+        HotkeyProfile_data hotkeyprofile = 19;
+        Add_on_data add_on = 20;
+        Config_data config = 21;
+        Item_Folder item_folder = 22;
+        Group_Chats group_chats = 24;
+        Contact contact = 25;
+    }
+}
+
+message TSCHAT_DE_Data {
+    optional string url = 1;
+    optional string identity = 2;
+    optional string username = 3;
+    optional string server_id = 4;
+    optional string address = 5;
+    optional string port = 6;
+    optional string name = 7;
+}

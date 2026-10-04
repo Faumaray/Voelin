@@ -177,7 +177,7 @@ Settings sections (`settings:<section>`):
 
 | Section | Holds |
 |---|---|
-| `account` | The identity in use (nickname, TeamSpeak 3 and 6 unique ids, security level) and why there is no myTeamSpeak sign-in |
+| `account` | The identity in use (nickname, TeamSpeak 3 and 6 unique ids, security level); on desktop, the primary myTeamSpeak profile, login/OTP, session status, sign-out and official browser account-management actions |
 | `profiles` (also `identities`) | Identities with where they came from: rename, use as default (the store's default, `Store::set_default_identity`), export as a TeamSpeak 3 .ini, delete, raise the security level on every core; the import of the official clients' identities on start (`identity.import_from_teamspeak`) and by hand from their settings and .ini files (key material is never shown); the identity per server |
 | `appearance` | Theme, text size, the phone layout's width, the image cache |
 | `voice` | Microphone (device, test, level, noise suppression, echo cancellation, automatic gain), output (device, test sound, volume), streaming permissions, camera (device, preview with the background effect), video settings (resolution, frame rate 15 to 320 fps, codec, hardware acceleration, mirror), stream quality presets (Auto, 720p to 8K) with free bitrate entry (slider up to 60 Mbit/s, empty: automatic) and the upload it takes |
@@ -189,8 +189,20 @@ Settings sections (`settings:<section>`):
 | `integrations` | The gateways of our servers with their features, and their administration for admins (configuration keys, permission rules); FFmpeg, the video encoders and decoders, what works and why not |
 | `advanced` | Encoder and decoder, hardware acceleration and decoding, SRTP profiles, chat history, cache, transfers, logs and crash reports, and every setting by its key as JSON |
 
-Every control reads and writes `voelin_core::settings` and applies at
-once; numbers are typed freely next to the presets.
+Settings controls read and write `voelin_core::settings` and apply at once;
+numbers are typed freely next to the presets.
+
+Desktop startup shows the shared myTeamSpeak login page until a saved session
+is validated, a login succeeds, or the user chooses Continue without an account.
+The signed-in username/email becomes the primary app profile in the desktop
+user card and mobile You page; it does not replace server identities or bookmark
+nicknames. Settings → My Account reuses the form, supports retry/OTP/sign-out,
+and opens official browser flows for registration, activation, recovery and
+account management. Account and renewal material live only in the keyring;
+passwords and one-time codes are cleared after submission. Expired sessions
+require fresh sign-in because password login supplies no renewal auth token.
+See [research/myteamspeak.md](research/myteamspeak.md) for protocol evidence
+and remaining cloud-sync limitations.
 
 ## The Stream Studio
 

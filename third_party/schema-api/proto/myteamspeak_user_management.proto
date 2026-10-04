@@ -1,0 +1,459 @@
+syntax = "proto3";
+
+package com.teamspeak.myteamspeak.proto.management.user;
+
+import "myteamspeak_common.proto";
+import "global_badge_list.proto";
+
+option java_generic_services = true;
+option cc_generic_services = true;
+option optimize_for = SPEED;
+
+service UserManagementService {
+    rpc listUser(SearchLimit) returns (UserLightDataList);
+    rpc getUserInfo(Request) returns (UserLightData);
+    rpc getKey(Request) returns (KeyData);
+    rpc deleteUser(Request) returns (UserManagementReturnCode);
+    rpc activateUser(Activation) returns (UserManagementReturnCode);
+    rpc requestNewActivation(Activation) returns (UserManagementReturnCode);
+    rpc setAddonDevStatus(AddonDevRequest) returns (AddonDevReturnCode);
+    rpc requestPasswordReset(PasswordResetRequest) returns (UserManagementReturnCode);
+    rpc resetPassword(PasswordResetRequest) returns (UserManagementReturnCode);
+    rpc generateBadgeCodes(BadgeCodesRequest) returns (BadgeCodes);
+    rpc changeEmail(EmailChange) returns (UserManagementReturnCode);
+    rpc changeEmail2(EmailChange) returns (UserManagementReturnCode);
+    rpc changeEmail3(EmailChange) returns (UserManagementReturnCode);
+    rpc assignBadge(AssignBadgeRequest) returns (UserManagementReturnCode);
+    rpc getUserData(Request) returns (UserFullData);
+    rpc forceRename(UserRenameRequest) returns (UserManagementReturnCode);
+    rpc addBadge(AddBadgeRequest) returns (AddBadgeReturnCode);
+    rpc listBadges(Session) returns (ListBadgesReturnCode);
+    rpc getBadgeStatistics(BadgeStatisticsRequest) returns (BadgeStatisticsReturnCode);
+    rpc deleteBadge(Request) returns (DeleteBadgeReturnCode);
+    rpc updateBadge(UpdateBadgeRequest) returns (AddBadgeReturnCode);
+    rpc updateBadgeCode(BadgeCodesRequest) returns (BadgeCodeReturnCode);
+    rpc deleteBadgeCode(BadgeCodesRequest) returns (UserManagementReturnCode);
+    rpc listBadgeCodes(BadgeCodesRequest) returns (ListBadgeCodesResponse);
+    rpc addOAuthClient(OAuthClientRequest) returns (OAuthClientReturnCode);
+    rpc updateOAuthClient(OAuthClientRequest) returns (OAuthClientReturnCode);
+    rpc deleteOAuthClient(OAuthClientRequest) returns (UserManagementReturnCode);
+    rpc listOAuthClients(Request) returns (ListOAuthClientsReturnCode);
+    rpc searchUser(SearchTerm) returns (UserLightDataList);
+    rpc addPermission(PermissionRequest) returns (UserManagementReturnCode);
+    rpc removePermission(PermissionRequest) returns (UserManagementReturnCode);
+    rpc removeBadgeFromUser(AssignBadgeRequest) returns (UserManagementReturnCode);
+    rpc createCommunity(TSCommunityRequest) returns (TSCommunityList);
+    rpc listCommunities(TSCommunityListRequest) returns (TSCommunityList);
+    rpc updateCommunity(TSCommunityRequest) returns (TSCommunityList);
+    rpc setRenameAllowance(RenameAllowanceRequest) returns (UserManagementReturnCode);
+    rpc deleteTSChatAccount(Request) returns (UserManagementReturnCode);
+    rpc getUserStatistics(UserStatisticsRequest) returns (UserStatisticsResponse);
+    rpc getAllUserStatistics(UserStatisticsRequest) returns (AllUserStatisticsResponse);
+}
+
+message SearchLimit {
+    int32 request_size = 1;
+    string last_uuid = 2;
+}
+
+message Activation {
+    string email = 1;
+    string key = 2;
+}
+
+message Request {
+    string session = 3;
+    
+    oneof request_oneof {
+        string email = 1;
+        string uuid = 2;
+        string username = 4;
+        string self_deletion_validation_key = 5;
+    }
+}
+
+message AddonDevRequest {
+    string uuid = 1;
+    AddonDevStatus new_status = 2;
+    bool revoke = 3;
+    string author_name = 7;
+    PhoneNumber phone = 9;
+    string confirmation_code = 4;
+    string rejection_reason = 10;
+    string notes = 11;
+    
+    reserved 8;
+}
+
+message PhoneNumber {
+    string country_code = 1;
+    string national_number = 2;
+}
+
+message PasswordResetRequest {
+    string email = 1;
+    string key = 2;
+    string password = 3;
+}
+
+message BadgeCodesRequest {
+    string badge_uuid = 1;
+    int32 count = 2;
+    string expiry = 3;
+    bool multiple_use = 4;
+    int32 quota = 5;
+    int64 activation_start_timestamp = 6;
+    int64 activation_end_timestamp = 7;
+    string badge_code = 8;
+    string session = 9;
+    string generation_style = 10;
+}
+
+message ListBadgeCodesResponse {
+    bool success = 1;
+    string error = 2;
+    UserManagementErrorReturnCode error_code = 3;
+    repeated BadgeCodesRequest badge_codes = 4;
+}
+
+message UserLightDataList {
+    repeated UserLightData userlist = 1;
+    UserManagementErrorReturnCode error_code = 2;
+    bool success = 3;
+    string error_message = 4;
+}
+
+message UserLightData {
+    string uuid = 1;
+    string email = 2;
+    string username = 3;
+    UserDetailData details = 4;
+    UserManagementErrorReturnCode error_code = 5;
+}
+
+message UserDetailData {
+    bool haskey = 1;
+    bool hasbackupkey = 2;
+    int64 last_login = 3;
+    int64 last_update = 4;
+    int64 registration_date = 9;
+    repeated int32 limits = 5;
+    AddonDevStatus addon_dev = 6;
+    string author_name = 7;
+    string phone = 8;
+    string confirmation_code = 10;
+    Permissions permission = 11;
+}
+
+message KeyData {
+    bytes key = 1;
+    string error = 2;
+    UserManagementErrorReturnCode error_code = 3;
+}
+
+message AddonDevReturnCode {
+    bool success = 1;
+    string phone = 4;
+    string error = 2;
+    UserManagementErrorReturnCode error_code = 3;
+}
+
+message BadgeCodes {
+    repeated string codes = 1;
+    string error = 3;
+    UserManagementErrorReturnCode error_code = 2;
+}
+
+message EmailChange {
+    string email = 1;
+    string uuid = 2;
+    string validationKey = 3;
+    bytes key = 4;
+    string newPw = 5;
+    string currentPw = 6;
+    string session = 7;
+}
+
+message AssignBadgeRequest {
+    string badge_uuid = 2;
+    string reason = 3;
+    string session = 5;
+    
+    oneof user_identifier {
+        string email = 1;
+        string client_id = 4;
+    }
+}
+
+message UserFullData {
+    UserManagementReturnCode return_code = 1;
+    repeated string user_data_field = 2;
+}
+
+message UserRenameRequest {
+    string new_username = 2;
+    string session = 3;
+    
+    oneof target_user {
+        string current_username = 1;
+        string client_id = 4;
+    }
+}
+
+message BadgeCodeReturnCode {
+    bool success = 1;
+    string error = 2;
+    UserManagementErrorReturnCode error_code = 3;
+    BadgeCodesRequest badge_code_request = 4;
+}
+
+message AddBadgeReturnCode {
+    bool success = 1;
+    string badge_name = 2;
+    string badge_uuid = 3;
+    string badge_description = 4;
+    string badge_url = 5;
+    string error = 6;
+    UserManagementErrorReturnCode error_code = 7;
+}
+
+message UserManagementReturnCode {
+    bool success = 1;
+    string error = 2;
+    UserManagementErrorReturnCode error_code = 3;
+}
+
+message AddBadgeRequest {
+    string badgeName = 1;
+    string badgeDescription = 2;
+    string graphicSvg = 3;
+    string graphicSvgDetail = 4;
+    string graphicPng16 = 5;
+    string graphicPng64 = 6;
+    string session = 7;
+}
+
+message UpdateBadgeRequest {
+    string badgeUuid = 1;
+    AddBadgeRequest addBadgeRequest = 2;
+}
+
+message ListBadgesReturnCode {
+    bool success = 1;
+    cloud.BadgeList badgeList = 2;
+    string error = 3;
+    UserManagementErrorReturnCode error_code = 4;
+}
+
+message DeleteBadgeReturnCode {
+    bool success = 1;
+    string badge_uuid = 2;
+    string error = 3;
+    UserManagementErrorReturnCode error_code = 4;
+}
+
+message OAuthClient {
+    repeated string allowedCorsOrigins = 4;
+    repeated string audience = 5;
+    bool backchannelLogoutSessionRequired = 6;
+    string backchannelLogoutUri = 7;
+    string clientId = 8;
+    string clientName = 9;
+    string clientSecret = 10;
+    int64 clientSecretExpiresAt = 11;
+    string clientUri = 12;
+    repeated string contacts = 13;
+    int64 createdAt = 14;
+    bool frontchannelLogoutSessionRequired = 15;
+    string frontchannelLogoutUri = 16;
+    repeated string grantTypes = 17;
+    string logoUri = 18;
+    string owner = 19;
+    string policyUri = 20;
+    repeated string postLogoutRedirectUris = 21;
+    repeated string redirectUris = 22;
+    repeated string requestUris = 23;
+    repeated string responseTypes = 24;
+    string scope = 25;
+    string sectorIdentifierUri = 26;
+    string subjectType = 27;
+    string tokenEndpointAuthMethod = 28;
+    string tosUri = 29;
+    int64 updatedAt = 30;
+}
+
+message OAuthClientRequest {
+    string session = 1;
+    OAuthClient oauth_client = 2;
+}
+
+message OAuthClientReturnCode {
+    bool success = 1;
+    string error = 2;
+    UserManagementErrorReturnCode error_code = 3;
+    OAuthClient oauth_client = 4;
+}
+
+message ListOAuthClientsReturnCode {
+    bool success = 1;
+    string error = 2;
+    UserManagementErrorReturnCode error_code = 3;
+    repeated OAuthClient oauth_clients = 4;
+}
+
+message SearchTerm {
+    UserSearchCriterionSelector criterion = 1;
+    string content = 2;
+    string session = 3;
+    int64 limit = 4;
+    int64 offset = 5;
+    bool partial_search = 6;
+}
+
+message PermissionRequest {
+    string session = 1;
+    string client_id = 2;
+    string permission = 3;
+}
+
+message TSCommunity {
+    string entity_id = 1;
+    string customer_id = 2;
+    string subscription_id = 3;
+    string client_id = 4;
+    string community_id = 5;
+    int64 created = 6;
+    int64 updated = 7;
+    TSCommunityState state = 8;
+}
+
+message TSCommunityList {
+    repeated TSCommunity community = 1;
+    UserManagementReturnCode return_code = 2;
+}
+
+message TSCommunityRequest {
+    string session = 1;
+    TSCommunity community = 2;
+}
+
+message TSCommunityListRequest {
+    TSCommunityRequest request = 1;
+    int64 limit = 2;
+    int64 offset = 3;
+}
+
+message RenameAllowanceRequest {
+    string session = 1;
+    int32 allowance = 2;
+    string client_id = 3;
+}
+
+message BadgeStatisticsRequest {
+    string session = 1;
+    int32 limit = 2;
+    int32 offset = 3;
+}
+
+message BadgeStatistic {
+    string badge_uuid = 1;
+    string badge_name = 2;
+    string badge_description = 3;
+    string badge_url = 4;
+    int32 user_count = 5;
+}
+
+message BadgeStatisticsReturnCode {
+    bool success = 1;
+    string error = 2;
+    UserManagementErrorReturnCode error_code = 3;
+    repeated BadgeStatistic badge_statistics = 4;
+    int32 total_count = 5;
+}
+
+message UserStatisticsRequest {
+    string session = 1;
+    string statistic_name = 2;
+}
+
+message UserStatistic {
+    string statistic_name = 1;
+    int64 statistic_value = 2;
+    string last_updated = 3;
+}
+
+message UserStatisticsResponse {
+    bool success = 1;
+    string error = 2;
+    UserManagementErrorReturnCode error_code = 3;
+    UserStatistic statistic = 4;
+}
+
+message AllUserStatisticsResponse {
+    bool success = 1;
+    string error = 2;
+    UserManagementErrorReturnCode error_code = 3;
+    repeated UserStatistic statistics = 4;
+}
+
+enum TSCommunityState {
+    TS_COMMUNITY_STATE_UNKNOWN = 0;
+    TS_COMMUNITY_STATE_ACTIVE = 1;
+    TS_COMMUNITY_STATE_SUSPENDED = 2;
+    TS_COMMUNITY_STATE_DELETED = 3;
+}
+
+enum UserSearchCriterionSelector {
+    USER_SEARCH_CRITERION_UNSPECIFIED = 0;
+    USER_SEARCH_CRITERION_NAME = 1;
+    USER_SEARCH_CRITERION_EMAIL = 2;
+    USER_SEARCH_CRITERION_CLIENT_ID = 3;
+    USER_SEARCH_CRITERION_BADGE = 4;
+    USER_SEARCH_CRITERION_PERMISSION = 5;
+    USER_SEARCH_CRITERION_MXID = 6;
+    USER_SEARCH_CRITERION_NAMEDSERVER = 7;
+}
+
+enum UserManagementErrorReturnCode {
+    UNKNOWN_USERMANAGEMENTERRORRETURNCODE = 0;
+    USERMANAGEMENT_ERROR_NO_USER_FOUND = 100;
+    USERMANAGEMENT_ERROR_DATABASE = 101;
+    USERMANAGEMENT_ERROR_USER_ACTIVATE_FAILED = 102;
+    USERMANAGEMENT_ERROR_USER_REQUEST_CODE = 103;
+    USERMANAGEMENT_ERROR_INVALID_REQUEST = 104;
+    USERMANAGEMENT_ERROR_PASSWORD_RESET_FAILED = 105;
+    USERMANAGEMENT_ERROR_ALREADY_TAKEN = 106;
+    USERMANAGEMENT_ERROR_INVALID_PARAMETER = 107;
+    USERMANAGEMENT_ERROR_CHANGE_EMAIL_FAILED = 108;
+    USERMANAGEMENT_ERROR_EMPTY_KEY = 109;
+    USERMANAGEMENT_ERROR_CHANGE_EMAIL_FAILED_MISSING_FIELD = 110;
+    USERMANAGEMENT_ERROR_CHANGE_EMAIL_FAILED_FUNCTIONAL_EMAIL_FORMAT = 111;
+    USERMANAGEMENT_ERROR_CHANGE_EMAIL_FAILED_FUNCTIONAL_EQUAL_EMAIL = 112;
+    USERMANAGEMENT_ERROR_CHANGE_EMAIL_FAILED_FUNCTIONAL_ALREADY_PENDING = 113;
+    USERMANAGEMENT_ERROR_CHANGE_EMAIL_FAILED_FUNCTIONAL_TARGET_EXISTS = 114;
+    USERMANAGEMENT_ERROR_CHANGE_EMAIL_FAILED_FUNCTIONAL_WRONG_STEP = 115;
+    USERMANAGEMENT_ERROR_CHANGE_EMAIL_FAILED_FUNCTIONAL_VALIDATION_KEY = 116;
+    USERMANAGEMENT_ERROR_CHANGE_EMAIL_FAILED_FUNCTIONAL_NO_PROCESS = 117;
+    USERMANAGEMENT_ERROR_CHANGE_EMAIL_FAILED_FUNCTIONAL_NOT_VERIFIED = 118;
+    USERMANAGEMENT_ERROR_CHANGE_EMAIL_FAILED_FUNCTIONAL_WRONG_PASSWORD = 119;
+    USERMANAGEMENT_ERROR_BLACKLISTED = 120;
+    USERMANAGEMENT_ERROR_UPLOAD_TO_AWS_FAILED = 121;
+    USERMANAGEMENT_ERROR_UPLOAD_TO_ELASTIC_FAILED = 122;
+    USERMANAGEMENT_ERROR_INSUFFICIENT_PERMISSION = 123;
+    USERMANAGEMENT_ERROR_DELETE_FROM_AWS_FAILED = 124;
+    USERMANAGEMENT_ERROR_GET_FROM_AWS_FAILED = 125;
+    USERMANAGEMENT_ERROR_DELETE_FROM_ELASTIC_FAILED = 126;
+    USERMANAGEMENT_ERROR_GET_FROM_ELASTIC_FAILED = 127;
+    USERMANAGEMENT_ERROR_IO_FAILED = 128;
+    USERMANAGEMENT_ERROR_OAUTH_CLIENT_NOT_FOUND = 129;
+    USERMANAGEMENT_ERROR_OAUTH_CLIENT_EXISTS = 130;
+    USERMANAGEMENT_ERROR_USER_ACTIVATION_MISSING_FIELD_EMAIL = 131;
+    USERMANAGEMENT_ERROR_USER_ACTIVATION_MISSING_FIELD_KEY = 132;
+    USERMANAGEMENT_ERROR_DISALLOWED_ORIGIN = 133;
+    USERMANAGEMENT_ERROR_USER_ACTIVATION_WRONG_KEY = 134;
+    USERMANAGEMENT_ERROR_USER_ACTIVATION_NO_PENDING_ACTIVATION = 135;
+    USERMANAGEMENT_ERROR_USER_DELETION_USER_DB_ENTRY = 136;
+    USERMANAGEMENT_ERROR_USER_DELETION_KEY_MISMATCH = 137;
+    USERMANAGEMENT_ERROR_USER_DELETION_STORE_KEY = 138;
+    USERMANAGEMENT_ERROR_USER_DELETION_NOT_ACTIVATED = 139;
+}

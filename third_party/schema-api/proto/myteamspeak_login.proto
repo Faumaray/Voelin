@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+package com.teamspeak.myteamspeak.proto.login;
+
+import "myteamspeak_common.proto";
+
+option java_generic_services = true;
+option cc_generic_services = true;
+option optimize_for = SPEED;
+
+service LoginService {
+    rpc session(Session) returns (LoginStatus);
+    rpc deleteSession(Session) returns (LoginStatus);
+    rpc login(LoginData) returns (LoginSession);
+    rpc requestAuthToken(AuthTokenRequest) returns (AuthTokenReply);
+    rpc loginWithAuthToken(AuthTokenLogin) returns (LoginSession);
+    rpc loginWithRenewalToken(RenewalTokenLogin) returns (LoginSession);
+    rpc getAuthTokenList(AuthTokenListRequest) returns (AuthTokenListReply);
+    rpc expireAuthTokenAccess(AuthTokenExpireRequest) returns (AuthTokenExpireReply);
+    rpc deleteAccount(AccountStatusInfo) returns (AccountStatusReply);
+    rpc suspendAccount(AccountStatusInfo) returns (AccountStatusReply);
+    rpc reactivateAccount(AccountStatusInfo) returns (AccountStatusReply);
+    rpc listSuspensionReasonForUser(AccountEmail) returns (SuspensionReasonForUserReply);
+}
+
+message requestExpireTime {
+    string uuid = 1;
+}
+
+message replyExpireTime {
+    int64 purge = 1;
+}
+
+message AuthTokenListRequest {
+    string email = 1;
+    string password = 2;
+}
+
+message AuthTokenListReply {
+    repeated Entry entries = 1;
+    message Entry {
+        uint64 creation = 1;
+        string device_description = 2;
+        string id = 3;
+    }
+}
+
+message AuthTokenExpireRequest {
+    string email = 1;
+    string password = 2;
+    repeated string id = 3;
+}
+
+message AuthTokenExpireReply {
+    bool success = 1;
+    string error_msg = 2;
+}
+
+message AccountStatusInfo {
+    string email = 1;
+    string reason = 2;
+}
+
+message AccountStatusReply {
+    bool success = 1;
+    string error_msg = 2;
+}
+
+message AccountEmail {
+    string email = 1;
+}
+
+message SuspensionReasonForUserReply {
+    string client_id = 1;
+    
+    repeated Reason reasons = 2;
+    message Reason {
+        string email = 1;
+        int64 timestamp = 2;
+        string reason = 3;
+    }
+}

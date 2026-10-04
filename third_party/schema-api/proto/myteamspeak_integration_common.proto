@@ -1,0 +1,78 @@
+syntax = "proto3";
+
+package com.teamspeak.myteamspeak.proto.integration;
+
+message UserIntegrationSubscriptionInfoRequestData {
+    IntegrationInfo integrations = 1;
+    bytes signature = 2;
+    uint64 timestamp = 3;
+    string virtualserver_id = 4;
+}
+
+message IntegrationResponse {
+    bytes integration_id = 1;
+    IntegrationType type = 2;
+    string special_information = 3;
+    uint64 cache_valid_timestamp = 4;
+    ResponseSpecifier response_specifier = 5;
+}
+
+message IntegrationResponseListData {
+    repeated IntegrationResponse list = 1;
+}
+
+message IntegrationResponseList {
+    IntegrationResponseListData data = 1;
+    bytes signature = 2;
+    bytes signing_certificate = 3;
+    uint64 timestamp = 4;
+}
+
+message IntegrationInfo {
+    repeated Entry entry = 1;
+    message Entry {
+        bytes integration_id = 1;
+        IntegrationType type = 2;
+    }
+}
+
+message ResponseSpecifier {
+    SpecifierType specifier_type = 1;
+    string value = 2;
+}
+
+enum SpecifierType {
+    SPECIFIER_TYPE_INVALID = 0;
+    SUBSCRIPTION_TYPE = 1;
+    RELATIONSHIP_TYPE = 2;
+    TEST_RESPONSE_TYPE = 100;
+    ANOTHER_TEST_RESPONSE_TYPE = 101;
+}
+
+enum IntegrationType {
+    INTEGRATION_TYPE_INVALID = 0;
+    TWITCH = 1;
+    TEST_INTEGRATION = 100;
+}
+
+enum IntegrationBindingStatus {
+    STATUS_INVALID = 0;
+    STATUS_NOT_BOUND = 1;
+    STATUS_BOUND = 2;
+    STATUS_BINDING_IN_PROGRESS = 3;
+}
+
+enum IntegrationError {
+    INTEGRATION_ERROR_INVALID = 0;
+    INTEGRATION_ERROR_OK = 1;
+    INTEGRATION_ERROR_INVALID_USER = 2;
+    INTEGRATION_ERROR_INVALID_INTEGRATION = 3;
+    INTEGRATION_ERROR_INVALID_INTEGRATION_ID = 4;
+    INTEGRATION_ERROR_INVALID_PARAMETER = 5;
+    INTEGRATION_ERROR_INTERNAL = 6;
+    INTEGRATION_INFO_NOT_PRESENT_YET = 7;
+    INTEGRATION_ERROR_SESSION_EXPIRED = 8;
+    INTEGRATION_ERROR_SERVER_NOT_REACHABLE = 9;
+    INTEGRATION_ERROR_PENDING_PROCESS = 10;
+    INTEGRATION_ERROR_INVALID_TIMESTAMP = 11;
+}
