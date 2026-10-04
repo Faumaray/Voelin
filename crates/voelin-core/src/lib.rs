@@ -46,6 +46,7 @@ mod audio;
 mod book;
 pub mod cache;
 pub mod contacts;
+pub mod discover;
 pub mod files;
 pub mod gateway;
 pub mod history;

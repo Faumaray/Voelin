@@ -200,6 +200,22 @@ goes to the running capture at once (`Capture::follow_audio`, which calls
 to add sources to. With sample data `share:live` shares the test pattern
 with the sample studio's sources, live at once with sample viewers.
 
+## Adding a server
+
+The add-server dialog (`BookmarkDialog` in `screens/dialogs.slint`, logic in
+`servers.rs`) asks for the address (host, host:port, IP or server
+nickname; the resolver finds the port through SRV records and TSDNS) and
+an optional server password. *Advanced* (open when editing) has the rest,
+and empty fields there are filled in: the name is the address until the
+first connection, then the server's own name (`adopt_server_name`); the
+nickname is the default identity's (one imported from TeamSpeak keeps its
+nickname there), else the system user's, else "Voelin user"; the identity is the default one,
+there is no default channel; the gateway is looked up in DNS when the
+server is saved without one and when it connects
+([gateway-admin.md](gateway-admin.md#letting-voelin-find-the-gateway)),
+and one found is stored as if typed. `bookmark` and `bookmark:edit` open
+it (below).
+
 ## Adding a screen
 
 1. Write the screen in `ui/screens/<name>.slint` from the components
@@ -262,7 +278,7 @@ Environment variables (see `src/dev.rs`):
 - `VOELIN_DEMO_UI=1`: sample servers, channels, members, chat with emoji and
   a stream, without a server (nothing is stored).
 - `VOELIN_OPEN=<what>[,<what>...]`: `home`, `server`, `settings[:voice|keybinds|streaming|privacy|appearance]`,
-  `about`, `share[:live]`, `bookmark`, `emoji`, `client`, `panel`, `no-panel`,
+  `about`, `share[:live]`, `bookmark[:edit]`, `emoji`, `client`, `panel`, `no-panel`,
   `voice`, `pins`, `topics`, `topic:<id>`, `member`, `watch`, `popout`
   (the server page, above), `tab:<home|servers|chat|activity|you>` (phone
   layout). With sample data, `watch` plays the local test pattern in the
@@ -322,6 +338,7 @@ the window's size so the pointer is not over the window, and passes
 |---|---|---|---|---|
 | ![chat](screenshots/mobile-chat.png) | ![servers](screenshots/mobile-servers.png) | ![home](screenshots/mobile-home.png) | ![you](screenshots/mobile-you.png) | ![settings](screenshots/mobile-settings.png) |
 | ![voice channel](screenshots/mobile-voice.png) | ![activity](screenshots/mobile-activity.png) | ![studio](screenshots/mobile-studio.png) | ![share](screenshots/mobile-share.png) | ![sharing](screenshots/mobile-share-live.png) |
+| ![add server](screenshots/mobile-add-server.png) | | | | |
 
 ## Limits
 
