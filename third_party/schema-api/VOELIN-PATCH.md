@@ -9,7 +9,14 @@ Voelin consumes the message types, session helpers and wire codec via a path
 dependency with default features disabled. Generated gRPC clients are not used
 for myTeamSpeak's custom HTTP transport.
 
-The only upstream patch is an empty `[workspace]` table in `Cargo.toml`, matching
-Voelin's other vendored packages. This packaging change prevents Cargo from
-assigning the vendor to an enclosing checkout's workspace when Voelin itself is
-in a nested worktree. All Rust and protobuf sources remain unmodified.
+Two packaging patches in `Cargo.toml`; all Rust and protobuf sources remain
+unmodified:
+
+1. An empty `[workspace]` table, matching Voelin's other vendored packages. It
+   prevents Cargo from assigning the vendor to an enclosing checkout's
+   workspace when Voelin itself is in a nested worktree.
+2. tonic's TLS uses `tls-aws-lc` instead of `tls-ring`. Voelin's rustls already
+   uses aws-lc-rs (reqwest, str0m); with `ring` too, rustls cannot choose a
+   process-wide crypto provider and every TLS client built without an explicit
+   one panics (`wss://` gateway connections did). `voelin-core`'s
+   `one_rustls_crypto_provider` test fails if a second provider comes back.

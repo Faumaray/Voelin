@@ -1032,3 +1032,13 @@ fn command_session(command: &Command) -> SessionId {
 		}
 	}
 }
+
+/// The app has one rustls crypto provider. With two (aws-lc-rs and ring), a
+/// TLS client built without an explicit provider panics: `wss://` gateways
+/// did. This test's build has the app's TLS dependencies (reqwest here,
+/// tonic through the voelin-myts dev-dependency).
+#[cfg(test)]
+#[test]
+fn one_rustls_crypto_provider() {
+	let _ = rustls::ClientConfig::builder();
+}

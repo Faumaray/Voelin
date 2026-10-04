@@ -57,6 +57,8 @@ tsproto-packets = { path = "../proto/tsproto-packets" }
 tsproto-types = { path = "../proto/tsproto-types" }
 
 [dev-dependencies]
+# Already in the app's graph (reqwest); for one_rustls_crypto_provider.
+rustls = { version = "0.23", default-features = false }
 voelin-myts = { path = "../voelin-myts" }
 # `process`: the browser interop test drives Chromium through Node.js.
 tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "test-util"] }

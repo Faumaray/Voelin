@@ -17,7 +17,8 @@ gzip = ["tonic/gzip"]
 [dependencies]
 prost = "0.14"
 prost-types = "0.14"
-tonic = { version = "0.14", features = ["transport", "tls-ring", "tls-native-roots"] }
+# Voelin: aws-lc-rs (was tls-ring), the one rustls provider of the app (VOELIN-PATCH.md).
+tonic = { version = "0.14", features = ["transport", "tls-aws-lc", "tls-native-roots"] }
 tonic-prost = "0.14"
 thiserror = "2"
 prost-reflect = { version = "0.16", features = ["serde"], optional = true }
