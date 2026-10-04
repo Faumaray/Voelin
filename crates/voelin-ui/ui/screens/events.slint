@@ -1,0 +1,444 @@
+// A server's scheduled events (gateway `events`): the list with answers
+// (going, maybe, not going), who answered, reminders, scheduled streams;
+// creating, editing and deleting them. Also the entries above the channel
+// tree that lead here and to the members (design mockup 03).
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Bridge, EventItem, EventForm } from "../bridge.slint";
+import { Nav, Page } from "../nav.slint";
+import { Icon, Button, ButtonKind, IconButton, Chip, LiveBadge, NavItem, TextField, Field, Select, Toggle, ToggleRow, Modal, Divider, Banner, ScrollView } from "../components/index.slint";
+
+// Events and Members above the channel tree.
+export component ServerLinks inherits VerticalLayout {
+    spacing: Theme.space-1;
+    if Bridge.has-events: NavItem {
+        icon: Icons.calendar-days;
+        text: @tr("Events");
+        selected: Nav.page == Page.events;
+        clicked => { Nav.show(Page.events); }
+    }
+    // Not marked while the panel is open, as in the design: the header's
+    // members button shows that.
+    NavItem {
+        icon: Icons.users;
+        text: @tr("Members");
+        clicked => { Nav.show-members(); }
+    }
+}
+
+// One answer button: "Going · 12".
+component RsvpButton inherits Rectangle {
+    in property <string> text;
+    in property <int> count;
+    in property <bool> chosen;
+    in property <color> tone: Theme.accent;
+    callback clicked();
+    height: 32px;
+    width: row.preferred-width + 24px;
+    border-radius: Theme.radius-pill;
+    background: chosen ? tone.transparentize(0.7) : touch.has-hover ? Theme.surface-3 : Theme.surface-2;
+    border-width: 1px;
+    border-color: chosen ? tone : Theme.border-strong;
+    accessible-role: AccessibleRole.button;
+    accessible-label: text;
+    accessible-checkable: true;
+    accessible-checked: chosen;
+    accessible-action-default => { clicked(); }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+    row := HorizontalLayout {
+        alignment: center;
+        spacing: Theme.space-2;
+        if root.chosen: Icon {
+            source: Icons.check;
+            size: 14px;
+            tint: root.tone;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: root.text;
+            color: root.chosen ? Theme.text : Theme.text-secondary;
+            font-size: Theme.font-sm;
+            font-weight: Theme.weight-medium;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.count;
+            color: Theme.text-muted;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// One event as a card.
+component EventCard inherits Rectangle {
+    in property <EventItem> event;
+    // The phone: a smaller date, the lines wrap.
+    in property <bool> compact;
+    border-radius: Theme.radius-lg;
+    background: Theme.surface-2.transparentize(0.25);
+    border-width: 1px;
+    border-color: event.live ? Theme.live : event.expanded ? Theme.accent : Theme.border;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: event.title;
+    HorizontalLayout {
+        padding: root.compact ? Theme.space-3 : Theme.space-4;
+        spacing: root.compact ? Theme.space-3 : Theme.space-4;
+        // The date block.
+        VerticalLayout {
+            alignment: start;
+            Rectangle {
+                width: root.compact ? 48px : 64px;
+                height: root.compact ? 58px : 72px;
+                border-radius: Theme.radius-md;
+                background: Theme.accent-soft;
+                border-width: 1px;
+                border-color: Theme.accent.transparentize(0.5);
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: root.event.weekday;
+                        color: Theme.accent-text;
+                        font-size: Theme.font-xs;
+                        font-weight: Theme.weight-semibold;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: root.event.day;
+                        color: Theme.text;
+                        font-size: root.compact ? Theme.font-xl : Theme.font-2xl;
+                        font-weight: Theme.weight-bold;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: root.event.month;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-xs;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: Theme.space-2;
+            // The title, then its marks (under it where narrow).
+            FlexboxLayout {
+                spacing: Theme.space-2;
+                Text {
+                    text: root.event.title;
+                    color: Theme.text;
+                    font-size: Theme.font-lg;
+                    font-weight: Theme.weight-semibold;
+                    wrap: word-wrap;
+                }
+                if root.event.live: LiveBadge { }
+                if root.event.stream != "" && !root.event.live: Chip {
+                    text: @tr("Stream");
+                    icon: Icons.radio;
+                    tint: Theme.live;
+                }
+                if root.event.soon != "": Chip {
+                    text: root.event.soon;
+                    icon: Icons.clock;
+                    tint: Theme.warning;
+                }
+            }
+            FlexboxLayout {
+                spacing: Theme.space-4;
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    Icon {
+                        source: Icons.clock;
+                        size: 14px;
+                        tint: Theme.text-muted;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    Text {
+                        text: root.event.when;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    Icon {
+                        source: Icons.hash;
+                        size: 14px;
+                        tint: Theme.text-muted;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    Text {
+                        text: root.event.place;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                    }
+                }
+            }
+            if root.event.stream != "": HorizontalLayout {
+                spacing: Theme.space-2;
+                Icon {
+                    source: Icons.monitor;
+                    size: 14px;
+                    tint: Theme.live;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: root.event.stream;
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                    overflow: elide;
+                }
+            }
+            if root.event.description != "": Text {
+                text: root.event.description;
+                color: Theme.text-secondary;
+                wrap: word-wrap;
+            }
+            // The answers, then what can be done; they wrap where narrow.
+            FlexboxLayout {
+                spacing: Theme.space-2;
+                RsvpButton {
+                    text: @tr("Going");
+                    count: root.event.going;
+                    chosen: root.event.rsvp == "going";
+                    tone: Theme.success;
+                    clicked => { Bridge.rsvp(root.event.id, root.event.rsvp == "going" ? "" : "going"); }
+                }
+                RsvpButton {
+                    text: @tr("Maybe");
+                    count: root.event.maybe;
+                    chosen: root.event.rsvp == "maybe";
+                    tone: Theme.warning;
+                    clicked => { Bridge.rsvp(root.event.id, root.event.rsvp == "maybe" ? "" : "maybe"); }
+                }
+                RsvpButton {
+                    text: @tr("Not going");
+                    count: root.event.not-going;
+                    chosen: root.event.rsvp == "not_going";
+                    tone: Theme.danger;
+                    clicked => { Bridge.rsvp(root.event.id, root.event.rsvp == "not_going" ? "" : "not_going"); }
+                }
+                if root.event.live: Button {
+                    small: true;
+                    kind: ButtonKind.primary;
+                    icon: Icons.monitor;
+                    text: @tr("Watch");
+                    clicked => { Bridge.watch-event(root.event.id); }
+                }
+                Button {
+                    small: true;
+                    kind: ButtonKind.ghost;
+                    icon: root.event.expanded ? Icons.chevron-up : Icons.users;
+                    text: root.event.expanded ? @tr("Hide") : @tr("Who answered");
+                    clicked => { Bridge.toggle-event(root.event.id); }
+                }
+                if root.event.editable: IconButton {
+                    icon: Icons.pencil;
+                    label: @tr("Edit {}", root.event.title);
+                    size: 30px;
+                    icon-size: Theme.icon-sm;
+                    clicked => { Nav.edit-event(root.event.id); }
+                }
+                if root.event.editable: IconButton {
+                    icon: Icons.trash-2;
+                    label: @tr("Delete {}", root.event.title);
+                    size: 30px;
+                    icon-size: Theme.icon-sm;
+                    tint: Theme.danger;
+                    clicked => { Bridge.delete-event(root.event.id); }
+                }
+            }
+            if root.event.expanded: VerticalLayout {
+                spacing: Theme.space-2;
+                Divider { }
+                Text {
+                    text: root.event.attendees.length == 0 ? @tr("No answers yet.") : @tr("Answers");
+                    color: Theme.text-muted;
+                    font-size: Theme.font-sm;
+                }
+                FlexboxLayout {
+                    spacing: Theme.space-2;
+                    for person in root.event.attendees: Chip {
+                        text: person;
+                        icon: Icons.user;
+                        outlined: true;
+                    }
+                }
+            }
+            Text {
+                text: @tr("Created by {}", root.event.creator);
+                color: Theme.text-muted;
+                font-size: Theme.font-xs;
+            }
+        }
+    }
+}
+
+// The events of the current server.
+export component EventsPage inherits VerticalLayout {
+    in property <bool> compact;
+    padding: compact ? Theme.space-4 : Theme.space-6;
+    spacing: Theme.space-4;
+    // The phone's top bar already says "Events" and the server.
+    HorizontalLayout {
+        spacing: Theme.space-4;
+        alignment: root.compact ? end : stretch;
+        if !root.compact: Icon {
+            source: Icons.calendar-days;
+            size: 30px;
+            tint: Theme.accent-text;
+            y: (parent.height - self.height) / 2;
+        }
+        if !root.compact: VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: @tr("Events");
+                font-size: Theme.font-2xl;
+                font-weight: Theme.weight-bold;
+                color: Theme.text;
+            }
+            Text {
+                text: @tr("Scheduled on {}", Bridge.server-title);
+                color: Theme.text-secondary;
+                font-size: Theme.font-sm;
+                overflow: elide;
+            }
+        }
+        if Bridge.can-create-events: Button {
+            kind: ButtonKind.primary;
+            icon: Icons.calendar-plus;
+            text: @tr("Create Event");
+            y: (parent.height - self.height) / 2;
+            clicked => { Nav.create-event(); }
+        }
+    }
+    if !Bridge.has-events: Banner {
+        text: @tr("This server's gateway does not keep events (or there is no gateway).");
+        icon: Icons.info;
+        tone: Theme.info;
+    }
+    if Bridge.has-events && Bridge.events.length == 0: Text {
+        text: Bridge.events-loading ? @tr("Loading events…") : @tr("Nothing scheduled. Create an event to invite people, or schedule a stream.");
+        color: Theme.text-muted;
+        wrap: word-wrap;
+    }
+    sv := ScrollView {
+        vertical-stretch: 1;
+        VerticalLayout {
+            width: sv.visible-width - Theme.space-2;
+            spacing: Theme.space-3;
+            alignment: start;
+            for event in Bridge.events: EventCard {
+                event: event;
+                compact: root.compact;
+            }
+        }
+    }
+}
+
+// Create or edit an event.
+export component EventDialog inherits Modal {
+    in-out property <EventForm> form;
+    callback done();
+    title: form.id < 0 ? @tr("Create Event") : @tr("Edit Event");
+    subtitle: @tr("Everyone on {} can see it and answer.", Bridge.server-title);
+    icon: Icons.calendar-plus;
+    card-width: 560px;
+    card-height: 660px;
+    dismissed => { done(); }
+    ScrollView {
+        vertical-stretch: 1;
+        VerticalLayout {
+            spacing: Theme.space-4;
+            padding-right: Theme.space-3;
+            alignment: start;
+            Field {
+                label: @tr("Title");
+                TextField { text <=> form.title; placeholder: @tr("Raid night"); label: @tr("Title"); }
+            }
+            Field {
+                label: @tr("Description");
+                TextField { text <=> form.description; placeholder: @tr("What happens, what to bring"); label: @tr("Description"); }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-4;
+                Field {
+                    label: @tr("Starts");
+                    hint: @tr("YYYY-MM-DD HH:MM, local time");
+                    TextField { text <=> form.start; placeholder: "2026-10-04 19:00"; icon: Icons.calendar; label: @tr("Starts"); }
+                }
+                Field {
+                    label: @tr("Ends (optional)");
+                    hint: @tr("Empty: no end");
+                    TextField { text <=> form.end; placeholder: "2026-10-04 21:00"; icon: Icons.clock; label: @tr("Ends"); }
+                }
+            }
+            Field {
+                label: @tr("Where");
+                Select {
+                    model: Bridge.event-channels;
+                    current-index <=> form.channel;
+                    icon: Icons.hash;
+                    label: @tr("Channel");
+                }
+            }
+            ToggleRow {
+                icon: Icons.radio;
+                text: @tr("A scheduled stream");
+                description: @tr("Linked to the stream directory once the host goes live.");
+                checked <=> form.stream;
+            }
+            if form.stream: HorizontalLayout {
+                spacing: Theme.space-4;
+                Field {
+                    label: @tr("Stream title");
+                    TextField { text <=> form.stream-title; label: @tr("Stream title"); }
+                }
+                Field {
+                    label: @tr("Game or subject");
+                    TextField { text <=> form.game; label: @tr("Game or subject"); }
+                }
+            }
+            if Nav.event-error != "": Banner {
+                text: Nav.event-error;
+                tone: Theme.danger;
+            }
+        }
+    }
+    HorizontalLayout {
+        alignment: end;
+        spacing: Theme.space-3;
+        if form.id >= 0: Button {
+            kind: ButtonKind.danger;
+            icon: Icons.trash-2;
+            text: @tr("Delete");
+            clicked => {
+                Bridge.delete-event(form.id);
+                done();
+            }
+        }
+        Rectangle { horizontal-stretch: 1; }
+        Button {
+            text: @tr("Cancel");
+            clicked => { done(); }
+        }
+        Button {
+            kind: ButtonKind.primary;
+            icon: Icons.check;
+            text: form.id < 0 ? @tr("Create") : @tr("Save");
+            enabled: form.title != "" && form.start != "";
+            clicked => {
+                Nav.event-error = Bridge.save-event(form);
+                if Nav.event-error == "" {
+                    done();
+                }
+            }
+        }
+    }
+}

@@ -1,46 +1,25 @@
-//! Settings → Identities: the stored identities, which one servers see us
-//! as (the default), and the import of the official clients' identities on
-//! start (`voelin_core::identity::import_new`, app.rs).
+//! The identity servers see us as: the store's default (schema 4,
+//! `Store::default_identity`), chosen under Settings → Profiles, and the
+//! import of the official clients' identities on start
+//! (`voelin_core::identity::import_new`, app.rs). The rest of the Profiles
+//! page is in `settings_pages.rs`.
 
-use slint::ComponentHandle;
 use tracing::warn;
 use voelin_core::settings::IDENTITY_IMPORT;
-use voelin_store::{IdentityEntry, IdentityOrigin};
+use voelin_store::IdentityOrigin;
 
-use crate::app::{App, Bridge, IdentityItem, model};
-use crate::vm::avatar;
+use crate::app::App;
 
-/// A row of the identities card.
-fn item(entry: &IdentityEntry) -> IdentityItem {
-	let origin = match entry.origin {
-		IdentityOrigin::Imported => "From TeamSpeak",
-		IdentityOrigin::Created | IdentityOrigin::User => "Made in Voelin",
-	};
-	IdentityItem {
-		id: entry.id as i32,
-		name: entry.name.clone().into(),
-		detail: format!("{origin} · level {}", entry.level).into(),
-		uid: entry.uid.clone().into(),
-		initials: avatar::initials(&entry.name).into(),
-		tint: avatar::tint(&entry.name),
-		is_default: entry.is_default,
+/// Where an identity came from, as Profiles says it.
+pub(crate) fn origin_label(origin: IdentityOrigin) -> &'static str {
+	match origin {
+		IdentityOrigin::Created => "Made in Voelin",
+		IdentityOrigin::Imported => "Imported",
+		IdentityOrigin::User => "Chosen by you",
 	}
 }
 
 impl App {
-	pub(crate) fn refresh_identities(&self) {
-		let Some(ui) = self.ui.upgrade() else { return };
-		let bridge = ui.global::<Bridge>();
-		let mut entries = self.store.identities().unwrap_or_default();
-		// A store from before defaults were marked: the first one.
-		let default = self.store.default_identity().ok().flatten().map(|e| e.id);
-		for entry in &mut entries {
-			entry.is_default = Some(entry.id) == default;
-		}
-		bridge.set_identities(model(entries.iter().map(item).collect()));
-		bridge.set_identity_import(self.prefs.get(&IDENTITY_IMPORT));
-	}
-
 	/// The user's choice of the identity servers see us as, from the next
 	/// connection on; no import replaces it.
 	pub(crate) fn use_identity(&mut self, id: i64) {
@@ -79,23 +58,9 @@ mod tests {
 
 	#[test]
 	fn rows_say_where_an_identity_came_from() {
-		let entry = |origin, is_default| IdentityEntry {
-			id: 3,
-			name: "Main Nick".into(),
-			uid: "uid=".into(),
-			level: 8,
-			origin,
-			is_default,
-		};
-		let row = item(&entry(IdentityOrigin::Imported, true));
-		assert_eq!((row.id, row.name.as_str(), row.uid.as_str()), (3, "Main Nick", "uid="));
-		assert_eq!(row.detail, "From TeamSpeak · level 8");
-		assert!(row.is_default);
-		assert_eq!(row.initials, avatar::initials("Main Nick"));
-		for origin in [IdentityOrigin::Created, IdentityOrigin::User] {
-			let row = item(&entry(origin, false));
-			assert_eq!(row.detail, "Made in Voelin · level 8");
-			assert!(!row.is_default);
-		}
+		assert_eq!(origin_label(IdentityOrigin::Created), "Made in Voelin");
+		assert_eq!(origin_label(IdentityOrigin::Imported), "Imported");
+		// Made by the app, then chosen: an import never replaces it.
+		assert_eq!(origin_label(IdentityOrigin::User), "Chosen by you");
 	}
 }

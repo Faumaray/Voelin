@@ -9489,6 +9489,7 @@ dependencies = [
  "toml",
  "tracing",
  "tsclientlib",
+ "tsproto",
  "tsproto-packets",
  "tsproto-types",
  "voelin-audio",

@@ -222,7 +222,9 @@ for Home's friends list, and records sightings in one write per change. A
 contact's mute and volume apply to their voice in every session. Messages of
 blocked contacts are flagged (`ChatMessage::blocked`, live and in history);
 their private messages and pokes are dropped or flagged per
-`privacy.block_mode`. `stream.permissions = friends` lets friends watch our
+`privacy.block_mode`. `privacy.private_messages` and `privacy.pokes`
+(everyone, friends, nobody) drop those of everyone else.
+`stream.permissions = friends` lets friends watch our
 stream without asking and asks for everyone else.
 
 ## Streams

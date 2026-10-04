@@ -105,6 +105,134 @@ pub fn appearance_keys() -> [&'static dyn voelin_core::settings::Setting; 5] {
 	[&UI_THEME, &UI_FONT_SCALE, &UI_NARROW_BREAKPOINT, &UI_IMAGE_CACHE_MB, &UI_MEMBERS_WIDTH]
 }
 
+/// What a kind of notification does: nothing, the bell, or the bell and a
+/// desktop notification.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotifyLevel {
+	Off,
+	App,
+	#[default]
+	Desktop,
+}
+
+impl NotifyLevel {
+	pub fn index(self) -> i32 {
+		self as i32
+	}
+
+	pub fn from_index(index: i32) -> Self {
+		match index {
+			0 => Self::Off,
+			1 => Self::App,
+			_ => Self::Desktop,
+		}
+	}
+}
+
+const NOTIFY_LEVELS: Kind = Kind::Choice(&["off", "app", "desktop"]);
+
+/// `notify.*`: what the bell and the desktop say about each kind.
+pub static NOTIFY_MENTIONS: Key<NotifyLevel> = Key::new(
+	"notify.mentions",
+	NOTIFY_LEVELS,
+	"Our name in a channel or server chat: off, app (the bell) or desktop.",
+	NotifyLevel::default,
+);
+pub static NOTIFY_MESSAGES: Key<NotifyLevel> = Key::new(
+	"notify.private_messages",
+	NOTIFY_LEVELS,
+	"Private messages: off, app (the bell) or desktop.",
+	NotifyLevel::default,
+);
+pub static NOTIFY_POKES: Key<NotifyLevel> =
+	Key::new("notify.pokes", NOTIFY_LEVELS, "Pokes: off, app (the bell) or desktop.", || {
+		NotifyLevel::Desktop
+	});
+pub static NOTIFY_EVENTS: Key<NotifyLevel> = Key::new(
+	"notify.event_reminders",
+	NOTIFY_LEVELS,
+	"Reminders of scheduled events: off, app (the bell) or desktop.",
+	NotifyLevel::default,
+);
+pub static NOTIFY_FRIENDS: Key<NotifyLevel> = Key::new(
+	"notify.friends_online",
+	NOTIFY_LEVELS,
+	"Friends coming online: off, app (the bell) or desktop.",
+	|| NotifyLevel::App,
+);
+
+/// `video.camera`: the camera of the preview and the default of camera
+/// sources (a device id; empty: the first camera).
+pub static VIDEO_CAMERA: Key<String> = Key::new(
+	"video.camera",
+	Kind::Text { suggestions: &[] },
+	"Camera device (empty: the first one).",
+	String::new,
+);
+
+/// `video.background`: the camera's background effect.
+pub static VIDEO_BACKGROUND: Key<String> = Key::new(
+	"video.background",
+	Kind::Choice(&["none", "blur"]),
+	"Background effect of the camera: none or blur.",
+	|| "none".into(),
+);
+
+/// `video.resolution`: the camera's capture size, `auto` or `WIDTHxHEIGHT`.
+pub static VIDEO_RESOLUTION: Key<String> = Key::new(
+	"video.resolution",
+	Kind::Text { suggestions: &["auto", "1280x720", "1920x1080", "2560x1440"] },
+	"Camera resolution: auto or WIDTHxHEIGHT.",
+	|| "auto".into(),
+)
+.validated(valid_resolution);
+
+/// `video.mirror`: show our camera mirrored, as in a mirror.
+pub static VIDEO_MIRROR: Key<bool> =
+	Key::new("video.mirror", Kind::Bool, "Show our camera mirrored.", || true);
+
+/// `ui.image_preview_kb`: linked pictures up to this size are downloaded
+/// and shown in the chat (0: never). No maximum.
+pub static UI_IMAGE_PREVIEW_KB: Key<u32> = Key::new(
+	"ui.image_preview_kb",
+	Kind::UInt { min: 0 },
+	"Show pictures linked in chat up to this size in KB (0: never).",
+	|| 8192,
+);
+
+#[allow(clippy::ptr_arg)] // a validation of `Key<String>` is `fn(&String)`
+fn valid_resolution(text: &String) -> Result<(), String> {
+	if text == "auto" || parse_size(text).is_some() {
+		Ok(())
+	} else {
+		Err("auto or WIDTHxHEIGHT, e.g. 1280x720".into())
+	}
+}
+
+/// `1280x720` → (1280, 720), both above 0.
+pub fn parse_size(text: &str) -> Option<(u32, u32)> {
+	let (w, h) = text.trim().split_once(['x', 'X', '×'])?;
+	let (w, h) = (w.trim().parse().ok()?, h.trim().parse().ok()?);
+	(w > 0 && h > 0).then_some((w, h))
+}
+
+/// The keys of the home, messages and settings pages, for registering.
+pub fn page_keys() -> [&'static dyn voelin_core::settings::Setting; 10] {
+	[
+		&NOTIFY_MENTIONS,
+		&NOTIFY_MESSAGES,
+		&NOTIFY_POKES,
+		&NOTIFY_EVENTS,
+		&NOTIFY_FRIENDS,
+		&VIDEO_CAMERA,
+		&VIDEO_BACKGROUND,
+		&VIDEO_RESOLUTION,
+		&VIDEO_MIRROR,
+		&UI_IMAGE_PREVIEW_KB,
+	]
+}
+
 /// Frame rates and bitrates (kbit/s) the share dialog offers; any other
 /// value can be typed in.
 pub const FPS_CHOICES: [u32; 3] = [15, 30, 60];
@@ -362,6 +490,19 @@ mod tests {
 		assert_eq!(parse_positive(" 144 "), Some(144));
 		assert_eq!(parse_positive("0"), None);
 		assert_eq!(parse_positive("fast"), None);
+	}
+
+	#[test]
+	fn page_keys() {
+		assert_eq!(parse_size("1280x720"), Some((1280, 720)));
+		assert_eq!(parse_size(" 1920 × 1080 "), Some((1920, 1080)));
+		assert_eq!(parse_size("0x720"), None);
+		assert_eq!(parse_size("big"), None);
+		assert!(VIDEO_RESOLUTION.validate(&"auto".into()).is_ok());
+		assert!(VIDEO_RESOLUTION.validate(&"wide".into()).is_err());
+		assert_eq!(serde_json::to_value(NotifyLevel::App).unwrap(), "app");
+		assert_eq!(NotifyLevel::from_index(NotifyLevel::Off.index()), NotifyLevel::Off);
+		assert_eq!(NotifyLevel::from_index(7), NotifyLevel::Desktop);
 	}
 
 	#[test]

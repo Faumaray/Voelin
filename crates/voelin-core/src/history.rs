@@ -365,6 +365,17 @@ impl History {
 		Ok(rows.into_iter().map(HistoryMessage::from).collect())
 	}
 
+	/// The newest stored message of every chat with the server's unique id,
+	/// the most recently active chat first, at most `limit` chats (a list
+	/// of recent chats across servers).
+	pub async fn recent_chats(
+		&self,
+		limit: usize,
+	) -> Result<Vec<(String, HistoryMessage)>, String> {
+		let rows = self.run(false, move |s| s.recent_chats(Some(limit))).await?;
+		Ok(rows.into_iter().map(|m| (m.server_uid.clone(), HistoryMessage::from(m))).collect())
+	}
+
 	/// Delete messages older than `before_ms` (pinned ones stay).
 	pub(crate) fn prune(&self, before_ms: i64) {
 		self.send(Job::Run {
@@ -812,6 +823,9 @@ mod tests {
 			["m49", "n49"]
 		);
 		assert!(page[0].id > 0);
+		let recent = history.recent_chats(5).await.unwrap();
+		assert_eq!(recent.len(), 1, "one chat");
+		assert_eq!((recent[0].0.as_str(), recent[0].1.message.ts_ms), ("srv", 49));
 		// Kept in memory only: negative ids, not in the file.
 		let kept = history.write_async(true, vec![live("secret", 99)], 5000).await.unwrap();
 		assert!(kept[0].message.id < 0);

@@ -15,6 +15,12 @@ export struct ServerItem {
     unread: int,
     // Someone streams in our channel there.
     live: bool,
+    // "9 online · 7 channels" while its presence is known, else the address.
+    detail: string,
+    // "TeamSpeak 6", "TeamSpeak 3", "" before it was reached.
+    flavor: string,
+    // Gateway or query credentials: presence without joining.
+    gateway: bool,
 }
 
 export struct TreeItem {
@@ -155,6 +161,8 @@ export struct FileItem {
     progress: float,
     // A picture, so the icon differs.
     picture: bool,
+    // The picture itself, once downloaded: shown inline instead of the card.
+    preview: image,
 }
 
 export struct ChatLine {
@@ -274,19 +282,6 @@ export struct ShareForm {
     auto-accept: bool,
 }
 
-// An identity in Settings → Identities.
-export struct IdentityItem {
-    id: int,
-    name: string,
-    // "From TeamSpeak · level 8"
-    detail: string,
-    // The unique id servers know it by (TeamSpeak 3 form).
-    uid: string,
-    initials: string,
-    tint: color,
-    is-default: bool,
-}
-
 export struct AudioForm {
     // 0 = system default, then the devices.
     input-index: int,
@@ -326,6 +321,438 @@ export struct AppearanceForm {
     // Pixels.
     narrow-breakpoint: float,
     image-cache-mb: float,
+}
+
+// Home, friends, direct messages, notifications, search, events and the
+// settings pages (docs/ui.md). Lists are models Rust syncs row by row.
+
+// A contact (friend, blocked or neutral) and where they are now.
+export struct ContactItem {
+    uid: string,
+    name: string,
+    initials: string,
+    tint: color,
+    avatar: image,
+    // "friend", "blocked" or "neutral"
+    relation: string,
+    online: bool,
+    away: bool,
+    streaming: bool,
+    // What they do: "In Chill Zone", "Streaming", "Away: brb", "Offline".
+    status: string,
+    // Where: the server of the first session that sees them, or "Last seen
+    // 2 h ago on Nightfall Guild".
+    place: string,
+    // "12m ago": online since (this run), else when last seen.
+    when: string,
+    note: string,
+    // Local playback in percent.
+    volume: float,
+    muted: bool,
+    // "Contact since 14 Jan 2022".
+    since: string,
+    // Every session that sees them: "Nightfall Guild · #Chill Zone".
+    spots: [string],
+    // A voice connection sees them: they can be messaged, poked, joined.
+    reachable: bool,
+    selected: bool,
+}
+
+// A live stream on one of our servers (home page).
+export struct LiveItem {
+    // The session (bookmark id) and the stream (directory or stream id).
+    session: int,
+    id: string,
+    title: string,
+    streamer: string,
+    initials: string,
+    tint: color,
+    avatar: image,
+    server: string,
+    channel: string,
+    // 0: unknown.
+    viewers: int,
+    // "Screen", "Camera", ...
+    kind: string,
+    // The server's colour, for the card's picture.
+    backdrop: color,
+    // In our voice channel: it can be watched at once.
+    watchable: bool,
+}
+
+// A chat in the recent chats and in the direct messages list.
+export struct ConversationItem {
+    // Index in Rust's list (what `open-conversation` takes).
+    key: int,
+    // 0 server chat, 1 channel chat, 2 private chat, 3 offline message.
+    kind: int,
+    title: string,
+    // The server's name.
+    server: string,
+    // "You: That works!", "Sent a file".
+    preview: string,
+    // "11:42", "Yesterday", "Mon", "12 Mar".
+    time: string,
+    // "10m ago".
+    ago: string,
+    unread: int,
+    initials: string,
+    tint: color,
+    avatar: image,
+    online: bool,
+    selected: bool,
+}
+
+// A notification of the bell.
+export struct NoticeItem {
+    key: int,
+    // "mention", "poke", "message", "event", "friend"
+    kind: string,
+    title: string,
+    body: string,
+    // "3 min ago"
+    time: string,
+    unread: bool,
+    initials: string,
+    tint: color,
+    avatar: image,
+}
+
+// A result of the search (Ctrl+K).
+export struct SearchItem {
+    // "server", "channel", "person", "contact", "setting"
+    kind: string,
+    title: string,
+    subtitle: string,
+    initials: string,
+    tint: color,
+    avatar: image,
+    // The first result of a group names it ("Servers", "People", ...).
+    header: string,
+}
+
+// Something on our servers: an event, a scheduled stream or server news.
+export struct HappeningItem {
+    // "event", "stream", "news"
+    kind: string,
+    title: string,
+    subtitle: string,
+    // "Sat 26 Apr · 19:00"
+    when: string,
+    session: int,
+    id: int,
+    live: bool,
+}
+
+// A scheduled event of a server's gateway.
+export struct EventItem {
+    id: int,
+    title: string,
+    description: string,
+    // The date block: "SAT", "26", "APR".
+    weekday: string,
+    day: string,
+    month: string,
+    // "Sat 26 Apr, 19:00 – 21:00"
+    when: string,
+    // "#Raid Night" or "Server-wide".
+    place: string,
+    // A scheduled stream: "Exploring the Lands Between · Elden Ring".
+    stream: string,
+    live: bool,
+    going: int,
+    maybe: int,
+    not-going: int,
+    // "going", "maybe", "not_going" or "".
+    rsvp: string,
+    creator: string,
+    // We may edit and delete it (ours, or we moderate).
+    editable: bool,
+    // "Starts in 15 min", "Started 5 min ago", "".
+    soon: string,
+    // "Nova (going)", ...; filled once the event was opened.
+    attendees: [string],
+    expanded: bool,
+}
+
+// The event form (create or edit).
+export struct EventForm {
+    // -1: a new event.
+    id: int,
+    title: string,
+    description: string,
+    // "2026-10-04 19:00", local time.
+    start: string,
+    // Empty: no end.
+    end: string,
+    // Index into `event-channels` (0: server-wide).
+    channel: int,
+    stream: bool,
+    stream-title: string,
+    game: string,
+}
+
+// An offline message to write (mail the server keeps).
+export struct OfflineForm {
+    // The peer's unique id and name.
+    uid: string,
+    to: string,
+    subject: string,
+    text: string,
+}
+
+// The open direct message: who, and what can be done.
+export struct DmPeer {
+    open: bool,
+    uid: string,
+    name: string,
+    initials: string,
+    tint: color,
+    avatar: image,
+    online: bool,
+    // "Online · Nightfall Guild · #Chill Zone", "Offline · last seen 2 h ago".
+    status: string,
+    description: string,
+    groups: [string],
+    note: string,
+    since: string,
+    // Where they are now, or where they were last seen.
+    servers: [string],
+    // Pictures linked in the conversation that are downloaded, newest
+    // first (at most six; `media-more` counts the others), and the other
+    // files: name, "2.4 MB · Today at 11:36", picture.
+    media: [image],
+    media-more: int,
+    files: [FileItem],
+    friend: bool,
+    blocked: bool,
+    volume: float,
+    muted: bool,
+    // Messages can be sent now (a voice connection that sees them).
+    can-send: bool,
+    // Why not: "Kairo is offline.", "Connect to Nightfall Guild to send."
+    notice: string,
+    // The server keeps offline messages: offer one.
+    offline: bool,
+    // Connect with voice to the server of this conversation.
+    can-connect: bool,
+    // The messages come from the store, without a session: read-only.
+    stored: bool,
+    // An offline message is shown instead of the conversation.
+    mail: bool,
+    mail-subject: string,
+    mail-text: string,
+    mail-time: string,
+}
+
+// An identity (Profiles page); never its key.
+export struct IdentityItem {
+    id: int,
+    name: string,
+    // Unique ids on TeamSpeak 3 and TeamSpeak 6 servers.
+    uid: string,
+    uid6: string,
+    level: int,
+    // The store's default: servers see us as this one unless a bookmark
+    // names another.
+    default: bool,
+    // Where it came from: "Made in Voelin", "Imported", "Chosen by you".
+    origin: string,
+    // Raising its level: the level aimed at and the best one reached (0: no).
+    improving: int,
+    reached: int,
+    // The bookmarks that use it.
+    used-by: string,
+}
+
+// An identity found in another client's files (import).
+export struct FoundIdentity {
+    name: string,
+    uid: string,
+    level: int,
+    source: string,
+    // Already in our identities.
+    known: bool,
+    picked: bool,
+}
+
+// A bookmark and the identity it connects with (Profiles page).
+export struct BookmarkIdentity {
+    id: int,
+    name: string,
+    // Index into `identity-names` (0: the default identity).
+    identity: int,
+}
+
+// Camera, video and stream quality (Voice & Video page).
+export struct VideoForm {
+    // Index into `cameras`.
+    camera: int,
+    // 0 none, 1 blur.
+    background: int,
+    // "auto", "1280x720", ...
+    resolution: string,
+    // `stream.fps` as typed.
+    fps: string,
+    // auto, vp8, vp9, h264, av1.
+    codec: int,
+    hardware: bool,
+    mirror: bool,
+    // everyone, friends, channel, nobody.
+    permissions: int,
+    // 0 auto, 1 720p, 2 1080p, 3 1440p, -1 other layers.
+    quality: int,
+    // kbit/s.
+    bitrate: float,
+    // The camera preview runs.
+    preview: bool,
+}
+
+// A simulcast layer of our stream (Streaming page); numbers as typed.
+export struct LayerItem {
+    // "1920x1080", or a scale like "0.5".
+    size: string,
+    // Frames per second; "" no cap.
+    fps: string,
+    // kbit/s.
+    bitrate: string,
+    min-bitrate: string,
+    max-bitrate: string,
+}
+
+// An audio source mixed into our stream.
+export struct AudioSourceItem {
+    // "desktop", "app", "window", "microphone", "synthetic"
+    kind: string,
+    name: string,
+    detail: string,
+    // Percent.
+    gain: float,
+    muted: bool,
+}
+
+// Stream defaults (Streaming page).
+export struct StreamingForm {
+    fps: string,
+    bitrate: string,
+    // auto, vp8, vp9, h264, av1.
+    codec: int,
+    // auto, portal, wlroots, x11.
+    capture: int,
+    replay-seconds: string,
+    replay-memory: string,
+    recording-dir: string,
+}
+
+// Notification kinds: 0 off, 1 in the app, 2 also on the desktop.
+export struct NotifyForm {
+    mentions: int,
+    pokes: int,
+    messages: int,
+    events: int,
+    friends: int,
+}
+
+// Privacy & Safety.
+export struct PrivacyForm {
+    // 0 hide, 1 show flagged.
+    block-mode: int,
+    // everyone, friends, nobody.
+    messages: int,
+    pokes: int,
+}
+
+// A server's gateway (Integrations page).
+export struct GatewayItem {
+    session: int,
+    server: string,
+    url: string,
+    // "connected", "connecting", "off"
+    status: string,
+    features: [string],
+    admin: bool,
+}
+
+// A gateway configuration key (gateway administration).
+export struct ConfigItem {
+    key: string,
+    // JSON.
+    value: string,
+    source: string,
+    description: string,
+    kind: string,
+    bootstrap: bool,
+}
+
+// A gateway permission rule.
+export struct PermItem {
+    action: string,
+    // "Everyone", "Server groups 6, 7", "Default: server admins".
+    rule: string,
+    source: string,
+    everyone: bool,
+    server-groups: string,
+    channel-groups: string,
+}
+
+// A video encoder backend (Integrations page).
+export struct EncoderItem {
+    name: string,
+    api: string,
+    codec: string,
+    hardware: bool,
+    ok: bool,
+    // Why it does not work, or "used first".
+    status: string,
+}
+
+// Any registered setting (Advanced page).
+export struct SettingItem {
+    key: string,
+    doc: string,
+    // JSON.
+    value: string,
+    // "set here", "command line", "config file", "default".
+    source: string,
+}
+
+// A recording or clip of the Stream Studio (Library).
+export struct RecordingItem {
+    name: string,
+    // "12.3 MB · 3 Oct 18:04".
+    detail: string,
+    clip: bool,
+    path: string,
+}
+
+// Encoders, chat history, cache and logs (Advanced page); numbers as typed.
+export struct AdvancedForm {
+    encoder: string,
+    hardware: bool,
+    // `stream.decoder_backend`, `stream.hardware_decoding`.
+    decoder: string,
+    hardware-decoding: bool,
+    store-history: bool,
+    history-page: string,
+    dedupe-ms: string,
+    retention-days: string,
+    cache-mb: string,
+    fetch-images: bool,
+    progress-ms: string,
+    // `ui.image_preview_kb`.
+    preview-kb: string,
+    logs: string,
+    crash-dir: string,
+}
+
+// Who we are (My Account page).
+export struct AccountForm {
+    nickname: string,
+    identity: string,
+    uid: string,
+    uid6: string,
+    level: int,
+    server: string,
 }
 
 export global Bridge {
@@ -459,9 +886,9 @@ export global Bridge {
     in property <string> crash-notice;
     // Third-party notices, one entry per line, for the About page.
     in property <[string]> notices;
-    // Settings → Identities: who servers see us as, and the import of the
-    // official clients' identities on start (identity.import_from_teamspeak).
-    in property <[IdentityItem]> identities;
+    // Settings → Profiles: the identity servers see us as (the store's
+    // default, from the next connection) and the import of the official
+    // clients' identities on start (identity.import_from_teamspeak).
     in-out property <bool> identity-import;
     callback use-identity(int);
     callback set-identity-import(bool);
@@ -549,6 +976,168 @@ export global Bridge {
     // A link to our voice channel (`ts3server://`) to hand to others; the
     // caller copies it.
     callback invite() -> string;
+
+    // Home, friends, direct messages, notifications, search, events and
+    // the settings pages.
+
+    // Home: friends online first, live streams on our servers, the latest
+    // chats, what friends do, events and server news, the Library.
+    in property <[ContactItem]> friends-online;
+    in property <[LiveItem]> live-rooms;
+    in property <[ConversationItem]> recent-chats;
+    in property <[ContactItem]> friend-activity;
+    in property <[HappeningItem]> happenings;
+    in property <[RecordingItem]> recordings;
+    in property <string> recordings-dir;
+    callback open-conversation(int);
+    // The messages page and the Library were opened.
+    callback open-messages();
+    callback open-library();
+    callback watch-live(int, string);
+    callback open-happening(int);
+    callback open-recording(string);
+    callback open-recordings-folder();
+    // Connect a bookmark with voice (the Join buttons).
+    callback connect-server(int);
+
+    // Friends: the contacts (friends, then the others), the selected one.
+    in property <[ContactItem]> contacts;
+    in property <ContactItem> contact;
+    in property <int> contacts-online;
+    in property <int> contacts-all;
+    in property <int> contacts-blocked;
+    callback friends-tab(int);
+    callback search-contacts(string);
+    callback select-contact(string);
+    // "message", "poke", "join", "watch", "friend", "block", "neutral",
+    // "remove", "mute".
+    callback contact-action(string, string);
+    callback contact-note(string, string);
+    callback contact-volume(string, float);
+
+    // Direct messages: the conversations, the open one (its messages are
+    // `messages` while a session holds it, else `dm-messages`).
+    in property <[ConversationItem]> conversations;
+    in property <int> dm-unread;
+    in property <int> inbox-unread;
+    in property <DmPeer> dm;
+    in property <[ChatLine]> dm-messages;
+    callback dm-tab(int);
+    callback search-conversations(string);
+    // "poke", "join", "friend", "block", "mute", "connect", "delete-mail",
+    // "unread-mail".
+    callback dm-action(string);
+    callback dm-volume(float);
+    callback send-offline(OfflineForm);
+
+    // The bell.
+    in property <[NoticeItem]> notifications;
+    in property <int> notifications-unread;
+    callback open-notice(int);
+    callback mark-notices-read();
+    callback clear-notices();
+
+    // The search (Ctrl+K): `search` fills the results.
+    in property <[SearchItem]> search-results;
+    callback search-activate(int);
+
+    // A server's events (gateway `events`).
+    in property <bool> has-events;
+    in property <[EventItem]> events;
+    in property <bool> events-loading;
+    in property <bool> can-create-events;
+    in property <[string]> event-channels;
+    callback open-events();
+    callback rsvp(int, string);
+    callback toggle-event(int);
+    callback edit-event(int) -> EventForm;
+    callback save-event(EventForm) -> string;
+    callback delete-event(int);
+    callback watch-event(int);
+
+    // A picture linked in chat, opened larger: the message and the link.
+    callback open-preview(int, int) -> image;
+
+    // Settings pages: a section was shown (its data is loaded then).
+    callback settings-section(int);
+    in property <AccountForm> account;
+    in property <[IdentityItem]> identities;
+    in property <[string]> identity-names;
+    in property <[BookmarkIdentity]> bookmark-identities;
+    in property <[FoundIdentity]> found-identities;
+    in property <string> identity-status;
+    // "default", "delete", "export", "improve", "stop".
+    callback identity-action(int, string);
+    callback rename-identity(int, string);
+    callback improve-target(int, int);
+    callback find-identities();
+    callback pick-found(int, bool);
+    callback import-identities();
+    callback bookmark-identity(int, int);
+
+    in-out property <VideoForm> video;
+    in property <[string]> cameras;
+    in property <image> camera-frame;
+    in property <string> camera-status;
+    callback video-changed(VideoForm);
+    callback toggle-camera-preview();
+    callback test-sound();
+
+    in-out property <StreamingForm> streaming;
+    in property <[LayerItem]> layers;
+    in property <[AudioSourceItem]> audio-sources;
+    // Applications that play audio now (for an app source).
+    in property <[string]> audio-apps;
+    in property <bool> has-studio;
+    callback streaming-changed(StreamingForm);
+    callback layer-changed(int, LayerItem);
+    callback add-layer();
+    callback remove-layer(int);
+    callback audio-source-changed(int, AudioSourceItem);
+    callback add-audio-source(string, string);
+    callback remove-audio-source(int);
+
+    in-out property <NotifyForm> notify;
+    callback notify-changed(NotifyForm);
+    callback test-notification();
+
+    in-out property <PrivacyForm> privacy;
+    in property <[ContactItem]> blocked;
+    callback privacy-changed(PrivacyForm);
+
+    in property <[GatewayItem]> gateways;
+    // The gateway being administered (-1: none) and its keys and rules.
+    in property <int> admin-session: -1;
+    in property <[ConfigItem]> gateway-config;
+    in property <[PermItem]> gateway-perms;
+    in property <string> ffmpeg-status;
+    in property <string> zero-copy-status;
+    in property <[EncoderItem]> encoders;
+    // The decoders, each codec's in the order they are tried.
+    in property <[EncoderItem]> decoders;
+    in property <bool> encoders-loading;
+    callback gateway-admin(int);
+    callback config-set(string, string);
+    callback config-reset(string);
+    callback config-reload();
+    callback perm-set(string, bool, string, string);
+    callback perm-reset(string);
+    callback refresh-encoders();
+
+    in-out property <AdvancedForm> advanced;
+    // `stream.srtp_profiles` in order, and those left out.
+    in property <[string]> srtp-profiles;
+    in property <[string]> srtp-unused;
+    in property <[SettingItem]> all-settings;
+    in property <[string]> capture-sources;
+    callback advanced-changed(AdvancedForm);
+    callback srtp-move(int, int);
+    callback srtp-toggle(string);
+    // A key's JSON value: "" when taken, else why not.
+    callback setting-set(string, string) -> string;
+    callback setting-reset(string);
+    callback search-settings(string);
+    callback open-logs();
 }
 
 // Decoded images by key, from Rust's image cache (src/images.rs): each is

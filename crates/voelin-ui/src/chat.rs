@@ -67,7 +67,7 @@ impl App {
 				format!("#{}", name.unwrap_or_else(|| cid.to_string()))
 			}
 			ChatTarget::Server => "Server".into(),
-			ChatTarget::Private(uid) => format!("@{uid}"),
+			ChatTarget::Private(uid) => format!("@{}", self.peer_name(uid, None)),
 		};
 		let view = self.sessions.entry(id).or_default();
 		let index = match view.tabs.iter().position(|t| t.target == target) {
@@ -95,6 +95,9 @@ impl App {
 			view.current_tab = index;
 			view.tabs[index].unread = 0;
 			view.tabs[index].topic = None;
+		}
+		if let Some(id) = self.current {
+			self.fetch_previews(id);
 		}
 		self.refresh_chat();
 		self.refresh_servers();
@@ -183,9 +186,20 @@ impl App {
 		complete: bool,
 	) {
 		let current = self.current == Some(id);
+		// A private chat is named after the peer, whoever wrote first.
+		let peer = match target {
+			ChatTarget::Private(uid) => Some(format!(
+				"@{}",
+				self.peer_name(
+					uid,
+					messages.iter().find(|m| m.message.author_uid.as_deref() == Some(uid.as_str()))
+				)
+			)),
+			_ => None,
+		};
 		let view = self.sessions.entry(id).or_default();
 		let author = messages.first().map_or("", |m| m.message.author_name.as_str());
-		let title = Self::tab_title(view, target, author);
+		let title = peer.unwrap_or_else(|| Self::tab_title(view, target, author));
 		let index = Self::tab_for(view, target, || title);
 		let shown = current && view.current_tab == index;
 		let tab = &mut view.tabs[index];
@@ -214,6 +228,7 @@ impl App {
 			tab.unread += fresh;
 		}
 		if current {
+			self.fetch_previews(id);
 			self.refresh_chat();
 		}
 		if fresh > 0 && !shown {
@@ -249,7 +264,7 @@ impl App {
 			|| view.gateway_has(feature::REACTIONS)
 			|| view.gateway_has(feature::TOPICS);
 		let mut previous: Option<Previous> = None;
-		let mut lines = Vec::with_capacity(messages.len());
+		let mut lines: Vec<(i64, ChatLine)> = Vec::with_capacity(messages.len());
 		for m in messages {
 			let avatar =
 				m.message.message.author_uid.as_ref().and_then(|uid| view.avatars.get(uid));
@@ -260,6 +275,14 @@ impl App {
 				.and_then(|t| tab.topics.iter().find(|i| i.id == t))
 				.map(|t| t.title.clone())
 				.unwrap_or_default();
+			let previews = m
+				.message
+				.message
+				.file_refs()
+				.iter()
+				.enumerate()
+				.filter_map(|(i, f)| crate::previews::image_of(view, f).map(|image| (i, image)))
+				.collect();
 			let ctx = LineCtx {
 				key: m.key,
 				avatar: vm::avatar::image(avatar),
@@ -267,11 +290,20 @@ impl App {
 				marked: tab.marked == Some(m.message.id),
 				topic,
 				downloads: self.downloads_of(view, m.key),
+				previews,
 			};
-			lines.push(vm::chat::history_line(&m.message, previous.as_ref(), &ctx));
+			lines.push((
+				m.message.message.ts_ms,
+				vm::chat::history_line(&m.message, previous.as_ref(), &ctx),
+			));
 			previous = Some(Previous::of(&m.message.message));
 		}
-		lines
+		// Pokes of a private chat's peer show among its messages.
+		if let (ChatTarget::Private(uid), Some(session)) = (&tab.target, self.current) {
+			lines.extend(self.poke_lines(session, uid));
+			lines.sort_by_key(|(ts, _)| *ts);
+		}
+		lines.into_iter().map(|(_, line)| line).collect()
 	}
 
 	/// The file cards of a message that has downloads running.
@@ -710,6 +742,9 @@ impl App {
 				}
 				_ => {}
 			}
+			return;
+		}
+		if self.preview_progress(id, transfer, &state) {
 			return;
 		}
 		let done = matches!(state, TransferState::Done { .. });

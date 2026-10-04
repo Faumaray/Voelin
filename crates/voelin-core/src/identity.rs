@@ -26,6 +26,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::{fs, str};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -251,6 +252,51 @@ pub fn write_export(path: &Path, nickname: &str, identity: &Identity) -> Result<
 	}
 	let mut file = options.open(path).map_err(|e| IdentityError::read(path, e))?;
 	file.write_all(export(nickname, identity).as_bytes()).map_err(|e| IdentityError::read(path, e))
+}
+
+/// Raise `identity`'s hash cash security level to at least `target` on
+/// every core: the counters after its current one are searched in parallel
+/// chunks, and the identity with the first counter found that reaches
+/// `target` is returned (the same key, so the same unique id). `progress`
+/// hears each better level reached, from the worker threads; setting
+/// `cancel` stops the search with `None`. Each level takes about twice as
+/// long as the one before; there is no upper limit.
+pub fn improve_level(
+	identity: &Identity,
+	target: u8,
+	cancel: &AtomicBool,
+	progress: impl Fn(u8) + Sync,
+) -> Option<Identity> {
+	const CHUNK: u64 = 1 << 14;
+	if identity.level() >= target {
+		return Some(identity.clone());
+	}
+	let omega = identity.key().to_pub().to_ts();
+	let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+	let next = AtomicU64::new(identity.max_counter().max(identity.counter()));
+	let found = AtomicU64::new(u64::MAX);
+	let best = AtomicU8::new(identity.level());
+	std::thread::scope(|scope| {
+		for _ in 0..threads {
+			scope.spawn(|| {
+				while !cancel.load(Ordering::Relaxed) && found.load(Ordering::Relaxed) == u64::MAX {
+					let start = next.fetch_add(CHUNK, Ordering::Relaxed);
+					for counter in start..start.saturating_add(CHUNK) {
+						let level = tsproto::algorithms::get_hash_cash_level(&omega, counter);
+						if level > best.fetch_max(level, Ordering::Relaxed) {
+							progress(level);
+						}
+						if level >= target {
+							found.fetch_min(counter, Ordering::Relaxed);
+							break;
+						}
+					}
+				}
+			});
+		}
+	});
+	let counter = found.into_inner();
+	(counter != u64::MAX).then(|| Identity::new(identity.key().clone(), counter))
 }
 
 /// Does `path` start with the SQLite file header?
@@ -500,6 +546,25 @@ mod tests {
 	/// A synthetic identity; never a real one from any client.
 	fn synthetic() -> Identity {
 		Identity::create()
+	}
+
+	#[test]
+	fn improve_level_keeps_the_key() {
+		let identity = synthetic();
+		let levels = std::sync::Mutex::new(Vec::new());
+		let better = improve_level(&identity, 13, &AtomicBool::new(false), |l| {
+			levels.lock().unwrap().push(l);
+		})
+		.unwrap();
+		assert!(better.level() >= 13);
+		assert_eq!(better.key().to_pub().get_uid(), identity.key().to_pub().get_uid());
+		assert!(better.counter() > identity.counter());
+		assert!(levels.into_inner().unwrap().iter().any(|l| *l >= 13));
+		// Cancelled: nothing.
+		assert!(improve_level(&identity, 60, &AtomicBool::new(true), |_| {}).is_none());
+		// Already there: the same identity.
+		let same = improve_level(&better, 8, &AtomicBool::new(false), |_| {}).unwrap();
+		assert_eq!(same.counter(), better.counter());
 	}
 
 	fn temp_dir(name: &str) -> PathBuf {

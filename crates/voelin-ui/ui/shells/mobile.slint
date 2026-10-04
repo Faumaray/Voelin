@@ -158,6 +158,14 @@ export component MobileShell inherits Rectangle {
                         overflow: elide;
                     }
                 }
+                if !root.voice: IconButton {
+                    icon: Icons.search;
+                    label: @tr("Search");
+                    round: true;
+                    filled: true;
+                    y: (parent.height - self.height) / 2;
+                    clicked => { Nav.open-search(""); }
+                }
                 // The voice channel we are in, from any page.
                 if !root.voice && Bridge.voice-connected: IconButton {
                     icon: Icons.volume-2;
@@ -177,9 +185,10 @@ export component MobileShell inherits Rectangle {
                     label: @tr("Notifications");
                     round: true;
                     filled: true;
-                    dot: Bridge.share-requests > 0 || Bridge.crash-notice != "";
+                    checked: Nav.notifications-open;
+                    dot: Bridge.notifications-unread > 0 || Bridge.share-requests > 0 || Bridge.crash-notice != "";
                     y: (parent.height - self.height) / 2;
-                    clicked => { Nav.mobile-tab = MobileTab.activity; Nav.show(Page.server); }
+                    clicked => { Nav.notifications-open = !Nav.notifications-open; }
                 }
                 if root.voice: PeoplePill {
                     y: (parent.height - self.height) / 2;
@@ -255,34 +264,34 @@ export component MobileShell inherits Rectangle {
                 NavTab {
                     icon: Icons.home;
                     text: @tr("Home");
-                    selected: Nav.mobile-tab == MobileTab.home && Nav.page != Page.settings;
+                    selected: Nav.page == Page.home || Nav.page == Page.friends || Nav.page == Page.messages || Nav.page == Page.library || (Nav.mobile-tab == MobileTab.home && Nav.page == Page.server);
                     clicked => { Nav.show-tab(MobileTab.home); }
                 }
                 NavTab {
                     icon: Icons.server;
                     text: @tr("Servers");
-                    selected: Nav.mobile-tab == MobileTab.servers && Nav.page != Page.settings;
+                    selected: (Nav.mobile-tab == MobileTab.servers && Nav.page == Page.server) || Nav.page == Page.events;
                     dot: Bridge.voice-connected;
                     clicked => { Nav.show-tab(MobileTab.servers); }
                 }
                 NavTab {
                     icon: Icons.message-circle;
                     text: @tr("Chats");
-                    selected: Nav.mobile-tab == MobileTab.chat && Nav.page != Page.settings;
+                    selected: Nav.mobile-tab == MobileTab.chat && Nav.page == Page.server;
                     badge: root.unread;
                     clicked => { Nav.show-tab(MobileTab.chat); }
                 }
                 NavTab {
                     icon: Icons.activity;
                     text: @tr("Activity");
-                    selected: Nav.mobile-tab == MobileTab.activity && Nav.page != Page.settings;
+                    selected: Nav.mobile-tab == MobileTab.activity && Nav.page == Page.server;
                     badge: Bridge.share-requests;
                     clicked => { Nav.show-tab(MobileTab.activity); }
                 }
                 NavTab {
                     icon: Icons.user;
                     text: @tr("You");
-                    selected: Nav.mobile-tab == MobileTab.you || Nav.page == Page.settings;
+                    selected: (Nav.mobile-tab == MobileTab.you && Nav.page == Page.server) || Nav.page == Page.settings;
                     clicked => { Nav.show-tab(MobileTab.you); }
                 }
             }

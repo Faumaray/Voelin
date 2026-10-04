@@ -116,6 +116,21 @@ pub fn file(path: &std::path::Path) -> Image {
 		.unwrap_or_default()
 }
 
+/// A picture from encoded bytes (PNG, JPEG, GIF, WebP), decoded once and
+/// kept by `key`; an empty image if it cannot be decoded.
+pub fn picture(key: &str, bytes: &[u8]) -> Image {
+	let cache_key = format!("picture:{key}");
+	CACHE
+		.with(|c| {
+			c.borrow_mut().get_or_load(&cache_key, || {
+				let image = Image::load_from_data(bytes, None).ok()?;
+				let size = image.size();
+				Some((image, size.width as usize * size.height as usize * 4))
+			})
+		})
+		.unwrap_or_default()
+}
+
 /// A Twemoji by key; an empty image if there is none.
 pub fn emoji(key: &str) -> Image {
 	if key.is_empty() {
@@ -163,6 +178,17 @@ mod tests {
 		assert_eq!(lru.usage(), (0, 0));
 		// Unknown keys are not cached.
 		assert_eq!(lru.get_or_load("none", || None), None);
+	}
+
+	#[test]
+	fn pictures_decode() {
+		let mut png = Vec::new();
+		let mut encoder = png::Encoder::new(&mut png, 4, 2);
+		encoder.set_color(png::ColorType::Rgba);
+		encoder.set_depth(png::BitDepth::Eight);
+		encoder.write_header().unwrap().write_image_data(&[200; 32]).unwrap();
+		assert_eq!(picture("test:4x2", &png).size().width, 4);
+		assert_eq!(picture("test:junk", b"not a picture").size().width, 0);
 	}
 
 	#[test]

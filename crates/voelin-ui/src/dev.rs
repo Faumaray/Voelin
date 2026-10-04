@@ -12,7 +12,7 @@
 //! - `VOELIN_DEMO_STREAM=1`: a local test stream in the viewer.
 //! - `VOELIN_OPEN=<what>[,<what>...]`: open screens on start: `home`,
 //!   `server`, `settings[:<section>]` (voice, keybinds, streaming, privacy,
-//!   appearance, identities, or 0-5), `about`, `share`, `bookmark` (add a server;
+//!   appearance, or 0-4), `about`, `share`, `bookmark` (add a server;
 //!   `bookmark:edit` the current one, Advanced open),
 //!   `emoji` (the picker), `client` (the volume dialog of the first other
 //!   client once connected), `panel` / `no-panel` (the members panel),
@@ -23,7 +23,14 @@
 //!   `topic:<id>` (a topic's messages), `member` (the member card of the
 //!   first other client), `watch` (the first stream; with sample data the
 //!   local test pattern in its place), `popout` (the same, popped out),
-//!   `tab:<home|servers|chat|activity|you>` (phone layout),
+//!   `tab:<home|servers|chat|activity|you>` (phone layout); `friends[:<uid>]`,
+//!   `messages[:<uid>]` (a private chat), `inbox` (offline messages),
+//!   `library`, `events`, `event-form`, `search[:<text>]`,
+//!   `notifications` (the bell), `join` (join by address), `offline` (an
+//!   offline message), `picture` (a chat picture opened large), `camera`
+//!   (the settings' camera preview); settings sections also `account`,
+//!   `profiles` (also `identities`), `devices`, `notifications`,
+//!   `integrations`, `advanced` (5-10);
 //!   `studio[:<what>]`: the Stream Studio (with `VOELIN_DEMO_UI` a demo
 //!   studio from synthetic sources), `studio:window` in a window of its own,
 //!   `studio:live` going live, `studio:record`, or a dialog: `studio:source`,
@@ -42,16 +49,22 @@ use slint::{ComponentHandle, Rgba8Pixel, SharedPixelBuffer};
 use voelin_core::gateway::Pin;
 use voelin_core::stream::{StreamInfo, StreamKind};
 use voelin_core::{
-	Event, GatewayUpdate, HistoryMessage, HistorySource, ObserveState, SessionState, Source,
-	VoiceState,
+	Contact, Event, GatewayUpdate, HistoryMessage, HistorySource, ObserveState, OfflineMessageInfo,
+	Relation, SessionState, Source, VoiceState,
 };
-use voelin_gateway_proto::{ReactionCount, StreamEntry, StreamSource, TopicInfo, UserRef, feature};
+use voelin_gateway_proto::{
+	Action, Attendee, ConfigEntry, ConfigSource, EventInfo, EventKind, EventSpec, PermRule,
+	PermRuleInfo, ReactionCount, RsvpStatus, StreamEntry, StreamSource, TopicInfo, UserRef,
+	feature,
+};
 use voelin_model::{
 	ChannelInfo, ChatMessage, ChatTarget, ClientInfo, GroupInfo, Presence, ServerFlavor,
 };
 use voelin_store::{Bookmark, MessageSource};
 
-use crate::app::{App, Bridge, MainWindow, MobileTab, Nav, Page, SettingsSection, with_app};
+use crate::app::{
+	App, Bridge, MainWindow, MobileTab, Nav, Page, RecordingItem, SettingsSection, with_app,
+};
 
 /// The switches read at start.
 #[derive(Clone, Debug, Default)]
@@ -108,7 +121,12 @@ fn section(name: &str) -> SettingsSection {
 		"2" | "streaming" => SettingsSection::Streaming,
 		"3" | "privacy" => SettingsSection::Privacy,
 		"4" | "appearance" => SettingsSection::Appearance,
-		"5" | "identities" => SettingsSection::Identities,
+		"5" | "account" => SettingsSection::Account,
+		"6" | "profiles" | "identities" => SettingsSection::Profiles,
+		"7" | "devices" => SettingsSection::Devices,
+		"8" | "notifications" => SettingsSection::Notifications,
+		"9" | "integrations" => SettingsSection::Integrations,
+		"10" | "advanced" => SettingsSection::Advanced,
 		_ => SettingsSection::Voice,
 	}
 }
@@ -201,6 +219,41 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 					if switches.demo_ui { app.demo_watch() } else { app.watch_first_stream() }
 				});
 				ui.global::<Bridge>().set_viewer_popped(what == "popout");
+			}
+			// Home, friends, messages, events, the bell, the search.
+			"friends" => {
+				with_app(|app| app.select_contact(arg.to_owned()));
+				nav.invoke_show(Page::Friends);
+			}
+			"messages" | "dm" => {
+				let uid = if arg.is_empty() { "demo-3" } else { arg };
+				with_app(|app| app.open_dm_with(Some(DEMO), uid));
+				nav.invoke_show(Page::Messages);
+			}
+			"inbox" => {
+				nav.set_dm_tab(2);
+				with_app(|app| app.dm_tab(2));
+				nav.invoke_show(Page::Messages);
+			}
+			"library" => nav.invoke_show(Page::Library),
+			"events" => nav.invoke_show(Page::Events),
+			"event-form" => nav.invoke_create_event(),
+			"search" => nav.invoke_open_search(arg.into()),
+			"notifications" => nav.set_notifications_open(true),
+			"join" => nav.invoke_join_server(),
+			"offline" => nav.invoke_write_offline("demo-ari".into(), "Ari".into()),
+			"picture" => {
+				let picture = demo_picture(1280, 720, 16);
+				let image = crate::images::picture("demo:lightbox", &picture);
+				nav.set_lightbox(image);
+				nav.set_lightbox_open(true);
+			}
+			// The camera preview of the settings (the test pattern).
+			"camera" => {
+				with_app(|app| {
+					app.start_camera();
+					app.refresh_pages();
+				});
 			}
 			"studio" => {
 				if arg != "window" {
@@ -318,7 +371,10 @@ fn demo_ui(app: &mut App) {
 		client_version: None,
 	};
 	app.bookmarks = vec![
-		bookmark(DEMO, "Nightfall Guild", "ts.nightfall.example:9987"),
+		Bookmark {
+			gateway_url: Some("wss://gw.nightfall.example/v1".into()),
+			..bookmark(DEMO, "Nightfall Guild", "ts.nightfall.example:9987")
+		},
 		bookmark(DEMO + 1, "Pixel Lounge", "pixel.example"),
 		bookmark(DEMO + 2, "Dev TS3", "127.0.0.1:9987"),
 	];
@@ -326,6 +382,9 @@ fn demo_ui(app: &mut App) {
 	let session = DEMO as u64;
 
 	let mut p = Presence { server_name: "Nightfall Guild".into(), ..Default::default() };
+	p.server.welcome_message =
+		"Welcome to [b]Nightfall Guild[/b]! Raids on Tuesdays and Fridays, all levels welcome."
+			.into();
 	let mut chill = channel(2, 0, 1, "Chill Zone");
 	chill.max_clients = Some(50);
 	chill.topic = Some("Hang out, chat, and explore the worlds beyond.".into());
@@ -354,6 +413,9 @@ fn demo_ui(app: &mut App) {
 		client(9, 1, "Rin"),
 	];
 	clients[1].streaming = Some(true);
+	// Live in other channels (the gateway's directory has their streams).
+	clients[5].streaming = Some(true);
+	clients[6].streaming = Some(true);
 	clients[4].input_muted = true;
 	clients[7].away = Some("brb".into());
 	clients[8].output_muted = true;
@@ -426,6 +488,10 @@ fn demo_ui(app: &mut App) {
 					feature::PINS.into(),
 					feature::REACTIONS.into(),
 					feature::TOPICS.into(),
+					feature::EVENTS.into(),
+					feature::STREAMS.into(),
+					feature::ACTIVITY.into(),
+					feature::ADMIN.into(),
 				],
 			},
 		},
@@ -452,9 +518,527 @@ fn demo_ui(app: &mut App) {
 		app.handle_event(event);
 	}
 	demo_chat(app, session);
+	demo_social(app);
 	// No toast over the screenshots.
 	app.set_status("");
 	app.refresh_all();
+}
+
+/// Sample people, private chats, pokes, notifications, events, a picture
+/// and recordings for the home, friends, messages, events and settings
+/// screens (`VOELIN_DEMO_UI`).
+fn demo_social(app: &mut App) {
+	let session = DEMO as u64;
+	let now = chrono::Utc::now().timestamp_millis();
+	let min = 60_000;
+	// The second sample server is observed: a few people there.
+	let mut lounge = Presence { server_name: "Pixel Lounge".into(), ..Default::default() };
+	for c in [channel(1, 0, 0, "Lobby"), channel(2, 0, 1, "Art Corner"), channel(3, 0, 2, "Music")]
+	{
+		lounge.channels.insert(c.id, c);
+	}
+	let mut ivy = client(21, 2, "Ivy");
+	ivy.uid = Some("demo-ivy".into());
+	let mut sora = client(22, 3, "Sora");
+	sora.uid = Some("demo-sora".into());
+	sora.away = Some("painting".into());
+	let mut pixel = client(23, 1, "Pixel");
+	pixel.uid = Some("demo-pixel".into());
+	for c in [ivy, sora, pixel] {
+		lounge.clients.insert(c.id, c);
+	}
+	app.handle_event(Event::Presence { session: session + 1, presence: Arc::new(lounge) });
+	app.handle_event(Event::State {
+		session: session + 1,
+		state: SessionState {
+			observe: ObserveState::Observing,
+			presence_source: Some(Source::Gateway),
+			server_uid: Some("demo-lounge".into()),
+			..Default::default()
+		},
+	});
+	app.handle_event(Event::ServerInfo {
+		session: session + 1,
+		name: "Pixel Lounge".into(),
+		flavor: ServerFlavor::from_version_string("3.13.8 [Build: 1]"),
+		capabilities: Default::default(),
+	});
+
+	// Contacts: friends here and there, some offline, one blocked.
+	let contact =
+		|uid: &str, nick: &str, relation: Relation, seen_min: i64, server: &str| Contact {
+			uid: uid.into(),
+			nickname: nick.into(),
+			relation,
+			note: String::new(),
+			muted: false,
+			volume: 1.0,
+			added_ms: now - 400 * 86_400_000,
+			last_seen_ms: if seen_min > 0 { now - seen_min * min } else { 0 },
+			last_server: (!server.is_empty()).then(|| server.to_owned()),
+		};
+	let mut kairo = contact("demo-3", "Kairo", Relation::Friend, 1, "Nightfall Guild");
+	kairo.note = "Tank on Tuesday raids. Always down for co-op.".into();
+	let contacts = vec![
+		contact("demo-2", "Lumen", Relation::Friend, 1, "Nightfall Guild"),
+		kairo,
+		contact("demo-4", "Mira", Relation::Friend, 1, "Nightfall Guild"),
+		contact("demo-5", "dex", Relation::Friend, 1, "Nightfall Guild"),
+		contact("demo-6", "Talon", Relation::Friend, 1, "Nightfall Guild"),
+		contact("demo-7", "Zeph", Relation::Friend, 1, "Nightfall Guild"),
+		contact("demo-ivy", "Ivy", Relation::Friend, 1, "Pixel Lounge"),
+		contact("demo-sora", "Sora", Relation::Friend, 1, "Pixel Lounge"),
+		contact("demo-ari", "Ari", Relation::Friend, 130, "Nightfall Guild"),
+		contact("demo-neon", "Neon", Relation::Friend, 26 * 60, "Dev TS3"),
+		contact("demo-9", "Rin", Relation::Neutral, 1, "Nightfall Guild"),
+		contact("demo-spam", "FreeSkinsBot", Relation::Blocked, 3 * 24 * 60, "Pixel Lounge"),
+	];
+	app.handle_event(Event::ContactsChanged { contacts: Arc::new(contacts) });
+	for (uid, ago) in [
+		("demo-2", 12),
+		("demo-3", 28),
+		("demo-4", 42),
+		("demo-5", 64),
+		("demo-6", 95),
+		("demo-7", 130),
+		("demo-ivy", 8),
+		("demo-sora", 50),
+	] {
+		app.social.online_since.insert(uid.into(), now - ago * min);
+	}
+
+	// Private chats: with Kairo (a picture, a file), Mira, Lumen, dex,
+	// and Ivy on the other server; Neon's is only stored.
+	let picture = file_link(2, "night-castle.png", 412_331);
+	let private =
+		|id: i64, peer: &str, from_me: bool, author: (&str, u16), text: String, ago: i64| {
+			HistoryMessage {
+				id,
+				message: ChatMessage {
+					target: ChatTarget::Private(peer.into()),
+					author_name: author.0.into(),
+					author_uid: Some(if from_me { "demo-1".into() } else { peer.into() }),
+					author_id: (author.1 > 0).then_some(author.1),
+					text,
+					ts_ms: now - ago * min,
+					via_relay: false,
+					blocked: false,
+				},
+				source: MessageSource::Voice,
+				remote_id: None,
+				topic_id: None,
+				reactions: Vec::new(),
+				pinned: false,
+				rev: 0,
+			}
+		};
+	let nova = ("Nova", 1);
+	let kairo = ("Kairo", 3);
+	let lines = vec![
+		private(
+			300,
+			"demo-3",
+			true,
+			nova,
+			format!("Hey! Check out this shot I got last night while exploring 👀 {picture}"),
+			95,
+		),
+		private(301, "demo-3", false, kairo, "That looks incredible! Where was this?".into(), 93),
+		private(
+			302,
+			"demo-3",
+			true,
+			nova,
+			"In the northern region. The lighting was perfect.".into(),
+			91,
+		),
+		private(
+			303,
+			"demo-3",
+			false,
+			kairo,
+			"We should explore together this weekend! I found some cool locations too.".into(),
+			89,
+		),
+		private(
+			304,
+			"demo-3",
+			false,
+			kairo,
+			format!(
+				"Here are the spots I marked. {}",
+				file_link(2, "exploration-routes.pdf", 2_516_582)
+			),
+			88,
+		),
+		private(305, "demo-3", true, nova, "That sunset looks unreal. Let's do it! 🙌".into(), 6),
+		private(
+			310,
+			"demo-4",
+			false,
+			("Mira", 4),
+			"Working on a new video today, want to see a sneak peek?".into(),
+			70,
+		),
+		private(311, "demo-2", false, ("Lumen", 2), "Let's run it tonight!".into(), 120),
+		private(312, "demo-5", false, ("dex", 5), file_link(2, "map-notes.png", 96_120), 26 * 60),
+	];
+	for m in lines {
+		let target = m.message.target.clone();
+		app.handle_event(Event::ChatHistory {
+			session,
+			target,
+			messages: vec![m],
+			source: HistorySource::Gateway,
+			complete: true,
+		});
+	}
+	app.handle_event(Event::ChatHistory {
+		session: session + 1,
+		target: ChatTarget::Private("demo-ivy".into()),
+		messages: vec![HistoryMessage {
+			message: ChatMessage {
+				target: ChatTarget::Private("demo-ivy".into()),
+				author_name: "Ivy".into(),
+				author_uid: Some("demo-ivy".into()),
+				author_id: Some(21),
+				text: "Same here! The new channel is great.".into(),
+				ts_ms: now - 30 * min,
+				via_relay: true,
+				blocked: false,
+			},
+			..private(320, "demo-ivy", false, ("Ivy", 21), String::new(), 30)
+		}],
+		source: HistorySource::Gateway,
+		complete: true,
+	});
+	let mut neon = private(
+		330,
+		"demo-neon",
+		false,
+		("Neon", 0),
+		"Sent you the config, check the server folder.".into(),
+		3 * 24 * 60,
+	);
+	neon.message.author_id = None;
+	app.social.dm.stored.push(("demo-dev".into(), neon));
+	app.social.dm.bookmark_of.insert("demo-dev".into(), DEMO + 2);
+	// Unread: Mira's and Lumen's messages came while away.
+	if let Some(view) = app.sessions.get_mut(&DEMO) {
+		for tab in &mut view.tabs {
+			match &tab.target {
+				ChatTarget::Private(uid) if uid == "demo-4" => tab.unread = 1,
+				ChatTarget::Private(uid) if uid == "demo-2" => tab.unread = 2,
+				_ => {}
+			}
+		}
+	}
+	// A poke from Kairo, shown among the messages and in the bell.
+	app.handle_event(Event::Poke {
+		session,
+		from: 3,
+		from_uid: Some("demo-3".into()),
+		from_name: "Kairo".into(),
+		message: "raid in 5?".into(),
+		blocked: false,
+	});
+	if let Some(p) = app.social.pokes.last_mut() {
+		p.ts_ms = now - 7 * min;
+	}
+	// Offline messages the server keeps (the Inbox tab).
+	let mail = |id: u32, from: &str, subject: &str, ago_min: i64, read: bool| OfflineMessageInfo {
+		id,
+		from_uid: from.into(),
+		subject: subject.into(),
+		ts_s: (now - ago_min * min) / 1000,
+		read,
+	};
+	app.handle_event(Event::OfflineMessages {
+		session,
+		request: 0,
+		result: Ok(vec![
+			mail(1, "demo-ari", "Raid roster for Friday", 3 * 60, false),
+			mail(2, "demo-neon", "The config for the dev server", 26 * 60, true),
+			mail(3, "demo-4", "Thumbnails for the stream", 3 * 24 * 60, true),
+		]),
+	});
+
+	// The pictures of the links, as if downloaded.
+	if let Some(view) = app.sessions.get_mut(&DEMO) {
+		for (channel, name) in
+			[(2, "night-castle.png"), (2, "guild-banner.png"), (2, "map-notes.png")]
+		{
+			let file = voelin_model::FileRef {
+				channel,
+				path: "/".into(),
+				name: name.into(),
+				..Default::default()
+			};
+			view.extra.previews.insert(
+				crate::previews::link_key(&file),
+				crate::previews::Preview::Ready(voelin_core::Bytes(
+					demo_picture(640, 360, name.len() as u32).into(),
+				)),
+			);
+		}
+	}
+
+	// The gateway's events (one is live), its configuration and rules.
+	let by = |name: &str, uid: &str| UserRef { uid: uid.into(), name: name.into() };
+	let event =
+		|id: i64, title: &str, start: i64, hours: i64, channel: Option<u64>, stream: bool| {
+			EventInfo {
+				id,
+				spec: EventSpec {
+					title: title.into(),
+					description: String::new(),
+					start_ms: start,
+					end_ms: Some(start + hours * 3_600_000),
+					channel,
+					kind: if stream { EventKind::Stream } else { EventKind::General },
+					stream_title: None,
+					stream_game: None,
+					host_uid: None,
+				},
+				creator: by("Nova", "demo-1"),
+				created_ms: now - 86_400_000,
+				updated_ms: now - 86_400_000,
+				going: 0,
+				maybe: 0,
+				not_going: 0,
+				my_rsvp: None,
+				attendees: Vec::new(),
+				live_stream: None,
+			}
+		};
+	let hour = 3_600_000;
+	let tomorrow = (now / 86_400_000 + 1) * 86_400_000 + 18 * hour;
+	let mut raid = event(1, "Raid Night: The Frozen Citadel", tomorrow, 3, Some(4), false);
+	raid.spec.description = "Bring elixirs and fire resistance. Voice in Raid Night.".into();
+	raid.going = 12;
+	raid.maybe = 4;
+	raid.not_going = 1;
+	raid.my_rsvp = Some(RsvpStatus::Going);
+	raid.attendees = vec![
+		Attendee { user: by("Nova", "demo-1"), status: RsvpStatus::Going, ts_ms: now },
+		Attendee { user: by("Kairo", "demo-3"), status: RsvpStatus::Going, ts_ms: now },
+		Attendee { user: by("Mira", "demo-4"), status: RsvpStatus::Maybe, ts_ms: now },
+		Attendee { user: by("dex", "demo-5"), status: RsvpStatus::NotGoing, ts_ms: now },
+	];
+	let mut live = event(2, "Exploring the Lands Between", now - 12 * min, 2, Some(2), true);
+	live.spec.stream_title = Some("Exploring the Lands Between".into());
+	live.spec.stream_game = Some("Elden Ring".into());
+	live.creator = by("Lumen", "demo-2");
+	live.going = 8;
+	live.live_stream = Some("demo-stream".into());
+	let mut night = event(3, "Community Game Night", tomorrow + 2 * 86_400_000, 3, None, false);
+	night.spec.description = "Party games for everyone: drop in any time.".into();
+	night.creator = by("Talon", "demo-6");
+	night.going = 23;
+	night.maybe = 9;
+	let mut lofi = event(4, "Late Night Lofi & Chat", now + 50 * min, 2, Some(5), true);
+	lofi.spec.stream_title = Some("Lofi beats to raid to".into());
+	lofi.creator = by("Mira", "demo-4");
+	lofi.going = 5;
+	lofi.maybe = 2;
+	app.handle_event(Event::Gateway {
+		session,
+		update: GatewayUpdate::Events { events: vec![raid, live, night, lofi] },
+	});
+	app.handle_event(Event::Gateway {
+		session,
+		update: GatewayUpdate::Permissions {
+			channel: None,
+			actions: vec![
+				Action::React,
+				Action::Pin,
+				Action::CreateEvent,
+				Action::Rsvp,
+				Action::Moderate,
+				Action::Admin,
+			],
+		},
+	});
+	let config = |key: &str, value: serde_json::Value, source: ConfigSource, description: &str| {
+		ConfigEntry {
+			key: key.into(),
+			default: value.clone(),
+			value,
+			source,
+			value_type: "int".into(),
+			description: description.into(),
+			bootstrap: false,
+		}
+	};
+	app.handle_event(Event::Gateway {
+		session,
+		update: GatewayUpdate::Config {
+			entries: vec![
+				config(
+					"history.retention_days",
+					serde_json::json!(90),
+					ConfigSource::Db,
+					"Days of chat history the gateway keeps.",
+				),
+				config(
+					"events.reminders_min",
+					serde_json::json!([60, 15, 0]),
+					ConfigSource::File,
+					"Minutes before an event when reminders go out.",
+				),
+				config(
+					"streams.directory",
+					serde_json::json!(true),
+					ConfigSource::Default,
+					"Keep a directory of the server's streams.",
+				),
+			],
+		},
+	});
+	app.handle_event(Event::Gateway {
+		session,
+		update: GatewayUpdate::PermRules {
+			rules: vec![
+				PermRuleInfo {
+					action: Action::CreateEvent,
+					rule: Some(PermRule {
+						everyone: false,
+						server_groups: vec![GROUP_ADMIN, GROUP_MOD],
+						channel_groups: vec![],
+					}),
+					source: ConfigSource::Db,
+					default: "server admins".into(),
+				},
+				PermRuleInfo {
+					action: Action::Pin,
+					rule: None,
+					source: ConfigSource::Default,
+					default: "moderators".into(),
+				},
+			],
+		},
+	});
+
+	// Notifications: a mention, a message, an event, a friend online (and
+	// the poke above).
+	use crate::social::{NoticeKind, NoticeTarget};
+	app.notify(
+		NoticeKind::Mention,
+		"Talon mentioned you".into(),
+		"Nova, can you open the raid at 20:00? — #Chill Zone · Nightfall Guild".into(),
+		NoticeTarget::Chat(DEMO, ChatTarget::Channel(2)),
+		"Talon".into(),
+		Some("demo-6".into()),
+	);
+	app.notify(
+		NoticeKind::Event,
+		"Late Night Lofi & Chat starts in 50 min".into(),
+		"on Nightfall Guild".into(),
+		NoticeTarget::Event(DEMO, 4),
+		"Mira".into(),
+		Some("demo-4".into()),
+	);
+	app.notify(
+		NoticeKind::Friend,
+		"Ivy is online".into(),
+		"on Pixel Lounge · #Art Corner".into(),
+		NoticeTarget::Contact("demo-ivy".into()),
+		"Ivy".into(),
+		Some("demo-ivy".into()),
+	);
+	app.notify(
+		NoticeKind::Message,
+		"Mira".into(),
+		"Working on a new video today, want to see a sneak peek?".into(),
+		NoticeTarget::Dm(DEMO, "demo-4".into()),
+		"Mira".into(),
+		Some("demo-4".into()),
+	);
+	for (i, n) in app.social.notices.iter_mut().enumerate() {
+		n.ts_ms = now - (i as i64 * 9 + 2) * min;
+		n.unread = i < 3;
+	}
+	app.refresh_notices();
+
+	// Recordings and clips of the Studio.
+	let recording = |name: &str, detail: &str| RecordingItem {
+		name: name.into(),
+		detail: detail.into(),
+		clip: name.contains("clip"),
+		path: format!("/tmp/{name}").into(),
+	};
+	crate::vm::list::sync(
+		&app.models.social.recordings,
+		&[
+			recording("raid-night-2026-10-02.webm", "1.2 GB · 2 Oct 22:41"),
+			recording("clip-boss-down.mkv", "38.4 MB · 2 Oct 21:57"),
+			recording("lands-between-stream.mkv", "2.8 GB · 28 Sep 20:12"),
+			recording("clip-lucky-parry.mkv", "12.1 MB · 28 Sep 19:40"),
+		],
+	);
+	app.refresh_chats();
+	app.refresh_people();
+	app.refresh_home();
+}
+
+/// A painted night: sky, moon, stars, hills and a castle; PNG bytes.
+fn demo_picture(width: u32, height: u32, seed: u32) -> Vec<u8> {
+	let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+	let (w, h) = (width as f32, height as f32);
+	let (mx, my, mr) = (w * 0.68, h * 0.3, h * 0.17);
+	let hash = |x: u32, y: u32| {
+		let mut v = x.wrapping_mul(374_761_393)
+			^ y.wrapping_mul(668_265_263)
+			^ seed.wrapping_mul(2_654_435_761);
+		v = (v ^ (v >> 13)).wrapping_mul(1_274_126_177);
+		v ^ (v >> 16)
+	};
+	for y in 0..height {
+		for x in 0..width {
+			let (fx, fy) = (x as f32, y as f32);
+			let t = fy / h;
+			// Sky: deep blue to violet at the horizon.
+			let mut c = [12.0 + 50.0 * t, 18.0 + 30.0 * t, 60.0 + 90.0 * t];
+			// Moon and its glow.
+			let d = ((fx - mx).powi(2) + (fy - my).powi(2)).sqrt();
+			if d < mr {
+				let shade = 1.0 - 0.25 * ((fx - mx + mr * 0.3) / mr).max(0.0);
+				c = [200.0 * shade, 210.0 * shade, 245.0 * shade];
+			} else {
+				let glow = (1.0 - (d - mr) / (mr * 2.5)).max(0.0) * 60.0;
+				c = [c[0] + glow, c[1] + glow, c[2] + glow * 1.2];
+			}
+			if hash(x, y) % 900 == 0 && t < 0.6 {
+				c = [235.0, 235.0, 255.0];
+			}
+			// Hills, then a castle on the middle one.
+			let far = h * 0.62 + (fx / w * 9.0 + seed as f32).sin() * h * 0.05;
+			let near = h * 0.78 + (fx / w * 5.0 + 1.3).sin() * h * 0.06;
+			let castle = (fx > w * 0.36
+				&& fx < w * 0.52
+				&& fy > h * 0.38
+				&& ((((fx - w * 0.36) / (w * 0.02)) as u32).is_multiple_of(2) || fy > h * 0.45))
+				|| (fx > w * 0.42 && fx < w * 0.46 && fy > h * 0.24);
+			if fy > near {
+				c = [6.0, 10.0, 26.0];
+			} else if fy > far || castle {
+				c = [16.0, 20.0, 52.0];
+				// Lit windows.
+				if castle && hash(x / 6, y / 8) % 7 == 0 && (x % 6) < 3 && (y % 8) < 4 {
+					c = [255.0, 190.0, 90.0];
+				}
+			}
+			rgba.extend([c[0].min(255.0) as u8, c[1].min(255.0) as u8, c[2].min(255.0) as u8, 255]);
+		}
+	}
+	let mut out = Vec::new();
+	let mut encoder = png::Encoder::new(&mut out, width, height);
+	encoder.set_color(png::ColorType::Rgba);
+	encoder.set_depth(png::BitDepth::Eight);
+	if let Ok(mut writer) = encoder.write_header() {
+		let _ = writer.write_image_data(&rgba);
+	}
+	out
 }
 
 /// Server group ids of the sample server.
@@ -680,19 +1264,47 @@ fn demo_chat(app: &mut App, session: u64) {
 	app.handle_event(Event::Gateway {
 		session,
 		update: GatewayUpdate::Streams {
-			streams: vec![StreamEntry {
-				id: "demo-stream".into(),
-				stream_id: Some("demo-stream".into()),
-				streamer: UserRef { uid: "demo-2".into(), name: "Lumen".into() },
-				client_id: Some(2),
-				channel: Some(2),
-				title: "Exploring the Lands Between".into(),
-				kind: "screen".into(),
-				started_ms: now - 12 * 60_000,
-				viewers: Some(12),
-				source: StreamSource::Registered,
-				event_id: None,
-			}],
+			streams: vec![
+				StreamEntry {
+					id: "demo-stream".into(),
+					stream_id: Some("demo-stream".into()),
+					streamer: UserRef { uid: "demo-2".into(), name: "Lumen".into() },
+					client_id: Some(2),
+					channel: Some(2),
+					title: "Exploring the Lands Between".into(),
+					kind: "screen".into(),
+					started_ms: now - 12 * 60_000,
+					viewers: Some(12),
+					source: StreamSource::Registered,
+					event_id: None,
+				},
+				StreamEntry {
+					id: "demo-stream-2".into(),
+					stream_id: Some("demo-stream-2".into()),
+					streamer: UserRef { uid: "demo-6".into(), name: "Talon".into() },
+					client_id: Some(6),
+					channel: Some(3),
+					title: "Ranked Grind & Vibes".into(),
+					kind: "screen".into(),
+					started_ms: now - 41 * 60_000,
+					viewers: Some(38),
+					source: StreamSource::Registered,
+					event_id: None,
+				},
+				StreamEntry {
+					id: "demo-stream-3".into(),
+					stream_id: Some("demo-stream-3".into()),
+					streamer: UserRef { uid: "demo-7".into(), name: "Zeph".into() },
+					client_id: Some(7),
+					channel: Some(4),
+					title: "Raid prep: gear check".into(),
+					kind: "camera".into(),
+					started_ms: now - 8 * 60_000,
+					viewers: Some(9),
+					source: StreamSource::Registered,
+					event_id: None,
+				},
+			],
 		},
 	});
 	let by = |name: &str| UserRef { uid: format!("demo-{name}"), name: name.into() };

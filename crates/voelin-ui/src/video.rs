@@ -11,7 +11,7 @@ use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 use tokio::runtime::Handle;
 use tracing::warn;
 use voelin_core::media::voelin_media::capture::{CaptureSource, SourceId};
-use voelin_core::media::voelin_media::{Codec, Codecs, EncoderReport, VideoFrame, convert};
+use voelin_core::media::voelin_media::{Codec, Codecs, VideoFrame, convert};
 use voelin_core::media::{
 	self, AudioSourceSpec, DecoderPreference, EncoderPreference, Latest, LocalPreview, Streamer,
 	StreamerConfig, StreamerConfigUpdate, Viewer, peer_config, preferred_codec, stream_codec,
@@ -103,7 +103,6 @@ impl Video {
 	/// `stream.encoder_backend`) and stream codec (`stream.codec`, `None`:
 	/// automatic). A running share follows through
 	/// `Streamer::reconfigure` with `StreamerConfigUpdate::encoder`.
-	#[allow(dead_code, reason = "for the settings page")]
 	pub fn set_encoder_preference(&mut self, encoder: EncoderPreference, codec: Option<Codec>) {
 		let mut codecs = (*self.codecs).clone();
 		codecs.set_preference(encoder.clone());
@@ -121,13 +120,6 @@ impl Video {
 			self.codecs = Arc::new(codecs);
 			self.decoder = decoder;
 		}
-	}
-
-	/// Every encoder and decoder backend, what works and why the rest does
-	/// not.
-	#[allow(dead_code, reason = "for the integrations page")]
-	pub fn encoder_report(&self) -> EncoderReport {
-		self.codecs.report()
 	}
 
 	/// Whether H.264 works, and a line for the settings page.
