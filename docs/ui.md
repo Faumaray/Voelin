@@ -26,7 +26,10 @@ crates/voelin-ui/
                          navigation), common.slint (Panel, VoiceCard, UserCard, ...)
     screens/             channels, chat, members (panel, card), drawers (pins, topics),
                          voice (the voice channel), streams (viewer; the phone's
-                         panel), settings, home, dialogs, mobile (phone-only pages),
+                         panel), settings, settings-pages (its sections), home,
+                         friends, messages (direct messages), events, overlays
+                         (the bell, the search, a picture), dialogs, mobile and
+                         mobile-voice (phone-only pages),
                          studio-parts (the studio's pieces), studio (its page, its
                          phone layout)
     assets/              fonts/ (Inter, OFL), icons/ (Lucide, ISC), logo.svg
@@ -34,7 +37,10 @@ crates/voelin-ui/
   src/
     app.rs               setup, App state, event dispatch
     servers.rs chat.rs members.rs streams.rs settings_page.rs appearance.rs
-    studio.rs            the logic of each area (studio.rs: the Stream Studio's controller)
+    home.rs social.rs messages.rs events.rs settings_pages.rs previews.rs
+    studio.rs            the logic of each area (social.rs: contacts, the bell and the
+                         search; previews.rs: pictures in chat; studio.rs: the Stream
+                         Studio's controller)
     vm/                  pure view models (engine state → Slint structs), unit-tested
     bind/                callbacks of each area, wired once
     images.rs            the image cache (LRU, bounded by `ui.image_cache_mb`)
@@ -144,6 +150,48 @@ closes the other, and the members button brings the panel back. On the
 phone the chat is the Chat tab and the members of our channel are on the
 Activity tab.
 
+## Home, friends, messages and the settings pages
+
+These follow the design mockups 01 (home, desktop and phone), 02 (direct
+messages), 03 (the links above the channel tree) and 11 (Voice & Video,
+desktop and phone), mapped onto what TeamSpeak has: there is no global
+network, so nothing pretends one. "Friends" are the contacts (friend,
+blocked or neither) and where they are is what the servers we are on (or
+look into) say; "communities" are the user's servers. Nothing here needs
+a gateway; what one adds (events, the stream directory, activity) shows
+where a server has it.
+
+| Part | `VOELIN_OPEN` | What it shows | Engine data |
+|---|---|---|---|
+| Home | `home` | A banner with Voelin and a slide per server (connect, open); friends online (as many whole bubbles as fit, Find Friends after them); live streams on our servers (any channel, the gateways' directories, clients flagged streaming) with viewers, server, channel and kind; our servers with who is there and Join or Open; the latest chats of every server. At the right what friends do, quick actions (find friends, join by address, add a server) and what is happening (gateway events and scheduled streams, soonest first, then server news). The phone has the messages, servers, live streams and recent activity in one column | `FriendPresence`, `ContactsChanged`, `StreamsChanged`, `Gateway` (stream directory, events), `Presence` (the servers' welcome and host messages), `History::recent_chats` |
+| Library | `library` | The Stream Studio's recordings and clips (the files in `studio.recording_dir`, newest first) with Play and Open Folder | the folder |
+| Friends | `friends[:<uid>]` | Online, All and Blocked tabs, a search; each contact with where they are (server, channel, away, live), message, poke, join, watch. The selected one at the right: relation, where, a note, our volume and mute for them, friend, block, forget | `ContactsChanged`, `FriendPresence`; `Command::SetContact`, `RemoveContact`, `Poke`, `MoveToChannel` |
+| Direct messages | `messages[:<uid>]`, `inbox`, `offline` | The private chats of every server and of the store (peers by unique id) with the last message and unread counts, All, Unread and Inbox (offline messages); the conversation with the chat's message list, pokes among the messages, pictures and files, a composer, and a clear state when the peer cannot be reached (an offline message instead, where the server keeps them); the peer at the right: relation, note, the servers they are on, shared pictures and files, our volume for them | `ChatHistory` (`ChatTarget::Private` by unique id), `Command::LoadOlderHistory`, `Poke`, offline messages (`ListOfflineMessages`, `GetOfflineMessage`, `SendOfflineMessage`, `DeleteOfflineMessage`, `SetOfflineMessageRead`) |
+| The bell | `notifications` | Mentions, pokes, private messages, event reminders and friends coming online, newest first, unread marked; Mark all read, clear, the settings. Each kind is off, in the app or also a desktop notification (`notify.*`) | `Chat` and `ChatHistory` (mentions, private messages), `Poke`, `GatewayUpdate::EventReminder`, `FriendPresence`; `voelin_platform::notify` |
+| Search | `search[:<text>]` | Ctrl+K: servers, channels of every server, people (on the servers and the contacts) and the settings pages; arrows choose, Enter opens | the sessions, contacts, bookmarks |
+| Events | `events`, `event-form` | Above the channel tree (gateway `events`): a server's events with date, time, channel, scheduled stream, Going, Maybe and Not going with counts, who answered, reminders, Watch while live; create, edit and delete. Members (above the tree too) opens the members panel | `Gateway` events; `GatewayRequest::Events`, `CreateEvent`, `UpdateEvent`, `DeleteEvent`, `Rsvp` |
+| Pictures in chat | `picture` | A linked png, jpg, gif or webp up to `ui.image_preview_kb` is downloaded into memory, decoded once into the image cache and shown as a card in the message; a click opens it larger | `Command::DownloadChatFile` with `DownloadTo::Memory`, `Transfer` |
+| Join by address | `join` | The add-server dialog that connects once saved | `Command::ConnectVoice` |
+
+Settings sections (`settings:<section>`):
+
+| Section | Holds |
+|---|---|
+| `account` | The identity in use (nickname, TeamSpeak 3 and 6 unique ids, security level) and why there is no myTeamSpeak sign-in |
+| `profiles` | Identities: rename, make default (`identity.default`), export as a TeamSpeak 3 .ini, delete, raise the security level on every core; import from the official clients' settings and .ini files (key material is never shown); the identity per server |
+| `appearance` | Theme, text size, the phone layout's width, the image cache |
+| `voice` | Microphone (device, test, level, noise suppression, echo cancellation, automatic gain), output (device, test sound, volume), streaming permissions, camera (device, preview with the background effect), video settings (resolution, frame rate, codec, hardware acceleration, mirror), stream quality presets with free bitrate entry and the upload it takes |
+| `streaming` | Frame rate, bitrate, codec, capture backend, simulcast layers, the stream's audio sources (desktop without Voelin, applications, the shared window's application, microphone; gain and mute each), recording and replay |
+| `devices` | Microphones, speakers, cameras and what can be shared |
+| `notifications` | Each kind of notification: off, in the app, on the desktop; a test notification |
+| `privacy` | Who may send private messages and poke us, blocked people and what happens to their messages, streaming permissions |
+| `keybinds` | Voice activation, push-to-talk and its global key, the window's shortcuts |
+| `integrations` | The gateways of our servers with their features, and their administration for admins (configuration keys, permission rules); FFmpeg, the video encoders and decoders, what works and why not |
+| `advanced` | Encoder and decoder, hardware acceleration and decoding, SRTP profiles, chat history, cache, transfers, logs and crash reports, and every setting by its key as JSON |
+
+Every control reads and writes `voelin_core::settings` and applies at
+once; numbers are typed freely next to the presets.
+
 ## The Stream Studio
 
 ![Stream Studio](screenshots/desktop-studio-live.png)
@@ -248,6 +296,10 @@ live when they change (settings page, `--set`, another window):
 | `ui.narrow_breakpoint` | pixels | 800 | below this width the phone layout |
 | `ui.image_cache_mb` | megabytes | 64 | decoded images kept in memory (0: none) |
 | `ui.members_width` | pixels | 280 | width of the members panel (dragging its edge sets it) |
+| `ui.image_preview_kb` | kilobytes | 8192 | pictures linked in chat up to this size show as pictures (0: never) |
+| `notify.mentions`, `notify.private_messages`, `notify.pokes`, `notify.event_reminders`, `notify.friends_online` | off / app / desktop | desktop (friends: app) | what the bell and the desktop say about each kind |
+| `video.camera`, `video.background`, `video.resolution`, `video.mirror` | device id; none / blur; auto or WxH; bool | first camera, none, auto, true | the camera of the preview and the default of camera sources |
+| `identity.default` | identity id | 0 (the first) | the identity used where a bookmark names none |
 | `studio.ui` | JSON | see below | the Stream Studio's stream settings: `title`, `game`, `message` (go-live), `show_viewers`, `show_chat`, `show_now_playing`, `audio` (stream audio), `preview_width` (960), `preview_fps` (15) |
 
 In a config file write them as dotted keys at the top level
@@ -281,7 +333,11 @@ Environment variables (see `src/dev.rs`):
   `about`, `share[:live]`, `bookmark[:edit]`, `emoji`, `client`, `panel`, `no-panel`,
   `voice`, `pins`, `topics`, `topic:<id>`, `member`, `watch`, `popout`
   (the server page, above), `tab:<home|servers|chat|activity|you>` (phone
-  layout). With sample data, `watch` plays the local test pattern in the
+  layout); `friends[:<uid>]`, `messages[:<uid>]`, `inbox`, `offline`,
+  `library`, `events`, `event-form`, `search[:<text>]`, `notifications`,
+  `join`, `picture`, `camera` (the settings' camera preview, the test
+  pattern) and the settings sections `account`, `profiles`, `devices`,
+  `notifications`, `integrations`, `advanced` (above). With sample data, `watch` plays the local test pattern in the
   sample stream's place. `studio[:window|live|record|source|audio|camera|scene|settings]`
   opens the Stream Studio (above) in that state; with its window open a
   screenshot also saves the window alone (`<name>-window.png`) and draws it
@@ -334,10 +390,18 @@ the window's size so the pointer is not over the window, and passes
 | ![share](screenshots/desktop-share-dialog.png) | ![sharing](screenshots/desktop-share-live.png) |
 | ![add server](screenshots/desktop-add-server.png) | ![about](screenshots/desktop-about.png) |
 
+| Home, friends, messages | |
+|---|---|
+| ![friends](screenshots/desktop-friends.png) | ![direct messages](screenshots/desktop-messages.png) |
+| ![the bell](screenshots/desktop-notifications.png) | ![search](screenshots/desktop-search.png) |
+| ![events](screenshots/desktop-events.png) | ![library](screenshots/desktop-library.png) |
+| ![integrations](screenshots/desktop-settings-integrations.png) | ![profiles](screenshots/desktop-settings-profiles.png) |
+
 | Phone layout | | | | |
 |---|---|---|---|---|
 | ![chat](screenshots/mobile-chat.png) | ![servers](screenshots/mobile-servers.png) | ![home](screenshots/mobile-home.png) | ![you](screenshots/mobile-you.png) | ![settings](screenshots/mobile-settings.png) |
 | ![voice channel](screenshots/mobile-voice.png) | ![activity](screenshots/mobile-activity.png) | ![studio](screenshots/mobile-studio.png) | ![share](screenshots/mobile-share.png) | ![sharing](screenshots/mobile-share-live.png) |
+| ![friends](screenshots/mobile-friends.png) | ![messages](screenshots/mobile-messages.png) | ![events](screenshots/mobile-events.png) | ![the bell](screenshots/mobile-notifications.png) | ![streaming settings](screenshots/mobile-settings-streaming.png) |
 | ![add server](screenshots/mobile-add-server.png) | | | | |
 
 ## Limits
@@ -366,3 +430,14 @@ the window's size so the pointer is not over the window, and passes
   the model does not load). The
   studio cannot be detached on Android (one window). Its own window shows
   no toasts; status messages go to the main window.
+- Home, friends and messages show what the user's servers tell: there is
+  no global network behind TeamSpeak, so the design's Discover, other
+  communities with member counts, the games friends play and the upgrade
+  panels are left out, and a friend shows as online only on servers we
+  are on or look into.
+- Direct messages need a voice connection to the peer's server; the
+  design's calls, groups, requests, voice messages and reactions in
+  private chats have no TeamSpeak counterpart.
+- On the phone the settings are a list on the You tab and a section
+  picker inside them, not the design's list beside the page (too narrow
+  for most sections at a phone's width).
