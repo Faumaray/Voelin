@@ -133,7 +133,11 @@ port on the server's host is found with no setup at all; behind a proxy,
 set `listen.public_url` so the answer points at the proxy.
 
 Discovery is as trustworthy as DNS and the network, like TSDNS: prefer a
-`_tsgws` record, so TLS proves the gateway is yours. A user logs in with
+`_tsgws` record, so TLS proves the gateway is yours. Voelin checks a
+`wss://` gateway's certificate against the system's certificate store, so
+use one from a public CA (Caddy's automatic Let's Encrypt certificates
+work); the Android app cannot reach `wss://` gateways yet (it has no
+system store to read). A user logs in with
 their own identity, and only when they choose to observe the server.
 
 ## Install
