@@ -15,7 +15,7 @@ appear in the channel as `[#topic] text`).
 | Feature | How |
 |---|---|
 | Presence | One query session watches the server; each user sees the channels their `i_channel_subscribe_power` allows, without query clients |
-| Channel chat | A relay query session is moved into each channel someone opened; it forwards what is said and posts users' messages as `[Nick] text` |
+| Channel chat | A relay query session is moved into each channel someone opened; it forwards what is said and posts users' messages under their own nickname, as if they wrote them |
 | Server chat | Read by the watcher, posted by the gateway's lookup session |
 | History | Relayed messages are stored (SQLite) with stable ids; pages by id or time in both directions, without a size limit unless you set one; `sync` returns what changed since a revision |
 | Pins | Pinned messages per chat, kept even when older messages are pruned |
@@ -26,7 +26,13 @@ appear in the channel as `[#topic] text`).
 | Activity feed | Streams started and stopped, events scheduled, starting or cancelled, topics started, messages pinned |
 
 The nickname in relayed posts is the one the server has on record for the
-user's identity (from `clientdbinfo`), not something the user can choose.
+user's identity (from `clientdbinfo`), not something the user can choose. For
+each post the relay (or, for server chat, the lookup session) takes that
+nickname, sends the message and takes its own name back; while someone on the
+server has the nickname it uses `Nick1` to `Nick3`, as TeamSpeak names a second
+client of the same name. Only when it can take none of them (a nickname under
+three characters, the server refusing the change) does the post go out under
+the relay's own name, as `relay.format` (`[Nick] text`).
 Each feature can be turned off (`features.*`); pins, reactions and topics
 need `history.enabled`.
 
@@ -187,9 +193,9 @@ docker run -v $PWD/tsgw.toml:/etc/tsgw/tsgw.toml -e TSGW_QUERY_PASSWORD=… -p 7
 Query clients are not hidden by the server; official clients hide them from
 users whose `i_client_serverquery_view_power` is below the query client's
 needed view power (100 by default). Server Admins, and third-party clients
-that ignore the rule, see the gateway's sessions. Relayed channels show the
-relay's posts under its own nickname (`Chat Relay <cid>`), so people in the
-channel can tell the messages come through the gateway.
+that ignore the rule, see the gateway's sessions. Relayed posts show the
+user's nickname, like a message the user wrote in TeamSpeak; whoever can see
+query clients sees that it came from a query session.
 
 ## Configuration
 
@@ -241,7 +247,7 @@ you set here.
 | `auth.min_security_level` | `0` | On top of the server's own requirement |
 | `auth.token_ttl_hours` | `720` | Lifetime of login tokens |
 | `relay.nickname` | `"Chat Relay"` | Relay sessions are named `<nickname> <cid>`, the lookup session `<nickname> Gateway` |
-| `relay.format` | `"[{nick}] {text}"` | How posts appear in TeamSpeak |
+| `relay.format` | `"[{nick}] {text}"` | How posts appear when the relay cannot take the user's nickname |
 | `relay.idle_teardown_secs` | `120` | Close a relay this long after its last reader left |
 | `relay.max_channel_relays` | `6` | Concurrent relays (0: no limit) |
 | `relay.pinned_channels` | `[]` | Always relayed, so their history is complete |

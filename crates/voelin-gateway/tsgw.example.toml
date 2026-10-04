@@ -42,6 +42,8 @@ token_ttl_hours = 720
 
 [relay]
 nickname = "Chat Relay"
+# Posts go out under the user's nickname; this form only when the relay
+# cannot take it.
 format = "[{nick}] {text}"
 idle_teardown_secs = 120
 # Each relay is one query connection; stay below the server's per-IP limit.

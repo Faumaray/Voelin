@@ -41,7 +41,7 @@ the admin grants them to the guest query group.
 | Feature | Mechanism |
 |---|---|
 | Server chat | Voice connection: `targetmode=3`. Without one: gateway or own query session (`servernotifyregister event=textserver`) |
-| Channel chat without joining | Relay pool (`voelin-observer`): invisible query sessions sit in channels and relay both ways; posts appear as `[Nick] text` |
+| Channel chat without joining | Relay pool (`voelin-observer`): invisible query sessions sit in channels and relay both ways; posts appear under the author's nickname |
 | Chat history | Every message a session sees is stored on the device (`voelin-store`); a gateway's stored history fills in what the device missed (sync by revision, paging by time) |
 | Pins, reactions, topics, events, stream directory, activity | Gateway features (`tsgw`), driven through `Command::Gateway` / `Event::Gateway` |
 | Voice | tsproto UDP transport, Opus (`opus2`), echo cancellation / noise suppression (sonora), own jitter buffer, cpal / AAudio |
