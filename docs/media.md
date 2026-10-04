@@ -226,8 +226,15 @@ viewer:   Engine::subscribe_frames ─ VideoPipeline (thread) ─ VideoDecoder �
   which runs in the app, not sent as engine events: the engine never sees
   the decoded pictures.
 - `Viewer` feeds a `VideoPipeline` from the engine and sends
-  `RequestStreamKeyframe`; `LocalPreview` runs capture → encoder → decoder
-  without a server (the desktop app's `VOELIN_DEMO_STREAM`).
+  `RequestStreamKeyframe`. When video of one codec keeps coming (10 s, at
+  least 60 frames: time for every decoder of the ladder to fail) and not a
+  single picture decodes, it sends `Command::StreamUndecodable` once: the
+  stream session asks for a new connection without that codec, if the
+  streamer offered another we take (the negotiation ladder in
+  [architecture.md](architecture.md#negotiation-best-first-then-fall-back)).
+  A codec that decoded once is never reported. `LocalPreview` runs capture
+  → encoder → decoder without a server (the desktop app's
+  `VOELIN_DEMO_STREAM`).
 - Viewer counts come from the server: `StreamInfo::viewers` in
   `Event::StreamsChanged` is TeamSpeak 6's own count (`viewer` of
   `notifystreaminfo`), counted up from `notifystreamclientjoined` and

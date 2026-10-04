@@ -260,8 +260,14 @@ Transport details of our stream (`voelin-stream`):
   them), or without the video codec when audio came and video did not. A
   viewer sends `reconnect`; a streamer sends a `reconnectOffer` of its own,
   for viewers that do not step down (it waits twice as long, so a Voelin
-  viewer goes first). What was left out stays out for that viewer or
-  watched stream; when nothing is left, that is logged and nothing loops.
+  viewer goes first). One layer up, the app's `media::Viewer` judges by
+  decoded pictures: video of one codec that keeps coming (10 s, at least
+  60 frames) without a single picture, every decoder of the codec's
+  ladder having failed, makes it send `Command::StreamUndecodable`, and
+  the viewer asks for a connection without that codec
+  (`Streams::video_undecodable`). What was left out stays out for that
+  viewer or watched stream; when nothing is left, that is logged and
+  nothing loops.
 - **mDNS candidates**: host candidates behind `<uuid>.local` names (how
   browsers and other libwebrtc builds hide host addresses) are resolved by
   a multicast DNS query (`voelin_stream::mdns`, from port 5353 shared with
@@ -345,7 +351,7 @@ cannot decode and then shows nothing, so for codecs "accepted" is not
 | Point | Ladder (best → most compatible) | Not accepted means | State |
 |---|---|---|---|
 | Video codec, streamer offer | stream codec (configured, else the first of the encoder preference every TeamSpeak client decodes) → AV1, VP9, VP8 of hardware encoders and VP8 of libvpx → H.264 of hardware → HEVC | SDP: the answer lists what the viewer takes; our first one it took is sent (`PeerEvent::VideoCodec`), one encoder per format. At runtime undetectable for the official client: without OpenH264 it answers H.264, decodes nothing and reports success (libwebrtc's `NullVideoDecoder`, no PLI) | already so; deliberately not best-first for H.264: codecs every client decodes come before it, because the streamer cannot see that failure |
-| Video codec, viewer answer | the offer's order, limited to what we decode (the decoder ladder is separate work) | SDP: no codec in common → refused with the reason (`PeerError::NoCommonCodec`); an official streamer that does not encode our pick re-offers on the same connection (`Peer::renegotiate`). Runtime: audio comes, video does not for `stall_timeout` (`PeerEvent::NoVideo { audio: true }`) → `reconnect` without that codec | renegotiation already so; runtime step **changed now** (`viewer_falls_back_to_another_codec`) |
+| Video codec, viewer answer | the offer's order, limited to what we decode; each codec's decoders hardware → FFmpeg software → built-in ([media.md](media.md)) | SDP: no codec in common → refused with the reason (`PeerError::NoCommonCodec`); an official streamer that does not encode our pick re-offers on the same connection (`Peer::renegotiate`). Runtime: audio comes, video does not for `stall_timeout` (`PeerEvent::NoVideo { audio: true }`), or video comes and no picture decodes for 10 s and 60 frames, every decoder of the ladder having failed (`media::Viewer`, `Command::StreamUndecodable`) → `reconnect` without that codec | renegotiation already so; both runtime steps **changed now** (`viewer_falls_back_to_another_codec`, `undecodable_video_falls_back_to_another_codec`, `undecodable_video_is_noticed_through_the_pipeline`) |
 | H.264 profile | Constrained High (PT 112) → Constrained Baseline (PT 108) | SDP: the answer takes only the Baseline entry (headless Chromium 152) → that viewer's frames come from an encoder in Constrained Baseline | **changed now** (`a_baseline_only_viewer_gets_the_fallback_profile`, `an_encoder_per_h264_profile_viewers_chose`, browser: 90 of 90 frames, SPS profile 66). Android's MediaCodec encoder makes High only |
 | H.264 level, packetization | the level the stream needs (at least 3.1); packetization mode 1 | `level-asymmetry-allowed=1`; a peer without mode 1 does not take H.264 and gets the next codec | level: unchanged, not a ladder. The app offers 3.1 whatever the share's size (its peer configuration is made before the share starts; `voelinctl` sets the level): open issue |
 | SRTP profile | AES_CM_128_HMAC_SHA1_80 → AEAD_AES_128_GCM → AEAD_AES_256_GCM | handshake: the DTLS server (we are, with official clients and browsers) takes the first of its order the client offers. Runtime: connected, nothing gets through (`NoVideo { audio: false }` at the viewer, `NoFeedback` at the streamer) → a new connection without the negotiated profile (without both AEAD ones if it was AEAD) | runtime ladder **changed now** (`viewer_falls_back_when_srtp_fails`, `streamer_falls_back_when_its_viewer_gets_nothing`, `browser_srtp_failure_is_noticed`). The order stays most-compatible-first, see below |
