@@ -610,6 +610,40 @@ async fn viewer_falls_back_to_another_codec() {
 	assert_eq!(net.viewer().codec, Some(VideoCodec::Vp8));
 }
 
+/// Video arrives in the codec our answer took, but our decoders make
+/// nothing of it (the app's pipeline says so: `video_undecodable`): the
+/// viewer asks for a new connection without that codec and gets the next
+/// one the streamer offered. With no other codec left it stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn undecodable_video_falls_back_to_another_codec() {
+	let _ = tracing_subscriber::fmt().with_env_filter("warn").with_test_writer().try_init();
+	let streamer = PeerConfig {
+		video_codecs: vec![VideoCodec::Vp9, VideoCodec::Vp8],
+		..config(&SrtpProfile::DEFAULT_ORDER, Duration::MAX)
+	};
+	let mut net = Net::with(streamer, config(&SrtpProfile::DEFAULT_ORDER, Duration::MAX), None);
+	net.source = Some(SyntheticSource::new(30, 4000, true));
+	let id = net.watching().await;
+	net.frames(10).await;
+	assert_eq!(net.viewer().codec, Some(VideoCodec::Vp9));
+	net.clients[VIEWER].video_undecodable(&id).unwrap();
+	net.until("connected again", |i, e| {
+		i == VIEWER && watch_event(e, |e| matches!(e, WatchEvent::Connected))
+	})
+	.await;
+	net.frames(10).await;
+	assert_eq!(net.sent(VIEWER, |s| *s == Signal::Reconnect), 1);
+	assert_eq!(net.viewer().codec, Some(VideoCodec::Vp8));
+	// VP8 does not decode either: nothing is left, the viewer stays.
+	net.clients[VIEWER].video_undecodable(&id).unwrap();
+	net.frames(10).await;
+	assert_eq!(net.sent(VIEWER, |s| *s == Signal::Reconnect), 1);
+	assert_eq!(
+		net.clients[VIEWER].video_undecodable("nope"),
+		Err(SessionError::NotWatching("nope".into()))
+	);
+}
+
 /// Nothing left to fall back to: SRTP fails with every profile both sides
 /// have. The viewer says so and stays; nothing loops.
 #[tokio::test(flavor = "multi_thread")]

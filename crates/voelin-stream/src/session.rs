@@ -1597,15 +1597,15 @@ impl ViewerSession {
 		Ok(())
 	}
 
-	/// Connected, but no video came ([`PeerEvent::NoVideo`]): ask for a new
-	/// connection with the next lower set ([`Fallback`]), without the SRTP
-	/// profile this one negotiated when nothing came at all, without its
-	/// video codec when audio did (or no other profile is left).
-	fn fall_back(&mut self, audio: bool, out: &mut Outbox) {
+	/// The media of this connection does not get through (`why`): ask for a
+	/// new connection with the next lower set ([`Fallback`]): without the
+	/// SRTP profile this one negotiated when `srtp` (nothing came at all),
+	/// else (or when no other profile is left) without its video codec.
+	fn fall_back(&mut self, srtp: bool, why: &str, out: &mut Outbox) {
 		let config = self.fallback.apply(&self.config);
 		let profile = self.peer.as_ref().and_then(Peer::srtp_profile);
 		let mut step = None;
-		if !audio && let Some(profile) = profile {
+		if srtp && let Some(profile) = profile {
 			step = self
 				.fallback
 				.without_srtp(&config, profile)
@@ -1625,16 +1625,22 @@ impl ViewerSession {
 				.map(|left| format!("without {codec} (left: {})", list(&left)));
 		}
 		let Some(step) = step else {
-			warn!(stream = self.id, audio, "connected, but no video; nothing left to fall back to");
+			warn!(stream = self.id, "{why}; nothing left to fall back to");
 			return;
 		};
-		warn!(
-			stream = self.id,
-			audio, "connected, but no video; asking for a new connection {step}"
-		);
+		warn!(stream = self.id, "{why}; asking for a new connection {step}");
 		self.peer = None;
 		self.state = WatchState::Connecting;
 		self.signal(Signal::Reconnect, out);
+	}
+
+	/// Video arrives, but none of it decodes here (the app's decoders told
+	/// [`Streams::video_undecodable`]): a new connection without its codec,
+	/// if the streamer offered another we take.
+	pub fn video_undecodable(&mut self, out: &mut Outbox) {
+		if self.state == WatchState::Connected {
+			self.fall_back(false, "video arrives, but none of it decodes", out);
+		}
 	}
 
 	/// Drop the connection and ask the streamer for a new offer (`reconnect`).
@@ -1716,7 +1722,12 @@ impl ViewerSession {
 					self.event(WatchEvent::Frame(frame), out);
 				}
 			}
-			PeerEvent::NoVideo { audio } => self.fall_back(audio, out),
+			PeerEvent::NoVideo { audio: false } => {
+				self.fall_back(true, "connected, but nothing arrives", out);
+			}
+			PeerEvent::NoVideo { audio: true } => {
+				self.fall_back(false, "connected, but no video arrives (audio does)", out);
+			}
 			PeerEvent::KeyframeRequest
 			| PeerEvent::LayerKeyframeRequest(_)
 			| PeerEvent::BitrateEstimate(_)
@@ -1942,6 +1953,16 @@ impl Streams {
 		let viewer =
 			self.viewers.get_mut(id).ok_or_else(|| SessionError::NotWatching(id.into()))?;
 		viewer.set_layer(layer, &mut self.out)
+	}
+
+	/// The video of a watched stream arrives, but none of it decodes: watch
+	/// it in another codec the streamer offered, if there is one (see
+	/// [`ViewerSession::video_undecodable`]).
+	pub fn video_undecodable(&mut self, id: &str) -> Result<(), SessionError> {
+		let viewer =
+			self.viewers.get_mut(id).ok_or_else(|| SessionError::NotWatching(id.into()))?;
+		viewer.video_undecodable(&mut self.out);
+		Ok(())
 	}
 
 	/// Reconnect to a watched stream: the streamer sends a new offer.

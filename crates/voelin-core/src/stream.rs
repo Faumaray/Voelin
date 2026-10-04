@@ -163,6 +163,10 @@ pub(crate) enum StreamInput {
 	RequestKeyframe {
 		stream_id: String,
 	},
+	/// The stream's video arrives but does not decode.
+	Undecodable {
+		stream_id: String,
+	},
 	WatchLayer {
 		stream_id: String,
 		layer: Option<LayerId>,
@@ -376,6 +380,7 @@ impl StreamTask {
 				self.streams.request_keyframe(&stream_id);
 				Ok(())
 			}
+			StreamInput::Undecodable { stream_id } => self.streams.video_undecodable(&stream_id),
 			StreamInput::WatchLayer { stream_id, layer } => self
 				.streams
 				.set_watch_layer(&stream_id, layer)

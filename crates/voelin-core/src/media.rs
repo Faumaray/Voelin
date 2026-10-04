@@ -95,6 +95,13 @@ const FRAMES_WITHOUT_PICTURE: u32 = 10;
 const PICTURE_POOL: usize = 4;
 /// The decoding rates of [`DecodeStats`] cover at least this long.
 const RATE_WINDOW: Duration = Duration::from_millis(500);
+/// A watched stream's video of one codec counts as undecodable here once it
+/// came this long, and at least [`UNDECODABLE_FRAMES`] frames of it, without
+/// a single picture: time for the pipeline to try every decoder of the
+/// codec's ladder ([`DECODER_FAILURES`] failures of up to
+/// [`FRAMES_WITHOUT_PICTURE`] frames each).
+const UNDECODABLE_AFTER: Duration = Duration::from_secs(10);
+const UNDECODABLE_FRAMES: u64 = 60;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MediaError {
@@ -2601,6 +2608,51 @@ impl FrameInput {
 	pub fn lost(&self) {
 		lock(&self.queue.state).lost = true;
 	}
+
+	/// Pictures decoded so far (without touching the rates of
+	/// [`VideoPipeline::stats`]).
+	fn decoded(&self) -> u64 {
+		lock(&self.queue.stats).decoded
+	}
+}
+
+/// Whether the video of a watched stream decodes at all: video of one codec
+/// that keeps coming ([`UNDECODABLE_AFTER`], [`UNDECODABLE_FRAMES`]) without a
+/// single picture is reported once, so the stream can be watched in another
+/// codec ([`Command::StreamUndecodable`]). A codec that decoded once is
+/// fine (losses later are the pipeline's to repair); another codec starts
+/// over.
+struct DecodeWatch {
+	after: Duration,
+	frames: u64,
+	/// The codec, when its first frame came, pictures decoded by then, its
+	/// frames so far, and whether it is settled (decoded, or reported).
+	current: Option<(MediaCodec, Instant, u64, u64, bool)>,
+}
+
+type MediaCodec = voelin_stream::Codec;
+
+impl DecodeWatch {
+	fn new(after: Duration, frames: u64) -> Self {
+		Self { after, frames, current: None }
+	}
+
+	/// A video frame of `codec` arrived at `now`, with `decoded` pictures so
+	/// far; `true` when the codec turned out undecodable.
+	fn frame(&mut self, codec: MediaCodec, decoded: u64, now: Instant) -> bool {
+		let current = match &mut self.current {
+			Some(current) if current.0 == codec => current,
+			_ => self.current.insert((codec, now, decoded, 0, false)),
+		};
+		let (_, since, start, frames, settled) = current;
+		*frames += 1;
+		if *settled || decoded > *start {
+			*settled = true;
+			return false;
+		}
+		*settled = *frames >= self.frames && now.saturating_duration_since(*since) >= self.after;
+		*settled
+	}
 }
 
 /// Decodes the video frames of one stream on its own thread. See the
@@ -2928,11 +2980,25 @@ impl Viewer {
 		let input = pipeline.input();
 		let mut frames = engine.subscribe_frames();
 		let stream_id = stream_id.to_owned();
-		let forward = engine.runtime().spawn(async move {
+		let runtime = engine.runtime().clone();
+		let engine = engine.clone();
+		let forward = runtime.spawn(async move {
 			use tokio::sync::broadcast::error::RecvError;
+			let mut watch = DecodeWatch::new(UNDECODABLE_AFTER, UNDECODABLE_FRAMES);
 			loop {
 				match frames.recv().await {
 					Ok(f) if f.session == session && f.stream_id == stream_id => {
+						if f.frame.kind == MediaKind::Video
+							&& watch.frame(f.frame.codec, input.decoded(), Instant::now())
+						{
+							warn!(
+								stream = stream_id,
+								codec = ?f.frame.codec,
+								"the stream's video does not decode here; asking for another codec"
+							);
+							let stream_id = stream_id.clone();
+							engine.send(Command::StreamUndecodable { session, stream_id });
+						}
 						input.push(f.frame)
 					}
 					Ok(_) => {}
@@ -3088,6 +3154,71 @@ pub(crate) fn rectangle_span(picture: &VideoFrame) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Reported once, only after both the time and the frames, never for a
+	/// codec that decoded; another codec starts over.
+	#[test]
+	fn decode_watch_reports_a_codec_that_never_decodes() {
+		let (t0, second) = (Instant::now(), Duration::from_secs(1));
+		let mut watch = DecodeWatch::new(2 * second, 3);
+		let vp9 = MediaCodec::Vp9;
+		assert!(!watch.frame(vp9, 5, t0));
+		assert!(!watch.frame(vp9, 5, t0 + 3 * second), "two frames are not enough");
+		assert!(watch.frame(vp9, 5, t0 + 3 * second), "three frames, three seconds, no picture");
+		assert!(!watch.frame(vp9, 5, t0 + 9 * second), "once");
+		// Another codec starts over, and once it decodes it is fine.
+		let vp8 = MediaCodec::Vp8;
+		assert!(!watch.frame(vp8, 5, t0 + 10 * second));
+		assert!(!watch.frame(vp8, 6, t0 + 11 * second));
+		for _ in 0..10 {
+			assert!(!watch.frame(vp8, 6, t0 + 20 * second));
+		}
+		// Many frames quickly are not enough without the time.
+		let av1 = MediaCodec::Av1;
+		for _ in 0..100 {
+			assert!(!watch.frame(av1, 6, t0 + 20 * second));
+		}
+		assert!(watch.frame(av1, 6, t0 + 22 * second));
+	}
+
+	/// Frames that no decoder of the codec takes (VP9 that is not VP9)
+	/// through a real pipeline: no picture comes, and the watch reports it;
+	/// real VP8 keyframes decode and are never reported.
+	#[tokio::test]
+	async fn undecodable_video_is_noticed_through_the_pipeline() {
+		let codecs = Arc::new(Codecs::builtin());
+		let run = |codec: MediaCodec, data: Vec<u8>| {
+			let codecs = codecs.clone();
+			async move {
+				let pipeline = VideoPipeline::new(codecs, |_| {}, || {});
+				let input = pipeline.input();
+				let mut watch = DecodeWatch::new(Duration::from_millis(400), 10);
+				let start = Instant::now();
+				let data: Arc<[u8]> = data.into();
+				for n in 0..40u64 {
+					let frame = MediaFrame {
+						kind: MediaKind::Video,
+						codec,
+						time: MediaTime::from_90khz(n * 3000),
+						network_time: Instant::now(),
+						contiguous: true,
+						data: data.clone(),
+					};
+					if watch.frame(codec, input.decoded(), Instant::now()) {
+						return Some(start.elapsed());
+					}
+					input.push(frame);
+					tokio::time::sleep(Duration::from_millis(20)).await;
+				}
+				None
+			}
+		};
+		let junk = vec![0x82, 0x49, 0x83, 0x42, 0x00, 0x13, 0xf0, 0x0e, 0xf6, 0x00, 1, 2, 3];
+		let reported = run(MediaCodec::Vp9, junk).await;
+		assert!(reported.is_some_and(|after| after >= Duration::from_millis(400)), "{reported:?}");
+		let vp8 = voelin_stream::SyntheticSource::video_frame(0, 64);
+		assert_eq!(run(MediaCodec::Vp8, vp8).await, None, "VP8 decodes");
+	}
 
 	#[test]
 	fn keyframe_detection() {
