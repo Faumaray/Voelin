@@ -34,11 +34,22 @@ use tracing::{debug, trace, warn};
 use crate::dtls::{self, NegotiatedProfile, SrtpProfile};
 use crate::h264::{self, H264Profile};
 use crate::layer::LayerSpec;
-use crate::stun;
+use crate::{mdns, stun};
 
 /// Initial bandwidth estimate of a streamer's peer without
 /// [`OfferOptions::start_bitrate`].
 pub const DEFAULT_START_BITRATE: u64 = 1_000_000;
+
+/// Socket buffers a peer asks for by default ([`PeerConfig::udp_buffer`]).
+pub const DEFAULT_UDP_BUFFER: usize = 4 << 20;
+
+/// How long an mDNS candidate's name is asked for.
+const MDNS_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long a connected viewer waits for video by default
+/// ([`PeerConfig::stall_timeout`]): a streamer sends a keyframe as soon as
+/// a viewer connects.
+pub const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Video codecs a peer can negotiate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,6 +103,73 @@ impl std::fmt::Display for VideoCodec {
 	}
 }
 
+/// A video codec as an answer chose it, with the H.264 profile: the
+/// streamer encodes each format with an encoder of its own and sends a
+/// viewer only frames of its format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum VideoFormat {
+	Vp8,
+	Vp9,
+	H264(H264Profile),
+	Av1,
+	H265,
+}
+
+impl VideoFormat {
+	pub const ALL: [Self; 6] = [
+		Self::Vp8,
+		Self::Vp9,
+		Self::H264(H264Profile::ConstrainedHigh),
+		Self::H264(H264Profile::ConstrainedBaseline),
+		Self::Av1,
+		Self::H265,
+	];
+
+	pub fn codec(self) -> VideoCodec {
+		match self {
+			Self::Vp8 => VideoCodec::Vp8,
+			Self::Vp9 => VideoCodec::Vp9,
+			Self::H264(_) => VideoCodec::H264,
+			Self::Av1 => VideoCodec::Av1,
+			Self::H265 => VideoCodec::H265,
+		}
+	}
+
+	/// Bit of this format in a set of formats ([`crate::LayerFeedback`]):
+	/// the codec's, and one more for H.264 Constrained Baseline.
+	pub fn bit(self) -> u8 {
+		match self {
+			Self::H264(H264Profile::ConstrainedBaseline) => 1 << VideoCodec::ALL.len(),
+			other => other.codec().bit(),
+		}
+	}
+}
+
+/// H.264 in Constrained High, what our encoders make unless told otherwise.
+impl From<VideoCodec> for VideoFormat {
+	fn from(codec: VideoCodec) -> Self {
+		match codec {
+			VideoCodec::Vp8 => Self::Vp8,
+			VideoCodec::Vp9 => Self::Vp9,
+			VideoCodec::H264 => Self::H264(H264Profile::ConstrainedHigh),
+			VideoCodec::Av1 => Self::Av1,
+			VideoCodec::H265 => Self::H265,
+		}
+	}
+}
+
+impl std::fmt::Display for VideoFormat {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::H264(H264Profile::ConstrainedHigh) => f.write_str("H264 Constrained High"),
+			Self::H264(H264Profile::ConstrainedBaseline) => {
+				f.write_str("H264 Constrained Baseline")
+			}
+			other => other.codec().fmt(f),
+		}
+	}
+}
+
 #[derive(Clone, Debug)]
 pub struct PeerConfig {
 	/// Local addresses for host candidates. Empty: the primary IPv4 address.
@@ -123,10 +201,25 @@ pub struct PeerConfig {
 	/// simulcast leaves the peer unable to send video. Official TeamSpeak
 	/// viewers get a plain offer and one layer at a time.
 	pub simulcast: bool,
-	/// H.264 `profile-level-id` of the offer: Constrained High at the level
-	/// the stream needs ([`set_h264_format`](Self::set_h264_format)); level
-	/// 3.1 by default.
-	pub h264_profile_level_id: u32,
+	/// H.264 `profile-level-id`s of the offer, best first: Constrained High,
+	/// then Constrained Baseline for peers that take only that (headless
+	/// Chromium and other libwebrtc builds without a High decoder), each at
+	/// the level the stream needs ([`set_h264_format`](Self::set_h264_format));
+	/// level 3.1 by default. A viewer gets frames of the profile its answer
+	/// chose ([`PeerEvent::VideoCodec`]). At most two are offered.
+	pub h264_profile_level_ids: Vec<u32>,
+	/// Receive and send buffer (bytes) each peer socket asks the system for
+	/// (`SO_RCVBUF`, `SO_SNDBUF`; Linux caps them at `net.core.rmem_max` and
+	/// `wmem_max`); 0 keeps the system's default. Linux's default, 208 KB,
+	/// holds about 90 full-size packets: a 1440p keyframe arriving while
+	/// the peer task is busy overflows it, and every lost packet costs the
+	/// viewer a retransmission or a keyframe.
+	pub udp_buffer: usize,
+	/// How long a connected viewer waits for video before its peer reports
+	/// [`PeerEvent::NoVideo`]; a streamer's peer waits twice as long for
+	/// the viewer to report any of our video ([`PeerEvent::NoFeedback`]),
+	/// so a Voelin viewer steps down first. `Duration::MAX` turns both off.
+	pub stall_timeout: Duration,
 }
 
 impl Default for PeerConfig {
@@ -141,7 +234,12 @@ impl Default for PeerConfig {
 			srtp_profiles: SrtpProfile::DEFAULT_ORDER.to_vec(),
 			bandwidth_estimation: true,
 			simulcast: false,
-			h264_profile_level_id: H264_CONSTRAINED_HIGH,
+			h264_profile_level_ids: H264Profile::LADDER
+				.iter()
+				.map(|p| h264::profile_level_id(*p, h264::MIN_OFFER_LEVEL))
+				.collect(),
+			udp_buffer: DEFAULT_UDP_BUFFER,
+			stall_timeout: DEFAULT_STALL_TIMEOUT,
 		}
 	}
 }
@@ -156,19 +254,14 @@ impl PeerConfig {
 		}
 	}
 
-	/// Offer H.264 in `profile` at the level a `width` x `height` stream at
-	/// `fps` and `bitrate` bit/s needs (at least 3.1, see
-	/// [`crate::h264::offer_profile_level_id`]).
-	pub fn set_h264_format(
-		&mut self,
-		profile: H264Profile,
-		width: u32,
-		height: u32,
-		fps: u32,
-		bitrate: u64,
-	) {
-		self.h264_profile_level_id =
-			h264::offer_profile_level_id(profile, width, height, fps, bitrate);
+	/// Offer H.264 in both profiles ([`H264Profile::LADDER`]) at the levels
+	/// a `width` x `height` stream at `fps` and `bitrate` bit/s needs (at
+	/// least 3.1, see [`crate::h264::offer_profile_level_id`]).
+	pub fn set_h264_format(&mut self, width: u32, height: u32, fps: u32, bitrate: u64) {
+		self.h264_profile_level_ids = H264Profile::LADDER
+			.iter()
+			.map(|p| h264::offer_profile_level_id(*p, width, height, fps, bitrate))
+			.collect();
 	}
 }
 
@@ -231,9 +324,20 @@ pub enum PeerEvent {
 	/// The answer accepted RID simulcast: video goes out per layer with
 	/// these RIDs ([`Peer::write_rid`]).
 	Simulcast(Vec<Rid>),
-	/// The video codec the answer chose (streamer side): the viewer's first
-	/// one. Video written to this peer must be in it.
-	VideoCodec(VideoCodec),
+	/// The video codec the answer chose (streamer side), with the H.264
+	/// profile: the first of our offer the viewer took. Video written to
+	/// this peer must be in it.
+	VideoCodec(VideoFormat),
+	/// Viewer side: connected, but no video arrived within
+	/// [`PeerConfig::stall_timeout`]. `audio`: audio did, so SRTP works
+	/// and the video codec is the suspect. Once per connection.
+	NoVideo { audio: bool },
+	/// Streamer side: connected and sending video for twice
+	/// [`PeerConfig::stall_timeout`], yet the viewer reported none of it
+	/// (no receiver report of our video, no REMB): its SRTP fails or
+	/// nothing reaches it. Keyframe requests do not count: a viewer that
+	/// gets nothing keeps asking. Once per connection.
+	NoFeedback,
 	/// The connection is gone.
 	Closed,
 }
@@ -281,6 +385,16 @@ impl Peer {
 		stream_id: &str,
 		options: &OfferOptions<'_>,
 	) -> Result<(Self, String), PeerError> {
+		Self::offer_now(config, stream_id, options)
+	}
+
+	/// [`offer_with`](Self::offer_with), which never waits: for the stream
+	/// sessions, which offer again from peer events.
+	pub(crate) fn offer_now(
+		config: &PeerConfig,
+		stream_id: &str,
+		options: &OfferOptions<'_>,
+	) -> Result<(Self, String), PeerError> {
 		let start = options.start_bitrate.unwrap_or(DEFAULT_START_BITRATE).max(1);
 		let bwe = config.bandwidth_estimation.then_some(start);
 		let (mut rtc, srtp_profile) = build_rtc(config, &config.video_codecs, true, bwe);
@@ -288,7 +402,7 @@ impl Peer {
 			let desired = options.desired_bitrate.unwrap_or(start);
 			rtc.bwe().set_desired_bitrate(Bitrate::bps(desired));
 		}
-		let net = Net::bind(config, &mut rtc).await?;
+		let net = Net::bind(config, &mut rtc)?;
 		let mut api = rtc.sdp_api();
 		let msid = Some(stream_id.to_owned());
 		let mut mids = Vec::new();
@@ -333,12 +447,35 @@ impl Peer {
 				codecs.push(*c);
 			}
 		}
-		let offer = SdpOffer::from_sdp_string(offer).map_err(|e| PeerError::Sdp(e.to_string()))?;
+		let parsed = SdpOffer::from_sdp_string(offer).map_err(|e| PeerError::Sdp(e.to_string()))?;
 		let (mut rtc, srtp_profile) = build_rtc(config, &codecs, false, None);
-		let net = Net::bind(config, &mut rtc).await?;
-		let answer = rtc.sdp_api().accept_offer(offer)?;
+		let net = Net::bind(config, &mut rtc)?;
+		let answer = rtc.sdp_api().accept_offer(parsed)?;
 		let peer = Self::spawn(rtc, net, config, None, Vec::new(), srtp_profile);
+		peer.resolve_mdns(offer);
 		Ok((peer, answer.to_sdp_string()))
+	}
+
+	/// Resolve the mDNS names of the candidates in `sdp` (a whole SDP or one
+	/// candidate line) in the background and add them as plain candidates:
+	/// peers that hide their host addresses (browsers, other libwebrtc
+	/// builds) can then still connect on a LAN. ICE takes whichever pair
+	/// works, these or the others.
+	fn resolve_mdns(&self, sdp: &str) {
+		for line in sdp.lines() {
+			let Some(name) = mdns::candidate_name(line) else { continue };
+			let (name, line, cmd) = (name.to_owned(), line.to_owned(), self.cmd.clone());
+			tokio::spawn(async move {
+				match mdns::resolve(&name, MDNS_TIMEOUT).await {
+					Some(ip) => {
+						debug!(name, %ip, "mDNS candidate resolved");
+						let _ =
+							cmd.send(Cmd::RemoteCandidate(line.replace(&name, &ip.to_string())));
+					}
+					None => debug!(name, "mDNS candidate not resolved"),
+				}
+			});
+		}
 	}
 
 	fn spawn(
@@ -354,6 +491,7 @@ impl Peer {
 		let task = Task {
 			rtc,
 			net,
+			offerer: pending.is_some(),
 			pending,
 			cmd: cmd_rx,
 			events: event_tx,
@@ -361,6 +499,7 @@ impl Peer {
 			writers: HashMap::new(),
 			stun: Vec::new(),
 			twcc: false,
+			stall: Stall { timeout: config.stall_timeout, ..Stall::default() },
 		};
 		tokio::spawn(task.run(config.stun_servers.clone()));
 		Self { cmd: cmd_tx, events: event_rx, srtp_profile }
@@ -370,7 +509,9 @@ impl Peer {
 	pub async fn accept_answer(&self, sdp: &str) -> Result<(), PeerError> {
 		let (tx, rx) = oneshot::channel();
 		self.cmd.send(Cmd::Answer(sdp.to_owned(), tx)).map_err(|_| PeerError::Closed)?;
-		rx.await.map_err(|_| PeerError::Closed)?
+		rx.await.map_err(|_| PeerError::Closed)??;
+		self.resolve_mdns(sdp);
+		Ok(())
 	}
 
 	/// Viewer side: answer a new offer of the streamer on this connection
@@ -380,12 +521,19 @@ impl Peer {
 	pub async fn renegotiate(&self, offer: &str) -> Result<String, PeerError> {
 		let (tx, rx) = oneshot::channel();
 		self.cmd.send(Cmd::Offer(offer.to_owned(), tx)).map_err(|_| PeerError::Closed)?;
-		rx.await.map_err(|_| PeerError::Closed)?
+		let answer = rx.await.map_err(|_| PeerError::Closed)??;
+		self.resolve_mdns(offer);
+		Ok(answer)
 	}
 
-	/// Add a trickled remote candidate (`candidate:...`, `a=` prefix optional).
+	/// Add a trickled remote candidate (`candidate:...`, `a=` prefix
+	/// optional); one with an mDNS name once it is resolved.
 	pub fn add_remote_candidate(&self, candidate: &str) {
-		let _ = self.cmd.send(Cmd::RemoteCandidate(candidate.to_owned()));
+		if mdns::candidate_name(candidate).is_some() {
+			self.resolve_mdns(candidate);
+		} else {
+			let _ = self.cmd.send(Cmd::RemoteCandidate(candidate.to_owned()));
+		}
 	}
 
 	/// Send one encoded frame (streamer). Dropped until connected.
@@ -440,9 +588,11 @@ impl Drop for Peer {
 	}
 }
 
-/// H.264 Constrained High, level 3.1: reportedly the only H.264 profile the
-/// TeamSpeak client decodes; str0m's defaults lack it.
-const H264_CONSTRAINED_HIGH: u32 = 0x640c1f;
+/// Payload types (and their RTX) of the H.264 profiles an offer lists, in
+/// the order of [`PeerConfig::h264_profile_level_ids`]: 112 as before for
+/// Constrained High, which str0m's defaults lack, and 108, str0m's own for
+/// Constrained Baseline.
+const H264_PTS: [(u8, u8); 2] = [(112, 113), (108, 109)];
 
 /// The send simulcast of an offer: the layers with a RID, if at least two.
 fn simulcast_offer(layers: &[LayerSpec]) -> Option<Simulcast> {
@@ -474,10 +624,11 @@ fn simulcast_offer(layers: &[LayerSpec]) -> Option<Simulcast> {
 
 /// An RTC with Opus and `video` codecs, in this order of preference, our
 /// DTLS, and bandwidth estimation starting at `bwe` bit/s if given. An
-/// offer lists H.264 only as our encoders produce it (`profile-level-id`
-/// [`PeerConfig::h264_profile_level_id`], packetization mode 1): with
-/// str0m's other variants offered too, a viewer may answer a profile we
-/// never send. An answer takes every variant the offer has.
+/// offer lists H.264 only as our encoders produce it (the
+/// [`PeerConfig::h264_profile_level_ids`], packetization mode 1, best
+/// first): with str0m's other variants offered too, a viewer may answer a
+/// profile we never send. An answer takes str0m's variants and Constrained
+/// High, which they lack.
 fn build_rtc(
 	config: &PeerConfig,
 	video: &[VideoCodec],
@@ -486,18 +637,24 @@ fn build_rtc(
 ) -> (Rtc, NegotiatedProfile) {
 	let mut rtc_config =
 		RtcConfig::new().clear_codecs().enable_opus(config.audio).enable_bwe(bwe.map(Bitrate::bps));
+	if offer {
+		// The viewer's receiver reports ([`PeerEvent::NoFeedback`]).
+		rtc_config = rtc_config.set_stats_interval(Some(Duration::from_secs(1)));
+	}
 	for codec in video {
 		rtc_config = match codec {
 			VideoCodec::Vp8 => rtc_config.enable_vp8(true),
 			VideoCodec::Vp9 => rtc_config.enable_vp9(true),
 			VideoCodec::H264 => {
 				let mut c = if offer { rtc_config } else { rtc_config.enable_h264(true) };
-				c.codec_config().add_h264(
-					112.into(),
-					Some(113.into()),
-					true,
-					config.h264_profile_level_id,
-				);
+				let ids = config.h264_profile_level_ids.iter().copied().filter(|id| {
+					offer
+						|| H264Profile::from_profile_level_id(*id)
+							== Some(H264Profile::ConstrainedHigh)
+				});
+				for (id, (pt, rtx)) in ids.zip(H264_PTS) {
+					c.codec_config().add_h264(pt.into(), Some(rtx.into()), true, id);
+				}
 				c
 			}
 			VideoCodec::Av1 => rtc_config.enable_av1(true),
@@ -542,7 +699,7 @@ fn order_like_offer(answer: &str, offer: &str) -> String {
 }
 
 /// The video codecs of the first video media line of `sdp`, in offered order.
-fn offered_video_codecs(sdp: &str) -> Vec<VideoCodec> {
+pub(crate) fn offered_video_codecs(sdp: &str) -> Vec<VideoCodec> {
 	let mut pts: Vec<&str> = Vec::new();
 	let mut names: Vec<(&str, VideoCodec)> = Vec::new();
 	let mut in_video = false;
@@ -593,7 +750,7 @@ struct Net {
 }
 
 impl Net {
-	async fn bind(config: &PeerConfig, rtc: &mut Rtc) -> Result<Self, PeerError> {
+	fn bind(config: &PeerConfig, rtc: &mut Rtc) -> Result<Self, PeerError> {
 		let hosts = if config.hosts.is_empty() {
 			primary_ipv4().into_iter().collect()
 		} else {
@@ -602,7 +759,7 @@ impl Net {
 		let (tx, incoming) = mpsc::channel(256);
 		let mut sockets = Vec::new();
 		for ip in hosts {
-			let socket = Arc::new(UdpSocket::bind(SocketAddr::new(ip, 0)).await?);
+			let socket = Arc::new(udp_socket(SocketAddr::new(ip, 0), config.udp_buffer)?);
 			let local = socket.local_addr()?;
 			match Candidate::host(local, "udp") {
 				Ok(c) => {
@@ -646,6 +803,38 @@ impl Net {
 	}
 }
 
+/// A UDP socket on `addr` asking for `buffer` bytes of receive and send
+/// buffer (0: the system's default), see [`PeerConfig::udp_buffer`]. What
+/// the system granted is logged; once per process with a hint when it is
+/// less than asked.
+fn udp_socket(addr: SocketAddr, buffer: usize) -> std::io::Result<UdpSocket> {
+	use socket2::{Domain, Protocol, Socket, Type};
+	static CAPPED: std::sync::Once = std::sync::Once::new();
+	let socket = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
+	if buffer > 0 {
+		// Best effort: the system caps what it grants, and a smaller
+		// buffer only costs packets under load.
+		let _ = socket.set_recv_buffer_size(buffer);
+		let _ = socket.set_send_buffer_size(buffer);
+	}
+	socket.set_nonblocking(true)?;
+	socket.bind(&addr.into())?;
+	let (receive, send) =
+		(socket.recv_buffer_size().unwrap_or(0), socket.send_buffer_size().unwrap_or(0));
+	debug!(%addr, asked = buffer, receive, send, "UDP socket buffers");
+	if receive < buffer {
+		CAPPED.call_once(|| {
+			warn!(
+				asked = buffer,
+				granted = receive,
+				"the system grants less UDP receive buffer than asked; high-bitrate streams \
+				 may lose packets in bursts (Linux: sysctl net.core.rmem_max)"
+			);
+		});
+	}
+	UdpSocket::from_std(socket.into())
+}
+
 struct PendingStun {
 	id: stun::TransactionId,
 	server: SocketAddr,
@@ -665,6 +854,53 @@ struct Task {
 	stun: Vec<PendingStun>,
 	/// A transport-cc estimate arrived: REMB is ignored from then on.
 	twcc: bool,
+	/// Made the offer: the streamer's side.
+	offerer: bool,
+	stall: Stall,
+}
+
+/// Whether media gets through once connected ([`PeerEvent::NoVideo`],
+/// [`PeerEvent::NoFeedback`]).
+#[derive(Debug, Default)]
+struct Stall {
+	timeout: Duration,
+	connected: Option<Instant>,
+	/// Checked already (once per connection).
+	checked: bool,
+	audio_in: bool,
+	video_in: bool,
+	video_out: bool,
+	/// The viewer reported our video (receiver report, REMB).
+	acknowledged: bool,
+}
+
+impl Stall {
+	/// When the check is due: after the timeout for a viewer, twice it for
+	/// a streamer.
+	fn due(&self, offerer: bool) -> Option<Instant> {
+		let wait = if offerer { self.timeout.saturating_mul(2) } else { self.timeout };
+		self.connected.filter(|_| !self.checked)?.checked_add(wait)
+	}
+
+	/// A renegotiated connection waits from `now` again, if it is connected.
+	fn restart(&mut self, now: Instant) {
+		if self.connected.is_some() {
+			*self = Self { timeout: self.timeout, connected: Some(now), ..Self::default() };
+		}
+	}
+
+	/// The event to report at `now`, once, if media does not get through.
+	fn check(&mut self, now: Instant, offerer: bool, video: bool) -> Option<PeerEvent> {
+		if self.due(offerer).is_none_or(|due| now < due) {
+			return None;
+		}
+		self.checked = true;
+		if offerer {
+			(self.video_out && !self.acknowledged).then_some(PeerEvent::NoFeedback)
+		} else {
+			(video && !self.video_in).then_some(PeerEvent::NoVideo { audio: self.audio_in })
+		}
+	}
 }
 
 fn transaction_id() -> stun::TransactionId {
@@ -758,7 +994,13 @@ impl Task {
 		mut stun_servers: mpsc::UnboundedReceiver<SocketAddr>,
 	) -> Result<(), PeerError> {
 		loop {
-			self.rtc.handle_input(Input::Timeout(Instant::now()))?;
+			let now = Instant::now();
+			self.rtc.handle_input(Input::Timeout(now))?;
+			let video = self.mids.iter().any(|(_, kind)| *kind == MediaKind::Video);
+			if let Some(event) = self.stall.check(now, self.offerer, video) {
+				debug!(?event, "connected, but the media does not get through");
+				let _ = self.events.send(event);
+			}
 			let deadline = loop {
 				if !self.rtc.is_alive() {
 					return Ok(());
@@ -779,6 +1021,7 @@ impl Task {
 					}
 				}
 			};
+			let deadline = self.stall.due(self.offerer).map_or(deadline, |due| due.min(deadline));
 			let sleep = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
 			tokio::select! {
 				packet = self.net.incoming.recv() => {
@@ -813,6 +1056,7 @@ impl Task {
 	fn handle_event(&mut self, event: Event) -> bool {
 		match event {
 			Event::Connected => {
+				self.stall.connected = Some(Instant::now());
 				let _ = self.events.send(PeerEvent::Connected);
 			}
 			Event::IceConnectionStateChange(IceConnectionState::Disconnected) => return false,
@@ -823,8 +1067,10 @@ impl Task {
 			}
 			Event::MediaData(d) => {
 				let kind = if d.params.spec().codec.is_audio() {
+					self.stall.audio_in = true;
 					MediaKind::Audio
 				} else {
+					self.stall.video_in = true;
 					MediaKind::Video
 				};
 				let frame = MediaFrame {
@@ -847,17 +1093,28 @@ impl Task {
 				});
 			}
 			Event::EgressBitrateEstimate(estimate) => {
+				// Transport-cc estimates also come from the estimator's own
+				// timer; a REMB only from the viewer.
 				let bitrate = match estimate {
 					BweKind::Twcc(b) => {
 						self.twcc = true;
 						Some(b)
 					}
-					BweKind::Remb(_, b) if !self.twcc => Some(b),
+					BweKind::Remb(_, b) => {
+						self.stall.acknowledged = true;
+						(!self.twcc).then_some(b)
+					}
 					_ => None,
 				};
 				if let Some(b) = bitrate {
 					let _ = self.events.send(PeerEvent::BitrateEstimate(b.as_u64()));
 				}
+			}
+			// A receiver report of our video: the viewer decrypts it.
+			Event::MediaEgressStats(stats)
+				if stats.remote.is_some() && self.mids.contains(&(stats.mid, MediaKind::Video)) =>
+			{
+				self.stall.acknowledged = true;
 			}
 			_ => {}
 		}
@@ -876,6 +1133,10 @@ impl Task {
 					.map_err(|e| PeerError::Sdp(e.to_string()))
 					.and_then(|offer| Ok(self.rtc.sdp_api().accept_offer(offer)?.to_sdp_string()))
 					.map(|answer| order_like_offer(&answer, &sdp));
+				if result.is_ok() {
+					// Another codec, maybe: it gets the whole wait anew.
+					self.stall.restart(Instant::now());
+				}
 				let _ = reply.send(result);
 			}
 			Cmd::RemoteCandidate(line) => {
@@ -917,13 +1178,21 @@ impl Task {
 		// The codec video is written in (see `find_writer`).
 		if let Some((mid, pt)) = self.find_writer(MediaKind::Video) {
 			self.writers.insert(MediaKind::Video, (mid, pt));
-			let codec = self.rtc.writer(mid).and_then(|w| {
-				let params = w.payload_params().find(|p| p.pt() == pt)?;
-				VideoCodec::from_codec(params.spec().codec)
+			let format = self.rtc.writer(mid).and_then(|w| {
+				let spec = w.payload_params().find(|p| p.pt() == pt)?.spec();
+				Some(match VideoCodec::from_codec(spec.codec)? {
+					VideoCodec::H264 => VideoFormat::H264(
+						spec.format
+							.profile_level_id
+							.and_then(H264Profile::from_profile_level_id)
+							.unwrap_or_default(),
+					),
+					codec => codec.into(),
+				})
 			});
-			if let Some(codec) = codec {
-				debug!(%codec, "the answer chose");
-				let _ = self.events.send(PeerEvent::VideoCodec(codec));
+			if let Some(format) = format {
+				debug!(%format, "the answer chose");
+				let _ = self.events.send(PeerEvent::VideoCodec(format));
 			}
 		}
 		Ok(())
@@ -944,8 +1213,9 @@ impl Task {
 			if let Some(rid) = rid {
 				writer = writer.rid(rid);
 			}
-			if let Err(e) = writer.write(pt, Instant::now(), time, data) {
-				debug!(?kind, ?rid, "frame not sent: {e}");
+			match writer.write(pt, Instant::now(), time, data) {
+				Ok(()) => self.stall.video_out |= kind == MediaKind::Video,
+				Err(e) => debug!(?kind, ?rid, "frame not sent: {e}"),
 			}
 		}
 	}
@@ -991,10 +1261,24 @@ mod tests {
 			..PeerConfig::loopback()
 		};
 		let (_peer, offer) = Peer::offer(&streamer, "s").await.unwrap();
-		assert!(offer.contains("profile-level-id=640c1f"), "{offer}");
-		// Only the profile we encode: a viewer must not answer another.
-		let h264 = offer.lines().filter(|l| l.contains(" H264/90000")).count();
-		assert_eq!(h264, 1, "{offer}");
+		// Only the profiles we encode, best first: a viewer must not answer
+		// another.
+		let h264: Vec<&str> = offer
+			.lines()
+			.filter(|l| l.starts_with("a=fmtp:") && l.contains("profile-level-id"))
+			.collect();
+		assert_eq!(h264.len(), 2, "{offer}");
+		assert!(h264[0].contains("profile-level-id=640c1f"), "{offer}");
+		assert!(h264[1].contains("profile-level-id=42e01f"), "{offer}");
+		let pts: Vec<&str> = offer
+			.lines()
+			.find_map(|l| l.strip_prefix("m=video "))
+			.unwrap()
+			.split(' ')
+			.skip(2)
+			.collect();
+		let at = |pt: &str| pts.iter().position(|p| *p == pt).unwrap();
+		assert!(at("112") < at("108") && at("108") < at("96"), "{pts:?}");
 		let (_peer, answer) = Peer::answer(&PeerConfig::loopback(), &offer).await.unwrap();
 		assert_eq!(offered_video_codecs(&answer)[0], VideoCodec::H264, "{answer}");
 		let vp8_only =
@@ -1067,39 +1351,116 @@ mod tests {
 		);
 	}
 
+	/// The format the answer chose, as the streamer's peer reports it.
+	async fn answered_format(peer: &mut Peer) -> VideoFormat {
+		loop {
+			match peer.next_event().await.unwrap() {
+				PeerEvent::VideoCodec(format) => return format,
+				PeerEvent::Closed => panic!("closed"),
+				_ => {}
+			}
+		}
+	}
+
 	/// Several codecs offered: the streamer learns which one each viewer's
-	/// answer chose; H.264 carries the level the stream needs.
+	/// answer chose; H.264 carries the level the stream needs, in both
+	/// profiles.
 	#[tokio::test]
 	async fn streamer_learns_the_answered_codec() {
 		let mut streamer = PeerConfig {
 			video_codecs: vec![VideoCodec::Vp8, VideoCodec::H264, VideoCodec::H265],
 			..PeerConfig::loopback()
 		};
-		streamer.set_h264_format(H264Profile::ConstrainedHigh, 1920, 1080, 60, 8_000_000);
+		streamer.set_h264_format(1920, 1080, 60, 8_000_000);
 		let (mut peer, offer) = Peer::offer(&streamer, "s").await.unwrap();
 		assert!(offer.contains("profile-level-id=640c2a"), "{offer}");
+		assert!(offer.contains("profile-level-id=42e02a"), "{offer}");
 		assert!(offer.contains("H265/90000"), "{offer}");
+		let high = VideoFormat::H264(H264Profile::ConstrainedHigh);
 		let viewers = [
-			(vec![VideoCodec::Vp8, VideoCodec::H264], VideoCodec::Vp8),
-			(vec![VideoCodec::H264], VideoCodec::H264),
-			(vec![VideoCodec::H265], VideoCodec::H265),
+			(vec![VideoCodec::Vp8, VideoCodec::H264], VideoFormat::Vp8),
+			// Our viewers take both H.264 profiles: the better one.
+			(vec![VideoCodec::H264], high),
+			(vec![VideoCodec::H265], VideoFormat::H265),
 		];
 		for (accept, expected) in viewers {
 			let (mut streamer_peer, offer) = Peer::offer(&streamer, "s").await.unwrap();
 			let config = PeerConfig { accept_video_codecs: accept, ..PeerConfig::loopback() };
 			let (_viewer, answer) = Peer::answer(&config, &offer).await.unwrap();
 			streamer_peer.accept_answer(&answer).await.unwrap();
-			let codec = loop {
-				match streamer_peer.next_event().await.unwrap() {
-					PeerEvent::VideoCodec(codec) => break codec,
-					PeerEvent::Closed => panic!("closed"),
-					_ => {}
-				}
-			};
-			assert_eq!(codec, expected);
+			assert_eq!(answered_format(&mut streamer_peer).await, expected);
 		}
 		peer.close();
 		while peer.next_event().await.is_some() {}
+	}
+
+	/// A viewer whose H.264 is Constrained Baseline only (headless
+	/// Chromium's libwebrtc lists no High profile) answers the fallback
+	/// payload type of our H.264 ladder, and the streamer learns the profile.
+	#[tokio::test]
+	async fn a_baseline_only_viewer_gets_the_fallback_profile() {
+		let streamer =
+			PeerConfig { video_codecs: vec![VideoCodec::H264], ..PeerConfig::loopback() };
+		let (mut streamer_peer, offer) = Peer::offer(&streamer, "s").await.unwrap();
+		let mut viewer = RtcConfig::new().clear_codecs().enable_opus(true);
+		viewer.codec_config().add_h264(102.into(), Some(103.into()), true, 0x42e01f);
+		let mut viewer = viewer.build(Instant::now());
+		let offer = SdpOffer::from_sdp_string(&offer).unwrap();
+		let answer = viewer.sdp_api().accept_offer(offer).unwrap().to_sdp_string();
+		assert!(answer.contains("profile-level-id=42e01f"), "{answer}");
+		assert!(!answer.contains("profile-level-id=640c"), "{answer}");
+		streamer_peer.accept_answer(&answer).await.unwrap();
+		assert_eq!(
+			answered_format(&mut streamer_peer).await,
+			VideoFormat::H264(H264Profile::ConstrainedBaseline)
+		);
+	}
+
+	#[test]
+	fn format_bits_are_distinct() {
+		let bits = VideoFormat::ALL.iter().fold(0u8, |bits, f| {
+			assert_eq!(bits & f.bit(), 0, "{f}");
+			bits | f.bit()
+		});
+		assert_eq!(bits.count_ones(), 6);
+		assert_eq!(VideoFormat::from(VideoCodec::H264).bit(), VideoCodec::H264.bit());
+	}
+
+	/// Once per connection, after the timeout (twice it for a streamer),
+	/// anew after a renegotiation; never with `Duration::MAX`.
+	#[test]
+	fn stall_checks() {
+		let t0 = Instant::now();
+		let second = Duration::from_secs(1);
+		let mut viewer = Stall { timeout: second, ..Stall::default() };
+		assert!(viewer.check(t0 + 10 * second, false, true).is_none(), "not connected");
+		viewer.connected = Some(t0);
+		viewer.audio_in = true;
+		assert!(viewer.check(t0 + second / 2, false, true).is_none());
+		let event = viewer.check(t0 + second, false, true);
+		assert!(matches!(event, Some(PeerEvent::NoVideo { audio: true })), "{event:?}");
+		assert!(viewer.check(t0 + 2 * second, false, true).is_none(), "once");
+		// A new offer on the connection: the new codec gets its own wait.
+		viewer.restart(t0 + 2 * second);
+		viewer.video_in = true;
+		assert!(viewer.check(t0 + 4 * second, false, true).is_none(), "video came");
+		assert_eq!(viewer.due(false), None);
+
+		let mut streamer = Stall { timeout: second, connected: Some(t0), ..Stall::default() };
+		streamer.video_out = true;
+		assert!(streamer.check(t0 + second, true, true).is_none(), "a streamer waits longer");
+		assert!(matches!(streamer.check(t0 + 2 * second, true, true), Some(PeerEvent::NoFeedback)));
+		let mut working = Stall {
+			timeout: second,
+			connected: Some(t0),
+			video_out: true,
+			acknowledged: true,
+			..Stall::default()
+		};
+		assert!(working.check(t0 + 2 * second, true, true).is_none(), "the viewer reported");
+
+		let off = Stall { timeout: Duration::MAX, connected: Some(t0), ..Stall::default() };
+		assert_eq!(off.due(false), None);
 	}
 
 	/// The SDP lines that make up the media description (not the random ids,

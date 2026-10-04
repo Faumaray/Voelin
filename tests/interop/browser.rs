@@ -25,6 +25,18 @@ pub struct Browser {
 
 impl Browser {
 	pub async fn start() -> Self {
+		Self::launch(false).await
+	}
+
+	/// A browser that hides its host addresses behind mDNS names
+	/// (`<uuid>.local`), as Chromium does without camera or microphone
+	/// permission.
+	#[allow(dead_code, reason = "not every test uses it")]
+	pub async fn start_with_mdns() -> Self {
+		Self::launch(true).await
+	}
+
+	async fn launch(mdns: bool) -> Self {
 		let script = Path::new(env!("CARGO_MANIFEST_DIR"))
 			.join("../../tests/interop/browser-peer.cjs")
 			.canonicalize()
@@ -36,6 +48,7 @@ impl Browser {
 			.stdin(Stdio::piped())
 			.stdout(Stdio::piped())
 			.stderr(Stdio::inherit())
+			.env("VOELIN_BROWSER_MDNS", if mdns { "1" } else { "0" })
 			.kill_on_drop(true);
 		// Playwright is usually installed globally.
 		if std::env::var_os("NODE_PATH").is_none()

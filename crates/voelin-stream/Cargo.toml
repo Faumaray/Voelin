@@ -14,6 +14,8 @@ publish.workspace = true
 dimpl = { version = "0.7.4", default-features = false, features = ["aws-lc-rs", "rcgen"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Socket options std lacks: UDP buffer sizes.
+socket2 = "0.6"
 str0m = { version = "0.23.1", default-features = false, features = ["aws-lc-rs"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }

@@ -40,7 +40,10 @@ use crate::discovery::{ClientState, Discovery, StreamLookup};
 use crate::dtls::SrtpProfile;
 use crate::feedback::LayerFeedback;
 use crate::layer::{self, LayerId, LayerSet, LayerSpec};
-use crate::peer::{MediaFrame, OfferOptions, Peer, PeerConfig, PeerEvent, VideoCodec};
+use crate::peer::{
+	MediaFrame, OfferOptions, Peer, PeerConfig, PeerEvent, VideoCodec, VideoFormat,
+	offered_video_codecs,
+};
 use crate::proto::{self, LeaveReason, StreamInfo, StreamNotification, StreamSetup};
 use crate::signal::Signal;
 use crate::source::EncodedFrame;
@@ -555,6 +558,74 @@ impl LayerChoice {
 	}
 }
 
+/// The ladder of a connection that connects but carries no media: the next
+/// one leaves out the SRTP profile it negotiated (every AEAD profile when
+/// that was one: an SRTP library has both or neither), or the video codec
+/// it carried, as long as another is left. What was left out stays out for
+/// the later connections of that viewer or watched stream.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Fallback {
+	srtp: Vec<SrtpProfile>,
+	codecs: Vec<VideoCodec>,
+}
+
+impl Fallback {
+	/// `config` without what was left out.
+	fn apply(&self, config: &PeerConfig) -> PeerConfig {
+		let mut config = config.clone();
+		config.srtp_profiles = self.srtp_left(&config);
+		config.video_codecs.retain(|c| !self.codecs.contains(c));
+		config.accept_video_codecs.retain(|c| !self.codecs.contains(c));
+		config
+	}
+
+	/// The profiles of `config`'s order not left out yet.
+	fn srtp_left(&self, config: &PeerConfig) -> Vec<SrtpProfile> {
+		let order: &[SrtpProfile] = match &config.srtp_profiles[..] {
+			[] => &SrtpProfile::DEFAULT_ORDER,
+			order => order,
+		};
+		order.iter().copied().filter(|p| !self.srtp.contains(p)).collect()
+	}
+
+	/// Leave out `failed` (and the other AEAD profile with an AEAD one); the
+	/// profiles left, `None` (nothing left out) when none would be.
+	fn without_srtp(
+		&mut self,
+		config: &PeerConfig,
+		failed: SrtpProfile,
+	) -> Option<Vec<SrtpProfile>> {
+		let same = |p: &SrtpProfile| *p == failed || (p.is_aead() && failed.is_aead());
+		let left: Vec<_> = self.srtp_left(config).into_iter().filter(|p| !same(p)).collect();
+		if left.is_empty() {
+			return None;
+		}
+		self.srtp.extend(SrtpProfile::ALL.into_iter().filter(same));
+		Some(left)
+	}
+
+	/// Leave out `failed` of `codecs`; those left, `None` (nothing left
+	/// out) when none would be.
+	fn without_codec(
+		&mut self,
+		codecs: &[VideoCodec],
+		failed: VideoCodec,
+	) -> Option<Vec<VideoCodec>> {
+		let left: Vec<_> =
+			codecs.iter().copied().filter(|c| *c != failed && !self.codecs.contains(c)).collect();
+		if left.is_empty() {
+			return None;
+		}
+		self.codecs.push(failed);
+		Some(left)
+	}
+}
+
+/// `items` for a log line.
+fn list<T: std::fmt::Display>(items: &[T]) -> String {
+	items.iter().map(T::to_string).collect::<Vec<_>>().join(", ")
+}
+
 struct ViewerSlot {
 	state: ViewerState,
 	message: String,
@@ -567,11 +638,13 @@ struct ViewerSlot {
 	/// The latest bandwidth estimate of the connection (bit/s).
 	estimate: Option<u64>,
 	srtp_profile: Option<SrtpProfile>,
-	/// The video codec its answer chose.
-	codec: Option<VideoCodec>,
+	/// The video codec (and H.264 profile) its answer chose.
+	codec: Option<VideoFormat>,
 	/// The layer the viewer asked for ([`Signal::Layer`]); `None`: its
 	/// estimate decides.
 	pinned: Option<LayerId>,
+	/// What its connections leave out after one carried nothing.
+	fallback: Fallback,
 }
 
 impl ViewerSlot {
@@ -586,6 +659,7 @@ impl ViewerSlot {
 			srtp_profile: None,
 			codec: None,
 			pinned: None,
+			fallback: Fallback::default(),
 		}
 	}
 
@@ -680,7 +754,7 @@ impl StreamerSession {
 				layer: (v.peer.is_some() && v.rids.is_none()).then_some(v.choice.layer),
 				estimate: v.estimate,
 				srtp_profile: v.srtp_profile,
-				codec: v.codec,
+				codec: v.codec.map(VideoFormat::codec),
 			})
 			.collect()
 	}
@@ -716,7 +790,7 @@ impl StreamerSession {
 			StreamNotification::JoinRequest { viewer, message, remove: false, .. } => {
 				self.viewers.insert(viewer.0, ViewerSlot::new(message.clone()));
 				if self.options.auto_accept {
-					self.offer(*viewer, false, out).await;
+					self.offer(*viewer, false, out);
 				} else {
 					out.event(StreamEvent::Streamer(StreamerEvent::Request {
 						viewer: *viewer,
@@ -769,7 +843,7 @@ impl StreamerSession {
 			}
 			Signal::Reconnect => {
 				if slot.state != ViewerState::Requested {
-					self.offer(viewer, true, out).await;
+					self.offer(viewer, true, out);
 				}
 			}
 			Signal::Layer { layer } => self.pin(viewer, layer, out),
@@ -821,8 +895,9 @@ impl StreamerSession {
 	}
 
 	/// Create a peer for `viewer` and send our offer: in `respondjoinstreamrequest`,
-	/// or as `reconnectOffer` for a viewer that lost its connection.
-	async fn offer(&mut self, viewer: ClientId, reconnect: bool, out: &mut Outbox) {
+	/// or as `reconnectOffer` for a viewer that lost its connection (or
+	/// whose connection carried nothing, see [`Fallback`]).
+	fn offer(&mut self, viewer: ClientId, reconnect: bool, out: &mut Outbox) {
 		let Some(id) = self.id.clone() else { return };
 		let start = self.start_bitrate();
 		let layer = self.layers.specs[self.layers.fitting(start)].id;
@@ -841,7 +916,11 @@ impl StreamerSession {
 			desired_bitrate: Some(desired_bitrate),
 			layers: &self.layers.specs,
 		};
-		match Peer::offer_with(&self.config, &id, &options).await {
+		let config = match self.viewers.get(&viewer.0) {
+			Some(slot) => slot.fallback.apply(&self.config),
+			None => self.config.clone(),
+		};
+		match Peer::offer_now(&config, &id, &options) {
 			Ok((peer, sdp)) => {
 				// Voelin viewers learn the layers and may pick one (other
 				// clients skip the attribute); not with RID simulcast, where
@@ -894,7 +973,7 @@ impl StreamerSession {
 			_ => return Err(SessionError::NoRequest(viewer.0)),
 		}
 		if accept {
-			self.offer(viewer, false, out).await;
+			self.offer(viewer, false, out);
 		} else {
 			self.viewers.remove(&viewer.0);
 			out.request(Request::Respond { id, viewer, offer: None, accept: false });
@@ -1001,13 +1080,13 @@ impl StreamerSession {
 		self.write_frame_in(frame, None, out);
 	}
 
-	/// [`write_frame`](Self::write_frame) for video encoded in `codec`
+	/// [`write_frame`](Self::write_frame) for video encoded in `format`
 	/// (`None`: whatever the viewers negotiated): only viewers whose answer
-	/// chose that codec get it.
+	/// chose that codec and H.264 profile get it.
 	pub fn write_frame_in(
 		&mut self,
 		frame: &EncodedFrame,
-		codec: Option<VideoCodec>,
+		format: Option<VideoFormat>,
 		out: &mut Outbox,
 	) {
 		let (kind, time, layer) = (frame.kind, frame.time, frame.layer);
@@ -1024,8 +1103,8 @@ impl StreamerSession {
 				peer.write(kind, time, frame.data.clone());
 				continue;
 			}
-			if let (Some(codec), Some(negotiated)) = (codec, slot.codec)
-				&& codec != negotiated
+			if let (Some(format), Some(negotiated)) = (format, slot.codec)
+				&& format != negotiated
 			{
 				continue;
 			}
@@ -1147,12 +1226,36 @@ impl StreamerSession {
 					slot.rids = Some(rids);
 				}
 			}
-			PeerEvent::VideoCodec(codec) => {
-				debug!(viewer = viewer.0, %codec, "viewer's video codec");
-				slot.codec = Some(codec);
+			PeerEvent::VideoCodec(format) => {
+				debug!(viewer = viewer.0, %format, "viewer's video codec");
+				slot.codec = Some(format);
 				self.emit_viewers(out);
 			}
-			PeerEvent::Media(_) | PeerEvent::LayerMedia { .. } => {}
+			PeerEvent::NoFeedback => {
+				// Its SRTP fails, or nothing reaches it: offer a new
+				// connection with the next lower set. A Voelin viewer steps
+				// down by itself first (it waits half as long).
+				let profile = slot.peer.as_ref().and_then(Peer::srtp_profile);
+				let left = profile.and_then(|p| slot.fallback.without_srtp(&self.config, p));
+				match (profile, left) {
+					(Some(profile), Some(left)) => {
+						warn!(
+							viewer = viewer.0,
+							"connected, but the viewer reports none of our video; offering a \
+							 new connection without SRTP {profile} (left: {})",
+							list(&left)
+						);
+						self.offer(viewer, true, out);
+					}
+					_ => warn!(
+						viewer = viewer.0,
+						?profile,
+						"connected, but the viewer reports none of our video; nothing left to \
+						 fall back to"
+					),
+				}
+			}
+			PeerEvent::Media(_) | PeerEvent::LayerMedia { .. } | PeerEvent::NoVideo { .. } => {}
 			PeerEvent::Closed => {
 				// The viewer may ask for a new offer (`reconnect`); it stays
 				// until it leaves.
@@ -1306,6 +1409,11 @@ pub struct ViewerSession {
 	layers: Option<Vec<LayerSpec>>,
 	/// The layer we asked for; `None`: the streamer's estimate decides.
 	layer: Option<LayerId>,
+	/// The streamer's last offer, and the codec our answer took from it.
+	offer: Option<String>,
+	codec: Option<VideoCodec>,
+	/// What our connections leave out after one carried nothing.
+	fallback: Fallback,
 }
 
 impl ViewerSession {
@@ -1330,6 +1438,9 @@ impl ViewerSession {
 			layer_rid: None,
 			layers: None,
 			layer: None,
+			offer: None,
+			codec: None,
+			fallback: Fallback::default(),
 		}
 	}
 
@@ -1382,7 +1493,11 @@ impl ViewerSession {
 				Ok(Signal::Offer { sdp, reconnect: false }) if self.peer.is_some() => {
 					let peer = self.peer.as_ref().expect("checked above");
 					match peer.renegotiate(&sdp).await {
-						Ok(sdp) => self.signal(Signal::Answer { sdp }, out),
+						Ok(answer) => {
+							self.codec = offered_video_codecs(&answer).first().copied();
+							self.offer = Some(sdp);
+							self.signal(Signal::Answer { sdp: answer }, out);
+						}
 						Err(e) => {
 							self.fail(format!("cannot answer the streamer's new offer: {e}"), out)
 						}
@@ -1407,10 +1522,13 @@ impl ViewerSession {
 
 	/// Answer an offer (the first one or a `reconnectOffer`) with a new peer.
 	async fn answer(&mut self, offer: &str, out: &mut Outbox) {
-		match Peer::answer(&self.config, offer).await {
+		match Peer::answer(&self.fallback.apply(&self.config), offer).await {
 			Ok((peer, sdp)) => {
 				self.peer = Some(peer);
 				self.state = WatchState::Connecting;
+				// The streamer sends the first codec of our answer.
+				self.codec = offered_video_codecs(&sdp).first().copied();
+				self.offer = Some(offer.to_owned());
 				self.signal(Signal::Answer { sdp }, out);
 				let layers = layer::from_sdp(offer).filter(|l| l.len() > 1);
 				if layers != self.layers {
@@ -1477,6 +1595,52 @@ impl ViewerSession {
 		self.layer = layer;
 		self.signal(Signal::Layer { layer }, out);
 		Ok(())
+	}
+
+	/// The media of this connection does not get through (`why`): ask for a
+	/// new connection with the next lower set ([`Fallback`]): without the
+	/// SRTP profile this one negotiated when `srtp` (nothing came at all),
+	/// else (or when no other profile is left) without its video codec.
+	fn fall_back(&mut self, srtp: bool, why: &str, out: &mut Outbox) {
+		let config = self.fallback.apply(&self.config);
+		let profile = self.peer.as_ref().and_then(Peer::srtp_profile);
+		let mut step = None;
+		if srtp && let Some(profile) = profile {
+			step = self
+				.fallback
+				.without_srtp(&config, profile)
+				.map(|left| format!("without SRTP {profile} (left: {})", list(&left)));
+		}
+		if step.is_none()
+			&& let Some(codec) = self.codec
+		{
+			let offered: Vec<VideoCodec> =
+				offered_video_codecs(self.offer.as_deref().unwrap_or(""))
+					.into_iter()
+					.filter(|c| config.accept_video_codecs.contains(c))
+					.collect();
+			step = self
+				.fallback
+				.without_codec(&offered, codec)
+				.map(|left| format!("without {codec} (left: {})", list(&left)));
+		}
+		let Some(step) = step else {
+			warn!(stream = self.id, "{why}; nothing left to fall back to");
+			return;
+		};
+		warn!(stream = self.id, "{why}; asking for a new connection {step}");
+		self.peer = None;
+		self.state = WatchState::Connecting;
+		self.signal(Signal::Reconnect, out);
+	}
+
+	/// Video arrives, but none of it decodes here (the app's decoders told
+	/// [`Streams::video_undecodable`]): a new connection without its codec,
+	/// if the streamer offered another we take.
+	pub fn video_undecodable(&mut self, out: &mut Outbox) {
+		if self.state == WatchState::Connected {
+			self.fall_back(false, "video arrives, but none of it decodes", out);
+		}
 	}
 
 	/// Drop the connection and ask the streamer for a new offer (`reconnect`).
@@ -1558,11 +1722,18 @@ impl ViewerSession {
 					self.event(WatchEvent::Frame(frame), out);
 				}
 			}
+			PeerEvent::NoVideo { audio: false } => {
+				self.fall_back(true, "connected, but nothing arrives", out);
+			}
+			PeerEvent::NoVideo { audio: true } => {
+				self.fall_back(false, "connected, but no video arrives (audio does)", out);
+			}
 			PeerEvent::KeyframeRequest
 			| PeerEvent::LayerKeyframeRequest(_)
 			| PeerEvent::BitrateEstimate(_)
 			| PeerEvent::Simulcast(_)
-			| PeerEvent::VideoCodec(_) => {}
+			| PeerEvent::VideoCodec(_)
+			| PeerEvent::NoFeedback => {}
 			PeerEvent::Closed => {
 				if self.peer.take().is_none() {
 					return;
@@ -1683,12 +1854,12 @@ impl Streams {
 		self.write_frame_in(frame, None);
 	}
 
-	/// [`write_frame`](Self::write_frame) of video encoded in `codec`: to
+	/// [`write_frame`](Self::write_frame) of video encoded in `format`: to
 	/// the viewers that negotiated it (see
 	/// [`StreamerSession::write_frame_in`]).
-	pub fn write_frame_in(&mut self, frame: &EncodedFrame, codec: Option<VideoCodec>) {
+	pub fn write_frame_in(&mut self, frame: &EncodedFrame, format: Option<VideoFormat>) {
 		if let Some(s) = self.streamer.as_mut().filter(|s| !s.is_ended()) {
-			s.write_frame_in(frame, codec, &mut self.out);
+			s.write_frame_in(frame, format, &mut self.out);
 		}
 	}
 
@@ -1782,6 +1953,16 @@ impl Streams {
 		let viewer =
 			self.viewers.get_mut(id).ok_or_else(|| SessionError::NotWatching(id.into()))?;
 		viewer.set_layer(layer, &mut self.out)
+	}
+
+	/// The video of a watched stream arrives, but none of it decodes: watch
+	/// it in another codec the streamer offered, if there is one (see
+	/// [`ViewerSession::video_undecodable`]).
+	pub fn video_undecodable(&mut self, id: &str) -> Result<(), SessionError> {
+		let viewer =
+			self.viewers.get_mut(id).ok_or_else(|| SessionError::NotWatching(id.into()))?;
+		viewer.video_undecodable(&mut self.out);
+		Ok(())
 	}
 
 	/// Reconnect to a watched stream: the streamer sends a new offer.
