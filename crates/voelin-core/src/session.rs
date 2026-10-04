@@ -1923,7 +1923,10 @@ mod banner_tests {
 			cache: SharedCache::new(Cache::new(dir)),
 			contacts: Contacts::new(events.clone(), history),
 		};
-		(Session::new(1, events, frames, AudioSettings::default(), shared), receiver)
+		// No myTeamSpeak account; its source stays open, as the engine's does
+		// (a closed one ends voice connections).
+		let myts_identity = Box::leak(Box::new(watch::Sender::new(None))).subscribe();
+		(Session::new(1, events, frames, AudioSettings::default(), shared, myts_identity), receiver)
 	}
 
 	#[tokio::test]
