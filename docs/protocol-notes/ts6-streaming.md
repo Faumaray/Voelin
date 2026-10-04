@@ -33,7 +33,8 @@ Transport (**reported**, TeamSpeak staff on community.teamspeak.com):
 - ICE with STUN only (`turn.teamspeak.com`, `turn2.teamspeak.com`; no TURN relay).
 - Media ports: UDP 49152–65535.
 - Streams are channel-scoped: "public" means everyone in the streamer's channel.
-- Bitrate capped at 10 Mbit/s.
+- Bitrate capped at 10 Mbit/s. The server itself enforces no limit, see
+  [what `setupstream` takes](#what-setupstream-takes-confirmed-600-beta131-2026-10-04).
 
 Codecs (**reported**, from the ts6-manager bot's working code):
 
@@ -89,6 +90,29 @@ When the streamer disconnects, everyone gets `notifystreamstopped id=<uuid>`.
 
 Stream ids are UUIDs. The notification carries the command's `return_code`, and
 the field is named `access` there (not `accessibility`).
+
+### What `setupstream` takes (confirmed, 6.0.0-beta13.1, 2026-10-04)
+
+`bitrate` (kbit/s) is informational: the server stores it in 16 bits and
+enforces nothing. Sent with `voelinctl connect 127.0.0.1:9988 --log-commands
+raw 'setupstream name=probe type=3 bitrate=<b> accessibility=1 mode=1
+viewer_limit=0 audio=1'` (`RUST_LOG=debug` prints the commands), every one
+answered `error id=0`, and `notifystreamstarted` announced:
+
+| `bitrate` sent | announced |
+|---|---|
+| 10000, 10001, 60000 | the same |
+| 100000 | 34464 (100000 mod 65536) |
+| 1000000 | 16960 |
+| 4294967295 | 65535 |
+| 4294967296, 0 | 0 |
+
+So 65535 kbit/s is the most a stream can announce, and anything above it
+wraps silently. Voelin announces its stream's real bitrate up to 65535
+(`proto::MAX_ANNOUNCED_BITRATE`; e.g. 60000 for a 60 Mbit/s stream), and
+its peers send whatever the stream needs whatever was announced: nothing
+between the peers looks at the announcement. Viewers see the announced
+value in `notifystreamstarted` / `notifystreaminfo`.
 
 ### Join handshake (confirmed, 6.0.0-beta13.1)
 
