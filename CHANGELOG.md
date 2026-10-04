@@ -6,6 +6,41 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- myTeamSpeak profile: Settings → My Account shows the account's avatar,
+  description, registration date, previous sign-in, badges and signed-in
+  devices from the account service; the avatar is also the sidebar's
+  profile picture where a server has none for us.
+- Log files: each run logs to `<state>/voelin/logs/voelin.log`, the previous
+  four runs are kept; `VOELIN_LOG` sets what is logged. Settings → Advanced
+  opens the folder.
+- Linux `.tar.gz`: libvpx and libdav1d in `lib/`, and `bin/voelin-install-deps`
+  for FFmpeg, VA-API drivers, PipeWire, the desktop portal and a keyring.
+- Windows packages ship FFmpeg's LGPL libraries, so hardware encoders and
+  decoders work without installing FFmpeg.
+- AV1 decoding through dav1d in every desktop build.
+- 122 more signed client versions (`Versions.csv`).
+
+### Changed
+
+- New login page; it no longer opens when a session is saved (only when one
+  has expired), and "Continue without an account" is remembered.
+- Selecting a server observes it through its gateway at once; the Observe
+  button is gone. The server dialog asks only for the address, password,
+  name and nickname: the gateway is found from the address.
+- Relayed messages appear in TeamSpeak under the author's own nickname
+  (`Nick1` while the name is taken), not as `[Nick] text` from the relay.
+- The client reports itself as TeamSpeak 6 (`6.0.0-beta4.1` on Linux,
+  `6.0.0-beta2` on Windows) instead of `3.?.?`; `--client-version generic`
+  claims the old version.
+- Watching streams: VP8 decodes on one thread (FFmpeg's slice threads made
+  multi-partition streams 40-80 % slower), pictures are converted for the
+  window on their own thread into reused buffers, and libvpx and dav1d use
+  fewer threads. A 1440p60 VP8 stream from a 6-8 core sender showed 35-49
+  fps; FFmpeg decodes it at 95-101 fps on one thread against 54-60 on four.
+- Release builds no longer limit Cargo to one job.
+
 ## [0.0.1-alpha] - 2026-10-04
 
 The first alpha.
