@@ -113,7 +113,9 @@ impl App {
 					.contains(&name.as_str())
 			})
 			.or_else(|| std::env::var("USER").or_else(|_| std::env::var("USERNAME")).ok())
-			.unwrap_or_default()
+			// Servers refuse an empty nickname (Android has no user name).
+			.filter(|name| !name.trim().is_empty())
+			.unwrap_or_else(|| "Voelin user".to_owned())
 	}
 
 	/// Look up the gateway of a server that has none in DNS

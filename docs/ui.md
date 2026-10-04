@@ -209,7 +209,7 @@ an optional server password. *Advanced* (open when editing) has the rest,
 and empty fields there are filled in: the name is the address until the
 first connection, then the server's own name (`adopt_server_name`); the
 nickname is the default identity's (one imported from TeamSpeak keeps its
-nickname there), else the system user's; the identity is the default one,
+nickname there), else the system user's, else "Voelin user"; the identity is the default one,
 there is no default channel; the gateway is looked up in DNS when the
 server is saved without one and when it connects
 ([gateway-admin.md](gateway-admin.md#letting-voelin-find-the-gateway)),
