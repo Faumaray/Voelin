@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::time::Instant;
@@ -124,6 +125,33 @@ enum ImageRequest {
 	Avatar { uid: String, hash: String },
 	Icon(u32),
 	Picture(String),
+}
+
+/// An image download over the voice connection, finished in the cache
+/// once: with its result, or as failed when the request is dropped
+/// unanswered (sent while the connection closes, or still queued when it
+/// ends). Otherwise the key would stay in flight, and every later fetch of
+/// it, in any session, would wait forever.
+struct ImageDownload {
+	cache: cache::Cache,
+	key: String,
+	temp: PathBuf,
+	settings: SharedSettings,
+	done: AtomicBool,
+}
+
+impl ImageDownload {
+	fn finish(&self, result: Result<(), String>) {
+		if !self.done.swap(true, Ordering::AcqRel) {
+			self.cache.finish(&self.key, &self.temp, result, max_cache_bytes(&self.settings));
+		}
+	}
+}
+
+impl Drop for ImageDownload {
+	fn drop(&mut self) {
+		self.finish(Err("the voice connection closed".into()));
+	}
 }
 
 /// At most three retries (after 1, 4 and 16 seconds) per image version.
@@ -1029,21 +1057,21 @@ impl Session {
 	fn fetch_image(&self, key: String, file: Option<(u64, String)>, fresh: bool, waiter: Waiter) {
 		let cache = self.cache.current();
 		let Fetch::Download(temp) = cache.fetch(&key, fresh, waiter) else { return };
-		let settings = self.settings.clone();
+		let download = ImageDownload {
+			cache,
+			key,
+			temp: temp.clone(),
+			settings: self.settings.clone(),
+			done: AtomicBool::new(false),
+		};
 		let (Some((channel, path)), Some((_, voice))) = (file, &self.voice) else {
-			cache.finish(&key, &temp, Err(NO_VOICE.into()), max_cache_bytes(&settings));
+			download.finish(Err(NO_VOICE.into()));
 			return;
 		};
-		let finish = {
-			let temp = temp.clone();
-			move |result: Result<(), String>| {
-				cache.finish(&key, &temp, result, max_cache_bytes(&settings));
-			}
-		};
 		let report: Report = Arc::new(move |state| match state {
-			TransferState::Done { .. } => finish(Ok(())),
-			TransferState::Failed(e) => finish(Err(e)),
-			TransferState::Cancelled => finish(Err("cancelled".into())),
+			TransferState::Done { .. } => download.finish(Ok(())),
+			TransferState::Failed(e) => download.finish(Err(e)),
+			TransferState::Cancelled => download.finish(Err("cancelled".into())),
 			_ => {}
 		});
 		let sink = Sink::File { part: temp.clone(), dest: temp, append: false };
@@ -2039,6 +2067,28 @@ mod banner_tests {
 		assert_eq!(path, session.cache.current().dir().join(key));
 		assert_eq!(std::fs::read(path).unwrap(), b"banner");
 		std::fs::remove_dir_all(session.cache.current().dir()).unwrap();
+	}
+
+	/// A request the voice connection drops unanswered (sent while it
+	/// closes) fails, instead of leaving the picture in flight for good.
+	#[tokio::test]
+	async fn a_dropped_image_request_fails_instead_of_waiting_forever() {
+		let (mut session, _events) = session("dropped");
+		let (tx, mut commands) = mpsc::unbounded_channel();
+		session.voice = Some((1, tx));
+		session.icons.insert(1234);
+		session.fetch_icon(1234);
+		drop(commands.try_recv().unwrap());
+		let Some(SourceEvent::ImageFinished(_, _, ImageRequest::Icon(1234), Err(_))) =
+			session.sources_rx.as_mut().unwrap().recv().await
+		else {
+			panic!("expected the icon to fail");
+		};
+		// The next fetch downloads again instead of waiting for the lost one.
+		let cache = session.cache.current();
+		let next = cache.fetch(&cache::icon_key(1234), false, Box::new(|_| {}));
+		assert!(matches!(next, Fetch::Download(_)));
+		let _ = std::fs::remove_dir_all(cache.dir());
 	}
 
 	#[tokio::test]

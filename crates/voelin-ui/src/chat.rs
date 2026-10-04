@@ -63,7 +63,8 @@ impl App {
 				let name = self
 					.sessions
 					.get(&id)
-					.and_then(|v| v.presence.channels.get(cid).map(|c| c.name.clone()));
+					.and_then(|v| v.presence.channels.get(cid))
+					.map(|c| vm::tree::channel_title(c).0.to_owned());
 				format!("#{}", name.unwrap_or_else(|| cid.to_string()))
 			}
 			ChatTarget::Server => "Server".into(),

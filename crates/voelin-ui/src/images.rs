@@ -110,6 +110,9 @@ pub fn usage_text() -> String {
 	})
 }
 
+/// What remembering a picture that cannot be decoded costs in the cache.
+const UNDECODABLE_COST: usize = 256;
+
 /// A picture the engine put in its cache (avatars, group and client icons),
 /// decoded once and kept by its path.
 pub fn file(path: &std::path::Path) -> Image {
@@ -121,7 +124,10 @@ pub fn file(path: &std::path::Path) -> Image {
 				// (`avatars/<md5>`, `icons/<id>`), and servers keep PNG, JPEG
 				// and SVG icons alike.
 				let bytes = std::fs::read(path).ok()?;
-				decode(&bytes)
+				// One that cannot be shown (too large, not a picture) is
+				// remembered as such, not read again on every refresh; a
+				// changed file is forgotten first (`forget`).
+				Some(decode(&bytes).unwrap_or((Image::default(), UNDECODABLE_COST)))
 			})
 		})
 		.unwrap_or_default()
@@ -328,6 +334,15 @@ mod tests {
 		assert_eq!(file(&path).size().width, 3, "kept until forgotten");
 		forget(&path);
 		assert_eq!(file(&path).size().width, 5);
+		// A file that is no picture is remembered as such until forgotten,
+		// not read again on every refresh.
+		let junk = dir.join("junk");
+		std::fs::write(&junk, b"<!DOCTYPE html>").unwrap();
+		assert_eq!(file(&junk).size().width, 0);
+		std::fs::write(&junk, &png).unwrap();
+		assert_eq!(file(&junk).size().width, 0, "remembered");
+		forget(&junk);
+		assert_eq!(file(&junk).size().width, 3);
 		std::fs::remove_dir_all(dir).unwrap();
 	}
 

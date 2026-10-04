@@ -4,7 +4,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use voelin_model::{BannerMode, ChannelId, ClientInfo, GroupInfo, Presence, TreeRow, tree_rows};
+use voelin_model::{
+	BannerMode, ChannelId, ChannelInfo, ClientInfo, GroupInfo, Presence, TreeRow, tree_rows,
+};
 
 use crate::app::{MemberItem, TreeItem};
 use crate::settings::ClientPlaybackMap;
@@ -113,6 +115,13 @@ fn channel_label(name: &str) -> (&str, bool) {
 	(name, false)
 }
 
+/// A channel's name as shown, and whether it is a centred spacer. Only
+/// top-level channels are spacers, as in TeamSpeak: a sub-channel keeps its
+/// name as it is.
+pub fn channel_title(channel: &ChannelInfo) -> (&str, bool) {
+	if channel.parent == 0 { channel_label(&channel.name) } else { (&channel.name, false) }
+}
+
 /// The rows of the tree, channels with their clients below.
 pub fn rows(input: &TreeInput) -> Vec<TreeItem> {
 	let p = input.presence;
@@ -120,7 +129,7 @@ pub fn rows(input: &TreeInput) -> Vec<TreeItem> {
 		.into_iter()
 		.map(|row| match row {
 			TreeRow::Channel { depth, channel } => {
-				let (name, centered_spacer) = channel_label(&channel.name);
+				let (name, centered_spacer) = channel_title(channel);
 				TreeItem {
 					centered_spacer,
 					is_channel: true,
@@ -235,7 +244,7 @@ impl TreeInput<'_> {
 			&& c.streaming != Some(true)
 			&& c.away.is_none();
 		let status = match self.presence.channels.get(&c.channel) {
-			Some(channel) if elsewhere => format!("In {}", channel.name),
+			Some(channel) if elsewhere => format!("In {}", channel_title(channel).0),
 			_ => status_of(c, talking),
 		};
 		MemberItem {
@@ -510,6 +519,14 @@ mod tests {
 		for name in ["[cspacerx]Games", "[cspacer2Games", "Games", "[spacer0]Games"] {
 			assert_eq!(channel_label(name), (name, false));
 		}
+		// Only top-level channels are spacers: a sub-channel keeps its name.
+		p.channels.get_mut(&3).unwrap().name = "[cspacer1]Chess".into();
+		let (t, c) = (HashSet::new(), HashSet::new());
+		let found = super::rows(&input(&p, &t, &c, &pb, "Chess", &e));
+		let chess = found.iter().find(|r| r.is_channel && r.id == 3).unwrap();
+		assert_eq!((chess.name.as_str(), chess.centered_spacer), ("[cspacer1]Chess", false));
+		assert_eq!(channel_title(&p.channels[&2]), ("Гамесы", true));
+		assert_eq!(channel_title(&p.channels[&3]), ("[cspacer1]Chess", false));
 	}
 
 	#[test]

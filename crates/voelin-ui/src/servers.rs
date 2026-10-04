@@ -409,7 +409,9 @@ impl App {
 		bridge.set_server_banner_mode(details.map_or(0, |d| vm::tree::banner_mode(d.banner_mode)));
 		let own_channel =
 			view.and_then(|v| state.own_channel.and_then(|c| v.presence.channels.get(&c)));
-		bridge.set_own_channel(own_channel.map(|c| c.name.clone()).unwrap_or_default().into());
+		bridge.set_own_channel(
+			own_channel.map(|c| vm::tree::channel_title(c).0).unwrap_or_default().into(),
+		);
 		bridge.set_own_channel_topic(
 			own_channel.and_then(|c| c.topic.clone()).unwrap_or_default().into(),
 		);

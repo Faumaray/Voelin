@@ -131,9 +131,16 @@ impl Cache {
 		self.touch(&mut index, key)
 	}
 
-	/// The cached server, channel, group or client icon, if available.
+	/// The cached server, channel, group or client icon, if available. Not
+	/// marked as used (no file is opened or touched): the UI asks on every
+	/// refresh of the server list.
 	pub fn icon(&self, id: u32) -> Option<PathBuf> {
-		(id != 0).then(|| self.get(&icon_key(id))).flatten()
+		if id == 0 {
+			return None;
+		}
+		let key = icon_key(id);
+		let path = self.dir.join(&key);
+		(self.lock().entries.contains_key(&key) && path.is_file()).then_some(path)
 	}
 
 	fn touch(&self, index: &mut Index, key: &str) -> Option<PathBuf> {

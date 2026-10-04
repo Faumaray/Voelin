@@ -158,6 +158,14 @@ component TreeRow inherits Rectangle {
         y: 0;
         source: item.banner;
     }
+    // The artwork covers the row's own background: tint it as that would
+    // be for our channel and on hover, translucent so the picture shows.
+    if item.is-channel && item.banner.width > 0 && (item.own || area.has-hover): Rectangle {
+        x: root.indent;
+        width: max(0px, root.width - root.indent);
+        border-radius: root.border-radius;
+        background: item.own ? Theme.accent-soft.transparentize(0.35) : Theme.surface-3.transparentize(0.5);
+    }
     area := TouchArea {
         mouse-cursor: MouseCursor.pointer;
         double-clicked => {
@@ -198,7 +206,9 @@ component TreeRow inherits Rectangle {
             horizontal-stretch: 1;
             overflow: elide;
         }
-        if item.locked && item.icon.width > 0: Icon {
+        // At the end where the start shows the channel's icon, or nothing
+        // (a centred spacer).
+        if item.locked && (item.icon.width > 0 || item.centered-spacer): Icon {
             source: Icons.lock;
             size: 14px;
             tint: item.banner.width > 0 ? Theme.text : Theme.icon;
