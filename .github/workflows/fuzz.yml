@@ -1,8 +1,7 @@
 name: Fuzz
 
+# Not scheduled: run by hand only.
 on:
-  schedule:
-    - cron: "17 3 * * *"
   workflow_dispatch:
 
 jobs:

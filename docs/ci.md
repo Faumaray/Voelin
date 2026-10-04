@@ -1,9 +1,12 @@
 # CI
 
 GitHub Actions runs `.github/workflows/ci.yml`, including Linux checks,
-Windows and Android Clippy, and TeamSpeak integration smoke tests. Both
-GitHub and Gitea provide release packaging; see [release.md](release.md) and
-[building.md](building.md).
+Windows and Android Clippy, and TeamSpeak integration smoke tests. Automatic
+runs are off: CI, the dependency audit and fuzzing run only by hand
+(Actions → the workflow → Run workflow; the same on Gitea). Only the package
+builds run by themselves, on `v*` tags, and they run none of these checks.
+Both GitHub and Gitea provide release packaging; see [release.md](release.md)
+and [building.md](building.md).
 
 Cargo builds use one job in CI so the generated UI library and its test
 target do not compile concurrently. The release profile uses ThinLTO and
@@ -15,10 +18,8 @@ runtime performance has not been benchmarked for this change.
 
 ## Gitea Actions
 
-`.gitea/workflows/ci.yml` runs a single Linux job on pushes to `main` and
-`master`, pull requests, and manual dispatch. Documentation-only changes
-are excluded; `THIRD_PARTY_NOTICES.md` is not excluded because the app embeds
-it and CI verifies it.
+`.gitea/workflows/ci.yml` runs a single Linux job when dispatched by hand
+(automatic runs on pushes and pull requests are off).
 
 The job runs:
 
@@ -147,10 +148,11 @@ ENDLESS_TASK_TIMEOUT = 9h
 
 Keep sufficient RAM/swap and free disk for all package builds and their
 Docker caches. Builds run sequentially and limit Cargo to one job. The
-workflow never prunes shared Docker state or creates host swap. The token and optional Android signing
-secrets are documented in [Gitea releases](release.md#gitea-releases).
+workflow never prunes shared Docker state or creates host swap. The token
+and optional Android signing secrets are documented in
+[Gitea releases](release.md#gitea-releases).
 
-Gitea packages pass the shared Linux checks but do not gain native Windows,
-Android Clippy or TS3/TS6 smoke-test acceptance from a successful release
-job. Full hosted builds and a draft upload must be verified on the registered
+The Gitea release job builds packages only: it runs no formatting, Clippy,
+tests, native Windows, Android Clippy or TS3/TS6 smoke tests; run CI by hand
+for those. Full hosted builds and a draft upload must be verified on the registered
 runner; local shell/API fixtures do not establish deployment acceptance.

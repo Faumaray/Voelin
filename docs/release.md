@@ -13,13 +13,12 @@ requirements differ.
 
 `.gitea/workflows/release.yml` builds Linux tarballs and `.deb` files, Windows
 zip and NSIS installer (MinGW cross-build), Android debug APK (arm64-v8a and
-x86_64), a Flatpak bundle, and the gateway container image. It shares Linux
-checks with Gitea CI, and reuses the Dockerfiles and `scripts/package.sh`.
-Unlike GitHub's release pipeline, it does not run native Windows tests,
-Android Clippy, TeamSpeak smoke tests or browser interop; complete those
-checks in GitHub or separately before accepting a release.
+x86_64), a Flatpak bundle, and the gateway container image. It reuses the
+Dockerfiles and `scripts/package.sh`, and builds packages only: it runs none
+of the checks (formatting, Clippy, tests, TeamSpeak smoke tests); run CI by
+hand for those before accepting a release.
 
-- **Manual dispatch:** after checks and all builds pass, download the
+- **Manual dispatch:** after all builds pass, download the
   `voelin-packages` artifact from the run. Manual runs never publish a draft,
   even when dispatched against a tag.
 - **Push a `v*` tag:** the same artifact is uploaded, then packages and a
@@ -218,7 +217,7 @@ Release:
 
 7. Tag `v<version>` (signed) on the release commit and push it.
 8. The tag's release workflow (`release.yml`, [building.md](building.md))
-   runs the checks and the Windows tests and builds every package: the app's
+   builds every package (it runs no checks: run CI by hand first): the app's
    Linux tarball and `.deb`, Flatpak bundle, Windows zip and installer and
    Android APKs (signed when the secrets are set), and the gateway's Linux
    tarball, `.deb` and image; its `release` job attaches them with a

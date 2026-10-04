@@ -3,8 +3,8 @@
 Every platform has installable packages. The release workflow builds them,
 and the Dockerfiles in `docker/` build the same kinds of packages on any
 machine with Docker. Both use `scripts/package.sh`, so file names and
-contents match. Regular CI (`ci.yml`, every push and PR) only runs the fast
-checks and builds no packages.
+contents match. CI (`ci.yml`, run by hand only) runs the checks and builds
+no packages; the release workflow builds packages without running them.
 
 The packages hold the app, Voelin. The gateway `tsgw` runs on servers and is
 packaged for Linux only, separately. `voelinctl` is a development tool and is
@@ -43,7 +43,7 @@ and [runner setup](ci.md#gitea-release-runner) for host requirements.
 
 - **A version tag** `v*` (`git tag -s v0.2.0 && git push origin v0.2.0`): the
   packages and a `SHA256SUMS` are attached to a **draft** GitHub release once
-  all checks pass (the same checks as CI, plus the Windows tests); review and
+  every package is built (no checks run; run CI by hand first); review and
   publish it by hand ([release.md](release.md#checklist)).
 - **By hand**, for a build to test without a release: Actions → Release → Run
   workflow (or `gh workflow run release.yml --ref <branch>`). The packages are

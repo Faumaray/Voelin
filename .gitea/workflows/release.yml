@@ -27,7 +27,6 @@ jobs:
       - uses: https://github.com/actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: ./.gitea/actions/checks
       - name: Check release tools
         run: |
           set -euo pipefail

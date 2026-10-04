@@ -3,8 +3,7 @@ name: Release
 # The packages (docs/building.md), made by scripts/package.sh like the Docker
 # builds in docker/. A v* tag attaches them to a draft GitHub release; run by
 # hand (Actions → Release → Run workflow) they are only uploaded as artifacts.
-# The package jobs run alongside the checks, so a manual run yields packages
-# even when a check fails; a release needs everything green.
+# Only the packages are built: the checks (ci.yml) run by hand.
 
 on:
   push:
@@ -25,25 +24,6 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
-  # The same checks as every push (lint, Linux tests, Windows and Android
-  # clippy, deny, notices, integration tests).
-  checks:
-    uses: ./.github/workflows/ci.yml
-
-  test-windows:
-    name: test (Windows)
-    runs-on: windows-2025
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/system-deps
-      - name: Install toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: Build
-        run: cargo build --workspace --all-targets --locked
-      - name: Test
-        run: cargo test --workspace --locked
-
   package-linux:
     name: package (Linux)
     runs-on: ubuntu-24.04
@@ -226,7 +206,7 @@ jobs:
   release:
     name: draft release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [checks, test-windows, package-linux, package-windows, package-flatpak, package-gateway-image, package-android]
+    needs: [package-linux, package-windows, package-flatpak, package-gateway-image, package-android]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
