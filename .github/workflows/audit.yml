@@ -4,9 +4,8 @@ name: Security audit
 # new advisories show up without a push. CI's cargo-deny job checks the same
 # on every push together with licenses and sources.
 
+# Not scheduled: run by hand only.
 on:
-  schedule:
-    - cron: "41 4 * * *"
   workflow_dispatch:
 
 jobs:

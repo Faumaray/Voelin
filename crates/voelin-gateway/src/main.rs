@@ -27,7 +27,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use clap::Parser;
-use tracing::{info, warn};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use crate::hub::Hub;
@@ -91,6 +91,7 @@ async fn ws(State(hub): State<Arc<Hub>>, upgrade: WebSocketUpgrade) -> impl Into
 #[cfg(unix)]
 async fn reload_on_hangup(hub: Arc<Hub>) {
 	use tokio::signal::unix::{SignalKind, signal};
+	use tracing::warn;
 	let Ok(mut hangup) = signal(SignalKind::hangup()) else { return };
 	while hangup.recv().await.is_some() {
 		if let Err(error) = hub.settings.reload() {

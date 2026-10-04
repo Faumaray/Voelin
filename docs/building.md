@@ -3,8 +3,8 @@
 Every platform has installable packages. The release workflow builds them,
 and the Dockerfiles in `docker/` build the same kinds of packages on any
 machine with Docker. Both use `scripts/package.sh`, so file names and
-contents match. Regular CI (`ci.yml`, every push and PR) only runs the fast
-checks and builds no packages.
+contents match. CI (`ci.yml`, run by hand only) runs the checks and builds
+no packages; the release workflow builds packages without running them.
 
 The packages hold the app, Voelin. The gateway `tsgw` runs on servers and is
 packaged for Linux only, separately. `voelinctl` is a development tool and is
@@ -30,13 +30,20 @@ signed with a debug key (fine for testing, not for the Play Store).
 The gateway's image can also be built directly:
 `docker build -f crates/voelin-gateway/Dockerfile -t tsgw .`.
 
+Gitea at [git.faumaray.ru](https://git.faumaray.ru) builds the same package
+types through `.gitea/workflows/release.yml`: manual runs produce one
+`voelin-packages` artifact; `v*` tag pushes also attach the packages to a
+draft release. Windows packages there use MinGW rather than MSVC. See
+[Gitea releases](release.md#gitea-releases) for signing and publishing,
+and [runner setup](ci.md#gitea-release-runner) for host requirements.
+
 ## From releases
 
 `.github/workflows/release.yml` builds every package:
 
 - **A version tag** `v*` (`git tag -s v0.2.0 && git push origin v0.2.0`): the
   packages and a `SHA256SUMS` are attached to a **draft** GitHub release once
-  all checks pass (the same checks as CI, plus the Windows tests); review and
+  every package is built (no checks run; run CI by hand first); review and
   publish it by hand ([release.md](release.md#checklist)).
 - **By hand**, for a build to test without a release: Actions → Release → Run
   workflow (or `gh workflow run release.yml --ref <branch>`). The packages are
@@ -109,3 +116,7 @@ the proxy is on localhost. If the proxy inspects TLS, set
 - **Android:** [android.md](android.md) (SDK, NDK, cargo-ndk), then
   `cd android && ./gradlew assembleDebug` and `scripts/package.sh android`.
 - **Flatpak:** [packaging/README.md](../packaging/README.md#flatpak).
+  On a trusted machine with rootful Docker,
+  `scripts/flatpak-build.sh` writes `dist/flatpak/voelin.flatpak` using the
+  release builder image. It requires a privileged container for Flatpak's
+  nested sandbox; do not use it on an untrusted build host.

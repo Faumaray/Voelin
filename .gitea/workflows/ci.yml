@@ -1,0 +1,24 @@
+name: CI
+
+# Linux checks for Gitea act_runner; runner setup and scope: docs/ci.md.
+# Off for pushes and pull requests: run by hand only.
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "1"
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "0"
+
+jobs:
+  linux:
+    name: Linux checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: https://github.com/actions/checkout@v4
+      - uses: ./.gitea/actions/checks

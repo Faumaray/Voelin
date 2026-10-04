@@ -18,6 +18,8 @@
 # unsigned.
 
 FROM ubuntu:24.04 AS toolchain
+# Serial builds keep the generated Slint UI within the CI memory budget.
+ENV CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0
 ARG DEBIAN_FRONTEND=noninteractive
 # JDK 17 (Gradle, the Android Gradle plugin), CMake + Ninja (the bundled libopus).
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -79,6 +81,9 @@ FROM toolchain AS build
 ARG ABIS=arm64-v8a,x86_64
 # debug (installable as is) or release (signed with the build secrets).
 ARG APK=debug
+# BuildKit secrets do not invalidate cached RUN steps. A signed CI build
+# supplies a fresh non-secret nonce so a rotated key cannot reuse an old APK.
+ARG SIGNING_CACHE_BUST=unsigned
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,id=voelin-cargo-registry,target=/usr/local/cargo/registry \
@@ -86,7 +91,7 @@ RUN --mount=type=cache,id=voelin-cargo-registry,target=/usr/local/cargo/registry
 	--mount=type=cache,id=voelin-gradle,target=/root/.gradle \
 	--mount=type=secret,id=keystore,required=false \
 	--mount=type=secret,id=signing,required=false \
-	set -e; \
+	set -e; : "$SIGNING_CACHE_BUST"; \
 	if [ "$APK" = release ] && [ -f /run/secrets/keystore ]; then \
 		export VOELIN_SIGNING_STORE_FILE=/run/secrets/keystore; \
 		set -a; . /run/secrets/signing; set +a; \

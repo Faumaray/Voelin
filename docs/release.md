@@ -4,6 +4,53 @@ How a release is versioned, built, signed and checked. The app id
 `io.github.faumaray.Voelin` ([packaging/README.md](../packaging/README.md))
 cannot change after the first release on Flathub or Google Play.
 
+CI resource settings and the Linux Gitea runner setup are documented in
+[ci.md](ci.md). Release packaging and draft publication run on GitHub and
+Gitea ([git.faumaray.ru](https://git.faumaray.ru)); runner and credential
+requirements differ.
+
+## Gitea releases
+
+`.gitea/workflows/release.yml` builds Linux tarballs and `.deb` files, Windows
+zip and NSIS installer (MinGW cross-build), Android debug APK (arm64-v8a and
+x86_64), a Flatpak bundle, and the gateway container image. It reuses the
+Dockerfiles and `scripts/package.sh`, and builds packages only: it runs none
+of the checks (formatting, Clippy, tests, TeamSpeak smoke tests); run CI by
+hand for those before accepting a release.
+
+- **Manual dispatch:** after all builds pass, download the
+  `voelin-packages` artifact from the run. Manual runs never publish a draft,
+  even when dispatched against a tag.
+- **Push a `v*` tag:** the same artifact is uploaded, then packages and a
+  combined `SHA256SUMS` are attached to a **draft** Gitea release. Review,
+  sign checksums and publish manually, just as on GitHub.
+
+Set the repository secret `RELEASE_TOKEN` to a Gitea personal access
+token with `write:repository`, limited to this repository where supported
+(Gitea refuses secret names that start with `GITEA_` or `GITHUB_`; the
+workflow hands it to the script as `GITEA_RELEASE_TOKEN`).
+The token's account must be able to write releases. The publishing script
+uses the runner's `GITHUB_SERVER_URL` and `GITHUB_REPOSITORY`; it requires
+HTTPS and never uses GitHub's release API. On this instance the server URL
+is `https://git.faumaray.ru`. No registry credentials are needed: the gateway
+image is attached as `tsgw-image.tar.gz`, not pushed to an OCI registry.
+
+Retries update only a matching **draft**, replacing same-named assets.
+Published releases are not changed; a failed upload leaves a partial draft
+for retry. Do not publish or modify a draft while the workflow runs. Gitea
+1.25 ignores workflow concurrency and environment approvals; use the
+dedicated, serial trusted runner described in [ci.md](ci.md#gitea-release-runner).
+
+For an optional signed Android release APK, set the same four signing secrets
+listed below. They are written outside the Docker build context with private
+permissions, passed as BuildKit secrets, and removed on success or failure.
+Signed builds invalidate the signing stage's cache on every run; changing a
+key or password cannot return a cached APK signed with the previous key.
+Without the keystore secret, only the installable debug APK is produced; a
+partially configured keystore fails the job rather than producing an
+unsigned release. Windows and Flatpak packages are not code-signed by this
+workflow.
+
 ## Versioning
 
 - One version for the apps: `version` of `crates/voelin-ui` (desktop; the
@@ -170,7 +217,7 @@ Release:
 
 7. Tag `v<version>` (signed) on the release commit and push it.
 8. The tag's release workflow (`release.yml`, [building.md](building.md))
-   runs the checks and the Windows tests and builds every package: the app's
+   builds every package (it runs no checks: run CI by hand first): the app's
    Linux tarball and `.deb`, Flatpak bundle, Windows zip and installer and
    Android APKs (signed when the secrets are set), and the gateway's Linux
    tarball, `.deb` and image; its `release` job attaches them with a
