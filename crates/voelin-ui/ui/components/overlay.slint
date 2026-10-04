@@ -234,6 +234,8 @@ export component Toast inherits Rectangle {
     in property <image> icon: Icons.info;
     in property <duration> timeout: 5s;
     in-out property <bool> shown;
+    // Hidden for now (under the account prompt): the time to read starts later.
+    in property <bool> paused;
     // The widest it gets (e.g. the window less a margin); longer text wraps.
     in property <length> widest: 560px;
     height: shown ? row.preferred-height + 16px : 0px;
@@ -248,7 +250,7 @@ export component Toast inherits Rectangle {
     accessible-live-region: polite;
     Timer {
         interval: root.timeout;
-        running: root.shown;
+        running: root.shown && !root.paused;
         triggered => { root.shown = false; }
     }
     TouchArea {

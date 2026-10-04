@@ -16,7 +16,9 @@ component LoginForm inherits VerticalLayout {
     spacing: Theme.space-3;
     property <string> otp-text;
     function submit() {
-        if !Bridge.myts.busy && email.text != "" && password.text != "" && (!Bridge.myts.otp-required || otp-text != "") {
+        // The one-time code is asked for, never required to submit: another
+        // account needs none, and without it a 2FA account is asked again.
+        if !Bridge.myts.busy && email.text != "" && password.text != "" {
             Bridge.myts-login(email.text, password.text, otp-text);
             password.clear();
             otp-text = "";
@@ -52,7 +54,7 @@ component LoginForm inherits VerticalLayout {
     }
     Button {
         text: @tr("Sign in");
-        enabled: !Bridge.myts.busy && email.text != "" && password.text != "" && (!Bridge.myts.otp-required || root.otp-text != "");
+        enabled: !Bridge.myts.busy && email.text != "" && password.text != "";
         clicked => { root.submit(); }
     }
     Button {

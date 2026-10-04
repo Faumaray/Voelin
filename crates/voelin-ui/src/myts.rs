@@ -251,22 +251,9 @@ impl App {
 		let Some(url) = portal_url(action).filter(|_| !self.myts.busy) else {
 			return;
 		};
-		let generation = self.myts.generation;
-		self.runtime.spawn(async move {
-			let opened = tokio::task::spawn_blocking(move || {
-				crate::app::desktop_opener(std::ffi::OsStr::new(url))
-					.status()
-					.is_ok_and(|status| status.success())
-			})
-			.await
-			.unwrap_or(false);
-			later(move |app| {
-				if app.myts.generation == generation && !app.myts.busy {
-					app.myts.status = if opened { 11 } else { 10 };
-					app.refresh_myts();
-				}
-			});
-		});
+		let opened = crate::app::open_target(std::ffi::OsStr::new(url)).is_ok();
+		self.myts.status = if opened { 11 } else { 10 };
+		self.refresh_myts();
 	}
 
 	pub(crate) fn myts_retry(&mut self) {
@@ -313,7 +300,8 @@ impl App {
 	}
 
 	pub(crate) fn myts_login(&mut self, email: String, password: String, otp: String) {
-		if email.trim().is_empty() || password.is_empty() || self.myts.signed_in {
+		// The sample screens of VOELIN_DEMO_UI sign in nowhere.
+		if self.demo_ui || email.trim().is_empty() || password.is_empty() || self.myts.signed_in {
 			return;
 		}
 		let (device, otp_renewal) = self.myts.device_for(&email);
@@ -378,6 +366,10 @@ impl App {
 	}
 
 	pub(crate) fn myts_logout(&mut self) {
+		// Nor do they sign out: no session, keyring or engine account to clear.
+		if self.demo_ui {
+			return;
+		}
 		let token =
 			self.myts.saved.as_ref().and_then(|s| SessionToken::new(s.session.clone()).ok());
 		let cleared = self.myts.forget(self.secrets.as_ref());

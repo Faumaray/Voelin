@@ -292,6 +292,9 @@ export component MainWindow inherits Window {
         y: parent.height - self.height - (Nav.narrow ? 140px : 96px);
         text: Bridge.status-text;
         visible: self.shown && !Bridge.myts.prompt;
+        // A notice from the start (an imported identity) waits for the
+        // account prompt to close.
+        paused: Bridge.myts.prompt;
         widest: min(560px, parent.width - 32px);
     }
 

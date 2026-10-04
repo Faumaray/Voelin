@@ -665,7 +665,10 @@ pub fn run(options: RunOptions) -> Result<()> {
 		myts: Default::default(),
 		ui: ui.as_weak(),
 		store,
-		secrets: options.secrets.unwrap_or_else(default_secrets),
+		// The sample data of VOELIN_DEMO_UI never reaches the system keyring.
+		secrets: options.secrets.unwrap_or_else(|| {
+			if switches.demo_ui { Box::new(MemorySecrets::default()) } else { default_secrets() }
+		}),
 		engine: engine.clone(),
 		identity,
 		current: bookmarks.first().map(|b| b.id),
@@ -779,7 +782,14 @@ pub fn run(options: RunOptions) -> Result<()> {
 
 /// Open a file or folder with the desktop's default application.
 pub(crate) fn open_path(path: &Path) -> std::io::Result<()> {
-	let mut child = desktop_opener(path.as_os_str()).spawn()?;
+	open_target(path.as_os_str())
+}
+
+/// Open a file, folder or address with the desktop's handler. Success is that
+/// the opener started: explorer's exit code means nothing (1 on success), and
+/// xdg-open may wait until the browser closes.
+pub(crate) fn open_target(target: &std::ffi::OsStr) -> std::io::Result<()> {
+	let mut child = desktop_opener(target).spawn()?;
 	// Reap it without blocking the UI.
 	std::thread::spawn(move || child.wait());
 	Ok(())
