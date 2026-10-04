@@ -245,6 +245,98 @@ fn h264_level(profile: H264Profile, width: u32, height: u32, fps: u32, bitrate: 
 		.map_or(H264_LEVELS[H264_LEVELS.len() - 1].0, |l| l.0)
 }
 
+/// An HEVC level (ITU-T H.265 Table A.8 and A.9): `general_level_idc` (30
+/// times the level), luma samples per picture and per second, Main and High
+/// tier bitrate in kbit/s (High from level 4 on).
+type HevcLevel = (i64, u64, u64, u64, u64);
+
+const HEVC_LEVELS: [HevcLevel; 13] = [
+	(30, 36_864, 552_960, 128, 0),
+	(60, 122_880, 3_686_400, 1_500, 0),
+	(63, 245_760, 7_372_800, 3_000, 0),
+	(90, 552_960, 16_588_800, 6_000, 0),
+	(93, 983_040, 33_177_600, 10_000, 0),
+	(120, 2_228_224, 66_846_720, 12_000, 30_000),
+	(123, 2_228_224, 133_693_440, 20_000, 50_000),
+	(150, 8_912_896, 267_386_880, 25_000, 100_000),
+	(153, 8_912_896, 534_773_760, 40_000, 160_000),
+	(156, 8_912_896, 1_069_547_520, 60_000, 240_000),
+	(180, 35_651_584, 1_069_547_520, 60_000, 240_000),
+	(183, 35_651_584, 2_139_095_040, 120_000, 480_000),
+	(186, 35_651_584, 4_278_190_080, 240_000, 800_000),
+];
+
+/// An AV1 level (AV1 specification A.3): `seq_level_idx`, samples per
+/// picture, width, height, samples per second (MaxDisplayRate), frame
+/// headers per second, Main and High tier bitrate in kbit/s (High from 4.0
+/// on).
+type Av1Level = (i64, u64, u32, u32, u64, u32, u64, u64);
+
+const AV1_LEVELS: [Av1Level; 14] = [
+	(0, 147_456, 2048, 1152, 4_423_680, 150, 1_500, 0),
+	(1, 278_784, 2816, 1584, 8_363_520, 150, 3_000, 0),
+	(4, 665_856, 4352, 2448, 19_975_680, 150, 6_000, 0),
+	(5, 1_065_024, 5504, 3096, 31_950_720, 150, 10_000, 0),
+	(8, 2_359_296, 6144, 3456, 70_778_880, 300, 12_000, 30_000),
+	(9, 2_359_296, 6144, 3456, 141_557_760, 300, 20_000, 50_000),
+	(12, 8_912_896, 8192, 4352, 267_386_880, 300, 30_000, 100_000),
+	(13, 8_912_896, 8192, 4352, 534_773_760, 300, 40_000, 160_000),
+	(14, 8_912_896, 8192, 4352, 1_069_547_520, 300, 60_000, 240_000),
+	(15, 8_912_896, 8192, 4352, 1_069_547_520, 300, 60_000, 240_000),
+	(16, 35_651_584, 16384, 8704, 1_069_547_520, 300, 60_000, 240_000),
+	(17, 35_651_584, 16384, 8704, 2_139_095_040, 300, 100_000, 480_000),
+	(18, 35_651_584, 16384, 8704, 4_278_190_080, 300, 160_000, 800_000),
+	(19, 35_651_584, 16384, 8704, 4_278_190_080, 300, 160_000, 800_000),
+];
+
+/// The lowest level of `levels` (`fits` its picture and rate limits) whose
+/// Main tier holds `kbps`, else the lowest whose High tier does: Main is
+/// what more decoders take. `None` beyond every level.
+fn tiered_level<L: Copy>(
+	levels: &[L],
+	fits: impl Fn(&L) -> bool,
+	tiers: impl Fn(&L) -> (i64, u64, u64),
+	kbps: u64,
+) -> Option<(i64, bool)> {
+	let fitting = || levels.iter().filter(|l| fits(l)).map(&tiers);
+	let main = fitting().find(|&(_, main, _)| kbps <= main).map(|(level, ..)| (level, false));
+	main.or_else(|| fitting().find(|&(.., high)| kbps <= high).map(|(level, ..)| (level, true)))
+}
+
+/// HEVC `general_level_idc` and High tier for this stream (see
+/// [`tiered_level`]); beyond every level 8.5 (255) in the High tier, as
+/// FFmpeg's own guess does.
+fn hevc_level(width: u32, height: u32, fps: u32, bitrate: u32) -> (i64, bool) {
+	let picture = u64::from(width) * u64::from(height);
+	let rate = picture * u64::from(fps.max(1));
+	let side = u64::from(width.max(height));
+	let fits = |&(_, max_picture, max_rate, ..): &HevcLevel| {
+		picture <= max_picture && side * side <= 8 * max_picture && rate <= max_rate
+	};
+	let tiers = |&(level, .., main, high): &HevcLevel| (level, main, high);
+	tiered_level(&HEVC_LEVELS, fits, tiers, u64::from(bitrate).div_ceil(1000))
+		.unwrap_or((255, true))
+}
+
+/// AV1 `seq_level_idx` and High tier for this stream (see
+/// [`tiered_level`]); beyond every level 31, which has no limits, as
+/// FFmpeg's own guess does. Unlike that guess this counts the frame rate:
+/// FFmpeg's wrappers read it from `AVCodecContext.framerate`, which has no
+/// AVOption.
+fn av1_level(width: u32, height: u32, fps: u32, bitrate: u32) -> (i64, bool) {
+	let picture = u64::from(width) * u64::from(height);
+	let rate = picture * u64::from(fps.max(1));
+	let fits = |&(_, max_picture, max_w, max_h, max_rate, headers, ..): &Av1Level| {
+		picture <= max_picture
+			&& width <= max_w
+			&& height <= max_h
+			&& rate <= max_rate
+			&& fps <= headers
+	};
+	let tiers = |&(level, .., main, high): &Av1Level| (level, main, high);
+	tiered_level(&AV1_LEVELS, fits, tiers, u64::from(bitrate).div_ceil(1000)).unwrap_or((31, true))
+}
+
 /// The backend's realtime settings (besides size, format, time base and
 /// rate, which every backend gets).
 fn settings(spec: &BackendSpec, config: &EncoderConfig, low_power: bool) -> Vec<Setting> {
@@ -855,9 +947,12 @@ impl FfmpegEncoder {
 			// 7.9 % at 1440p60 / 10 Mbit/s (RX 7900 GRE, desktop pattern);
 			// with two it lands within 1.2 % at both and at 720p30, no frame
 			// skipped, the largest 68 KB against 64 KB at 1440p60.
+			// `bufsize` is an int: from 1 Gbit/s (2.1 for one second) the
+			// buffer stays at the most it holds rather than failing the open.
 			generic(
 				"bufsize",
-				u64::from(bitrate) * if self.spec.name == "av1_vaapi" { 2 } else { 1 },
+				(u64::from(bitrate) * if self.spec.name == "av1_vaapi" { 2 } else { 1 })
+					.min(i32::MAX as u64),
 			),
 			generic("g", gop),
 			generic("bf", 0),
@@ -878,6 +973,21 @@ impl FfmpegEncoder {
 				h264_level(self.config.h264_profile, width, height, fps, bitrate).to_string();
 			list.push(generic("level", &level));
 			list.push(Setting { values: vec![level], ..opt("level", &[]) });
+		}
+		// HEVC and AV1 through VA-API: the level and tier the stream needs.
+		// Left to FFmpeg, a 4K240 stream declares a 4K60 level (neither guess
+		// counts the frame rate, and the HEVC one ignores it entirely). Only
+		// VA-API, whose `level` is `general_level_idc` and `seq_level_idx`;
+		// other wrappers count levels differently (Quick Sync in tenths).
+		let tiered = match self.spec.codec {
+			Codec::H265 if self.spec.is_vaapi() => Some(hevc_level(width, height, fps, bitrate)),
+			Codec::Av1 if self.spec.is_vaapi() => Some(av1_level(width, height, fps, bitrate)),
+			_ => None,
+		};
+		if let Some((level, high)) = tiered {
+			list.push(generic("level", level));
+			list.push(Setting { values: vec![level.to_string()], ..opt("level", &[]) });
+			list.push(opt("tier", &[if high { "high" } else { "main" }]));
 		}
 		list.extend(settings(self.spec, &self.config, low_power));
 		for setting in &list {
@@ -2526,6 +2636,39 @@ mod tests {
 		if Ffmpeg::get().is_ok() {
 			assert!(FfmpegEncoder::new("h264_vaapi", EncoderConfig::default()).is_ok());
 		}
+	}
+
+	/// Levels and tiers per H.265 Table A.8 and AV1 A.3, with the frame rate
+	/// and the bitrate counted.
+	#[test]
+	fn hevc_and_av1_levels() {
+		// 1080p60 at 8 Mbit/s: 4.1 Main; 4K60 at 60 Mbit/s: 5.1's Main
+		// tier holds 40, so 5.2 Main.
+		assert_eq!(hevc_level(1920, 1080, 60, 8_000_000), (123, false));
+		assert_eq!(hevc_level(3840, 2160, 60, 60_000_000), (156, false));
+		// 4K240 needs 6.1 for its sample rate; 8K30, 8K60, 8K120: 6, 6.1, 6.2.
+		assert_eq!(hevc_level(3840, 2160, 240, 60_000_000), (183, false));
+		assert_eq!(hevc_level(7680, 4320, 30, 60_000_000), (180, false));
+		assert_eq!(hevc_level(7680, 4320, 60, 60_000_000), (183, false));
+		assert_eq!(hevc_level(7680, 4320, 120, 60_000_000), (186, false));
+		// Beyond the Main tier of every level: High.
+		assert_eq!(hevc_level(1920, 1080, 30, 300_000_000), (183, true));
+		// Beyond every level: 8.5.
+		assert_eq!(hevc_level(7680, 4320, 320, 60_000_000), (255, true));
+		assert_eq!(hevc_level(16384, 16384, 30, 60_000_000), (255, true));
+
+		// AV1: 1080p60 at 6 Mbit/s 4.1; 4K60 at 60 Mbit/s 5.2 (5.1 Main
+		// holds 40).
+		assert_eq!(av1_level(1920, 1080, 60, 6_000_000), (9, false));
+		assert_eq!(av1_level(3840, 2160, 60, 60_000_000), (14, false));
+		// The frame rate counts: 4K240 6.1, 1440p240 5.2, 8K60 6.1.
+		assert_eq!(av1_level(3840, 2160, 240, 60_000_000), (17, false));
+		assert_eq!(av1_level(2560, 1440, 240, 60_000_000), (14, false));
+		assert_eq!(av1_level(7680, 4320, 60, 60_000_000), (17, false));
+		// 8K30 at 100 Mbit/s: 6.1 Main rather than 6.0 High.
+		assert_eq!(av1_level(7680, 4320, 30, 100_000_000), (17, false));
+		// More than 300 frame headers a second is beyond every level.
+		assert_eq!(av1_level(1920, 1080, 320, 60_000_000), (31, true));
 	}
 
 	#[test]

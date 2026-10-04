@@ -477,6 +477,18 @@ the software encoders above are used as before.
   implementations conventionally do, `h264_vaapi` and `h264_amf` emit `0c`
   for the former and `libx264` emits `00`, and all three emit `40` or `c0`
   for the latter. Those bits do not change what a decoder can decode.
+- HEVC and AV1 levels (VA-API): the level and tier the stream needs, from
+  its size, frame rate and bitrate (H.265 Table A.8, AV1 A.3): the lowest
+  level whose Main tier holds the bitrate, else the lowest whose High tier
+  does, else 8.5 / level 31 (no limits). FFmpeg's own guess counts neither
+  the frame rate (AV1 reads `AVCodecContext.framerate`, which has no
+  AVOption; HEVC ignores it) nor, at a given level, a higher tier, so a
+  4K240 stream declared a 4K60 level. Now 4K60 at 60 Mbit/s is HEVC 5.2 /
+  AV1 5.2 Main, 4K240 6.1, 8K30/60/120 HEVC 6/6.1/6.2; more than 300 fps
+  is beyond every AV1 level (300 frame headers a second). Other wrappers
+  count levels differently (Quick Sync in tenths) and keep choosing their
+  own. The rate-control buffer (`bufsize`, an int) stays at the 2^31-1
+  bits it holds from 1 Gbit/s on instead of failing the open.
 - Runtime changes: x264, NVENC and Quick Sync take bitrate changes on the
   running encoder (FFmpeg's wrappers compare `b` / `maxrate` / `bufsize`
   before each frame); the others reopen at the next keyframe, at once
