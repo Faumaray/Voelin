@@ -951,8 +951,9 @@ cargo bench -p voelin-media --bench convert
 `--pattern desktop` (default) is a code-editor-like picture whose document
 scrolls three pixels per frame, about as costly to encode as real screen
 content; `--pattern simple` is the flat test pattern. The bench prints
-capture fps, how many frames each path converted (CPU, or GPU for
-DMA-BUFs no CPU read) and the time per frame of each, per layer fps, kbit/s, keyframes,
+capture fps, how many frames each path converted (CPU, or GPU: DMA-BUFs,
+and for VA-API encoders pictures copied into a surface) and the time per
+frame of each, per layer fps, kbit/s, keyframes,
 frames dropped by the handoff, encode time, threads and `cpu-used`, CPU use
 and allocations per captured and per encoded frame.
 
@@ -1208,6 +1209,118 @@ whether frames took the GPU path; with
 `RUST_LOG=voelin_media::capture::portal=debug` also the modifiers offered
 and chosen.
 
+### 60 Mbit/s, up to 8K and 320 fps, measured
+
+Asked for: a stream that can target 60 Mbit/s at up to 7680x4320 and up
+to 320 fps wherever the hardware can, with nothing in Voelin capping
+below that. Same machine (Radeon RX 7900 GRE, 32 cores, FFmpeg 9.0.1,
+release builds), desktop pattern, 5 s after 2 s of warm-up, one run at a
+time on a desktop in use.
+
+What caps a stream now:
+
+| | before | now |
+|---|---|---|
+| `stream.bitrate_kbps` | 8000 by default | 0 by default: automatic (`media::auto_bitrate`, up to 60 Mbit/s, following size and rate live); typed values have no maximum (encoders take up to 2^32-1 bit/s) |
+| quick share presets | 15-60 fps, 2.5-10 Mbit/s | 15-320 fps, Auto and 2.5-60 Mbit/s; typed values unlimited |
+| studio presets | 720p-1440p, 30 and 60 fps | 720p-8K, 30-240 fps; any numbers typed |
+| settings pages (Video) | slider to 20 Mbit/s, 15-120 fps, presets to 1440p; any change stored 1 kbit/s with the automatic bitrate | slider to 60 Mbit/s (empty: automatic), 15-320 fps, presets to 8K |
+| `setupstream` bitrate | as given; the server wraps anything above 65535 kbit/s | at most 65535 (see the [protocol notes](protocol-notes/ts6-streaming.md#what-setupstream-takes-confirmed-600-beta131-2026-10-04)); the peers send the real rate |
+| ScreenCast portal | `framerate` up to the cap, no `maxFramerate`: the compositor's own maximum applied | `maxFramerate` up to the cap too: the lower of the cap and the screen's refresh rate (xdg-desktop-portal-hyprland also its `screencopy:max_fps`, 120 by default) |
+| Windows Graphics Capture | default update interval (reported about 60 fps) | 1 ms where Windows 11 has the setting (not run on Windows) |
+| H.264 `profile-level-id` of the app's offers | always 3.1 | the encoder's size, rate and bitrate (both profiles), at most 5.2, the highest libwebrtc and str0m parse; 6.x levels stay in the SPS |
+| HEVC / AV1 level and tier (VA-API) | FFmpeg's guess, which ignores the frame rate | Table A.8 / A.3 with the frame rate, Main tier first, then High |
+| rate-control buffer | `bufsize` overflowed its int above 1 Gbit/s | clamped |
+| str0m's pacer | one packet a millisecond: 9.5 Mbit/s | as fast as the estimate allows (below) |
+| encoder target | followed an estimate above the stream's bitrate | the layer's bitrate or `max_bitrate`, at most |
+| studio simulcast layers | never reached the engine's stream session | sent when going live and on every change |
+
+Left: an encoder that cannot encode a size fails (`h264_vaapi` takes at
+most 4096x4096 on this GPU, Cisco's OpenH264 3840x2160; HEVC and AV1
+take 8192x4352), and `threads_for` gives one software encoder at most 64
+threads.
+
+The GPU's encoders alone (`ffmpeg`, frames made on the GPU, CBR 60 Mbit/s,
+`async_depth` 1): what the hardware reaches, in fps.
+
+| | AV1 | HEVC | H.264 |
+|---|---|---|---|
+| 7680x4320 | 61-63 | 51-52 | – (at most 4096 wide) |
+| 3840x2160 | 233 | 193 | 194 |
+| 2560x1440 | 449 | 385 | 390 |
+| 1920x1080 | 680 | 603 | 601 |
+
+The streamer (`voelinctl stream bench ... --bitrate 60000`), before
+(076674b) and after. "memory": the pattern drawn into memory, as shared
+memory and X11 hand over the screen; "DMA-BUF": udmabuf, ordinary memory
+(before, refused above 64 MiB); "video memory": `--vram`, buffers of the
+driver's own layout, as a compositor's are. fps encoded, kbit/s, cores of
+the whole process (the pattern's drawing included).
+
+| run | before | after |
+|---|---|---|
+| 7680x4320@30 AV1, memory | 29.8 fps, 59.0 Mbit/s, 3.47 cores (CPU path, 31 ms encode) | 30.0, 60.6, 1.45 cores |
+| 7680x4320@30 AV1, video memory | – | 30.0, 58.4, 0.01 cores |
+| 7680x4320@60 AV1, memory | 27.4 (81 of 218 dropped), 16.7 Mbit/s, 5.17 cores | 48.0, 46.3, 1.88 cores |
+| 7680x4320@60 AV1, DMA-BUF / video memory | 29.2 (udmabuf refused, CPU path) | 60.0, 58.9, 0.01 cores |
+| 7680x4320@60 HEVC, video memory | – | 52.0 (the GPU's own rate) |
+| 3840x2160@120 H.264, memory | 83.6 (80 dropped), 41.8 Mbit/s, 2.79 cores | 120.0, 60.0, 1.06 cores |
+| 3840x2160@240 AV1, memory | 106.8 (208 dropped), 16.8 Mbit/s, 3.82 cores | 232.2, 58.0, 1.22 cores |
+| 3840x2160@240 AV1, DMA-BUF / video memory | 70.0 (the GPU reading udmabuf over the bus) | 237.8, 59.0, 0.02 cores |
+| 3840x2160@240 HEVC, video memory | – | 193.2 (the GPU's own rate) |
+| 2560x1440@240 H.264, memory | 221.2 (92 dropped), 2.40 cores | 238.6, 59.2, 0.49 cores |
+| 1920x1080@320 HEVC / H.264, memory | 318.0, 1.60 cores | 318.6, 59.7, 0.28 cores |
+| 1920x1080@320 AV1, video memory | – | 319.0, 62.0, 0.03 cores |
+
+Where the time went and what changed:
+
+- Memory frames for VA-API encoders went through the CPU path: the
+  pyramid converted to I420 on every core (4.6 ms at 8K), then each encoder
+  thread interleaved NV12 and uploaded it on one thread (`encode_with`), 20
+  of its 37 ms per 8K frame. They now take the GPU path (see the
+  [pipeline](#the-pipeline-in-voelin-core-media-module)): one copy into a
+  surface (5.7 ms of CPU at 8K, 1.3 at 4K, 0.3 at 1080p; more threads
+  saved 2 ms at 8K for four times the CPU), the GPU converts. 8K60 from
+  memory still makes 48 fps: the capture thread copies (5.7 ms), waits for
+  the GPU's upload and conversion (6 ms) and draws the next pattern; a
+  compositor's DMA-BUF takes 1 ms on the GPU path.
+- DMA-BUFs: the GPU converted a buffer of ordinary memory far slower than
+  one in video memory (`gpu_conversion_cost`, ignored test: 9.7 ms against
+  0.16 at 3840x2160, 4.0 against 0.09 at 1080p, 0.83 ms at 8K from video
+  memory; the import is 0.01-0.02 ms either way). A compositor's buffers
+  are in video memory, so the bench now has them too (`--vram`).
+- The pattern drew 7680x4320 (230 MB of copies) on one thread, which alone
+  kept the bench under 40 fps; four threads now.
+- Not waiting for the GPU after converting an uploaded picture was tried
+  and was slower (36 fps at 8K60 against 42: the encoder waited instead).
+
+End to end, Voelin to Voelin through the TeamSpeak 6 dev server on
+loopback (`voelinctl stream start --synthetic --pattern desktop --stats`,
+`stream watch --stats`; the viewer decodes with `av1_vaapi` /
+`h264_vaapi`):
+
+| stream | sent | received, decoded |
+|---|---|---|
+| 3840x2160@60 AV1, 60 Mbit/s, before the pacer fix | the estimate fell from 60 to 9 Mbit/s, the encoder followed (8.8) | 5 Mbit/s, 60 fps |
+| same, bandwidth estimation off (`--no-bwe`) | 60.0 Mbit/s | 44-46 Mbit/s, 60 fps, 715 of 716 |
+| 3840x2160@60 H.264, estimation off | 60.0 Mbit/s | 40.3-40.5 Mbit/s, 60 fps, 715 of 716 |
+| 3840x2160@60 AV1, 60 Mbit/s | 60.0 Mbit/s, estimate 107-143 Mbit/s | 43.7-45.1 Mbit/s, 60 fps, 895 of 897 |
+| 2560x1440@240 AV1, 60 Mbit/s | 57-61 Mbit/s, 238-240 fps | 56.6-60.8 Mbit/s, 235-237 fps, 2349 of 2370 |
+| 1920x1080@240 H.264, 60 Mbit/s | 59.4-60.2 Mbit/s, 240 fps | 59.3-60.2 Mbit/s, 238-241 fps, 2377 of 2379 |
+| 7680x4320@30 AV1, 60 Mbit/s | 56-66 Mbit/s, 29-31 fps | 38-45 Mbit/s, 18-20 fps decoded: the viewer's decoding is the limit at 8K |
+
+Received is below sent at 4K60 because of what the encoders write to
+hold a constant bitrate when the picture needs less: measured on the
+encoders' own output at 3840x2160@60 and 60 Mbit/s, `h264_vaapi` wrote 22
+Mbit/s of filler NAL units (type 12) and `av1_vaapi`, after two seconds,
+about 15 Mbit/s of padding OBUs (type 15); str0m drops both before
+packetizing, as RFC 6184 and the AV1 RTP payload format allow, so only
+the picture travels. At 240 fps the picture takes the whole 60 Mbit/s and
+it all arrives. The viewer's RGBA picture (`deliver` in the app, a new
+buffer per picture) costs 0.46 ms at 1080p, 2.8 ms at 4K and 9.5 ms at
+8K (6.3 ms of it the conversion, the rest the fresh buffer), so reusing
+buffers would save about 3 ms at 8K; not the limit.
+
 Build profiles: the dev profile builds the media hot path (yuv,
 voelin-media, str0m, x11rb-protocol, pipewire, wayland-client, ...) with
 `opt-level = 3`; release builds use fat LTO with one codegen unit.
@@ -1320,6 +1433,7 @@ has not run on Windows yet.
 | Application audio on PipeWire: desktop without our own stream, by name, by pid, a new player linked live, a quit one dropped, a restarted one matched again, the app list | `voelin-media/tests/pipewire_apps.rs` (private PipeWire, WirePlumber and D-Bus; tones told apart by frequency) | tested with PipeWire 1.0 and WirePlumber 0.4; skipped without them |
 | Streamer audio sources (mix levels, gain, mute, live change, microphone tap, window source error, silence) | `voelin-core` `media::tests::audio_sources_change_live`, `audio_sources_from_settings`, `settings::tests::audio_sources` | tested |
 | The share dialog's audio: the picked sources (gain, mute) in the capture request, none with "Share system audio" off; a running share following `stream.audio_sources` (a share without sound left so) | `voelin-ui` `streams::tests::the_share_carries_the_picked_audio`, `video::tests::a_share_follows_its_audio_sources`; headless screenshots (`share`, `share:live`) | tested; the dialog itself only in headless screenshots (nothing clicked) |
+| 60 Mbit/s at up to 8K and 320 fps: the streamer, the GPU path for memory frames (BGRx and RGBx against the CPU's conversion), the automatic bitrate, the encoder's format reaching the offer's H.264 level, the pacer at 60 Mbit/s | `voelinctl stream bench` (table above), `ffmpeg::encoder::tests::memory_pictures_are_converted_on_the_gpu`, `voelin-core` `media::tests::memory_frames_take_the_gpu_path_too`, `an_automatic_bitrate_follows_the_stream`, `stream::tests::layer_formats_reach_the_live_stream`, `voelin-stream` `tests/loopback.rs` `the_pacer_keeps_up_with_60_mbits` | tested on the Radeon RX 7900 GRE and through the TeamSpeak 6 dev server (above); 8K60 needs DMA-BUFs (memory frames make 48 fps), the viewer decodes 8K at about 20 fps |
 | X11 `_NET_WM_PID` of the shared window | `tests/x11_capture.rs` under Xvfb (`VOELIN_X11_TEST_DISPLAY`) | tested |
 | WASAPI per-process loopback, audio sessions, `HWND` owner | – | type-checked for `x86_64-pc-windows-gnu` only |
 | Android per-app and all-but-ours playback capture | `cargo ndk -t arm64-v8a clippy`, `gradlew compileDebugKotlin` | compiles only (no device or emulator here) |
