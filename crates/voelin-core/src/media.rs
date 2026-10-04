@@ -575,6 +575,9 @@ pub struct StreamerConfig {
 	/// ([`SyntheticScreen::with_dmabuf`]): drives the GPU path without a
 	/// portal (Linux, `/dev/udmabuf`).
 	pub synthetic_dmabuf: bool,
+	/// With `synthetic_dmabuf`: buffers in video memory drawn in advance, as
+	/// a compositor's are ([`SyntheticScreen::with_video_memory`]; VA-API).
+	pub synthetic_video_memory: bool,
 	/// Portal restore token from an earlier share: the desktop may skip its
 	/// dialog. The new one is [`Streamer::restore_token`].
 	pub restore_token: Option<String>,
@@ -598,6 +601,7 @@ impl Default for StreamerConfig {
 			synthetic_size: (1280, 720),
 			synthetic_pattern: Pattern::Simple,
 			synthetic_dmabuf: false,
+			synthetic_video_memory: false,
 			restore_token: None,
 			layers: Vec::new(),
 		}
@@ -1058,7 +1062,8 @@ impl Streamer {
 			SourceId::Synthetic => {
 				let (w, h) = config.synthetic_size;
 				let mut screen = SyntheticScreen::with_pattern(w, h, config.synthetic_pattern)
-					.with_dmabuf(config.synthetic_dmabuf);
+					.with_dmabuf(config.synthetic_dmabuf)
+					.with_video_memory(config.synthetic_video_memory);
 				screen.start_sink(&SourceId::Synthetic, &options, ingest).await?;
 				(Box::new(screen), None)
 			}

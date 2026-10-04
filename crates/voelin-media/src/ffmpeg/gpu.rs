@@ -138,6 +138,142 @@ pub(crate) fn map_dmabuf(
 	Ok(())
 }
 
+/// A VA-API surface of `sw_format` (holding `picture`, BGRA, if given)
+/// exported as a DRM PRIME DMA-BUF: a buffer in video memory as a
+/// compositor hands one over, the driver's tiling modifier and all. The
+/// buffer ([`frame`](Self::frame)) is valid while this lives.
+#[cfg(target_os = "linux")]
+pub(crate) struct Exported {
+	pool: Ptr,
+	surface: Ptr,
+	drm: Ptr,
+	pub(crate) frame: DmaBufRef,
+}
+
+// SAFETY: the frames and the pool are ours; FFmpeg's buffer references are
+// thread-safe and the surface is only read once it is made.
+#[cfg(target_os = "linux")]
+unsafe impl Send for Exported {}
+
+#[cfg(target_os = "linux")]
+impl Exported {
+	pub(crate) fn new(
+		(width, height): (u32, u32),
+		sw_format: c_int,
+		fourcc: u32,
+		picture: Option<&crate::frame::VideoFrame>,
+	) -> std::result::Result<Self, String> {
+		let ffmpeg = Ffmpeg::get().map_err(str::to_owned)?;
+		let api = &ffmpeg.api;
+		let pool = vaapi_pool(ffmpeg, width, height, sw_format)?;
+		let mut exported = Exported {
+			pool,
+			// SAFETY: allocations, checked below; the drop frees them.
+			surface: unsafe { (api.av_frame_alloc)() },
+			drm: unsafe { (api.av_frame_alloc)() },
+			frame: DmaBufRef {
+				width,
+				height,
+				timestamp: Duration::ZERO,
+				fourcc,
+				modifier: 0,
+				fd: -1,
+				size: 0,
+				planes: [(0, 0); 4],
+				plane_count: 0,
+			},
+		};
+		let (surface, drm) = (exported.surface, exported.drm);
+		if surface.is_null() || drm.is_null() {
+			return Err("out of memory".into());
+		}
+		// SAFETY: `pool` is a live frames context of this process's VA-API
+		// device; the frames are ours. The exported frame's `data[0]` is the
+		// AVDRMFrameDescriptor FFmpeg filled, valid while the frame holds
+		// the mapping; a picture's rows are `width * 4` bytes.
+		unsafe {
+			let ret = (api.av_hwframe_get_buffer)(pool, surface, 0);
+			if ret < 0 {
+				return Err(format!("VA-API surface: {}", api.error_text(ret)));
+			}
+			if let Some(picture) = picture {
+				let crate::frame::FrameData::Bgra(pixels) = &picture.data else {
+					return Err("only BGRA pictures are uploaded".into());
+				};
+				let mut sw = (api.av_frame_alloc)();
+				if sw.is_null() {
+					return Err("out of memory".into());
+				}
+				let head = sw.cast::<FrameHead>();
+				((*head).width, (*head).height) = (width as c_int, height as c_int);
+				(*head).format = sw_format;
+				let mut ret = (api.av_frame_get_buffer)(sw, 0);
+				if ret >= 0 {
+					let stride = (*head).linesize[0] as usize;
+					let rows =
+						std::slice::from_raw_parts_mut((*head).data[0], stride * height as usize);
+					for (y, row) in rows.chunks_exact_mut(stride).enumerate() {
+						row[..width as usize * 4]
+							.copy_from_slice(pixels.row(y, width as usize * 4));
+					}
+					ret = (api.av_hwframe_transfer_data)(surface, sw, 0);
+				}
+				(api.av_frame_free)(&mut sw);
+				if ret < 0 {
+					return Err(format!("upload: {}", api.error_text(ret)));
+				}
+			}
+			(*drm.cast::<FrameHead>()).format =
+				ffmpeg.pix.drm_prime.ok_or("no DRM PRIME format")?;
+			let flags = sys::HWFRAME_MAP_READ | sys::HWFRAME_MAP_DIRECT;
+			if (api.av_hwframe_map)(drm, surface, flags) < 0 {
+				return Err("this driver cannot export a VA-API surface as a DMA-BUF".into());
+			}
+			let descriptor = *(*drm.cast::<FrameHead>()).data[0].cast::<sys::DrmFrameDescriptor>();
+			if descriptor.nb_objects != 1 {
+				return Err(format!("{} buffer objects, not one", descriptor.nb_objects));
+			}
+			// The driver may describe a surface one plane per layer (NV12 as
+			// R8 for Y and GR88 for UV) rather than as one layer, which is how
+			// a compositor hands it over. Both name the same bytes of the same
+			// object, so the layers are flattened into planes.
+			let object = descriptor.objects[0];
+			let frame = &mut exported.frame;
+			let layers = descriptor.layers.iter().take(descriptor.nb_layers.max(0) as usize);
+			for layer in layers {
+				for plane in layer.planes.iter().take(layer.nb_planes.max(0) as usize) {
+					if frame.plane_count == frame.planes.len() {
+						return Err("more than four planes".into());
+					}
+					frame.planes[frame.plane_count] = (plane.offset as usize, plane.pitch as usize);
+					frame.plane_count += 1;
+				}
+			}
+			(frame.modifier, frame.fd, frame.size) =
+				(object.format_modifier, object.fd, object.size);
+			if frame.fd < 0 || frame.size == 0 {
+				return Err("no DMA-BUF exported".into());
+			}
+		}
+		Ok(exported)
+	}
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Exported {
+	fn drop(&mut self) {
+		if let Ok(ffmpeg) = Ffmpeg::get() {
+			// SAFETY: ours (or NULL); the mapping goes before the surface it
+			// maps.
+			unsafe {
+				(ffmpeg.api.av_frame_free)(&mut self.drm);
+				(ffmpeg.api.av_frame_free)(&mut self.surface);
+				(ffmpeg.api.av_buffer_unref)(&mut self.pool);
+			}
+		}
+	}
+}
+
 /// One output of [`GpuConverter::convert`]: a layer's size, the multiple
 /// its encoder takes, and whether it wants this frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -279,6 +415,17 @@ impl GpuConverter {
 		// SAFETY: our frame; this lets the buffer go.
 		unsafe { (self.ffmpeg.api.av_frame_unref)(self.mapped.0) };
 		result
+	}
+
+	/// Map `frame` and let it go again: the import alone, for measuring.
+	#[cfg(test)]
+	pub(crate) fn import_only(&mut self, frame: &DmaBufRef) -> Result<()> {
+		self.prepare((frame.width, frame.height))?;
+		let pool = self.import.as_ref().expect("prepared").0;
+		map_dmabuf(self.ffmpeg, frame, pool, self.mapped.0, self.refs).map_err(Error::Convert)?;
+		// SAFETY: our frame.
+		unsafe { (self.ffmpeg.api.av_frame_unref)(self.mapped.0) };
+		Ok(())
 	}
 
 	/// The import pool and the video processing for buffers of `source`'s

@@ -903,6 +903,11 @@ voelinctl stream bench --res 2560x1440 --fps 30 \
 # The pattern handed over as DMA-BUFs, as the portal hands over the screen
 # (Linux, /dev/udmabuf): with VA-API encoders the GPU path, no portal needed
 voelinctl stream bench --res 2560x1440 --fps 60 --encoder h264_vaapi --dmabuf
+# The same from buffers in video memory in the driver's tiled layout, drawn
+# in advance (eight frames in turn), as a compositor hands them over: the
+# udmabuf ones are ordinary memory the GPU reads over the bus several times
+# slower, and /dev/udmabuf refuses more than 64 MiB (7680x4320 is 132 MiB)
+voelinctl stream bench --res 7680x4320 --fps 60 --encoder av1_vaapi --vram
 # A real screen capture instead of the pattern (the portal asks the user;
 # --start-timeout bounds the wait so it cannot hang):
 voelinctl stream bench --source portal --fps 60 --encoder h264_vaapi

@@ -30,6 +30,8 @@ mod layout;
 pub mod sys;
 mod vpp;
 
+#[cfg(target_os = "linux")]
+pub(crate) use gpu::Exported;
 pub(crate) use gpu::Surface;
 pub use gpu::{GpuConverter, GpuLayer};
 

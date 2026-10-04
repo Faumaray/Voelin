@@ -85,6 +85,13 @@ struct BenchArgs {
 	/// encoders the frames are then converted and scaled on the GPU.
 	#[arg(long)]
 	dmabuf: bool,
+	/// The pattern drawn in advance into DMA-BUFs in video memory (VA-API
+	/// surfaces in the driver's layout), as a compositor hands over the
+	/// screen; implies --dmabuf. Without it the DMA-BUFs are ordinary
+	/// memory, which the GPU reads over the bus several times slower, and
+	/// which `/dev/udmabuf` limits to 64 MiB (7680x4320 needs 132).
+	#[arg(long)]
+	vram: bool,
 	/// Video codec: vp8, vp9, h264, av1 or h265 [default: the codec of
 	/// --encoder if named, else the first the encoder choice gives].
 	#[arg(long)]
@@ -388,7 +395,8 @@ fn bench(args: BenchArgs) -> Result<()> {
 		source: source.clone(),
 		synthetic_size: (width, height),
 		synthetic_pattern: pattern,
-		synthetic_dmabuf: args.dmabuf,
+		synthetic_dmabuf: args.dmabuf || args.vram,
+		synthetic_video_memory: args.vram,
 		fps: args.fps,
 		bitrate_kbps: args.bitrate,
 		codec,

@@ -1993,6 +1993,7 @@ impl EncoderFactory for FfmpegFactory {
 
 #[cfg(test)]
 mod tests {
+	use super::gpu::Exported;
 	use super::*;
 
 	#[test]
@@ -2136,112 +2137,6 @@ mod tests {
 		probe().iter().any(|s| s.spec.name == name && s.available.is_ok())
 	}
 
-	/// A VA-API surface of `sw_format` (holding `picture`, BGRA, if given)
-	/// exported as a DRM PRIME DMA-BUF: what a compositor hands over,
-	/// tiling modifier and all. The buffer is valid while this lives.
-	struct Exported {
-		pool: Ptr,
-		surface: Ptr,
-		drm: Ptr,
-		frame: DmaBufRef,
-	}
-
-	impl Exported {
-		fn new(
-			(width, height): (u32, u32),
-			sw_format: c_int,
-			fourcc: u32,
-			picture: Option<&VideoFrame>,
-		) -> Self {
-			let ffmpeg = Ffmpeg::get().unwrap();
-			let api = &ffmpeg.api;
-			let pool = vaapi_pool(ffmpeg, width, height, sw_format).expect("a VA-API surface pool");
-			// SAFETY: `pool` is a live frames context of this process's
-			// VA-API device; the frames are ours and freed by the drop. The
-			// exported frame's `data[0]` is the AVDRMFrameDescriptor FFmpeg
-			// filled, valid while the frame holds the mapping.
-			unsafe {
-				let mut exported = Exported {
-					pool,
-					surface: (api.av_frame_alloc)(),
-					drm: (api.av_frame_alloc)(),
-					frame: DmaBufRef {
-						width,
-						height,
-						timestamp: Duration::ZERO,
-						fourcc,
-						modifier: 0,
-						fd: -1,
-						size: 0,
-						planes: [(0, 0); 4],
-						plane_count: 0,
-					},
-				};
-				let (surface, drm) = (exported.surface, exported.drm);
-				assert!(!surface.is_null() && !drm.is_null());
-				let ret = (api.av_hwframe_get_buffer)(pool, surface, 0);
-				assert!(ret >= 0, "av_hwframe_get_buffer: {}", api.error_text(ret));
-				if let Some(picture) = picture {
-					let FrameData::Bgra(pixels) = &picture.data else { panic!("BGRA only") };
-					let mut sw = (api.av_frame_alloc)();
-					let head = sw.cast::<FrameHead>();
-					((*head).width, (*head).height) = (width as c_int, height as c_int);
-					(*head).format = sw_format;
-					assert!((api.av_frame_get_buffer)(sw, 0) >= 0);
-					let stride = (*head).linesize[0] as usize;
-					let rows =
-						std::slice::from_raw_parts_mut((*head).data[0], stride * height as usize);
-					for (y, row) in rows.chunks_exact_mut(stride).enumerate() {
-						row[..width as usize * 4]
-							.copy_from_slice(pixels.row(y, width as usize * 4));
-					}
-					let ret = (api.av_hwframe_transfer_data)(surface, sw, 0);
-					(api.av_frame_free)(&mut sw);
-					assert!(ret >= 0, "upload: {}", api.error_text(ret));
-				}
-				(*drm.cast::<FrameHead>()).format = ffmpeg.pix.drm_prime.expect("DRM PRIME");
-				let ret = (api.av_hwframe_map)(
-					drm,
-					surface,
-					sys::HWFRAME_MAP_READ | sys::HWFRAME_MAP_DIRECT,
-				);
-				assert!(ret >= 0, "this driver cannot export a VA-API surface as a DMA-BUF");
-				let descriptor =
-					*(*drm.cast::<FrameHead>()).data[0].cast::<sys::DrmFrameDescriptor>();
-				assert_eq!(descriptor.nb_objects, 1, "one buffer object");
-				// The driver may describe a surface one plane per layer (NV12
-				// as R8 for Y and GR88 for UV) rather than as one layer, which
-				// is how a compositor hands it over. Both name the same bytes
-				// of the same object, so flatten the layers into planes.
-				let object = descriptor.objects[0];
-				let frame = &mut exported.frame;
-				for layer in &descriptor.layers[..descriptor.nb_layers as usize] {
-					for plane in &layer.planes[..layer.nb_planes as usize] {
-						frame.planes[frame.plane_count] =
-							(plane.offset as usize, plane.pitch as usize);
-						frame.plane_count += 1;
-					}
-				}
-				(frame.modifier, frame.fd, frame.size) =
-					(object.format_modifier, object.fd, object.size);
-				assert!(frame.fd >= 0 && frame.size > 0);
-				exported
-			}
-		}
-	}
-
-	impl Drop for Exported {
-		fn drop(&mut self) {
-			let api = &Ffmpeg::get().unwrap().api;
-			// SAFETY: ours; the mapping goes before the surface it maps.
-			unsafe {
-				(api.av_frame_free)(&mut self.drm);
-				(api.av_frame_free)(&mut self.surface);
-				(api.av_buffer_unref)(&mut self.pool);
-			}
-		}
-	}
-
 	/// The picture of a GPU frame, read back into memory as I420.
 	fn download(frame: &GpuFrame) -> VideoFrame {
 		let ffmpeg = Ffmpeg::get().unwrap();
@@ -2295,7 +2190,8 @@ mod tests {
 		);
 		let picture = screen.frame(5, 30);
 		let rgb =
-			Exported::new(SIZE, ffmpeg.pix.bgr0.unwrap(), drm_fourcc(b"XR24"), Some(&picture));
+			Exported::new(SIZE, ffmpeg.pix.bgr0.unwrap(), drm_fourcc(b"XR24"), Some(&picture))
+				.unwrap();
 		let mut converter = GpuConverter::new().expect("VA-API video processing");
 		eprintln!("tiled RGB modifiers the import takes: {:x?}", converter.modifiers());
 		let layers = [
@@ -2380,7 +2276,7 @@ mod tests {
 			return;
 		}
 		let nv12 = Ffmpeg::get().unwrap().pix.nv12;
-		let exported = Exported::new((320, 240), nv12, drm_fourcc(b"NV12"), None);
+		let exported = Exported::new((320, 240), nv12, drm_fourcc(b"NV12"), None).unwrap();
 		let frame = exported.frame;
 		assert_eq!(frame.plane_count, 2, "NV12 has two planes");
 		let mut encoder = FfmpegEncoder::new("h264_vaapi", EncoderConfig::default()).unwrap();
@@ -2421,7 +2317,8 @@ mod tests {
 		);
 		let picture = screen.frame(3, 30);
 		let rgb =
-			Exported::new(SIZE, ffmpeg.pix.bgr0.unwrap(), drm_fourcc(b"XR24"), Some(&picture));
+			Exported::new(SIZE, ffmpeg.pix.bgr0.unwrap(), drm_fourcc(b"XR24"), Some(&picture))
+				.unwrap();
 		assert_eq!(rgb.frame.plane_count, 1);
 
 		// The conversion alone: the GPU's NV12 against the CPU's I420.
@@ -2607,12 +2504,82 @@ mod tests {
 		drop(encoder);
 
 		let rgb =
-			Exported::new(SIZE, ffmpeg.pix.bgr0.unwrap(), drm_fourcc(b"XR24"), Some(&picture));
+			Exported::new(SIZE, ffmpeg.pix.bgr0.unwrap(), drm_fourcc(b"XR24"), Some(&picture))
+				.unwrap();
 		let mut encoder = FfmpegEncoder::new("h264_vaapi", config).unwrap();
 		measure("GPU: RGB DMA-BUF imported and converted", &mut |timestamp| {
 			let frame = DmaBufRef { timestamp, ..rgb.frame };
 			encoder.encode_dmabuf(&frame, false, &mut |_| {}).unwrap();
 		});
+	}
+
+	/// What the GPU path costs per captured frame: the DMA-BUF import alone,
+	/// and the whole conversion (import, VPP to NV12, the wait for the GPU),
+	/// from a buffer of the driver's own (video memory, tiled) and from a
+	/// LINEAR one of ordinary memory where `/dev/udmabuf` allows its size.
+	/// `cargo test -p voelin-media --release --lib gpu_conversion_cost --
+	/// --ignored --nocapture`.
+	#[cfg(feature = "pipewire")]
+	#[test]
+	#[ignore = "a measurement, not a check"]
+	fn gpu_conversion_cost() {
+		if !usable("h264_vaapi") {
+			eprintln!("no usable h264_vaapi, skipped");
+			return;
+		}
+		let ffmpeg = Ffmpeg::get().unwrap();
+		for size in [(1920, 1080), (3840, 2160), (7680, 4320)] {
+			let screen = crate::capture::synthetic::SyntheticScreen::with_pattern(
+				size.0,
+				size.1,
+				crate::capture::synthetic::Pattern::Desktop,
+			);
+			let picture = screen.frame(3, 60);
+			let vram =
+				Exported::new(size, ffmpeg.pix.bgr0.unwrap(), drm_fourcc(b"XR24"), Some(&picture))
+					.unwrap();
+			let len = size.0 as usize * size.1 as usize * 4;
+			let mut ram = crate::capture::dmabuf::Udmabuf::new(len).ok();
+			if let Some(ram) = &mut ram {
+				let FrameData::Bgra(pixels) = &picture.data else { unreachable!() };
+				ram.bytes_mut().copy_from_slice(&pixels.data[..len]);
+			}
+			let linear = ram.as_ref().map(|ram| DmaBufRef {
+				fd: ram.fd(),
+				size: ram.len(),
+				modifier: crate::capture::DRM_MOD_LINEAR,
+				planes: [(0, size.0 as usize * 4), (0, 0), (0, 0), (0, 0)],
+				plane_count: 1,
+				..vram.frame
+			});
+			let mut converter = GpuConverter::new().unwrap();
+			let layer = [GpuLayer { size, alignment: (2, 2), due: true }];
+			let mut out = [None];
+			for (what, frame) in [("video memory", Some(vram.frame)), ("udmabuf", linear)] {
+				let Some(frame) = frame else {
+					eprintln!("{}x{} {what}: no buffer of that size", size.0, size.1);
+					continue;
+				};
+				converter.convert(&frame, &layer, &mut out).unwrap();
+				let started = Instant::now();
+				for _ in 0..100 {
+					converter.import_only(&frame).unwrap();
+				}
+				let import = started.elapsed() / 100;
+				let started = Instant::now();
+				for _ in 0..100 {
+					converter.convert(&frame, &layer, &mut out).unwrap();
+				}
+				let convert = started.elapsed() / 100;
+				eprintln!(
+					"{}x{} {what}: import {:.2} ms, whole conversion {:.2} ms",
+					size.0,
+					size.1,
+					import.as_secs_f64() * 1e3,
+					convert.as_secs_f64() * 1e3
+				);
+			}
+		}
 	}
 
 	/// On Linux an AMF encoder is not even made unless asked for, so AMF's

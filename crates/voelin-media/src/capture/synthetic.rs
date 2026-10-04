@@ -225,6 +225,7 @@ pub struct SyntheticScreen {
 	desktop: Option<Arc<Desktop>>,
 	worker: Option<Worker>,
 	dmabuf: bool,
+	video_memory: bool,
 }
 
 impl SyntheticScreen {
@@ -237,7 +238,7 @@ impl SyntheticScreen {
 		let (width, height) = (width.max(16), height.max(16));
 		let desktop = (pattern == Pattern::Desktop)
 			.then(|| Arc::new(Desktop::render(width as usize, height as usize)));
-		Self { width, height, pattern, desktop, worker: None, dmabuf: false }
+		Self { width, height, pattern, desktop, worker: None, dmabuf: false, video_memory: false }
 	}
 
 	/// Draw into a DMA-BUF of ordinary memory and offer it to sinks that
@@ -248,6 +249,20 @@ impl SyntheticScreen {
 	/// over as before.
 	pub fn with_dmabuf(mut self, enabled: bool) -> Self {
 		self.dmabuf = enabled;
+		self
+	}
+
+	/// With [`with_dmabuf`](Self::with_dmabuf): the DMA-BUFs are buffers in
+	/// video memory in the GPU driver's own (tiled) layout, as a
+	/// compositor's are, drawn once in advance ([`VIDEO_MEMORY_FRAMES`]
+	/// frames of the pattern, handed over in turn) so the source costs
+	/// nothing per frame. The GPU reads ordinary memory over the bus, several
+	/// times slower (measured on a Radeon RX 7900 GRE: 9.7 ms against 0.16
+	/// for a 3840x2160 conversion), and `/dev/udmabuf` refuses buffers of
+	/// more than 64 MiB by default (7680x4320 is 132). Linux with the `ffmpeg`
+	/// feature and VA-API; elsewhere, ordinary memory as before.
+	pub fn with_video_memory(mut self, enabled: bool) -> Self {
+		self.video_memory = enabled;
 		self
 	}
 
@@ -264,6 +279,7 @@ impl SyntheticScreen {
 			desktop: self.desktop.clone(),
 			worker: None,
 			dmabuf: self.dmabuf,
+			video_memory: self.video_memory,
 		}
 	}
 
@@ -375,13 +391,19 @@ impl ScreenCapture for SyntheticScreen {
 				loop {
 					let timestamp = started.elapsed();
 					if sink.wants(timestamp) {
-						let bytes = buffer.bytes();
-						pattern.draw(n, bytes);
-						let taken = match buffer.dmabuf(&pattern, timestamp) {
+						// Buffers in video memory are drawn in advance; memory
+						// only for a sink that declines them.
+						if !buffer.drawn_in_advance() {
+							pattern.draw(n, buffer.bytes());
+						}
+						let taken = match buffer.dmabuf(&pattern, n, timestamp) {
 							Some(frame) if sink.accepts_dmabuf() => sink.dmabuf(&frame),
 							_ => None,
 						};
 						let more = taken.unwrap_or_else(|| {
+							if buffer.drawn_in_advance() {
+								pattern.draw(n, buffer.bytes());
+							}
 							let plane = PlaneRef::new(buffer.bytes(), width as usize * 4);
 							sink.frame(FrameRef {
 								width,
@@ -413,17 +435,31 @@ impl ScreenCapture for SyntheticScreen {
 	}
 }
 
-/// Where the test pattern is drawn: plain memory, or a DMA-BUF of ordinary
-/// memory ([`SyntheticScreen::with_dmabuf`]).
+/// Frames of the pattern drawn in advance into video memory
+/// ([`SyntheticScreen::with_video_memory`]), handed over in turn.
+pub const VIDEO_MEMORY_FRAMES: usize = 8;
+
+/// Where the test pattern is drawn: plain memory, a DMA-BUF of ordinary
+/// memory ([`SyntheticScreen::with_dmabuf`]), or buffers in video memory
+/// drawn in advance (and memory for a sink that declines them).
 enum Buffer {
 	Memory(Vec<u8>),
 	#[cfg(all(target_os = "linux", feature = "pipewire"))]
 	Dmabuf(super::dmabuf::Udmabuf),
+	#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+	Video(Vec<crate::ffmpeg::Exported>, Vec<u8>),
 }
 
 impl Buffer {
 	fn new(pattern: &SyntheticScreen) -> Self {
 		let len = pattern.width as usize * pattern.height as usize * 4;
+		#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+		if pattern.dmabuf && pattern.video_memory {
+			match Self::video_memory(pattern) {
+				Ok(frames) => return Self::Video(frames, vec![0; len]),
+				Err(e) => tracing::warn!("test pattern not in video memory: {e}"),
+			}
+		}
 		#[cfg(all(target_os = "linux", feature = "pipewire"))]
 		if pattern.dmabuf {
 			match super::dmabuf::Udmabuf::new(len) {
@@ -434,20 +470,53 @@ impl Buffer {
 		Self::Memory(vec![0; len])
 	}
 
+	/// [`VIDEO_MEMORY_FRAMES`] frames of the pattern in VA-API surfaces of
+	/// the driver's layout, exported as DMA-BUFs.
+	#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+	fn video_memory(
+		pattern: &SyntheticScreen,
+	) -> std::result::Result<Vec<crate::ffmpeg::Exported>, String> {
+		let ffmpeg = crate::ffmpeg::Ffmpeg::get().map_err(str::to_owned)?;
+		let bgr0 = ffmpeg.pix.bgr0.ok_or("no bgr0 pixel format")?;
+		let size = (pattern.width, pattern.height);
+		(0..VIDEO_MEMORY_FRAMES as u64)
+			.map(|n| {
+				let picture = pattern.frame(n, 1);
+				crate::ffmpeg::Exported::new(size, bgr0, super::drm_fourcc(b"XR24"), Some(&picture))
+			})
+			.collect()
+	}
+
+	/// The frames are in video memory already.
+	fn drawn_in_advance(&self) -> bool {
+		#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+		if let Self::Video(..) = self {
+			return true;
+		}
+		false
+	}
+
 	fn bytes(&mut self) -> &mut [u8] {
 		match self {
 			Self::Memory(bytes) => bytes,
 			#[cfg(all(target_os = "linux", feature = "pipewire"))]
 			Self::Dmabuf(buffer) => buffer.bytes_mut(),
+			#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+			Self::Video(_, bytes) => bytes,
 		}
 	}
 
-	/// The buffer as a LINEAR `XR24` DMA-BUF, if it is one.
-	fn dmabuf(&self, pattern: &SyntheticScreen, timestamp: Duration) -> Option<DmaBufRef> {
+	/// Frame `n` as an `XR24` DMA-BUF, if the buffers are DMA-BUFs.
+	fn dmabuf(&self, pattern: &SyntheticScreen, n: u64, timestamp: Duration) -> Option<DmaBufRef> {
 		match self {
 			Self::Memory(_) => {
-				let _ = (pattern, timestamp);
+				let _ = (pattern, n, timestamp);
 				None
+			}
+			#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+			Self::Video(frames, _) => {
+				let exported = &frames[n as usize % frames.len()];
+				Some(DmaBufRef { timestamp, ..exported.frame })
 			}
 			#[cfg(all(target_os = "linux", feature = "pipewire"))]
 			Self::Dmabuf(buffer) => Some(DmaBufRef {
@@ -661,6 +730,74 @@ mod tests {
 			screen.stop();
 			assert_eq!(dmabuf, take, "taken as a DMA-BUF");
 			assert_eq!(row, expected[..64 * 4], "the first row of frame 0");
+		}
+	}
+
+	/// In video memory: the frames drawn in advance come in turn, each its
+	/// own buffer; a sink that declines them gets memory frames.
+	#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+	#[tokio::test]
+	async fn the_pattern_in_video_memory() {
+		use std::sync::mpsc;
+
+		/// Takes DMA-BUFs (or declines them) and reports each one's fd.
+		struct Sink {
+			take: bool,
+			got: mpsc::Sender<Option<i32>>,
+		}
+		impl FrameSink for Sink {
+			fn max_fps(&self) -> u32 {
+				100
+			}
+			fn frame(&mut self, _: FrameRef<'_>) -> bool {
+				self.got.send(None).is_ok()
+			}
+			fn accepts_dmabuf(&self) -> bool {
+				true
+			}
+			fn dmabuf(&mut self, frame: &DmaBufRef) -> Option<bool> {
+				assert_eq!((frame.width, frame.height), (256, 128));
+				self.take.then(|| self.got.send(Some(frame.fd)).is_ok())
+			}
+		}
+
+		let exports =
+			crate::ffmpeg::Ffmpeg::get().ok().and_then(|f| f.pix.bgr0).is_some_and(|bgr0| {
+				crate::ffmpeg::Exported::new(
+					(64, 64),
+					bgr0,
+					super::super::drm_fourcc(b"XR24"),
+					None,
+				)
+				.is_ok()
+			});
+		if !exports {
+			eprintln!("no VA-API surfaces to export, skipped");
+			return;
+		}
+		for take in [true, false] {
+			let mut screen =
+				SyntheticScreen::new(256, 128).with_dmabuf(true).with_video_memory(true);
+			let (got, frames) = mpsc::channel();
+			let sink = Box::new(Sink { take, got });
+			screen
+				.start_sink(&SourceId::Synthetic, &CaptureOptions::default(), sink)
+				.await
+				.unwrap();
+			let mut fds = std::collections::BTreeSet::new();
+			for _ in 0..2 * VIDEO_MEMORY_FRAMES {
+				match frames.recv_timeout(Duration::from_secs(5)).unwrap() {
+					Some(fd) => {
+						assert!(take, "declined, yet a DMA-BUF");
+						fds.insert(fd);
+					}
+					None => assert!(!take, "taken, yet a memory frame"),
+				}
+			}
+			screen.stop();
+			if take {
+				assert_eq!(fds.len(), VIDEO_MEMORY_FRAMES, "each buffer in turn");
+			}
 		}
 	}
 }
