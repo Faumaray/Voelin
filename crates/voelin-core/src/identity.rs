@@ -35,7 +35,7 @@ use voelin_gateway_proto::UniqueIds;
 use voelin_store::Store;
 
 /// Name given to an identity whose source kept none.
-const DEFAULT_NICKNAME: &str = "imported";
+pub const DEFAULT_NICKNAME: &str = "imported";
 
 /// Item field holding the item's type; the payload is in field
 /// [`PAYLOAD_FIELD_BASE`] `+ type`.
@@ -77,6 +77,8 @@ pub struct Found {
 	pub identity: Identity,
 	/// The file it came from.
 	pub source: PathBuf,
+	/// The identity the other client uses by default (payload field 5).
+	pub selected: bool,
 }
 
 impl Found {
@@ -170,6 +172,26 @@ pub fn import(store: &Store, found: &[Found]) -> Result<Vec<Imported>, IdentityE
 			Ok(Imported::Added(store.add_identity(&f.nickname, &f.identity)?))
 		})
 		.collect()
+}
+
+/// Store the identities in the official clients' files at `paths` (usually
+/// [`discover`]) that the store does not have yet, as the app does when it
+/// starts. Files that cannot be read or hold no identity are skipped; none is
+/// written. The identities the clients use by default go in first, so on a
+/// store without identities the official client's default becomes ours (the
+/// first identity) and servers see the same unique id. Returns what was
+/// added.
+pub fn import_new(store: &Store, paths: &[PathBuf]) -> Result<Vec<Found>, IdentityError> {
+	let mut found: Vec<Found> = paths.iter().filter_map(|path| read(path).ok()).flatten().collect();
+	// Stable: TeamSpeak 6's default before TeamSpeak 3's, as `locations` lists them.
+	found.sort_by_key(|f| !f.selected);
+	let outcomes = import(store, &found)?;
+	Ok(found
+		.into_iter()
+		.zip(outcomes)
+		.filter(|(_, outcome)| matches!(outcome, Imported::Added(_)))
+		.map(|(f, _)| f)
+		.collect())
 }
 
 /// The TeamSpeak 3 `.ini` export of an identity, which the official client
@@ -372,7 +394,7 @@ fn record_identity(record: &[(String, String)], source: &Path) -> Option<Found> 
 	let identity = Identity::new_from_ts_str(find("identity")?).ok()?;
 	let nickname = find("nickname").or_else(|| find("id")).unwrap_or_default();
 	let nickname = if nickname.is_empty() { DEFAULT_NICKNAME } else { nickname }.to_owned();
-	Some(Found { nickname, identity, source: source.to_owned() })
+	Some(Found { nickname, identity, source: source.to_owned(), selected: false })
 }
 
 /// The identity payload of a `ProtobufItems` item, or `None` if the item is
@@ -393,22 +415,27 @@ fn identity_payload(item: &[u8]) -> Option<&[u8]> {
 	payload.filter(|_| kind == Some(IDENTITY_TYPE))
 }
 
-/// The export string is field 1 of the identity payload, the nickname field 2.
+/// The export string is field 1 of the identity payload, the nickname field 2,
+/// and field 5 is 1 on the identity the client uses by default.
 fn payload_identity(payload: &[u8], source: &Path) -> Option<Found> {
 	let mut export = None;
 	let mut nickname = None;
+	let mut selected = false;
 	let mut wire = Wire { rest: payload };
-	while let Some((number, Field::Bytes(bytes))) = wire.next_field() {
-		match number {
-			1 => export = str::from_utf8(bytes).ok(),
-			2 => nickname = Some(String::from_utf8_lossy(bytes).into_owned()),
+	while let Some((number, field)) = wire.next_field() {
+		match (number, field) {
+			(1, Field::Bytes(bytes)) => export = str::from_utf8(bytes).ok(),
+			(2, Field::Bytes(bytes)) => {
+				nickname = Some(String::from_utf8_lossy(bytes).into_owned())
+			}
+			(5, Field::Var(value)) => selected = value == 1,
 			_ => {}
 		}
 	}
 	let identity = Identity::new_from_ts_str(export?).ok()?;
 	let nickname =
 		nickname.filter(|n| !n.is_empty()).unwrap_or_else(|| DEFAULT_NICKNAME.to_owned());
-	Some(Found { nickname, identity, source: source.to_owned() })
+	Some(Found { nickname, identity, source: source.to_owned(), selected })
 }
 
 /// A protobuf field's value. Fixed-width fields carry nothing we read; they
@@ -537,13 +564,14 @@ mod tests {
 		}
 	}
 
-	/// An item of the shape both clients write, holding `identity`.
-	fn protobuf_item(identity: &Identity, nickname: &str) -> Vec<u8> {
+	/// An item of the shape both clients write, holding `identity`; `selected`
+	/// is the client's default.
+	fn protobuf_item(identity: &Identity, nickname: &str, selected: bool) -> Vec<u8> {
 		let export = format!("{}V{}", identity.counter(), identity.key().to_ts_obfuscated());
 		let mut payload = bytes_field(1, export.as_bytes());
 		payload.extend(bytes_field(2, nickname.as_bytes()));
 		payload.extend(bytes_field(3, b"a1b2c3d4"));
-		payload.extend(varint_field(5, 1));
+		payload.extend(varint_field(5, u64::from(selected)));
 		let mut item = bytes_field(2, b"4a7b4f46-0000-4000-8000-000000000001");
 		item.extend(varint_field(TYPE_FIELD, IDENTITY_TYPE));
 		item.extend(varint_field(9, 1_700_000_000));
@@ -641,7 +669,7 @@ mod tests {
 			mismatched.extend(bytes_field(PAYLOAD_FIELD_BASE, b"not an identity"));
 			for (key, value) in [
 				("1", other),
-				("2", protobuf_item(&identity, "Имя")),
+				("2", protobuf_item(&identity, "Имя", true)),
 				("3", mismatched),
 				("Checksum", vec![0; 20]),
 			] {
@@ -653,6 +681,52 @@ mod tests {
 		// A non-ASCII nickname survives.
 		assert_eq!(found[0].nickname, "Имя");
 		assert_eq!(found[0].uid(), identity.key().to_pub().get_uid());
+		assert!(found[0].selected);
+		fs::remove_dir_all(dir).unwrap();
+	}
+
+	/// A `settings.db` as the official clients write it, with these
+	/// identities.
+	fn client_database(path: &Path, items: &[(&Identity, &str, bool)]) {
+		let db = Connection::open(path).unwrap();
+		db.execute_batch(
+			"CREATE TABLE ProtobufItems (timestamp integer unsigned NOT NULL,
+			 key varchar NOT NULL UNIQUE, value varchar)",
+		)
+		.unwrap();
+		for (key, (identity, nickname, selected)) in items.iter().enumerate() {
+			let item = protobuf_item(identity, nickname, *selected);
+			db.execute("INSERT INTO ProtobufItems VALUES (0, ?1, ?2)", (key.to_string(), item))
+				.unwrap();
+		}
+	}
+
+	#[test]
+	fn launch_import_makes_the_clients_default_ours_and_adds_only_new_ones() {
+		let dir = temp_dir("launch");
+		let ts6 = dir.join("ts6.db");
+		let ts3 = dir.join("ts3.db");
+		let (spare, main, old) = (synthetic(), synthetic(), synthetic());
+		// The default identity is not the first item.
+		client_database(&ts6, &[(&spare, "Spare", false), (&main, "Main", true)]);
+		let missing = dir.join("missing.db");
+		let store = Store::open_in_memory().unwrap();
+
+		let added = import_new(&store, &[ts6.clone(), missing.clone()]).unwrap();
+		let nicknames: Vec<_> = added.iter().map(|f| f.nickname.as_str()).collect();
+		assert_eq!(nicknames, ["Main", "Spare"]);
+		// The first identity is the app's default: the client's default.
+		assert_eq!(store.identities().unwrap()[0].uid, main.key().to_pub().get_uid());
+
+		// The next start finds only what is new.
+		client_database(&ts3, &[(&old, "Old", true), (&main, "Main", true)]);
+		let added = import_new(&store, &[ts6, ts3, missing]).unwrap();
+		let nicknames: Vec<_> = added.iter().map(|f| f.nickname.as_str()).collect();
+		assert_eq!(nicknames, ["Old"]);
+		let stored = store.identities().unwrap();
+		assert_eq!(stored.len(), 3);
+		// A store that has identities keeps its default.
+		assert_eq!(stored[0].uid, main.key().to_pub().get_uid());
 		fs::remove_dir_all(dir).unwrap();
 	}
 
@@ -664,6 +738,7 @@ mod tests {
 			nickname: nickname.to_owned(),
 			identity: identity.clone(),
 			source: PathBuf::from("test.ini"),
+			selected: false,
 		};
 		// The same unique id twice in one batch, then again in a second run.
 		let outcome = import(&store, &[found("first"), found("again")]).unwrap();

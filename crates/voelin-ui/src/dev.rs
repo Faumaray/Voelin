@@ -12,7 +12,8 @@
 //! - `VOELIN_DEMO_STREAM=1`: a local test stream in the viewer.
 //! - `VOELIN_OPEN=<what>[,<what>...]`: open screens on start: `home`,
 //!   `server`, `settings[:<section>]` (voice, keybinds, streaming, privacy,
-//!   appearance, or 0-4), `about`, `share`, `bookmark` (add a server),
+//!   appearance, or 0-4), `about`, `share`, `bookmark` (add a server;
+//!   `bookmark:edit` the current one, Advanced open),
 //!   `emoji` (the picker), `client` (the volume dialog of the first other
 //!   client once connected), `panel` / `no-panel` (the members panel),
 //!   `voice` (the voice channel view; on the phone its own screen),
@@ -175,6 +176,12 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 				// The sample share of the test pattern, live at once.
 				if arg == "live" && switches.demo_ui {
 					with_app(|app| app.demo_share());
+				}
+			}
+			// The current server's dialog, Advanced open.
+			"bookmark" if arg == "edit" => {
+				if let Some(id) = with_app(|app| app.current).flatten() {
+					nav.invoke_edit_server(id as i32);
 				}
 			}
 			"bookmark" => nav.invoke_add_server(),

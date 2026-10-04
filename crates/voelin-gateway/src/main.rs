@@ -21,10 +21,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use axum::Router;
 use axum::extract::{State, WebSocketUpgrade};
+use axum::http::{HeaderMap, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
+use axum::{Json, Router};
 use clap::Parser;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -62,7 +63,22 @@ async fn main() -> Result<()> {
 }
 
 pub fn router(hub: Arc<Hub>) -> Router {
-	Router::new().route("/v1", get(ws)).route("/health", get(|| async { "ok" })).with_state(hub)
+	Router::new()
+		.route("/v1", get(ws))
+		.route("/health", get(|| async { "ok" }))
+		.route("/.well-known/tsgw", get(well_known))
+		.with_state(hub)
+}
+
+/// Where apps reach this gateway, for those that find it by asking the
+/// server's host on the default port (docs/gateway-admin.md): the
+/// configured public URL, else this listener as the request reached it.
+async fn well_known(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Json<serde_json::Value> {
+	let url = hub.boot.public_url.clone().unwrap_or_else(|| {
+		let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("localhost");
+		format!("ws://{host}/v1")
+	});
+	Json(serde_json::json!({ "url": url }))
 }
 
 async fn ws(State(hub): State<Arc<Hub>>, upgrade: WebSocketUpgrade) -> impl IntoResponse {
