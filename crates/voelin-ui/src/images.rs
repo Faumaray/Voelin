@@ -392,6 +392,6 @@ mod tests {
 		let image = emoji("1f600");
 		assert!(image.size().width > 0);
 		assert_eq!(emoji("nope").size().width, 0);
-		assert!(usage_text().contains("of 64 MB"));
+		assert!(usage_text().contains("of 256 MB"));
 	}
 }
