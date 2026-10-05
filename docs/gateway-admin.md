@@ -102,9 +102,11 @@ registered domain, the most specific name first; for `ts.example.org` that
 is `ts.example.org`, then `example.org`. It looks once per run when the
 server is selected or connects with voice, and again when its address
 changes: what is published takes the place of what was found before (a
-lookup that finds nothing keeps it). A gateway that cannot be reached is
-tried again by itself (after 2, 5, 15, 30, then every 60 seconds); users
-see nothing of it, the log file has the URL and the error.
+lookup that finds nothing keeps it). Every gateway found is kept and
+tried in turn, best first, each for up to 20 seconds; the first that logs
+in is used, and the log file names those it passed over (URL and error).
+Only when all of them fail does it wait (2, 5, 15, 30, then every 60
+seconds) and start over; users see nothing of it.
 
 **DNS records** (preferred). An SRV record names the gateway's host and
 port, the service name says whether it speaks TLS:
@@ -115,9 +117,14 @@ port, the service name says whether it speaks TLS:
 | `_tsgw._tcp.<name>  SRV <prio> <weight> <port> <host>` | `ws://<host>:<port>/v1` (plain, e.g. tsgw itself on 7788) |
 | `_tsgws._tcp.<name>  TXT "path=/<path>"` (optional, same for `_tsgw`) | another path than `/v1`, e.g. behind a reverse proxy |
 
-At the same name TLS wins; among several records of one name the lowest
-priority. A target of `.` means "no gateway here" and the search goes on at
-the parent domain. Examples (zone of `example.org`):
+The order: the most specific name first; at a name `_tsgws` before
+`_tsgw`; among several records of one name the lowest priority first;
+then tsgw's own answer (below), but only when a plain record or nothing is
+published, so a server that publishes only TLS is never reached without
+it. A TLS proxy that fails (no rule for the host, no certificate) thus
+falls back to a published plain gateway. A target of `.` means "no gateway
+here" and the search goes on at the parent domain. Examples (zone of
+`example.org`):
 
 ```dns
 ; Behind a TLS proxy at gw.example.org that forwards /tsgw/v1 to tsgw:
@@ -134,6 +141,17 @@ The record's service name must match what listens on the port: tsgw
 itself speaks plain WebSocket, so its own port (7788) is published as
 `_tsgw`; a `_tsgws` record there makes Voelin start TLS with it, which
 fails. Publish `_tsgws` only for a port with TLS in front.
+
+Behind [Zoraxy](https://zoraxy.aroz.org/): add an HTTP proxy rule for the
+gateway's host (`gw.example.org`) with one upstream, tsgw's plain address
+(`<tsgw host>:7788`), "Proxy Target require TLS Connection" off,
+WebSockets on, and a certificate for the host (ACME). If the rule also
+has an uptime monitor, point it at `/health` (tsgw's `/` answers 404).
+Check from outside: `curl https://gw.example.org/health` prints `ok`;
+Zoraxy's own `404 page not found` there means no rule matched the host or
+the request went to another upstream. Then set `listen.public_url =
+"wss://gw.example.org/v1"` in tsgw.toml, so its own answer points at the
+proxy.
 
 One domain with several servers and several gateways: publish one record
 per server host (`_tsgws._tcp.ts1.example.org`, `_tsgws._tcp.ts2.example.org`);

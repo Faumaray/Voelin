@@ -111,10 +111,12 @@ pub enum Command {
 	DisconnectVoice {
 		session: SessionId,
 	},
-	/// Invisible presence and relay chat through a `tsgw` gateway.
+	/// Invisible presence and relay chat through a `tsgw` gateway: the first
+	/// of `urls` (best first, [`discover::gateways`]) that logs in, tried in
+	/// turn again whenever it is lost.
 	ObserveGateway {
 		session: SessionId,
-		url: String,
+		urls: Vec<String>,
 		identity: Box<tsclientlib::Identity>,
 	},
 	/// Invisible presence and relay chat with own ServerQuery credentials.

@@ -65,8 +65,8 @@ pub(crate) enum GatewayCmd {
 }
 
 pub(crate) enum GatewayEvent {
-	/// Logged in; requests go through `client`.
-	Connected(GatewayClient),
+	/// Logged in at the URL; requests go through the client.
+	Connected(GatewayClient, String),
 	Presence(Box<Presence>),
 	/// A push other than presence.
 	Push(Box<Push>),
@@ -87,36 +87,57 @@ pub async fn connect(
 	voelin_gateway_proto::client::connect(url, login).await
 }
 
+/// Observe through the first of `urls` (best first, as published) that
+/// logs in.
 pub(crate) async fn run(
-	url: String,
+	mut urls: Vec<String>,
 	identity: tsclientlib::Identity,
 	mut commands: mpsc::UnboundedReceiver<GatewayCmd>,
 	events: mpsc::UnboundedSender<GatewayEvent>,
 ) {
-	// A gateway that is away (down, restarting, a network change) is tried
-	// again until the session stops observing; only a refused login ends it.
+	// A gateway that is away (down, restarting, a network change, a proxy
+	// in front of it that fails) is tried again until the session stops
+	// observing; only a refused login ends it. A round tries every URL in
+	// turn without waiting; only a round that fails waits.
 	let mut chats = Chats::default();
 	let mut failures = 0;
-	let mut last_reason = String::new();
-	let reason = loop {
-		match attempt(&url, &identity, &mut commands, &events, &mut chats, &mut failures).await {
-			Ended::Stopped => break None,
-			Ended::Refused(reason) => break Some(reason),
-			Ended::Lost(reason) => {
-				failures += 1;
-				let delay = retry_delay(failures);
-				// Once per cause, not every minute of a long absence.
-				if reason != last_reason {
-					warn!(%url, error = %reason, retry_in_s = delay.as_secs(), "gateway unreachable");
-				} else {
-					debug!(%url, error = %reason, retry_in_s = delay.as_secs(), "gateway still unreachable");
-				}
-				last_reason.clone_from(&reason);
-				let _ = events.send(GatewayEvent::Retrying(reason));
-				if !chats.wait(delay, &mut commands).await {
-					break None;
+	// What was logged per URL: once per cause, not every minute of a long
+	// absence.
+	let mut told: Vec<(String, String)> = Vec::new();
+	let reason = 'observe: loop {
+		let mut lost = None;
+		let mut index = 0;
+		while index < urls.len() {
+			let url = urls[index].clone();
+			match attempt(&url, &identity, &mut commands, &events, &mut chats).await {
+				Ended::Stopped => break 'observe None,
+				Ended::Refused(reason) => break 'observe Some(reason),
+				Ended::Lost { reason, logged_in } => {
+					let next = urls.get(index + 1);
+					if told.iter().any(|(u, r)| *u == url && *r == reason) {
+						debug!(%url, error = %reason, ?next, "gateway still unreachable");
+					} else {
+						warn!(%url, error = %reason, ?next, "gateway unreachable");
+						told.retain(|(u, _)| *u != url);
+						told.push((url.clone(), reason.clone()));
+					}
+					lost = Some(reason);
+					if logged_in {
+						// It worked: it is tried first again, after a wait.
+						urls[..=index].rotate_right(1);
+						failures = 0;
+						break;
+					}
+					index += 1;
 				}
 			}
+		}
+		let Some(reason) = lost else { break None };
+		failures += 1;
+		let delay = retry_delay(failures);
+		let _ = events.send(GatewayEvent::Retrying(reason));
+		if !chats.wait(delay, &mut commands).await {
+			break None;
 		}
 	};
 	let _ = events.send(GatewayEvent::Disconnected(reason));
@@ -128,9 +149,14 @@ enum Ended {
 	Stopped,
 	/// The gateway refused the login: trying again would not help.
 	Refused(String),
-	/// Not reached, or lost: try again.
-	Lost(String),
+	/// Not reached, or lost (after logging in): try again.
+	Lost { reason: String, logged_in: bool },
 }
+
+/// One attempt to reach a gateway and log in (TCP, TLS, the WebSocket
+/// upgrade, the login's own queries at the gateway) gives up after this
+/// long, so a gateway that never answers does not hold up the next one.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The wait before the next attempt after `failures` failed ones in a row.
 fn retry_delay(failures: u32) -> Duration {
@@ -235,37 +261,42 @@ async fn attempt(
 	commands: &mut mpsc::UnboundedReceiver<GatewayCmd>,
 	events: &mpsc::UnboundedSender<GatewayEvent>,
 	chats: &mut Chats,
-	failures: &mut u32,
 ) -> Ended {
-	let (client, mut pushes) = match connect(url, identity).await {
-		Ok(connected) => connected,
-		Err(ClientError::Gateway { code, message }) => {
-			warn!(%url, ?code, %message, "gateway refused the login");
-			return Ended::Refused(format!("gateway refused login: {code:?}: {message}"));
-		}
-		Err(e) => return Ended::Lost(e.to_string()),
-	};
-	*failures = 0;
+	let lost = |reason: String| Ended::Lost { reason, logged_in: false };
+	let (client, mut pushes) =
+		match tokio::time::timeout(CONNECT_TIMEOUT, connect(url, identity)).await {
+			Ok(Ok(connected)) => connected,
+			Ok(Err(ClientError::Gateway { code, message })) => {
+				warn!(%url, ?code, %message, "gateway refused the login");
+				return Ended::Refused(format!("gateway refused login: {code:?}: {message}"));
+			}
+			Ok(Err(e)) => return lost(e.to_string()),
+			Err(_) => return lost(format!("no answer within {} s", CONNECT_TIMEOUT.as_secs())),
+		};
 	info!(%url, server_name = %client.info().server_name, capabilities = ?client.capabilities(), "gateway connected");
-	match relay(&client, &mut pushes, commands, events, chats).await {
-		Ok(ended) => ended,
-		Err(e) => Ended::Lost(e.to_string()),
-	}
+	let reason = match relay(url, &client, &mut pushes, commands, events, chats).await {
+		Ok(Ended::Lost { reason, .. }) => reason,
+		Ok(ended) => return ended,
+		Err(e) => e.to_string(),
+	};
+	Ended::Lost { reason, logged_in: true }
 }
 
 async fn relay(
+	url: &str,
 	client: &GatewayClient,
 	pushes: &mut mpsc::UnboundedReceiver<Push>,
 	commands: &mut mpsc::UnboundedReceiver<GatewayCmd>,
 	events: &mpsc::UnboundedSender<GatewayEvent>,
 	chats: &mut Chats,
 ) -> Result<Ended, ClientError> {
+	let lost = |reason: String| Ended::Lost { reason, logged_in: true };
 	// Messages with their gateway ids, pins, reactions and topics of open
 	// chats (older gateways answer `unknown_type` as a push; ignored).
 	if CHAT_EXTENSIONS.iter().any(|f| client.has(f)) {
 		client.send(ClientMsg::Enable { features: Vec::new() })?;
 	}
-	let _ = events.send(GatewayEvent::Connected(client.clone()));
+	let _ = events.send(GatewayEvent::Connected(client.clone(), url.to_owned()));
 	client.subscribe_presence()?;
 	chats.restore(client)?;
 	let mut presence = Presence::default();
@@ -274,9 +305,9 @@ async fn relay(
 		tokio::select! {
 			push = pushes.recv() => match push {
 				None | Some(Push::Disconnected(None)) => {
-					return Ok(Ended::Lost("the gateway closed the connection".into()));
+					return Ok(lost("the gateway closed the connection".into()));
 				}
-				Some(Push::Disconnected(Some(reason))) => return Ok(Ended::Lost(reason)),
+				Some(Push::Disconnected(Some(reason))) => return Ok(lost(reason)),
 				Some(Push::PresenceSnapshot(snapshot)) => {
 					presence = Presence::from_snapshot(snapshot);
 					let _ = events.send(GatewayEvent::Presence(Box::new(presence.clone())));
@@ -289,7 +320,7 @@ async fn relay(
 				Some(Push::Other(_) | Push::Error { code: ErrorCode::UnknownType, .. }) => {}
 				// The gateway forgot the login (restarted): log in again.
 				Some(Push::Error { code: ErrorCode::NotAuthenticated, message }) => {
-					return Ok(Ended::Lost(format!("gateway session lost: {message}")));
+					return Ok(lost(format!("gateway session lost: {message}")));
 				}
 				Some(push) => {
 					let _ = events.send(GatewayEvent::Push(Box::new(push)));
@@ -528,6 +559,8 @@ pub struct Pin {
 pub enum GatewayUpdate {
 	/// Logged in.
 	Connected {
+		/// Where: the first of the published URLs that logged in.
+		url: String,
 		gateway_id: String,
 		server_uid: String,
 		server_name: String,

@@ -49,6 +49,7 @@ fn bookmark_from_form(
 	if old.is_some_and(|old| old.address != bookmark.address) {
 		bookmark.cached_server_icon = None;
 		bookmark.gateway_url = None;
+		bookmark.gateway_urls.clear();
 		bookmark.query = None;
 	}
 	bookmark.name = match form.name.trim() {
@@ -135,10 +136,10 @@ impl App {
 	}
 
 	/// Look up the gateway of a server ([`voelin_core::discover`]), once a
-	/// run: one found is kept as if typed, and takes the place of a stored
-	/// one that is no longer what the server publishes (a gateway that
-	/// moved, or one typed into an older version, which showed the field).
-	/// Nothing found keeps what is stored.
+	/// run: every one the server publishes is kept, best first, and tried in
+	/// turn; they take the place of a stored one that is no longer published
+	/// (a gateway that moved, or one typed into an older version, which
+	/// showed the field). Nothing found keeps what is stored.
 	pub(crate) fn discover_gateway(&mut self, id: i64) {
 		if self.demo_ui || !self.gateways_looked_up.insert(id) {
 			return;
@@ -146,31 +147,33 @@ impl App {
 		let Some(b) = self.bookmark(id) else { return };
 		let address = b.address.clone();
 		self.engine.runtime().spawn(async move {
-			if let Some(url) = voelin_core::discover::gateway(&address).await {
-				later(move |app| app.gateway_found(id, &address, url));
+			let urls = voelin_core::discover::gateways(&address).await;
+			if !urls.is_empty() {
+				later(move |app| app.gateway_found(id, &address, urls));
 			}
 		});
 	}
 
-	/// A gateway was found for the server at `address`; it is kept unless
-	/// the server changed meanwhile, and the server is observed through it
-	/// if it is the one shown. Users never hear of it (logged only).
-	fn gateway_found(&mut self, id: i64, address: &str, url: String) {
+	/// Gateways were found for the server at `address` (best first); they
+	/// are kept unless the server changed meanwhile, and the server is
+	/// observed through them if it is the one shown. Users never hear of
+	/// them (logged only).
+	fn gateway_found(&mut self, id: i64, address: &str, urls: Vec<String>) {
 		let Some(b) = self.bookmarks.iter_mut().find(|b| b.id == id && b.address == address) else {
 			return;
 		};
-		if b.gateway_url.as_deref() == Some(url.as_str()) {
+		let previous = b.gateways();
+		if !b.set_gateways(urls) {
 			return;
 		}
-		let previous = b.gateway_url.replace(url.clone());
 		if let Err(e) = self.store.update_bookmark(b) {
 			warn!(%e, "could not keep the gateway found");
 			return;
 		}
-		info!(server = %b.address, %url, ?previous, "gateway found");
+		info!(server = %b.address, urls = ?b.gateway_urls, ?previous, "gateway found");
 		self.refresh_toolbar();
-		// Observed through the old one: through this one now.
-		if previous.is_some() {
+		// Observed through the old ones: through these now.
+		if !previous.is_empty() {
 			self.engine.send(Command::StopObserving { session: id as u64 });
 			if let Some(view) = self.sessions.get_mut(&id) {
 				view.state.observe = ObserveState::Off;
@@ -179,6 +182,19 @@ impl App {
 		if self.current == Some(id) {
 			self.observe(id);
 		}
+	}
+
+	/// The gateway logged in at `url`: it is the one in use from now on.
+	pub(crate) fn gateway_in_use(&mut self, id: i64, url: &str) {
+		let Some(b) = self.bookmarks.iter_mut().find(|b| b.id == id) else { return };
+		if !b.gateway_in_use(url) {
+			return;
+		}
+		if let Err(e) = self.store.update_bookmark(b) {
+			warn!(%e, "could not keep the gateway in use");
+			return;
+		}
+		info!(server = %b.address, %url, "gateway in use");
 	}
 
 	/// The server told its name: a server still named by its address takes
@@ -213,10 +229,11 @@ impl App {
 		if observing {
 			return;
 		}
-		if let Some(url) = &b.gateway_url {
+		let urls = b.gateways();
+		if !urls.is_empty() {
 			self.engine.send(Command::ObserveGateway {
 				session,
-				url: url.clone(),
+				urls,
 				identity: Box::new(self.identity_for(Some(b.id))),
 			});
 			// Still the one the server publishes?
@@ -608,6 +625,7 @@ mod tests {
 			identity: Some(2),
 			default_channel: Some("Lobby/Sub".into()),
 			gateway_url: Some("ws://gw.example.test:7788/v1".into()),
+			gateway_urls: vec!["ws://gw.example.test:7788/v1".into()],
 			query: Some(QueryConfig { server_port: Some(9988), ..Default::default() }),
 			client_version: Some("linux".into()),
 			cached_server_icon: Some(voelin_store::CachedServerIcon {
@@ -636,6 +654,7 @@ mod tests {
 		assert_eq!((b.identity, b.default_channel), (Some(2), Some("Lobby/Sub".into())));
 		assert_eq!(b.client_version.as_deref(), Some("linux"));
 		assert_eq!((b.gateway_url, b.query), (None, None));
+		assert!(b.gateway_urls.is_empty());
 	}
 
 	#[test]

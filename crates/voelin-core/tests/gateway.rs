@@ -434,7 +434,7 @@ fn observe(engine: &Engine, session: u64, gw: &FakeGateway) {
 	let identity = tsclientlib::Identity::create();
 	engine.send(Command::ObserveGateway {
 		session,
-		url: gw.url.clone(),
+		urls: vec![gw.url.clone()],
 		identity: Box::new(identity),
 	});
 }
@@ -726,7 +726,7 @@ async fn an_unreachable_gateway_is_tried_again_quietly() {
 	engine.send(Command::OpenChat { session: 3, target: LOBBY });
 	engine.send(Command::ObserveGateway {
 		session: 3,
-		url: format!("ws://127.0.0.1:{port}/v1"),
+		urls: vec![format!("ws://127.0.0.1:{port}/v1")],
 		identity: Box::new(tsclientlib::Identity::create()),
 	});
 	// The first attempt fails (the next one is 2 s later): still connecting,
@@ -763,6 +763,71 @@ async fn an_unreachable_gateway_is_tried_again_quietly() {
 	})
 	.await
 	.unwrap_or_else(|_| panic!("the chat was not opened again: {:?}", gw.requests()));
+	drop(engine);
+	let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+/// A reverse proxy without a rule for the gateway's host, as Zoraxy's
+/// default site answers: 404 to everything.
+async fn not_found_proxy() -> String {
+	let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let url = format!("ws://{}/v1", listener.local_addr().unwrap());
+	tokio::spawn(async move {
+		while let Ok((mut tcp, _)) = listener.accept().await {
+			tokio::spawn(async move {
+				use tokio::io::{AsyncReadExt, AsyncWriteExt};
+				let mut request = [0; 4096];
+				let _ = tcp.read(&mut request).await;
+				let _ = tcp
+					.write_all(
+						b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain; charset=utf-8\r\n\
+						  Content-Length: 19\r\n\r\n404 page not found\n",
+					)
+					.await;
+			});
+		}
+	});
+	url
+}
+
+/// Every published gateway is tried in turn, without waiting: a TLS proxy
+/// that answers 404 and a port nothing listens on are passed over, and the
+/// plain gateway published after them is used, quietly.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_next_published_gateway_is_used_when_one_fails() {
+	let proxy = not_found_proxy().await;
+	let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+	let gw = FakeGateway::start().await;
+	let path = temp_db("fallback");
+	let engine = Engine::start_with(Settings::in_memory(), History::open(&path).unwrap());
+	let mut rx = engine.subscribe();
+	engine.send(Command::ObserveGateway {
+		session: 4,
+		urls: vec![proxy, format!("ws://127.0.0.1:{closed}/v1"), gw.url.clone()],
+		identity: Box::new(tsclientlib::Identity::create()),
+	});
+	// Within one round: sooner than the first wait (2 s) after a failed round.
+	let url = timeout(Duration::from_millis(1800), async {
+		loop {
+			match rx.recv().await {
+				Ok(Event::Error { message, .. }) => panic!("the user was told: {message}"),
+				Ok(Event::Gateway { session: 4, update: GatewayUpdate::Connected { url, .. } }) => {
+					return url;
+				}
+				Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+				Err(e) => panic!("{e}"),
+			}
+		}
+	})
+	.await
+	.expect("the plain gateway was not used within a round");
+	assert_eq!(url, gw.url);
+	wait(&mut rx, "observing", |e| match e {
+		Event::Error { message, .. } => panic!("the user was told: {message}"),
+		Event::State { session: 4, state } if state.observe == ObserveState::Observing => Some(()),
+		_ => None,
+	})
+	.await;
 	drop(engine);
 	let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }

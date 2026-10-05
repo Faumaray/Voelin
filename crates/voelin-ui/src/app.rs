@@ -980,6 +980,9 @@ impl App {
 				self.history_batch(session as i64, &target, messages, source, complete);
 			}
 			Event::Gateway { session, update } => {
+				if let voelin_core::gateway::GatewayUpdate::Connected { url, .. } = &update {
+					self.gateway_in_use(session as i64, url);
+				}
 				self.gateway_extra(session as i64, &update);
 				self.gateway_update(session as i64, update);
 			}

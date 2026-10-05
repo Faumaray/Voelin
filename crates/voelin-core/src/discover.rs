@@ -8,12 +8,20 @@
 //! - SRV `_tsgws._tcp.<name>`: `wss://<target>:<port><path>`,
 //! - SRV `_tsgw._tcp.<name>`: `ws://<target>:<port><path>`,
 //!
-//! TLS first at the same name; `<path>` is `path=…` from a TXT record at the
-//! SRV record's name, `/v1` without one. Without any such record, as TSDNS
-//! has its well-known port, the gateway itself is asked at tsgw's default
-//! port: `http://<name>:7788/.well-known/tsgw` answers `{"url": "…"}`. For an
-//! IP address (or `localhost`) only that is tried. What an admin publishes is
-//! in `docs/gateway-admin.md`.
+//! `<path>` is `path=…` from a TXT record at the SRV record's name, `/v1`
+//! without one. As TSDNS has its well-known port, the gateway itself is also
+//! asked at tsgw's default port: `http://<name>:7788/.well-known/tsgw`
+//! answers `{"url": "…"}`; for an IP address (or `localhost`) only that is
+//! tried. That answer is plain HTTP, so it is asked only when nothing or a
+//! plain record is published: a TLS-only publication stays TLS-only.
+//!
+//! Every gateway found is kept, best first (the most specific name, at a
+//! name TLS before plain, by priority, then the gateway's own answer), and
+//! tried in turn ([`crate::Command::ObserveGateway`]): a TLS proxy that
+//! fails falls back to a published plain one. Discovery trusts DNS and the
+//! network as TSDNS does; falling back from a published `_tsgws` to a
+//! published `_tsgw` is no weaker than publishing only `_tsgw`. What an
+//! admin publishes is in `docs/gateway-admin.md`.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -34,9 +42,12 @@ pub const DEFAULT_PORT: u16 = 7788;
 const DEFAULT_PATH: &str = "/v1";
 /// Give up on asking one name's gateway after this long.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+/// At most this many gateways are kept, best first.
+const MAX_CANDIDATES: usize = 8;
 
 type SrvFn = dyn Fn(String) -> BoxFuture<'static, Vec<(u16, String, u16)>> + Send + Sync;
 type TxtFn = dyn Fn(String) -> BoxFuture<'static, Vec<String>> + Send + Sync;
+type ProbeFn = dyn Fn(String) -> BoxFuture<'static, Option<String>> + Send + Sync;
 
 /// Where [`gateway`] gets its answers from; the tests put fakes in.
 #[derive(Clone)]
@@ -45,8 +56,8 @@ struct Lookups {
 	srv: Arc<SrvFn>,
 	/// The strings of the TXT records at a name.
 	txt: Arc<TxtFn>,
-	/// Where a gateway is asked for its URL.
-	probe_port: u16,
+	/// The URL a gateway at a name gives for itself (`/.well-known/tsgw`).
+	probe: Arc<ProbeFn>,
 }
 
 impl Lookups {
@@ -101,30 +112,45 @@ impl Lookups {
 				.map(Option::unwrap_or_default)
 				.boxed()
 			}),
-			probe_port: DEFAULT_PORT,
+			probe: Arc::new(|name| {
+				async move {
+					timeout(PROBE_TIMEOUT, well_known(&name, DEFAULT_PORT)).await.ok().flatten()
+				}
+				.boxed()
+			}),
 		}
 	}
 }
 
-/// The URL of the gateway of the server at `address` (as a bookmark has it:
-/// host, host:port, an IP), if one is published.
-pub async fn gateway(address: &str) -> Option<String> {
-	gateway_with(address, Lookups::system()).await
+/// The URLs of the gateway of the server at `address` (as a bookmark has
+/// it: host, host:port, an IP), best first: everything published, to be
+/// tried in turn. Empty: none is published.
+pub async fn gateways(address: &str) -> Vec<String> {
+	gateways_with(address, Lookups::system()).await
 }
 
-async fn gateway_with(address: &str, lookups: Lookups) -> Option<String> {
+async fn gateways_with(address: &str, lookups: Lookups) -> Vec<String> {
 	let host = host_of(address);
 	let names = names(host);
 	if names.is_empty() {
-		return None;
+		return Vec::new();
 	}
-	if host.parse::<IpAddr>().is_err()
-		&& host.contains('.')
-		&& let Some(url) = from_srv(&names, &lookups).await
-	{
-		return Some(url);
+	let mut urls = if host.parse::<IpAddr>().is_err() && host.contains('.') {
+		from_srv(&names, &lookups).await
+	} else {
+		Vec::new()
+	};
+	// The gateway's own answer comes over plain HTTP: not for a server that
+	// publishes only TLS.
+	if urls.is_empty() || urls.iter().any(|url| url.starts_with("ws://")) {
+		for url in from_well_known(&names, &lookups).await {
+			if !urls.contains(&url) {
+				urls.push(url);
+			}
+		}
 	}
-	from_well_known(&names, lookups.probe_port).await
+	urls.truncate(MAX_CANDIDATES);
+	urls
 }
 
 /// The host of an address: without the port, the brackets of an IPv6
@@ -155,8 +181,9 @@ fn names(host: &str) -> Vec<&str> {
 		.collect()
 }
 
-/// The URL from SRV records, every name and service asked at once.
-async fn from_srv(names: &[&str], lookups: &Lookups) -> Option<String> {
+/// The URLs from SRV records, every name and service asked at once: the
+/// most specific name first, at a name TLS first, by priority.
+async fn from_srv(names: &[&str], lookups: &Lookups) -> Vec<String> {
 	let queries: Vec<(&str, String)> = names
 		.iter()
 		.flat_map(|name| {
@@ -164,14 +191,33 @@ async fn from_srv(names: &[&str], lookups: &Lookups) -> Option<String> {
 		})
 		.collect();
 	let answers = join_all(queries.iter().map(|(_, owner)| (lookups.srv)(owner.clone()))).await;
-	// The first (most specific, TLS first) name with a usable record.
-	let ((scheme, owner), (_, target, port)) =
-		queries.iter().zip(answers).find_map(|(q, records)| {
+	let found: Vec<_> = queries
+		.iter()
+		.zip(answers)
+		.filter_map(|(query, mut records)| {
 			// A target of "." says there is no such service there.
-			let best = records.into_iter().filter(|r| r.1 != ".").min_by_key(|r| r.0)?;
-			Some((q, best))
-		})?;
-	let mut path = (lookups.txt)(owner.clone())
+			records.retain(|r| r.1 != ".");
+			records.sort_by_key(|r| r.0);
+			(!records.is_empty()).then_some((query, records))
+		})
+		.collect();
+	let paths = join_all(found.iter().map(|((_, owner), _)| path_at(lookups, owner))).await;
+	let mut urls = Vec::new();
+	for (((scheme, _), records), path) in found.into_iter().zip(paths) {
+		for (_, target, port) in records {
+			let url = format!("{scheme}://{}:{port}{path}", target.trim_end_matches('.'));
+			if !urls.contains(&url) {
+				urls.push(url);
+			}
+		}
+	}
+	urls
+}
+
+/// The path at a SRV record's name: `path=…` from its TXT records, `/v1`
+/// without one.
+async fn path_at(lookups: &Lookups, owner: &str) -> String {
+	let mut path = (lookups.txt)(owner.to_owned())
 		.await
 		.into_iter()
 		.find_map(|s| s.strip_prefix("path=").map(str::to_owned))
@@ -179,15 +225,20 @@ async fn from_srv(names: &[&str], lookups: &Lookups) -> Option<String> {
 	if !path.starts_with('/') {
 		path.insert(0, '/');
 	}
-	Some(format!("{scheme}://{}:{port}{path}", target.trim_end_matches('.')))
+	path
 }
 
-/// The URL a gateway gives for itself at one of `names`, all asked at once;
-/// the most specific that answers wins.
-async fn from_well_known(names: &[&str], port: u16) -> Option<String> {
-	let answers =
-		join_all(names.iter().map(|name| timeout(PROBE_TIMEOUT, well_known(name, port)))).await;
-	answers.into_iter().find_map(|answer| answer.ok().flatten())
+/// The URLs gateways give for themselves at `names`, all asked at once,
+/// the most specific first.
+async fn from_well_known(names: &[&str], lookups: &Lookups) -> Vec<String> {
+	let answers = join_all(names.iter().map(|name| (lookups.probe)((*name).to_owned()))).await;
+	let mut urls: Vec<String> = Vec::new();
+	for url in answers.into_iter().flatten() {
+		if !urls.contains(&url) {
+			urls.push(url);
+		}
+	}
+	urls
 }
 
 /// tsgw's answer at `http://<host>:<port>/.well-known/tsgw`.
@@ -215,8 +266,8 @@ mod tests {
 	use super::*;
 
 	/// DNS answers from these lists only: SRV `(name, priority, target,
-	/// port)`, TXT `(name, string)`.
-	fn fake(srv: &[(&str, u16, &str, u16)], txt: &[(&str, &str)], probe_port: u16) -> Lookups {
+	/// port)`, TXT `(name, string)`; no gateway answers for itself.
+	fn fake(srv: &[(&str, u16, &str, u16)], txt: &[(&str, &str)]) -> Lookups {
 		let srv: Vec<(String, u16, String, u16)> =
 			srv.iter().map(|(n, p, t, port)| (n.to_string(), *p, t.to_string(), *port)).collect();
 		let txt: Vec<(String, String)> =
@@ -231,8 +282,28 @@ mod tests {
 				let found = txt.iter().filter(|r| r.0 == name).map(|r| r.1.clone()).collect();
 				futures::future::ready(found).boxed()
 			}),
-			probe_port,
+			probe: Arc::new(|_| futures::future::ready(None).boxed()),
 		}
+	}
+
+	/// `lookups` where the gateway at a name answers `(name, url)`.
+	fn answering(mut lookups: Lookups, answers: &[(&str, &str)]) -> Lookups {
+		let answers: Vec<(String, String)> =
+			answers.iter().map(|(n, u)| (n.to_string(), u.to_string())).collect();
+		lookups.probe = Arc::new(move |name| {
+			let url = answers.iter().find(|a| a.0 == name).map(|a| a.1.clone());
+			futures::future::ready(url).boxed()
+		});
+		lookups
+	}
+
+	/// `lookups` asking the real `/.well-known/tsgw` at `port`.
+	fn probing(mut lookups: Lookups, port: u16) -> Lookups {
+		lookups.probe = Arc::new(move |name| {
+			async move { timeout(PROBE_TIMEOUT, well_known(&name, port)).await.ok().flatten() }
+				.boxed()
+		});
+		lookups
 	}
 
 	/// A port nothing listens on.
@@ -242,20 +313,20 @@ mod tests {
 
 	#[tokio::test]
 	async fn finds_the_gateway_at_the_host_or_its_domain() {
-		let lookups = fake(&[("_tsgw._tcp.example.test.", 0, "gw.example.test.", 7788)], &[], 0);
+		let lookups = fake(&[("_tsgw._tcp.example.test.", 0, "gw.example.test.", 7788)], &[]);
 		for address in ["ts.example.test", "ts.example.test:9987", "example.test"] {
 			assert_eq!(
-				gateway_with(address, lookups.clone()).await.as_deref(),
-				Some("ws://gw.example.test:7788/v1"),
+				gateways_with(address, lookups.clone()).await,
+				["ws://gw.example.test:7788/v1"],
 				"{address}"
 			);
 		}
 		// The parent's parent is not the domain any more.
-		assert_eq!(gateway_with("example", lookups).await, None);
+		assert!(gateways_with("example", lookups).await.is_empty());
 	}
 
 	#[tokio::test]
-	async fn the_most_specific_name_wins_then_tls() {
+	async fn every_record_in_order_most_specific_name_then_tls() {
 		let lookups = fake(
 			&[
 				("_tsgws._tcp.example.test.", 0, "domain.example.test.", 443),
@@ -264,16 +335,71 @@ mod tests {
 				("_tsgws._tcp.ts.example.test.", 1, "tls.example.test.", 8443),
 			],
 			&[("_tsgws._tcp.ts.example.test.", "path=/tsgw/v1")],
-			0,
 		);
 		assert_eq!(
-			gateway_with("ts.example.test", lookups.clone()).await.as_deref(),
-			Some("wss://tls.example.test:8443/tsgw/v1")
+			gateways_with("ts.example.test", lookups.clone()).await,
+			[
+				"wss://tls.example.test:8443/tsgw/v1",
+				"wss://backup.example.test:443/tsgw/v1",
+				"ws://plain.example.test:7788/v1",
+				"wss://domain.example.test:443/v1",
+			]
 		);
 		assert_eq!(
-			gateway_with("voice.example.test", lookups).await.as_deref(),
-			Some("wss://domain.example.test:443/v1")
+			gateways_with("voice.example.test", lookups).await,
+			["wss://domain.example.test:443/v1"]
 		);
+	}
+
+	/// A TLS proxy in front of tsgw and tsgw itself published next to the
+	/// server (and again at the domain): TLS first, the plain one after it,
+	/// once; the gateway's own answer is the plain one again.
+	#[tokio::test]
+	async fn a_tls_proxy_falls_back_to_the_published_plain_gateway() {
+		let lookups = answering(
+			fake(
+				&[
+					("_tsgws._tcp.ts.example.test.", 0, "gw.example.test.", 443),
+					("_tsgw._tcp.ts.example.test.", 0, "ts.example.test.", 7788),
+					("_tsgw._tcp.example.test.", 0, "ts.example.test.", 7788),
+				],
+				&[],
+			),
+			&[("ts.example.test", "ws://ts.example.test:7788/v1")],
+		);
+		assert_eq!(
+			gateways_with("ts.example.test", lookups).await,
+			["wss://gw.example.test:443/v1", "ws://ts.example.test:7788/v1"]
+		);
+	}
+
+	#[tokio::test]
+	async fn the_gateways_own_answer_comes_last() {
+		let lookups = answering(
+			fake(&[("_tsgw._tcp.ts.example.test.", 0, "plain.example.test.", 7788)], &[]),
+			&[("ts.example.test", "wss://gw.example.test/v1")],
+		);
+		assert_eq!(
+			gateways_with("ts.example.test", lookups).await,
+			["ws://plain.example.test:7788/v1", "wss://gw.example.test/v1"]
+		);
+	}
+
+	#[tokio::test]
+	async fn a_tls_only_publication_is_not_widened() {
+		let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let mut lookups =
+			fake(&[("_tsgws._tcp.ts.example.test.", 0, "gw.example.test.", 443)], &[]);
+		let flag = asked.clone();
+		lookups.probe = Arc::new(move |_| {
+			flag.store(true, std::sync::atomic::Ordering::SeqCst);
+			futures::future::ready(Some("ws://ts.example.test:7788/v1".to_owned())).boxed()
+		});
+		assert_eq!(
+			gateways_with("ts.example.test", lookups).await,
+			["wss://gw.example.test:443/v1"]
+		);
+		assert!(!asked.load(std::sync::atomic::Ordering::SeqCst), "plain HTTP was asked");
 	}
 
 	#[tokio::test]
@@ -284,12 +410,8 @@ mod tests {
 				("_tsgw._tcp.example.test.", 0, "gw.example.test.", 80),
 			],
 			&[("_tsgw._tcp.example.test.", "path=ws")],
-			closed_port(),
 		);
-		assert_eq!(
-			gateway_with("ts.example.test", lookups).await.as_deref(),
-			Some("ws://gw.example.test:80/ws")
-		);
+		assert_eq!(gateways_with("ts.example.test", lookups).await, ["ws://gw.example.test:80/ws"]);
 	}
 
 	/// Without records the gateway next to the server answers at its port,
@@ -313,16 +435,17 @@ mod tests {
 				socket.write_all(response.as_bytes()).await.unwrap();
 			}
 		});
-		let lookups = fake(&[], &[], port);
+		let lookups = probing(fake(&[], &[]), port);
 		for address in ["127.0.0.1", "127.0.0.1:9987", "localhost"] {
 			assert_eq!(
-				gateway_with(address, lookups.clone()).await.as_deref(),
-				Some("wss://gw.example.test/v1"),
+				gateways_with(address, lookups.clone()).await,
+				["wss://gw.example.test/v1"],
 				"{address}"
 			);
 		}
 		// Nothing there.
-		assert_eq!(gateway_with("127.0.0.1", fake(&[], &[], closed_port())).await, None);
+		let nothing = probing(fake(&[], &[]), closed_port());
+		assert!(gateways_with("127.0.0.1", nothing).await.is_empty());
 	}
 
 	#[test]

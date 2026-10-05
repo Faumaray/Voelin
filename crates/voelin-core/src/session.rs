@@ -404,13 +404,20 @@ impl Session {
 					let _ = tx.send(VoiceCmd::Disconnect);
 				}
 			}
-			Command::ObserveGateway { url, identity, .. } => {
+			Command::ObserveGateway { urls, identity, .. } => {
 				self.stop_observing();
+				if urls.is_empty() {
+					return;
+				}
 				let generation = self.next_generation();
-				self.known_server(format!("gateway:{url}"));
+				// Each is published for this server (history before its
+				// unique id is known).
+				for url in &urls {
+					self.known_server(format!("gateway:{url}"));
+				}
 				let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 				let (ev_tx, ev_rx) = mpsc::unbounded_channel();
-				tokio::spawn(gateway::run(url, *identity, cmd_rx, ev_tx));
+				tokio::spawn(gateway::run(urls, *identity, cmd_rx, ev_tx));
 				self.forward(ev_rx, move |e| SourceEvent::Gateway(generation, e));
 				self.gateway = Some((generation, cmd_tx));
 				self.state.observe = ObserveState::Connecting;
@@ -1711,7 +1718,7 @@ impl Session {
 
 	fn gateway_event(&mut self, e: GatewayEvent) {
 		match e {
-			GatewayEvent::Connected(client) => {
+			GatewayEvent::Connected(client, url) => {
 				self.state.observe = ObserveState::Observing;
 				let info = client.info().clone();
 				self.gateway_client = Some(client.clone());
@@ -1721,6 +1728,7 @@ impl Session {
 				self.learn_server_uid(info.server_uid.clone(), Source::Gateway);
 				self.emit_state();
 				self.gateway_update(GatewayUpdate::Connected {
+					url,
 					gateway_id: info.gateway_id,
 					server_uid: info.server_uid,
 					server_name: info.server_name,
