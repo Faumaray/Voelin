@@ -9,8 +9,10 @@ use tracing_subscriber::{EnvFilter, Layer, fmt, prelude::*};
 use voelin_platform::logs;
 
 /// What the log file gets without `VOELIN_LOG`: our crates' information,
-/// everyone's warnings.
-const FILE_FILTER: &str = "warn,voelin=info,voelin_ui=info,voelin_core=info,voelin_media=info,\
+/// everyone's warnings. zbus's warnings are left out: it warns when a desktop
+/// portal's request or session object is gone before it reads the object's
+/// properties, which is harmless; its errors stay.
+const FILE_FILTER: &str = "warn,zbus=error,voelin=info,voelin_ui=info,voelin_core=info,voelin_media=info,\
 	voelin_stream=info,voelin_audio=info,voelin_store=info,voelin_myts=info,voelin_observer=info,\
 	voelin_query=info,voelin_gateway_proto=info,voelin_platform=info,tsclientlib=info";
 
@@ -19,9 +21,9 @@ fn main() -> Result<()> {
 	// state directory (VOELIN_LOG, `FILE_FILTER` by default): release builds
 	// on Windows have no terminal.
 	let file = logs::LogFile::open(logs::default_dir());
-	let console = fmt::layer()
-		.with_writer(std::io::stderr)
-		.with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")));
+	let console = fmt::layer().with_writer(std::io::stderr).with_filter(
+		EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,zbus=error")),
+	);
 	let to_file = file.as_ref().ok().map(|log| {
 		let log = log.clone();
 		fmt::layer().with_ansi(false).with_writer(move || log.clone()).with_filter(
