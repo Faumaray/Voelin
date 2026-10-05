@@ -15,10 +15,12 @@
 //! tried. That answer is plain HTTP, so it is asked only when nothing or a
 //! plain record is published: a TLS-only publication stays TLS-only.
 //!
-//! Every gateway found is kept, best first (the most specific name, at a
-//! name TLS before plain, by priority, then the gateway's own answer), and
-//! tried in turn ([`crate::Command::ObserveGateway`]): a TLS proxy that
-//! fails falls back to a published plain one. Discovery trusts DNS and the
+//! The most specific name with a record wins: a parent domain's records
+//! are another server's gateway when the host publishes its own. Every
+//! gateway of that name is kept, best first (TLS before plain, by
+//! priority, then the gateway's own answer at that name), and tried in turn
+//! ([`crate::Command::ObserveGateway`]): a TLS proxy that fails falls back
+//! to the plain gateway published next to it. Discovery trusts DNS and the
 //! network as TSDNS does; falling back from a published `_tsgws` to a
 //! published `_tsgw` is no weaker than publishing only `_tsgw`. What an
 //! admin publishes is in `docs/gateway-admin.md`.
@@ -135,20 +137,26 @@ async fn gateways_with(address: &str, lookups: Lookups) -> Vec<String> {
 	if names.is_empty() {
 		return Vec::new();
 	}
-	let mut urls = if host.parse::<IpAddr>().is_err() && host.contains('.') {
+	let srv = if host.parse::<IpAddr>().is_err() && host.contains('.') {
 		from_srv(&names, &lookups).await
 	} else {
-		Vec::new()
+		None
 	};
 	// The gateway's own answer comes over plain HTTP: not for a server that
-	// publishes only TLS.
-	if urls.is_empty() || urls.iter().any(|url| url.starts_with("ws://")) {
-		for url in from_well_known(&names, &lookups).await {
-			if !urls.contains(&url) {
+	// publishes only TLS; at the name that publishes, or without records the
+	// most specific name that answers.
+	let mut urls = match srv {
+		None => from_well_known(&names, &lookups).await.into_iter().collect(),
+		Some((name, mut urls)) => {
+			if urls.iter().any(|url| url.starts_with("ws://"))
+				&& let Some(url) = from_well_known(&[name], &lookups).await
+				&& !urls.contains(&url)
+			{
 				urls.push(url);
 			}
+			urls
 		}
-	}
+	};
 	urls.truncate(MAX_CANDIDATES);
 	urls
 }
@@ -181,17 +189,21 @@ fn names(host: &str) -> Vec<&str> {
 		.collect()
 }
 
-/// The URLs from SRV records, every name and service asked at once: the
-/// most specific name first, at a name TLS first, by priority.
-async fn from_srv(names: &[&str], lookups: &Lookups) -> Vec<String> {
-	let queries: Vec<(&str, String)> = names
+/// The URLs from SRV records, every name and service asked at once: those
+/// of the most specific name with a usable record (with that name), TLS
+/// first, by priority.
+async fn from_srv<'a>(names: &[&'a str], lookups: &Lookups) -> Option<(&'a str, Vec<String>)> {
+	let queries: Vec<(&str, &str, String)> = names
 		.iter()
 		.flat_map(|name| {
-			[("wss", format!("_tsgws._tcp.{name}.")), ("ws", format!("_tsgw._tcp.{name}."))]
+			[
+				(*name, "wss", format!("_tsgws._tcp.{name}.")),
+				(*name, "ws", format!("_tsgw._tcp.{name}.")),
+			]
 		})
 		.collect();
-	let answers = join_all(queries.iter().map(|(_, owner)| (lookups.srv)(owner.clone()))).await;
-	let found: Vec<_> = queries
+	let answers = join_all(queries.iter().map(|(.., owner)| (lookups.srv)(owner.clone()))).await;
+	let mut found: Vec<_> = queries
 		.iter()
 		.zip(answers)
 		.filter_map(|(query, mut records)| {
@@ -201,9 +213,11 @@ async fn from_srv(names: &[&str], lookups: &Lookups) -> Vec<String> {
 			(!records.is_empty()).then_some((query, records))
 		})
 		.collect();
-	let paths = join_all(found.iter().map(|((_, owner), _)| path_at(lookups, owner))).await;
+	let name = found.first()?.0.0;
+	found.retain(|((n, ..), _)| *n == name);
+	let paths = join_all(found.iter().map(|((.., owner), _)| path_at(lookups, owner))).await;
 	let mut urls = Vec::new();
-	for (((scheme, _), records), path) in found.into_iter().zip(paths) {
+	for (((_, scheme, _), records), path) in found.into_iter().zip(paths) {
 		for (_, target, port) in records {
 			let url = format!("{scheme}://{}:{port}{path}", target.trim_end_matches('.'));
 			if !urls.contains(&url) {
@@ -211,7 +225,7 @@ async fn from_srv(names: &[&str], lookups: &Lookups) -> Vec<String> {
 			}
 		}
 	}
-	urls
+	Some((name, urls))
 }
 
 /// The path at a SRV record's name: `path=…` from its TXT records, `/v1`
@@ -228,17 +242,11 @@ async fn path_at(lookups: &Lookups, owner: &str) -> String {
 	path
 }
 
-/// The URLs gateways give for themselves at `names`, all asked at once,
-/// the most specific first.
-async fn from_well_known(names: &[&str], lookups: &Lookups) -> Vec<String> {
+/// The URL a gateway gives for itself at one of `names`, all asked at
+/// once; the most specific that answers wins.
+async fn from_well_known(names: &[&str], lookups: &Lookups) -> Option<String> {
 	let answers = join_all(names.iter().map(|name| (lookups.probe)((*name).to_owned()))).await;
-	let mut urls: Vec<String> = Vec::new();
-	for url in answers.into_iter().flatten() {
-		if !urls.contains(&url) {
-			urls.push(url);
-		}
-	}
-	urls
+	answers.into_iter().flatten().next()
 }
 
 /// tsgw's answer at `http://<host>:<port>/.well-known/tsgw`.
@@ -325,8 +333,10 @@ mod tests {
 		assert!(gateways_with("example", lookups).await.is_empty());
 	}
 
+	/// All of the most specific name's gateways, TLS first, by priority; a
+	/// parent domain's only for a host without its own.
 	#[tokio::test]
-	async fn every_record_in_order_most_specific_name_then_tls() {
+	async fn the_most_specific_name_wins_with_all_its_gateways() {
 		let lookups = fake(
 			&[
 				("_tsgws._tcp.example.test.", 0, "domain.example.test.", 443),
@@ -342,7 +352,6 @@ mod tests {
 				"wss://tls.example.test:8443/tsgw/v1",
 				"wss://backup.example.test:443/tsgw/v1",
 				"ws://plain.example.test:7788/v1",
-				"wss://domain.example.test:443/v1",
 			]
 		);
 		assert_eq!(
@@ -370,6 +379,28 @@ mod tests {
 		assert_eq!(
 			gateways_with("ts.example.test", lookups).await,
 			["wss://gw.example.test:443/v1", "ws://ts.example.test:7788/v1"]
+		);
+	}
+
+	/// A gateway at the domain fronts another server than one of its hosts
+	/// that publishes its own: never a fallback for it, nor the domain's own
+	/// answer.
+	#[tokio::test]
+	async fn another_servers_gateway_is_no_fallback() {
+		let lookups = answering(
+			fake(
+				&[
+					("_tsgws._tcp.ts1.example.test.", 0, "gw1.example.test.", 443),
+					("_tsgw._tcp.ts1.example.test.", 0, "ts1.example.test.", 7788),
+					("_tsgws._tcp.example.test.", 0, "gw-main.example.test.", 443),
+				],
+				&[],
+			),
+			&[("example.test", "ws://main.example.test:7788/v1")],
+		);
+		assert_eq!(
+			gateways_with("ts1.example.test", lookups).await,
+			["wss://gw1.example.test:443/v1", "ws://ts1.example.test:7788/v1"]
 		);
 	}
 

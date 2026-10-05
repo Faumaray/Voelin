@@ -96,6 +96,8 @@ use voelin_stream::{
 	EncodedFrame, LayerId, LayerSpec, SrtpProfile, StreamInfo, StreamSetup, ViewerInfo,
 };
 pub use voice::VoiceOptions;
+/// Banners are downloaded and shown by the same rule.
+pub use web::is_svg;
 
 pub type SessionId = u64;
 
@@ -646,9 +648,10 @@ pub enum Event {
 		request: RequestId,
 		result: Result<(), String>,
 	},
-	/// A client's avatar is in the cache: `path`, its MD5 `hash`
-	/// ([`voelin_model::ClientInfo::avatar`]). Comes when the client appears
-	/// with an avatar and when it changes.
+	/// A client's avatar is in the cache: `path`, and `hash`: the MD5 of a
+	/// server avatar ([`voelin_model::ClientInfo::avatar`]), or the address
+	/// of a myTeamSpeak avatar ([`voelin_model::ClientInfo::myts_avatar`]).
+	/// Comes when the client appears with an avatar and when it changes.
 	AvatarReady {
 		session: SessionId,
 		client_uid: String,

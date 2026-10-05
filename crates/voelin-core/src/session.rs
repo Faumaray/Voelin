@@ -284,9 +284,10 @@ struct Session {
 	/// myTeamSpeak avatars wanted per client unique id (their link), any
 	/// presence: where the server's avatar is not shown.
 	myts_avatars: HashMap<String, String>,
-	/// Clients whose server avatar could not be downloaded (retries used
-	/// up): their myTeamSpeak avatar is shown instead.
-	server_avatars_failed: HashSet<String>,
+	/// Server avatars that could not be downloaded (retries used up), per
+	/// client unique id (their hash): the client's myTeamSpeak avatar is
+	/// shown instead, until it sets another.
+	server_avatars_failed: HashMap<String, String>,
 	/// Icons reported or being fetched, voice only.
 	icons: HashSet<u32>,
 	/// Pictures on the web (banners) reported or being fetched, by address.
@@ -330,7 +331,7 @@ impl Session {
 			contacts_rx,
 			avatars: HashMap::new(),
 			myts_avatars: HashMap::new(),
-			server_avatars_failed: HashSet::new(),
+			server_avatars_failed: HashMap::new(),
 			icons: HashSet::new(),
 			pictures: HashSet::new(),
 			unfetchable: HashSet::new(),
@@ -748,7 +749,7 @@ impl Session {
 					.as_ref()
 					.and_then(|p| p.client_by_uid(&client_uid))
 					.and_then(|c| c.avatar.clone())
-					.filter(|_| !self.server_avatars_failed.contains(&client_uid));
+					.filter(|hash| self.server_avatars_failed.get(&client_uid) != Some(hash));
 				let myts = self.shown_client(&client_uid).and_then(|c| c.myts_avatar.clone());
 				if let Some(hash) = hash.filter(|_| self.voice.is_some()) {
 					self.fetch_avatar(&client_uid, &hash, true);
@@ -979,7 +980,7 @@ impl Session {
 			let (Some(uid), Some(url)) = (&c.uid, &c.myts_avatar) else { continue };
 			let server_avatar = c.avatar.is_some()
 				&& self.voice.is_some()
-				&& !self.server_avatars_failed.contains(uid);
+				&& self.server_avatars_failed.get(uid) != c.avatar.as_ref();
 			if server_avatar {
 				continue;
 			}
@@ -1058,6 +1059,16 @@ impl Session {
 		match result {
 			Ok(path) => {
 				self.image_retries.remove(&request);
+				// A server avatar given up on came after all (asked for
+				// again): it is shown again in place of the myTeamSpeak one.
+				if let ImageRequest::Avatar { uid, hash } = &request
+					&& self.server_avatars_failed.get(uid) == Some(hash)
+				{
+					self.server_avatars_failed.remove(uid);
+					if let Some(presence) = self.voice_presence.clone() {
+						self.fetch_myts_avatars(&presence);
+					}
+				}
 				if !requested && !self.settings.current().get(&CACHE_FETCH_IMAGES) {
 					return;
 				}
@@ -1077,7 +1088,7 @@ impl Session {
 			}
 			Err(error) => {
 				let avatar_of = match &request {
-					ImageRequest::Avatar { uid, .. } => Some(uid.clone()),
+					ImageRequest::Avatar { uid, hash } => Some((uid.clone(), hash.clone())),
 					_ => None,
 				};
 				let retry = self
@@ -1090,11 +1101,13 @@ impl Session {
 				log_image_failure(&request, retry.failures, delay, &error);
 				// The server's avatar gave up (its files unreachable): the
 				// myTeamSpeak one, if the client has one.
-				if let (None, Some(uid)) = (retry.due, avatar_of)
-					&& self.server_avatars_failed.insert(uid)
-					&& let Some(presence) = self.voice_presence.clone()
+				if let (None, Some((uid, hash))) = (retry.due, avatar_of)
+					&& self.server_avatars_failed.get(&uid) != Some(&hash)
 				{
-					self.fetch_myts_avatars(&presence);
+					self.server_avatars_failed.insert(uid, hash);
+					if let Some(presence) = self.voice_presence.clone() {
+						self.fetch_myts_avatars(&presence);
+					}
 				}
 			}
 		}
@@ -1107,6 +1120,7 @@ impl Session {
 			self.image_epoch += 1;
 			self.avatars.clear();
 			self.myts_avatars.clear();
+			self.server_avatars_failed.clear();
 			self.icons.clear();
 			self.pictures.clear();
 			self.image_retries.clear();
@@ -2464,6 +2478,12 @@ mod banner_tests {
 			);
 		}
 		assert_eq!(session.myts_avatars.get("B=").map(String::as_str), Some(b));
+		// A new server avatar is tried again: the failure was that one's.
+		let presence = session.voice_presence.as_mut().unwrap();
+		presence.clients.get_mut(&2).unwrap().avatar =
+			Some("fedcba9876543210fedcba9876543210".into());
+		session.publish_presence();
+		assert_eq!(session.myts_avatars.keys().collect::<Vec<_>>(), ["A="]);
 		std::fs::remove_dir_all(cache.dir()).unwrap();
 	}
 

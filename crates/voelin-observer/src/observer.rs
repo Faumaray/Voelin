@@ -191,7 +191,8 @@ async fn session(
 			Some(n) => handle_notification(&n, presence, events),
 			None => {
 				// Resync and publish only what changed.
-				let fresh = load(&client).await?;
+				let listed = load(&client).await?;
+				let fresh = keep_unlisted(&presence.read().unwrap(), listed);
 				let deltas = presence.read().unwrap().diff(&fresh);
 				if !deltas.is_empty() {
 					debug!(changes = deltas.len(), "observer resync");
@@ -204,6 +205,24 @@ async fn session(
 			}
 		}
 	}
+}
+
+/// What `clientlist` does not tell (the avatars, which come with
+/// `notifycliententerview` and `notifyclientupdated`), kept from what was
+/// known of the same client: a resync must not take them away.
+fn keep_unlisted(old: &Presence, mut fresh: Presence) -> Presence {
+	for (id, client) in &mut fresh.clients {
+		let Some(known) = old.clients.get(id).filter(|known| known.uid == client.uid) else {
+			continue;
+		};
+		if client.avatar.is_none() {
+			client.avatar.clone_from(&known.avatar);
+		}
+		if client.myts_avatar.is_none() {
+			client.myts_avatar.clone_from(&known.myts_avatar);
+		}
+	}
+	fresh
 }
 
 fn handle_notification(
@@ -238,5 +257,38 @@ fn handle_notification(
 	for d in deltas {
 		state.apply(&d);
 		let _ = events.send(ObserverEvent::Delta(d));
+	}
+}
+
+#[cfg(test)]
+mod resync_tests {
+	use super::*;
+	use voelin_model::ClientInfo;
+
+	#[test]
+	fn a_resync_keeps_the_avatars_the_list_does_not_tell() {
+		let client = |uid: &str, myts: Option<&str>| ClientInfo {
+			id: 5,
+			uid: Some(uid.into()),
+			nickname: "a".into(),
+			avatar: myts.map(|_| "0123456789abcdef0123456789abcdef".into()),
+			myts_avatar: myts.map(Into::into),
+			..Default::default()
+		};
+		let mut old = Presence::default();
+		old.clients.insert(5, client("u=", Some("https://a.example.test/on.png")));
+		let mut listed = Presence::default();
+		listed.clients.insert(5, client("u=", None));
+		let fresh = keep_unlisted(&old, listed.clone());
+		assert_eq!(fresh.clients[&5], old.clients[&5]);
+		assert!(old.diff(&fresh).is_empty());
+		// Another client in the same slot starts without them.
+		let mut other = Presence::default();
+		other.clients.insert(5, client("v=", None));
+		let fresh = keep_unlisted(&old, other);
+		assert_eq!(
+			(fresh.clients[&5].avatar.clone(), fresh.clients[&5].myts_avatar.clone()),
+			(None, None)
+		);
 	}
 }

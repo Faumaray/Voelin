@@ -185,7 +185,12 @@ fn not_a_picture(head: &[u8]) -> String {
 	let what = if lower.starts_with(b"<!doctype html") || lower.starts_with(b"<html") {
 		"an HTML page"
 	} else if head.len() >= 12 && &head[4..8] == b"ftyp" {
-		"AVIF or HEIF, which cannot be shown"
+		// ISO media, told by its brand.
+		match &head[8..12] {
+			b"avif" | b"avis" | b"heic" | b"heix" | b"heim" | b"heis" | b"hevc" | b"hevx"
+			| b"mif1" | b"msf1" => "AVIF or HEIF, which cannot be shown",
+			_ => "a video (MP4, MOV), which cannot be shown",
+		}
 	} else if start.starts_with(b"{") {
 		"JSON"
 	} else {
@@ -205,33 +210,62 @@ pub(crate) fn host_of(url: &str) -> String {
 }
 
 /// Whether `data` is a picture the UI decodes, told by its content as the
-/// UI tells it (SVG by its start, without leading blanks, or after a
-/// comment or a DOCTYPE).
+/// UI tells it (SVG by [`is_svg`]).
 fn is_picture(data: &[u8]) -> bool {
-	const STARTS: [&[u8]; 7] = [
+	const STARTS: [&[u8]; 6] = [
 		b"\x89PNG\r\n\x1a\n",
 		b"\xff\xd8\xff",
 		b"GIF87a",
 		b"GIF89a",
 		b"BM",
-		// ICO and CUR.
+		// ICO.
 		b"\0\0\x01\0",
-		b"\0\0\x02\0",
 	];
 	STARTS.iter().any(|s| data.starts_with(s))
 		|| (data.len() >= 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP")
 		|| is_svg(data)
 }
 
-/// Whether `data` starts an SVG document: after a BOM and blanks, with
-/// `<svg`, `<?xml`, or a comment or a DOCTYPE with `<svg` after it.
-pub(crate) fn is_svg(data: &[u8]) -> bool {
-	let xml = data.strip_prefix(b"\xef\xbb\xbf").unwrap_or(data).trim_ascii_start();
-	let prolog = xml.starts_with(b"<!--")
-		|| xml.get(..9).is_some_and(|s| s.eq_ignore_ascii_case(b"<!doctype"));
-	xml.starts_with(b"<?xml")
-		|| xml.starts_with(b"<svg")
-		|| (prolog && xml.windows(4).any(|w| w == b"<svg"))
+/// Whether `data` starts an SVG document: after a BOM and the prolog (the
+/// XML declaration and other processing instructions, comments, blanks),
+/// a DOCTYPE `svg` or an `svg` element. A page with an `svg` in it (an
+/// HTML page, XHTML too) is not; nor is a start cut off before it tells.
+pub fn is_svg(data: &[u8]) -> bool {
+	let mut rest = data.strip_prefix(b"\xef\xbb\xbf").unwrap_or(data);
+	loop {
+		rest = rest.trim_ascii_start();
+		let (skipped, end) = if let Some(pi) = rest.strip_prefix(b"<?") {
+			(pi, b"?>".as_slice())
+		} else if let Some(comment) = rest.strip_prefix(b"<!--") {
+			(comment, b"-->".as_slice())
+		} else if rest.get(..9).is_some_and(|s| s.eq_ignore_ascii_case(b"<!doctype")) {
+			// The root element it declares.
+			let name = rest[9..].trim_ascii_start();
+			return name.get(..3).is_some_and(|n| n.eq_ignore_ascii_case(b"svg"))
+				&& name
+					.get(3)
+					.is_some_and(|b| b.is_ascii_whitespace() || matches!(b, b'>' | b'['));
+		} else if let Some(element) = rest.strip_prefix(b"<") {
+			return names_svg(element);
+		} else {
+			return false;
+		};
+		let Some(at) = skipped.windows(end.len()).position(|w| w == end) else {
+			return false;
+		};
+		rest = &skipped[at + end.len()..];
+	}
+}
+
+/// Whether the element named at the start of `tag` is `svg`, with a
+/// namespace prefix or without.
+fn names_svg(tag: &[u8]) -> bool {
+	let Some(len) = tag.iter().position(|b| b.is_ascii_whitespace() || matches!(b, b'>' | b'/'))
+	else {
+		return false;
+	};
+	let name = &tag[..len];
+	name == b"svg" || name.ends_with(b":svg")
 }
 
 #[cfg(test)]
@@ -277,9 +311,11 @@ mod tests {
 						"/big" => ("200 OK", true, [PNG, &[0; 4000]].concat()),
 						"/big-unannounced" => ("200 OK", false, [PNG, &[0; 4000]].concat()),
 						"/page" => ("200 OK", true, b"<!DOCTYPE html><html></html>".to_vec()),
-						"/long-page" => {
-							("200 OK", false, [b"<!DOCTYPE html>", &[b' '; 4000][..]].concat())
-						}
+						"/long-page" | "/endless-page" => (
+							"200 OK",
+							false,
+							[b"<!DOCTYPE html>".as_slice(), &vec![b' '; SNIFF]].concat(),
+						),
 						// A picture, then a byte every 100 ms.
 						"/slow" => ("200 OK", true, [PNG, &[0; 20]].concat()),
 						_ => ("404 Not Found", true, b"no".to_vec()),
@@ -302,6 +338,12 @@ mod tests {
 						return;
 					}
 					let _ = socket.write_all(&body).await;
+					// Never done: refused by its start or not at all.
+					if path == "/endless-page" {
+						while socket.write_all(b" ").await.is_ok() {
+							tokio::time::sleep(Duration::from_millis(100)).await;
+						}
+					}
 				});
 			}
 		});
@@ -332,9 +374,14 @@ mod tests {
 			let e = download(&format!("{base}{path}"), &to, &limits).await.unwrap_err();
 			assert!(e.contains(error), "{path}: {e}");
 		}
-		// An error page longer than the first bytes looked at, unannounced.
-		let e = download(&format!("{base}/long-page"), &to, &LIMITS).await.unwrap_err();
-		assert!(e.contains("not a picture"), "{e}");
+		// An error page longer than the first bytes looked at, unannounced:
+		// refused by them, without waiting for the rest.
+		for path in ["/long-page", "/endless-page"] {
+			let url = format!("{base}{path}");
+			let fetch = download(&url, &to, &LIMITS);
+			let e = tokio::time::timeout(Duration::from_secs(5), fetch).await.unwrap().unwrap_err();
+			assert!(e.contains("not a picture (an HTML page)"), "{path}: {e}");
+		}
 		// Nothing listens there.
 		let port = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap().port();
 		assert!(download(&format!("http://127.0.0.1:{port}/b"), &to, &limits).await.is_err());
@@ -476,11 +523,32 @@ mod tests {
 		assert!(is_picture(b"<!-- made with a tool -->\n<svg/>"));
 		assert!(is_picture(b"<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\"><svg/>"));
 		assert!(!is_picture(b"<!-- a page --><html></html>"));
+		assert!(is_picture(b"<svg:svg xmlns:svg='http://www.w3.org/2000/svg'/>"));
+		assert!(is_picture(
+			b"<?xml version=\"1.0\"?><!-- c --><!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"x\"><svg/>"
+		));
+		assert!(is_picture(b"<!DOCTYPE svg [ <!ENTITY e \"x\"> ]><svg/>"));
+		// Pages with an SVG in them are pages.
+		assert!(!is_picture(
+			b"<!DOCTYPE html><html><head><link rel=icon href=\"data:image/svg+xml,<svg/>\"></head></html>"
+		));
+		assert!(!is_picture(b"<!-- x --><html><body><svg/></body></html>"));
+		assert!(!is_picture(b"<?xml version=\"1.0\"?><!DOCTYPE html><html><svg/></html>"));
+		assert!(!is_picture(b"<svgx/>"));
+		// Cut off before it tells.
+		assert!(!is_picture(b"<?xml version=\"1.0\"?><!-- a long comment"));
+		assert!(!is_picture(b"<svg"));
+		// A cursor (CUR) is not shown.
+		assert!(!is_picture(b"\0\0\x02\0\x01\0"));
 		// What came instead is told.
 		assert_eq!(not_a_picture(b"<!DOCTYPE html><html>"), "not a picture (an HTML page)");
 		assert_eq!(
 			not_a_picture(b"\0\0\0\x1cftypavif"),
 			"not a picture (AVIF or HEIF, which cannot be shown)"
+		);
+		assert_eq!(
+			not_a_picture(b"\0\0\0\x20ftypisom\0\0\x02\0isomiso2avc1mp41"),
+			"not a picture (a video (MP4, MOV), which cannot be shown)"
 		);
 		assert_eq!(host_of(" https://cdn.example.test/b.png?sig=x "), "cdn.example.test");
 		assert_eq!(host_of("ts3image://banner.png?channel=1"), "ts3image");

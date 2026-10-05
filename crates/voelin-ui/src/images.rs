@@ -94,6 +94,16 @@ fn svg_cost(svg_len: usize) -> usize {
 
 thread_local! {
 	static CACHE: RefCell<Lru<Image>> = RefCell::new(Lru::new(256 << 20));
+	/// What each file decoded held (its length and a hash of its bytes), so
+	/// one that arrives again unchanged is not decoded again.
+	static DECODED: RefCell<HashMap<String, (usize, u64)>> = RefCell::new(HashMap::new());
+}
+
+fn fingerprint(bytes: &[u8]) -> (usize, u64) {
+	use std::hash::{DefaultHasher, Hasher};
+	let mut hasher = DefaultHasher::new();
+	hasher.write(bytes);
+	(bytes.len(), hasher.finish())
 }
 
 /// Set the budget in megabytes.
@@ -124,25 +134,34 @@ pub fn file(path: &std::path::Path) -> Image {
 				// (`avatars/<md5>`, `icons/<id>`), and servers keep PNG, JPEG
 				// and SVG icons alike.
 				let bytes = std::fs::read(path).ok()?;
+				DECODED.with(|d| d.borrow_mut().insert(key.to_string(), fingerprint(&bytes)));
 				// One that cannot be shown (too large, not a picture) is
 				// remembered as such, not read again on every refresh; a
-				// changed file is forgotten first (`forget`).
+				// changed file is forgotten first (`reloaded`).
 				Some(decode(&bytes).unwrap_or((Image::default(), UNDECODABLE_COST)))
 			})
 		})
 		.unwrap_or_default()
 }
 
-/// Forget the decoded picture of a file that changed (a reloaded banner).
-pub fn forget(path: &std::path::Path) {
-	CACHE.with(|c| c.borrow_mut().remove(&path.to_string_lossy()));
+/// A file that arrived again (a reloaded banner, an avatar fetched again):
+/// its decoded picture is forgotten if it changed, so it is decoded again.
+pub fn reloaded(path: &std::path::Path) {
+	let key = path.to_string_lossy();
+	let now = std::fs::read(path).ok().map(|bytes| fingerprint(&bytes));
+	let decoded = DECODED.with(|d| d.borrow().get(key.as_ref()).copied());
+	if now.is_none() || now != decoded {
+		DECODED.with(|d| d.borrow_mut().remove(key.as_ref()));
+		CACHE.with(|c| c.borrow_mut().remove(&key));
+	}
 }
 
 /// The largest side a raster picture keeps: larger ones (a banner made for
 /// print) are scaled down when decoded, as nothing shows them larger.
 const MAX_SIDE: u32 = 4096;
-/// A picture with more pixels than this (RGBA bytes) is not decoded at all.
-const MAX_DECODED_BYTES: u64 = 512 << 20;
+/// A picture with more pixels than this (RGBA bytes) is not decoded at all:
+/// it is decoded and scaled down on the UI thread.
+const MAX_DECODED_BYTES: u64 = 128 << 20;
 
 /// Compressed pictures can be small on disk but huge when decoded. Check
 /// raster dimensions before Slint allocates pixels on the UI thread. SVGs
@@ -151,29 +170,53 @@ fn decode(bytes: &[u8]) -> Option<(Image, usize)> {
 	let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
 	let reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?;
 	if reader.format().is_none() {
-		let start = bytes.trim_ascii_start();
-		if !is_svg(start) {
+		// As the engine tells one when it downloads it.
+		if !voelin_core::is_svg(bytes) {
 			return None;
 		}
+		let start = bytes.trim_ascii_start();
 		// Intrinsic SVG dimensions describe coordinates, not an allocated
 		// pixel buffer. Use the same vector cost as the emoji cache.
 		return Image::load_from_svg_data(start).ok().map(|image| (image, svg_cost(bytes.len())));
 	}
-	let (width, height) = reader.into_dimensions().ok()?;
+	let format = reader.format();
+	let (width, height) = match reader.into_dimensions() {
+		Ok(size) => size,
+		Err(error) => {
+			tracing::warn!(?format, %error, "picture not shown: unreadable");
+			return None;
+		}
+	};
 	if width == 0 || height == 0 || u64::from(width) * u64::from(height) * 4 > MAX_DECODED_BYTES {
 		tracing::warn!(width, height, "picture not shown: too large to decode");
 		return None;
 	}
 	if width <= MAX_SIDE && height <= MAX_SIDE {
 		let cost = width as usize * height as usize * 4;
-		return Image::load_from_data(bytes, None).ok().map(|image| (image, cost));
+		return match Image::load_from_data(bytes, None) {
+			Ok(image) => Some((image, cost)),
+			Err(error) => {
+				tracing::warn!(?format, %error, "picture not shown: not decoded");
+				None
+			}
+		};
 	}
-	// Scaled down (the first frame of an animation).
+	// Scaled down (the first frame of an animation). 16 bits a channel
+	// take twice the bytes.
 	let mut reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?;
 	let mut limits = image::Limits::default();
-	limits.max_alloc = Some(MAX_DECODED_BYTES + (64 << 20));
+	limits.max_alloc = Some(2 * MAX_DECODED_BYTES + (64 << 20));
 	reader.limits(limits);
-	let small = reader.decode().ok()?.thumbnail(MAX_SIDE, MAX_SIDE).to_rgba8();
+	let full = match reader.decode() {
+		Ok(full) => full,
+		Err(error) => {
+			tracing::warn!(?format, width, height, %error, "picture not shown: not decoded");
+			return None;
+		}
+	};
+	let small = full.thumbnail(MAX_SIDE, MAX_SIDE);
+	drop(full);
+	let small = small.into_rgba8();
 	let (width, height) = small.dimensions();
 	let pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
 		small.as_raw(),
@@ -183,21 +226,18 @@ fn decode(bytes: &[u8]) -> Option<(Image, usize)> {
 	Some((Image::from_rgba8(pixels), width as usize * height as usize * 4))
 }
 
-/// Whether `start` (without a BOM and leading blanks) is an SVG document:
-/// `<svg`, `<?xml`, or a comment or a DOCTYPE with `<svg` after it.
-fn is_svg(start: &[u8]) -> bool {
-	let prolog = start.starts_with(b"<!--")
-		|| start.get(..9).is_some_and(|s| s.eq_ignore_ascii_case(b"<!doctype"));
-	start.starts_with(b"<svg")
-		|| start.starts_with(b"<?xml")
-		|| (prolog && start.windows(4).any(|w| w == b"<svg"))
-}
-
 /// A picture from encoded bytes (PNG, JPEG, GIF, WebP), decoded once and
-/// kept by `key`; an empty image if it cannot be decoded.
+/// kept by `key`; an empty image if it cannot be decoded (remembered too,
+/// until [`forget_picture`]).
 pub fn picture(key: &str, bytes: &[u8]) -> Image {
 	let cache_key = format!("picture:{key}");
-	CACHE.with(|c| c.borrow_mut().get_or_load(&cache_key, || decode(bytes))).unwrap_or_default()
+	CACHE
+		.with(|c| {
+			c.borrow_mut().get_or_load(&cache_key, || {
+				Some(decode(bytes).unwrap_or((Image::default(), UNDECODABLE_COST)))
+			})
+		})
+		.unwrap_or_default()
 }
 
 /// Forget the decoded picture kept by `key` (a changed account avatar).
@@ -270,6 +310,10 @@ mod tests {
 		encoder.write_header().unwrap().write_image_data(&[200; 32]).unwrap();
 		assert_eq!(picture("test:4x2", &png).size().width, 4);
 		assert_eq!(picture("test:junk", b"not a picture").size().width, 0);
+		// Remembered: not decoded (and warned about) on every refresh.
+		assert_eq!(picture("test:junk", &png).size().width, 0);
+		forget_picture("test:junk");
+		assert_eq!(picture("test:junk", &png).size().width, 4);
 	}
 
 	#[test]
@@ -292,6 +336,8 @@ mod tests {
 		let svg = b"<!-- tool --><!DOCTYPE svg><svg xmlns='http://www.w3.org/2000/svg' width='8' height='4'><rect width='8' height='4'/></svg>";
 		assert_eq!(picture("test:svg-prolog", svg).size().width, 8);
 		assert!(decode(b"<!-- a page --><html></html>").is_none());
+		// A page with an SVG in it is a page (told so by the engine).
+		assert!(decode(b"<!DOCTYPE html><html><svg/></html>").is_none());
 	}
 
 	#[test]
@@ -308,7 +354,7 @@ mod tests {
 	#[test]
 	fn large_rasters_are_scaled_down() {
 		use std::io::Write;
-		for (width, height) in [(6000, 6000), (16_385, 1), (1, 16_385)] {
+		for (width, height) in [(5000, 5000), (16_385, 1), (1, 16_385)] {
 			let mut bytes = Vec::new();
 			let mut encoder = png::Encoder::new(&mut bytes, width, height);
 			encoder.set_color(png::ColorType::Rgba);
@@ -364,16 +410,23 @@ mod tests {
 			std::fs::write(&path, bytes).unwrap();
 			assert_eq!(file(&path).size().width, width, "{name}");
 		}
-		// A file that changed is decoded again once forgotten.
+		// A file that arrives again unchanged is not decoded again.
 		let path = dir.join("287478770");
+		let decoded = || CACHE.with(|c| c.borrow().len());
+		let before = decoded();
+		std::fs::write(&path, &png).unwrap();
+		reloaded(&path);
+		assert_eq!(decoded(), before, "kept");
+		// One that changed is, once it arrived.
 		let mut wider = Vec::new();
 		let mut encoder = png::Encoder::new(&mut wider, 5, 2);
 		encoder.set_color(png::ColorType::Rgba);
 		encoder.set_depth(png::BitDepth::Eight);
 		encoder.write_header().unwrap().write_image_data(&[90; 40]).unwrap();
 		std::fs::write(&path, wider).unwrap();
-		assert_eq!(file(&path).size().width, 3, "kept until forgotten");
-		forget(&path);
+		assert_eq!(file(&path).size().width, 3, "kept until it arrived");
+		reloaded(&path);
+		assert_eq!(decoded(), before - 1);
 		assert_eq!(file(&path).size().width, 5);
 		// A file that is no picture is remembered as such until forgotten,
 		// not read again on every refresh.
@@ -382,7 +435,7 @@ mod tests {
 		assert_eq!(file(&junk).size().width, 0);
 		std::fs::write(&junk, &png).unwrap();
 		assert_eq!(file(&junk).size().width, 0, "remembered");
-		forget(&junk);
+		reloaded(&junk);
 		assert_eq!(file(&junk).size().width, 3);
 		std::fs::remove_dir_all(dir).unwrap();
 	}

@@ -117,14 +117,17 @@ port, the service name says whether it speaks TLS:
 | `_tsgw._tcp.<name>  SRV <prio> <weight> <port> <host>` | `ws://<host>:<port>/v1` (plain, e.g. tsgw itself on 7788) |
 | `_tsgws._tcp.<name>  TXT "path=/<path>"` (optional, same for `_tsgw`) | another path than `/v1`, e.g. behind a reverse proxy |
 
-The order: the most specific name first; at a name `_tsgws` before
-`_tsgw`; among several records of one name the lowest priority first;
-then tsgw's own answer (below), but only when a plain record or nothing is
-published, so a server that publishes only TLS is never reached without
-it. A TLS proxy that fails (no rule for the host, no certificate) thus
-falls back to a published plain gateway. A target of `.` means "no gateway
-here" and the search goes on at the parent domain. Examples (zone of
-`example.org`):
+Which gateways: those of the most specific name that publishes a record,
+and only those (a parent domain's records are another server's gateway
+when the host publishes its own). At that name `_tsgws` before `_tsgw`,
+among several records of one kind the lowest priority first, then tsgw's
+own answer at that name (below), but only when a plain record is published
+there, so a server that publishes only TLS is never reached without it. A
+TLS proxy that fails (no rule for the host, no certificate) thus falls
+back to the plain gateway published next to it. With no record at any
+name, tsgw's own answer at the most specific name that gives one. A target
+of `.` means "no gateway here" and the search goes on at the parent
+domain. Examples (zone of `example.org`):
 
 ```dns
 ; Behind a TLS proxy at gw.example.org that forwards /tsgw/v1 to tsgw:

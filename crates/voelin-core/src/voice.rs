@@ -349,6 +349,9 @@ struct Voice {
 	pending: HashMap<MessageHandle, Pending>,
 	jobs: HashMap<FiletransferHandle, Job>,
 	transfers: HashMap<TransferId, Slot>,
+	/// `updatemytsdata` is to be sent once connected again: a reconnect
+	/// (tsclientlib's own) leaves the server without it.
+	myts_data_due: bool,
 }
 
 async fn run_inner(
@@ -443,12 +446,13 @@ async fn run_inner(
 		pending: HashMap::new(),
 		jobs: HashMap::new(),
 		transfers: HashMap::new(),
+		myts_data_due: false,
 	};
 	voice.publish_state()?;
 	// The account's avatar, for everyone on the server (as the official
 	// client, once connected).
 	data.borrow_and_update();
-	voice.send_myts_data(&identity, &data);
+	voice.send_myts_data();
 
 	let mut tick = tokio::time::interval(Duration::from_millis(250));
 	let result = loop {
@@ -472,12 +476,14 @@ async fn run_inner(
 					}
 					Err(e) => break Err(anyhow::anyhow!("myTeamSpeak account update: {e}")),
 				}
-				// After the proof, what is shown of the account (a sign-in).
-				voice.send_myts_data(&identity, &data);
+				// After the proof, what is shown of the account (a sign-in):
+				// its change, if any, is in this one.
+				data.borrow_and_update();
+				voice.send_myts_data();
 			}
 			Input::MytsDataChanged => {
 				data.borrow_and_update();
-				voice.send_myts_data(&identity, &data);
+				voice.send_myts_data();
 			}
 			Input::Item(None) => break Err(anyhow::anyhow!("connection closed")),
 			Input::Item(Some(Err(e))) => break Err(e.into()),
@@ -590,6 +596,10 @@ impl Voice {
 						self.message(target, invoker, message);
 					}
 				}
+				// Connected again after a reconnect.
+				if self.myts_data_due {
+					self.send_myts_data();
+				}
 				self.publish_state()?;
 			}
 			StreamItem::Audio(packet) => {
@@ -672,6 +682,7 @@ impl Voice {
 			}
 			StreamItem::DisconnectedTemporarily(reason) => {
 				warn!(?reason, "voice connection interrupted, reconnecting");
+				self.myts_data_due = true;
 			}
 			_ => {}
 		}
@@ -843,22 +854,22 @@ impl Voice {
 	}
 
 	/// Show the server the account's certificate and avatar
-	/// (`updatemytsdata`), when connected with the account.
-	fn send_myts_data(
-		&mut self,
-		identity: &watch::Receiver<Option<Arc<tsproto::myts::Identity>>>,
-		data: &watch::Receiver<Option<Arc<tsclientlib::MytsData>>>,
-	) {
-		if identity.borrow().is_none() {
+	/// (`updatemytsdata`), when connected with the account; while
+	/// reconnecting, once connected again.
+	fn send_myts_data(&mut self) {
+		self.myts_data_due = false;
+		if self.link.myts_identity.borrow().is_none() {
 			return;
 		}
-		let Some(data) = data.borrow().clone().filter(|d| !d.certificate.is_empty()) else {
+		let data = self.link.myts_data.borrow().clone();
+		let Some(data) = data.filter(|d| !d.certificate.is_empty()) else {
 			return;
 		};
 		match self.con.send_myts_data(&data) {
 			Ok(handle) => {
 				self.pending.insert(handle, Pending::MytsData);
 			}
+			Err(tsclientlib::Error::NotConnected) => self.myts_data_due = true,
 			Err(e) => warn!(error = %e, "the account's avatar was not sent"),
 		}
 	}
@@ -1203,6 +1214,51 @@ mod account_tests {
 			}
 		}
 		assert!(network > 0 && timers > 0 && audio > 0);
+	}
+
+	/// A reconnect (tsclientlib's own) leaves the server without the
+	/// account's avatar: it goes again once connected, not before.
+	#[tokio::test]
+	async fn account_data_waits_for_the_connection() {
+		// A silent UDP peer: never connected.
+		let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		// Scalar one and the standard compressed Edwards base point.
+		let mut private = [0; 32];
+		private[0] = 1;
+		let mut public = [0x66; 32];
+		public[0] = 0x58;
+		let identity =
+			tsproto::myts::Identity::new(vec![1; 33], 42, public, private, vec![2; 65]).unwrap();
+		let data = tsclientlib::MytsData { certificate: vec![1], avatar: Vec::new() };
+		let (events, _) = broadcast::channel(8);
+		let link = VoiceLink {
+			session: 1,
+			events,
+			settings: SharedSettings::new(crate::settings::Settings::default()),
+			myts_identity: watch::channel(Some(Arc::new(identity))).1,
+			myts_data: watch::channel(Some(Arc::new(data))).1,
+		};
+		let mut voice = Voice {
+			con: Connection::build(server.local_addr().unwrap().to_string()).connect().unwrap(),
+			link,
+			events: mpsc::unbounded_channel().0,
+			server_uid: String::new(),
+			talking: HashMap::new(),
+			pending: HashMap::new(),
+			jobs: HashMap::new(),
+			transfers: HashMap::new(),
+			myts_data_due: false,
+		};
+		voice.send_myts_data();
+		assert!(voice.myts_data_due && voice.pending.is_empty());
+		voice.myts_data_due = false;
+		let reconnecting = tsclientlib::TemporaryDisconnectReason::Timeout("test");
+		voice.item(StreamItem::DisconnectedTemporarily(reconnecting)).unwrap();
+		assert!(voice.myts_data_due);
+		// Not connected yet: still due.
+		let _ = voice.item(StreamItem::BookEvents(Vec::new()));
+		assert!(voice.myts_data_due && voice.pending.is_empty());
+		timeout(Duration::from_millis(100), shutdown_connection(voice.con)).await.unwrap().unwrap();
 	}
 
 	#[tokio::test]
