@@ -37,9 +37,6 @@ build-options:
   env:
     CARGO_HOME: /run/build/voelin/cargo
     CARGO_NET_OFFLINE: "true"
-    # flatpak-builder does not inherit Cargo settings from the outer job.
-    CARGO_BUILD_JOBS: "1"
-    CARGO_INCREMENTAL: "0"
     LIBCLANG_PATH: /usr/lib/sdk/llvm20/lib
 
 modules:

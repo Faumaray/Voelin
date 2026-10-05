@@ -12,6 +12,8 @@ const VERSIONS_CSV: &str = include_str!("../../proto/tsproto-structs/declaration
 
 /// The signed generic version of every platform, tsclientlib's default.
 const GENERIC_VERSION: &str = "3.?.? [Build: 5680278000]";
+/// The client generation claimed where a signed build of it exists.
+const CLIENT_GENERATION: &str = "6.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KnownVersion {
@@ -52,11 +54,16 @@ pub fn known_versions() -> Vec<KnownVersion> {
 
 /// Resolve a `--client-version` argument.
 ///
-/// Accepts `default` (the core native-platform default), an index into [`known_versions`],
-/// or `<platform>@<version>` with the exact strings from `voelinctl versions`.
+/// Accepts `default` (the core native-platform default), `generic` (the
+/// generic `3.?.?` version of the native platform, as before 6.x builds were
+/// claimed), an index into [`known_versions`], or `<platform>@<version>` with
+/// the exact strings from `voelinctl versions`.
 pub fn resolve(spec: &str) -> Result<Option<Version>> {
 	if spec == "default" {
 		return Ok(None);
+	}
+	if spec == "generic" {
+		return generic_version(std::env::consts::OS).map(Some);
 	}
 	let versions = known_versions();
 	if let Ok(i) = spec.parse::<usize>() {
@@ -74,10 +81,13 @@ pub fn resolve(spec: &str) -> Result<Option<Version>> {
 	}
 }
 
-/// The signed compatibility tuple for the native operating system.
+/// The signed compatibility tuple for the native operating system: the
+/// newest TeamSpeak 6 client build signed for it, so servers and other
+/// clients see a 6.x client (its build is recent enough for any server's
+/// minimum client version); where none is signed for the platform, the
+/// generic version, whose build passes every minimum.
 ///
-/// The generic version retains the library's minimum-version compatibility.
-/// Its version, platform and signature must stay together: the signature does
+/// Version, platform and signature must stay together: the signature does
 /// not authorize renaming the client or changing its platform.
 ///
 /// Unsupported operating systems return an error rather than claiming another
@@ -87,6 +97,31 @@ pub fn native_version() -> Result<Version> {
 }
 
 fn compatibility_version(os: &str) -> Result<Version> {
+	// TeamSpeak 5 and 6 call macOS "macOS", TeamSpeak 3 "OS X".
+	let platforms: &[&str] = match os {
+		"linux" => &["Linux"],
+		"windows" => &["Windows"],
+		"macos" => &["macOS", "OS X"],
+		"android" => &["Android"],
+		"ios" => &["iOS"],
+		_ => bail!("no signed compatibility version for operating system {os:?}"),
+	};
+	let versions = known_versions();
+	let newest = versions
+		.iter()
+		.filter(|v| platforms.contains(&v.platform.as_str()))
+		.filter(|v| v.version.starts_with(CLIENT_GENERATION))
+		.filter_map(|v| Some((build(&v.version)?, v)))
+		.max_by_key(|(build, _)| *build)
+		.map(|(_, v)| v);
+	match newest {
+		Some(version) => version.to_version(),
+		None => generic_version(os),
+	}
+}
+
+/// The generic version of the operating system's platform.
+fn generic_version(os: &str) -> Result<Version> {
 	let platform = match os {
 		"linux" => "Linux",
 		"windows" => "Windows",
@@ -95,13 +130,16 @@ fn compatibility_version(os: &str) -> Result<Version> {
 		"ios" => "iOS",
 		_ => bail!("no signed compatibility version for operating system {os:?}"),
 	};
-	// The library's generic version: its build passes servers' minimum client
-	// version, which a real (older) build such as 3.6.0 may not.
 	known_versions()
 		.into_iter()
-		.find(|version| version.platform == platform && version.version == GENERIC_VERSION)
+		.find(|v| v.platform == platform && v.version == GENERIC_VERSION)
 		.with_context(|| format!("missing signed compatibility version for {platform}"))?
 		.to_version()
+}
+
+/// The build number of a version string (`6.0.0 [Build: 1737468425]`).
+fn build(version: &str) -> Option<u64> {
+	version.split_once("[Build: ")?.1.strip_suffix(']')?.parse().ok()
 }
 
 /// Truthful product identity, separate from the signed compatibility tuple.
@@ -121,16 +159,19 @@ mod tests {
 
 	#[test]
 	fn native_platform_preserves_complete_signed_tuple() {
-		for (os, platform) in [
-			("linux", "Linux"),
-			("windows", "Windows"),
-			("macos", "OS X"),
-			("android", "Android"),
-			("ios", "iOS"),
+		for (os, platform, version) in [
+			// The newest TeamSpeak 6 build signed for the platform.
+			("linux", "Linux", "6.0.0-beta4.1 [Build: 1779880475]"),
+			("windows", "Windows", "6.0.0-beta2 [Build: 1737468425]"),
+			// None signed: the generic version.
+			("macos", "OS X", GENERIC_VERSION),
+			("android", "Android", GENERIC_VERSION),
+			("ios", "iOS", GENERIC_VERSION),
 		] {
+			let expected = version;
 			let version = compatibility_version(os).unwrap();
 			assert_eq!(version.get_platform(), platform);
-			assert_eq!(version.get_version_string(), "3.?.? [Build: 5680278000]");
+			assert_eq!(version.get_version_string(), expected);
 			assert_eq!(version.get_signature().len(), 64);
 			let known = known_versions()
 				.into_iter()
@@ -157,6 +198,14 @@ mod tests {
 	}
 
 	#[test]
+	fn reads_build_numbers() {
+		assert_eq!(build("6.0.0-beta2 [Build: 1737468425]"), Some(1_737_468_425));
+		assert_eq!(build(GENERIC_VERSION), Some(5_680_278_000));
+		assert_eq!(build("3.0.0 [Build: x]"), None);
+		assert_eq!(build("6.0.0"), None);
+	}
+
+	#[test]
 	fn parses_all_rows() {
 		let versions = known_versions();
 		assert!(versions.len() > 50);
@@ -169,6 +218,10 @@ mod tests {
 	#[test]
 	fn resolves_specs() {
 		assert!(resolve("default").unwrap().is_none());
+		if let Ok(generic) = generic_version(std::env::consts::OS) {
+			assert_eq!(resolve("generic").unwrap(), Some(generic.clone()));
+			assert_eq!(generic.get_version_string(), GENERIC_VERSION);
+		}
 		let by_index = resolve("0").unwrap().unwrap();
 		let first = &known_versions()[0];
 		let by_name = resolve(&format!("{}@{}", first.platform, first.version)).unwrap().unwrap();

@@ -3,8 +3,10 @@
 //! Requests use the official client's method envelope and password derivation.
 //! No requests or credentials are logged.
 mod identity;
+mod profile;
 mod transport;
 pub use identity::IdentityError;
+pub use profile::{Badge, Device, Profile};
 pub use tsproto::myts::Identity as ServerIdentity;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -22,6 +24,9 @@ pub struct Login {
 	pub renewal: Option<Renewal>,
 	/// Validated server identity, or why this session cannot associate with servers.
 	pub identity: Result<ServerIdentity, IdentityError>,
+	/// What the login response tells about the account (the avatar's file
+	/// names, the description); [`Client::profile`] tells more.
+	pub profile: Profile,
 }
 
 /// Server-provided alternative login material, stored only in a secret store.
@@ -67,6 +72,12 @@ pub enum Error {
 	CredentialPreparation,
 	#[error("renewal requires both a renewal token and an auth token")]
 	MissingRenewalCredentials,
+	#[error("account service refused the request (code {0})")]
+	Refused(i32),
+	#[error("the account's avatar is not an HTTPS link")]
+	AvatarUrl,
+	#[error("avatar download returned HTTP {0}")]
+	Download(u16),
 }
 impl Error {
 	pub fn status_code(&self) -> Option<i32> {
@@ -83,6 +94,7 @@ impl Error {
 	/// Only the explicit expired-session status permits an automatic renewal.
 	pub fn is_invalid_session(&self) -> bool {
 		self.status_code() == Some(api::ErrorCommon::ErrorSessionExpired as i32)
+			|| matches!(self, Self::Refused(code) if *code == profile::SESSION_EXPIRED)
 	}
 }
 
@@ -180,9 +192,11 @@ impl Client {
 		})
 		.await
 		.map_err(|_| Error::CredentialPreparation)?;
+		let profile = Profile::from_login(&response);
 		Ok(Login {
 			token,
 			identity,
+			profile,
 			uuid: response.uuid,
 			username: response.username,
 			renewal: response.alternative_login_info.map(|info| Renewal {
@@ -191,6 +205,24 @@ impl Client {
 				device_id: info.device_id,
 			}),
 		})
+	}
+
+	/// The signed-in user's account: names, description, dates, badges,
+	/// devices and avatar file names (`getAccountData` at `/user`).
+	pub async fn profile(&self, token: &SessionToken) -> Result<Profile, Error> {
+		transport::check_input_size(&[token.as_str()])?;
+		let request = profile::request(token);
+		let bytes = self.transport.call("user", "getAccountData", &wire::encode(&request)).await?;
+		profile::from_account_data(wire::decode(bytes)?)
+	}
+
+	/// The picture of an avatar of the signed-in user (one of
+	/// [`Profile::avatars`]). An avatar's "file name" is its download link,
+	/// fetched as it is: the official client GETs it without headers.
+	/// (`requestAvatarSignedUrl` signs upload links, not download links.)
+	pub async fn avatar(&self, file_name: &str) -> Result<Vec<u8>, Error> {
+		let url = profile::avatar_link(file_name)?;
+		self.transport.download(url, profile::MAX_AVATAR_BYTES).await
 	}
 
 	pub async fn validate_session(&self, token: &SessionToken) -> Result<(), Error> {

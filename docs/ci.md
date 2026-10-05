@@ -8,11 +8,12 @@ builds run by themselves, on `v*` tags, and they run none of these checks.
 Both GitHub and Gitea provide release packaging; see [release.md](release.md)
 and [building.md](building.md).
 
-Cargo builds use one job in CI so the generated UI library and its test
-target do not compile concurrently. The release profile uses ThinLTO and
+Cargo builds use one job in CI (`ci.yml`) so the generated UI library and
+its test target do not compile concurrently. The release workflows, their
+Docker images and the Flatpak build use Cargo's defaults (one job per CPU,
+no incremental builds in release mode). The release profile uses ThinLTO and
 16 codegen units instead of fat LTO and one unit, reducing peak compiler
-memory while retaining optimised builds and panic unwinding. Flatpak sets
-the Cargo job limit inside its build sandbox as well. This trades some
+memory while retaining optimised builds and panic unwinding. This trades some
 whole-program optimisation for lower build-memory requirements; release
 runtime performance has not been benchmarked for this change.
 
@@ -147,9 +148,10 @@ ENDLESS_TASK_TIMEOUT = 9h
 ```
 
 Keep sufficient RAM/swap and free disk for all package builds and their
-Docker caches. Builds run sequentially and limit Cargo to one job. The
-workflow never prunes shared Docker state or creates host swap. The token
-and optional Android signing secrets are documented in
+Docker caches. The package builds run one after another, each with as many
+Cargo jobs as the host has CPUs. The workflow never prunes shared Docker
+state or creates host swap. The token and optional Android signing secrets
+are documented in
 [Gitea releases](release.md#gitea-releases).
 
 The Gitea release job builds packages only: it runs no formatting, Clippy,

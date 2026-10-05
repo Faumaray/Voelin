@@ -12,13 +12,13 @@ in no package (`cargo run -p voelinctl`).
 
 | Platform | Files | Install |
 |---|---|---|
-| Linux x86_64 | `voelin-<version>-linux-x86_64.tar.gz` | unpack; `bin/voelin` plus desktop file and icon (prefix layout: `tar -xzf … --strip-components=1 -C ~/.local`) |
-| | `voelin_<version>_amd64.deb` | `sudo apt install ./voelin_<version>_amd64.deb` (Ubuntu 24.04+, Debian 13+) |
+| Linux x86_64 | `voelin-<version>-linux-x86_64.tar.gz` | unpack; `bin/voelin` plus desktop file and icon (prefix layout: `tar -xzf … --strip-components=1 -C ~/.local`), libvpx and libdav1d in `lib/`; `bin/voelin-install-deps` installs what comes from the system (FFmpeg, VA-API drivers, PipeWire, the desktop portal, a keyring) with apt, dnf, pacman or zypper |
+| | `voelin_<version>_amd64.deb` | `sudo apt install ./voelin_<version>_amd64.deb` (Ubuntu 24.04+, Debian 13+); apt installs the libraries it links and, by default, the recommended FFmpeg, VA-API, PipeWire, portal and keyring packages |
 | | `voelin.flatpak` (release workflow only) | `flatpak install --user voelin.flatpak` |
 | Linux server | `tsgw_<version>_amd64.deb` | `sudo apt install ./tsgw_<version>_amd64.deb`, then configure and start it ([gateway-admin.md](gateway-admin.md#install)) |
 | | `tsgw-<version>-linux-x86_64.tar.gz` | unpack; `bin/tsgw`, the systemd unit and the example config |
 | | `tsgw-image.tar.gz` (release workflow only) | `docker load -i tsgw-image.tar.gz` |
-| Windows x86_64 | `voelin-<version>-windows-x86_64.zip` | unpack; `voelin.exe` |
+| Windows x86_64 | `voelin-<version>-windows-x86_64.zip` | unpack; `voelin.exe` with FFmpeg's LGPL DLLs next to it (libvpx and dav1d are linked in) |
 | | `voelin-<version>-setup.exe` | run it (per-machine install, uninstaller in Settings → Apps) |
 | Android | `voelin-<version>-android-debug.apk` | `adb install …` or open it on the phone (arm64-v8a and x86_64) |
 | | `voelin-<version>-android-release.apk` | only with signing configured ([release.md](release.md#android-apk-signing)) |
@@ -57,7 +57,9 @@ gh run list --workflow release.yml --limit 3
 gh run download <run id> --dir dist
 ```
 
-The Windows packages use the MSVC toolchain and libvpx from vcpkg. The
+The Windows packages use the MSVC toolchain, libvpx and dav1d from vcpkg, and
+FFmpeg's LGPL shared build from BtbN/FFmpeg-Builds
+(`scripts/fetch-ffmpeg-windows.sh`, checked against the release's checksums). The
 Android job builds a signed release APK only when the repository has the
 signing secrets (`ANDROID_KEYSTORE_BASE64`, `VOELIN_SIGNING_STORE_PASSWORD`,
 `VOELIN_SIGNING_KEY_ALIAS`, `VOELIN_SIGNING_KEY_PASSWORD`).
@@ -85,7 +87,7 @@ BuildKit cache mounts (`docker builder prune` frees them).
 | Dockerfile | Builds | Notes |
 |---|---|---|
 | `docker/linux.Dockerfile` | the app's and the gateway's `.tar.gz` and `.deb` on Ubuntu 24.04 | the binaries need glibc 2.39+ and the libraries the `.deb` lists |
-| `docker/windows.Dockerfile` | `.zip` and the NSIS installer | cross-compiled for `x86_64-pc-windows-gnu` with mingw-w64 and a static libvpx; works on Windows 10 and 11 |
+| `docker/windows.Dockerfile` | `.zip` and the NSIS installer | cross-compiled for `x86_64-pc-windows-gnu` with mingw-w64 and static libvpx and dav1d, FFmpeg's LGPL DLLs alongside; works on Windows 10 and 11 |
 | `docker/android.Dockerfile` | debug APK | SDK, NDK and cargo-ndk as in CI; `--build-arg ABIS=arm64-v8a,x86_64,armeabi-v7a` picks the ABIs |
 
 Options go after the platform, straight to `docker build`:
@@ -108,11 +110,13 @@ the proxy is on localhost. If the proxy inspects TLS, set
 ## Locally without Docker
 
 - **Linux:** the packages from the table above need
-  `sudo apt install libasound2-dev libfontconfig1-dev libxkbcommon-dev libvpx-dev libdav1d-dev libpipewire-0.3-dev libspa-0.2-dev libclang-dev cmake dpkg-dev`,
+  `sudo apt install libasound2-dev libfontconfig1-dev libxkbcommon-dev libvpx-dev libdav1d-dev libpipewire-0.3-dev libspa-0.2-dev libclang-dev cmake dpkg-dev patchelf`,
   then `cargo build --release --locked -p voelin-ui -p voelin-gateway`
   and `scripts/package.sh linux`.
 - **Windows:** [packaging/windows/README.md](../packaging/windows/README.md)
-  (MSVC, vcpkg libvpx, NSIS), then `bash scripts/package.sh windows` from Git Bash.
+  (MSVC, vcpkg libvpx and dav1d, NSIS), then
+  `bash scripts/fetch-ffmpeg-windows.sh ffmpeg && FFMPEG_DLL_DIR=ffmpeg bash scripts/package.sh windows`
+  from Git Bash.
 - **Android:** [android.md](android.md) (SDK, NDK, cargo-ndk), then
   `cd android && ./gradlew assembleDebug` and `scripts/package.sh android`.
 - **Flatpak:** [packaging/README.md](../packaging/README.md#flatpak).

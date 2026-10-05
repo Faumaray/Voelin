@@ -18,17 +18,12 @@ const GROUP_MS: i64 = 5 * 60 * 1000;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Previous {
 	pub author: String,
-	pub relayed: bool,
 	pub ts_ms: i64,
 }
 
 impl Previous {
 	pub fn of(message: &ChatMessage) -> Self {
-		Self {
-			author: message.author_name.clone(),
-			relayed: message.via_relay,
-			ts_ms: message.ts_ms,
-		}
+		Self { author: message.author_name.clone(), ts_ms: message.ts_ms }
 	}
 }
 
@@ -174,9 +169,7 @@ fn line_of(
 	files: &[FileRef],
 ) -> ChatLine {
 	let continued = previous.is_some_and(|p| {
-		p.author == message.author_name
-			&& p.relayed == message.via_relay
-			&& (0..GROUP_MS).contains(&(message.ts_ms - p.ts_ms))
+		p.author == message.author_name && (0..GROUP_MS).contains(&(message.ts_ms - p.ts_ms))
 	});
 	let text =
 		if files.is_empty() { message.text.clone() } else { without_links(&message.text, files) };
@@ -210,7 +203,6 @@ fn line_of(
 		author: message.author_name.clone().into(),
 		text: text.clone().into(),
 		time: time_of(message.ts_ms).into(),
-		relayed: message.via_relay,
 		runs: runs.as_deref().map(runs_model).unwrap_or_default(),
 		rich: runs.is_some(),
 		jumbo,

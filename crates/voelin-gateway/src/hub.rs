@@ -19,8 +19,8 @@ use voelin_gateway_proto::{
 	Action, ActivityEntry, ErrorCode, EventInfo, HistoryEntry, PinInfo, StreamEntry, TopicInfo,
 	UniqueIds, UserRef, feature, identity_level, verify_auth,
 };
-use voelin_model::{ChannelId, ChatMessage, ChatTarget, Presence, ServerFlavor, relay_text};
-use voelin_observer::{Observer, ObserverConfig, RelayConfig, RelayPool};
+use voelin_model::{ChannelId, ChatMessage, ChatTarget, Presence, ServerFlavor};
+use voelin_observer::{Observer, ObserverConfig, RelayConfig, RelayPool, post_as};
 use voelin_query::{Command, Connect, QueryClient};
 
 use crate::config::{Bootstrap, Layers, Runtime};
@@ -206,6 +206,8 @@ pub struct Hub {
 	/// Serializes rebuilding the relay pool.
 	relay_rebuild: tokio::sync::Mutex<()>,
 	lookup: QueryClient,
+	/// One server-chat post at a time: each borrows the poster's nickname.
+	lookup_posting: tokio::sync::Mutex<()>,
 	perms: PermResolver,
 	groups: GroupResolver,
 	pub db: Db,
@@ -268,6 +270,7 @@ impl Hub {
 			relays: RwLock::new(relays),
 			relay_rebuild: Default::default(),
 			lookup,
+			lookup_posting: Default::default(),
 			perms,
 			groups: GroupResolver::default(),
 			db,
@@ -751,16 +754,20 @@ impl Hub {
 			}
 			None => text.to_string(),
 		};
-		let full = relay_text(&rt.relay.format, &user.nickname, &relayed);
+		// Posts go out under the user's nickname; `relay.format` only when the
+		// session cannot take it.
 		match target {
 			ChatTarget::Server => {
-				for part in voelin_model::split_message(&full, 1024) {
-					self.lookup
-						.send(
-							&Command::new("sendtextmessage").arg("targetmode", 3).arg("msg", part),
-						)
-						.await?;
-				}
+				let _posting = self.lookup_posting.lock().await;
+				post_as(
+					&self.lookup,
+					&lookup_nickname(&rt.relay.nickname),
+					&user.nickname,
+					&relayed,
+					&rt.relay.format,
+					|part| Command::new("sendtextmessage").arg("targetmode", 3).arg("msg", part),
+				)
+				.await?;
 			}
 			ChatTarget::Channel(cid) => {
 				if !self.readers.lock().unwrap().contains_key(cid) {
@@ -768,8 +775,7 @@ impl Hub {
 					self.add_reader(*cid).await?;
 					self.remove_reader(*cid);
 				}
-				// The pool's format is `{text}`: `full` is already formatted.
-				self.relays().send(*cid, &user.nickname, &full).await?;
+				self.relays().post(*cid, &user.nickname, &relayed, &rt.relay.format).await?;
 			}
 			ChatTarget::Private(_) => unreachable!("checked by require_post"),
 		}
@@ -797,14 +803,17 @@ impl Hub {
 fn new_relay_pool(connect: &Connect, nickname: &str) -> RelayPool {
 	let mut config = RelayConfig::new(connect.clone());
 	config.nickname = nickname.to_string();
-	// Posts are formatted by the hub, with the current settings.
-	config.format = "{text}".into();
 	RelayPool::new(config)
+}
+
+/// The lookup session's own name, given `relay.nickname`.
+fn lookup_nickname(nickname: &str) -> String {
+	format!("{nickname} Gateway")
 }
 
 async fn set_lookup_nickname(lookup: &QueryClient, nickname: &str) {
 	let _ = lookup
-		.send(&Command::new("clientupdate").arg("client_nickname", format!("{nickname} Gateway")))
+		.send(&Command::new("clientupdate").arg("client_nickname", lookup_nickname(nickname)))
 		.await;
 }
 

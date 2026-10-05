@@ -7,11 +7,13 @@
 //! - [`notify`]: desktop notifications
 //! - [`paths`]: data, config, cache and state directories
 //! - [`crash`]: opt-in local crash reports (panic hook)
+//! - [`logs`]: the log file, with the previous runs' kept
 //! - [`notices`]: third-party notices for the About page
 
 pub mod crash;
 pub mod files;
 pub mod hotkey;
+pub mod logs;
 pub mod notices;
 pub mod notify;
 pub mod paths;

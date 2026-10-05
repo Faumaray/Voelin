@@ -9,8 +9,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_BUILD_JOBS: "1"
-  CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "0"
 
 jobs:

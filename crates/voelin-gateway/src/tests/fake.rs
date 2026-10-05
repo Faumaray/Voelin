@@ -49,8 +49,12 @@ pub struct State {
 	pub server_groups: HashMap<u64, Vec<u64>>,
 	/// (target mode, channel of the posting connection, text)
 	pub posted: Vec<(u8, u64, String)>,
+	/// The nickname of the posting connection, for each of `posted`.
+	pub posters: Vec<String>,
 	/// Nicknames set with clientupdate.
 	pub nicknames: Vec<String>,
+	/// The current nickname of each query connection.
+	names: HashMap<u16, String>,
 	/// Connections that registered for server events (the observer).
 	observers: Vec<mpsc::UnboundedSender<String>>,
 	/// Relay connections by channel.
@@ -118,6 +122,12 @@ impl FakeServer {
 
 	pub fn posted(&self) -> Vec<(u8, u64, String)> {
 		self.state.lock().unwrap().posted.clone()
+	}
+
+	/// What was posted as `(nickname of the poster, text)`.
+	pub fn posted_by(&self) -> Vec<(String, String)> {
+		let s = self.state.lock().unwrap();
+		s.posters.iter().cloned().zip(s.posted.iter().map(|p| p.2.clone())).collect()
 	}
 
 	async fn connection(self, stream: tokio::net::TcpStream) {
@@ -192,6 +202,12 @@ impl FakeServer {
 			"whoami" => data(vec![format!("client_id={clid} client_channel_id={channel}")]),
 			"clientupdate" => {
 				if let Some(nick) = arg("client_nickname") {
+					let in_use = s.online.iter().any(|c| c.nickname == nick)
+						|| s.names.iter().any(|(id, n)| *id != clid && *n == nick);
+					if in_use {
+						return "error id=513 msg=nickname\\sis\\salready\\sin\\suse\n\r".into();
+					}
+					s.names.insert(clid, nick.clone());
 					s.nicknames.push(nick);
 				}
 				ok
@@ -262,6 +278,8 @@ impl FakeServer {
 			"sendtextmessage" => {
 				let mode = num("targetmode") as u8;
 				s.posted.push((mode, *channel, arg("msg").unwrap_or_default()));
+				let poster = s.names.get(&clid).cloned().unwrap_or_default();
+				s.posters.push(poster);
 				ok
 			}
 			_ => ok,

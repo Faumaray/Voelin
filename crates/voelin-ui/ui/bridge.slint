@@ -189,7 +189,6 @@ export struct ChatLine {
     author: string,
     text: string,
     time: string,
-    relayed: bool,
     // The text split into runs; only filled when it has emoji (`rich`).
     runs: [TextRun],
     rich: bool,
@@ -240,11 +239,6 @@ export struct BookmarkForm {
     address: string,
     nickname: string,
     server-password: string,
-    gateway-url: string,
-    query-transport: string,
-    query-addr: string,
-    query-user: string,
-    query-password: string,
 }
 
 // A stream on the server, ours first: a stream can be watched from any
@@ -774,8 +768,20 @@ export struct MytsForm {
     identity-status: int,
     available: bool,
     signed_in: bool,
+    // A saved session is being checked: its profile shows meanwhile.
+    restoring: bool,
     email: string,
     username: string,
+    // From the account service: the avatar, the initials without one, the
+    // description, dates as YYYY-MM-DD ("" when not known), badge names and
+    // the signed-in devices ("name · region · date").
+    avatar: image,
+    initials: string,
+    description: string,
+    member-since: string,
+    last-login: string,
+    badges: [string],
+    devices: [string],
     status: int,
     persistence-status: int,
     busy: bool,
@@ -853,8 +859,9 @@ export global Bridge {
     in property <int> own-channel-banner-mode;
     in property <bool> voice-connected;
     in property <bool> voice-connecting;
+    // Presence without joining (gateway or query), started when the server
+    // is selected.
     in property <bool> observing;
-    in property <bool> can-observe;
     in property <bool> input-muted;
     in property <bool> output-muted;
     in property <bool> transmitting;
@@ -945,7 +952,6 @@ export global Bridge {
     callback search(string);
     callback connect-voice();
     callback disconnect-voice();
-    callback toggle-observe();
     callback join-channel(int);
     callback open-channel-chat(int);
     callback toggle-collapse(int);
@@ -1109,7 +1115,7 @@ export global Bridge {
     callback settings-section(int);
     in property <AccountForm> account;
     in property <MytsForm> myts;
-    in property <string> primary-name: myts.signed-in ? (myts.username != "" ? myts.username : myts.email) : nickname != "" ? nickname : app-name;
+    in property <string> primary-name: myts.signed-in || myts.restoring ? (myts.username != "" ? myts.username : myts.email) : nickname != "" ? nickname : app-name;
     callback myts-dismiss();
     callback myts-retry();
     callback myts-portal(int);

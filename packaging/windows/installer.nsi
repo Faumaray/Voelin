@@ -7,6 +7,8 @@
 ;             for the numeric file version (default: VERSION)
 ;   BINARY    the executable (default ..\..\target\release\voelin.exe)
 ;   OUTDIR    where the installer goes (default: next to this file)
+;   FFMPEG    a directory with FFmpeg's DLLs and FFMPEG-*.txt
+;             (scripts/fetch-ffmpeg-windows.sh), installed next to the app
 ;   SIGN      a signing command; "%1" is replaced by the file to sign, e.g.
 ;             /DSIGN="signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /a %1"
 ;
@@ -67,6 +69,11 @@ Section "Install"
 	File "/oname=${EXE}" "${BINARY}"
 	; Also shown in the app's About page.
 	File "/oname=THIRD_PARTY_NOTICES.md" "..\..\THIRD_PARTY_NOTICES.md"
+!ifdef FFMPEG
+	; FFmpeg's DLLs, loaded from the app's directory, and their license.
+	File "${FFMPEG}\*.dll"
+	File "${FFMPEG}\FFMPEG-*.txt"
+!endif
 	WriteUninstaller "$INSTDIR\uninstall.exe"
 
 	CreateShortcut "$SMPROGRAMS\${APP_NAME}.lnk" "$INSTDIR\${EXE}"
@@ -86,6 +93,9 @@ Section "Uninstall"
 	; User data in %APPDATA%\voelin (identities, bookmarks, history) is kept.
 	Delete "$INSTDIR\${EXE}"
 	Delete "$INSTDIR\THIRD_PARTY_NOTICES.md"
+	Delete "$INSTDIR\av*.dll"
+	Delete "$INSTDIR\sw*.dll"
+	Delete "$INSTDIR\FFMPEG-*.txt"
 	Delete "$INSTDIR\uninstall.exe"
 	RMDir "$INSTDIR"
 	Delete "$SMPROGRAMS\${APP_NAME}.lnk"

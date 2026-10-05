@@ -882,7 +882,7 @@ export component IntegrationsSection inherits VerticalLayout {
         icon: Icons.plug;
         subtitle: @tr("A gateway gives a server invisible presence, chat without joining, history, pins, reactions, topics, events and the stream directory.");
         if Bridge.gateways.length == 0: Hint {
-            text: @tr("None of your servers has a gateway. Add its URL to a server's bookmark (Edit server).");
+            text: @tr("None of your servers has a gateway. Voelin finds one by the server's address when the server's admin publishes it.");
         }
         for gw in Bridge.gateways: VerticalLayout {
             spacing: Theme.space-2;
@@ -1265,6 +1265,23 @@ export component AdvancedSection inherits VerticalLayout {
         HorizontalLayout {
             spacing: Theme.space-3;
             Text {
+                text: @tr("Log files");
+                color: Theme.text-secondary;
+                font-size: Theme.font-sm;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            Button {
+                small: true;
+                icon: Icons.folder-open;
+                text: @tr("Open");
+                clicked => { Bridge.open-logs(); }
+            }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-3;
+            Text {
                 text: Bridge.advanced.crash-dir != "" ? @tr("Crash reports: {}", Bridge.advanced.crash-dir) : @tr("No crash report folder.");
                 color: Theme.text-secondary;
                 font-size: Theme.font-sm;
@@ -1277,7 +1294,7 @@ export component AdvancedSection inherits VerticalLayout {
                 icon: Icons.folder-open;
                 text: @tr("Open");
                 enabled: Bridge.advanced.crash-dir != "";
-                clicked => { Bridge.open-logs(); }
+                clicked => { Bridge.open-crash-folder(); }
             }
         }
     }

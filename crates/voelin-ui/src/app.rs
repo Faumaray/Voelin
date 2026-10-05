@@ -470,6 +470,8 @@ pub(crate) struct App {
 	pub demo: bool,
 	/// `VOELIN_DEMO_UI`: sample servers, channels and chat (dev.rs).
 	pub demo_ui: bool,
+	/// Servers whose gateway was looked up in this run (`discover_gateway`).
+	pub gateways_looked_up: HashSet<i64>,
 	/// `VOELIN_AUTOSHARE=test-pattern`: share the test pattern once streams work.
 	pub autoshare: bool,
 	/// `VOELIN_OPEN=client`: open the volume dialog of the first other client.
@@ -662,7 +664,7 @@ pub fn run(options: RunOptions) -> Result<()> {
 		#[cfg(not(target_os = "android"))]
 		runtime: runtime.clone(),
 		#[cfg(not(target_os = "android"))]
-		myts: Default::default(),
+		myts: crate::myts::Account::new(dir.join("account")),
 		ui: ui.as_weak(),
 		store,
 		// The sample data of VOELIN_DEMO_UI never reaches the system keyring.
@@ -699,6 +701,7 @@ pub fn run(options: RunOptions) -> Result<()> {
 		stream_volume: 100.0,
 		demo: switches.demo_stream,
 		demo_ui: switches.demo_ui,
+		gateways_looked_up: HashSet::new(),
 		autoshare: switches.autoshare,
 		open_client_pending: switches.open_client,
 		notices_loaded: false,

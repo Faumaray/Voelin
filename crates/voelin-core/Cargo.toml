@@ -16,9 +16,9 @@ audio-device = ["voelin-audio/device"]
 # voelin-media backends are enabled (e.g. MediaCodec and a registered capture
 # source on Android).
 media = ["dep:voelin-media"]
-# `media` with voelin-media's desktop backends: libvpx, OpenH264 loaded at
-# runtime, X11 and PipeWire on Linux. Not for Android (libvpx does not
-# cross-compile there).
+# `media` with voelin-media's desktop backends: libvpx, dav1d, OpenH264 and
+# FFmpeg loaded at runtime, X11 and PipeWire on Linux. Not for Android
+# (libvpx does not cross-compile there).
 media-desktop = ["media", "voelin-media/default"]
 
 [dependencies]

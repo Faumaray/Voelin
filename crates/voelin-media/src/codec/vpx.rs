@@ -302,7 +302,11 @@ impl VpxDecoder {
 	pub fn new(codec: Codec) -> Result<Self> {
 		let vp9 = is_vp9(codec)?;
 		check(codec, false)?;
-		let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(4) as u32);
+		// libvpx's decoder threads spin waiting for each other: on 4 threads
+		// with another core busy, our 4- and 8-partition 1440p streams
+		// decoded at 23 and 11 fps, on 2 at 143 and 129.
+		let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+		let threads = (cores / 2).clamp(1, 2) as u32;
 		let decoder =
 			raw::Decoder::new(vp9, threads).map_err(|message| Error::Decoder { codec, message })?;
 		Ok(Self { codec, decoder })

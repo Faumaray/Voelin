@@ -18,8 +18,6 @@
 # unsigned.
 
 FROM ubuntu:24.04 AS toolchain
-# Serial builds keep the generated Slint UI within the CI memory budget.
-ENV CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0
 ARG DEBIAN_FRONTEND=noninteractive
 # JDK 17 (Gradle, the Android Gradle plugin), CMake + Ninja (the bundled libopus).
 RUN apt-get update && apt-get install -y --no-install-recommends \

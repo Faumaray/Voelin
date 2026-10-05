@@ -357,3 +357,45 @@ async fn unsupported_identity_encryption_preserves_successful_account_login() {
 	assert_eq!(login.identity.unwrap_err(), IdentityError::UnsupportedKeyVersion);
 	server.await.unwrap();
 }
+
+/// One GET answered with `status` and `body`; the request's head comes back.
+async fn mock_get(status: u16, body: &'static [u8]) -> (String, tokio::task::JoinHandle<String>) {
+	let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let url = format!("http://{}/avatars/a.png?sig=1", listener.local_addr().unwrap());
+	let task = tokio::spawn(async move {
+		let (mut stream, _) = listener.accept().await.unwrap();
+		let mut request = Vec::new();
+		while !request.ends_with(b"\r\n\r\n") {
+			let mut byte = [0];
+			stream.read_exact(&mut byte).await.unwrap();
+			request.push(byte[0]);
+			assert!(request.len() < 8192);
+		}
+		let head = format!(
+			"HTTP/1.1 {status} Test\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+			body.len()
+		);
+		let _ = stream.write_all(head.as_bytes()).await;
+		let _ = stream.write_all(body).await;
+		String::from_utf8(request).unwrap()
+	});
+	(url, task)
+}
+
+#[tokio::test]
+async fn an_avatar_is_fetched_from_its_own_link() {
+	let client =
+		Client { transport: transport::Transport::mock(String::new(), Duration::from_secs(2)) };
+	// The file name is the link: a plain GET of it, nothing of the session.
+	let (url, task) = mock_get(200, b"\x89PNG picture").await;
+	assert_eq!(client.avatar(&url).await.unwrap(), b"\x89PNG picture");
+	let head = task.await.unwrap();
+	assert!(head.starts_with("GET /avatars/a.png?sig=1 HTTP/1.1\r\n"), "{head}");
+	assert!(!head.to_ascii_lowercase().contains("authorization"), "{head}");
+	// A refused download says so, apart from the account service's errors.
+	let (url, _task) = mock_get(403, b"<Error><Code>AccessDenied</Code></Error>").await;
+	let error = client.avatar(&url).await.unwrap_err();
+	assert!(matches!(error, Error::Download(403)), "{error:?}");
+	// A name that is not a link is never fetched.
+	assert!(matches!(client.avatar("online.png").await, Err(Error::AvatarUrl)));
+}

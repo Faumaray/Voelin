@@ -180,7 +180,8 @@ export component UserCard inherits Rectangle {
             Avatar {
                 size: 38px;
                 initials: Bridge.myts.signed-in || Bridge.nickname != "" ? "" : "?";
-                image: Bridge.own-avatar;
+                // The server's avatar for us, else the account's.
+                image: Bridge.own-avatar.width > 0 ? Bridge.own-avatar : Bridge.myts.avatar;
                 tint: Theme.accent;
                 label: Bridge.primary-name;
                 // Green ring while our voice goes out.
@@ -190,7 +191,7 @@ export component UserCard inherits Rectangle {
                     source: Icons.user;
                     size: 20px;
                     tint: #ffffff;
-                    visible: (Bridge.myts.signed-in || Bridge.nickname != "") && Bridge.own-avatar.width == 0;
+                    visible: (Bridge.myts.signed-in || Bridge.nickname != "") && Bridge.own-avatar.width == 0 && Bridge.myts.avatar.width == 0;
                 }
             }
         }

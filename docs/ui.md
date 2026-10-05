@@ -192,12 +192,20 @@ Settings sections (`settings:<section>`):
 Settings controls read and write `voelin_core::settings` and apply at once;
 numbers are typed freely next to the presets.
 
-Desktop startup shows the shared myTeamSpeak login page until a saved session
-is validated, a login succeeds, or the user chooses Continue without an account.
-The signed-in username/email becomes the primary app profile in the desktop
-user card and mobile You page; it does not replace server identities or bookmark
-nicknames. Settings → My Account reuses the form, supports retry/OTP/sign-out,
-and opens official browser flows for registration, activation, recovery and
+Desktop startup shows the myTeamSpeak login page (`LoginPage` in
+`screens/account.slint`: the artwork and what an account gives beside the
+form on wide windows, the form alone on narrow ones; email, password with a
+show button, the one-time code when asked, Sign in, password recovery and
+registration on the website) only when no session is saved and Continue
+without an account was never chosen (`ui.skip_account_prompt`). A saved
+session is checked in the background; only an expired one brings the page
+back. The signed-in username/email and the account's avatar become the
+primary app profile in the desktop user card and mobile You page; they do
+not replace server identities or bookmark nicknames. Settings → My Account
+shows the profile from the account service (avatar, name, email,
+description, member since, previous sign-in, badges, signed-in devices, the
+account and myTS ids) or the sign-in form, supports retry/OTP/sign-out, and
+opens official browser flows for registration, activation, recovery and
 account management. Account and renewal material live only in the keyring;
 passwords and one-time codes are cleared after submission. Expired sessions
 require fresh sign-in because password login supplies no renewal auth token.
@@ -276,16 +284,23 @@ with the sample studio's sources, live at once with sample viewers.
 The add-server dialog (`BookmarkDialog` in `screens/dialogs.slint`, logic in
 `servers.rs`) asks for the address (host, host:port, IP or server
 nickname; the resolver finds the port through SRV records and TSDNS) and
-an optional server password. *Advanced* (open when editing) has the rest,
-and empty fields there are filled in: the name is the address until the
-first connection, then the server's own name (`adopt_server_name`); the
-nickname is the default identity's (one imported from TeamSpeak keeps its
-nickname there), else the system user's, else "Voelin user"; the identity is the default one,
-there is no default channel; the gateway is looked up in DNS when the
-server is saved without one and when it connects
-([gateway-admin.md](gateway-admin.md#letting-voelin-find-the-gateway)),
-and one found is stored as if typed. `bookmark` and `bookmark:edit` open
-it (below).
+an optional server password. *Advanced* (open when editing) has the name
+and the nickname, and empty fields there are filled in: the name is the
+address until the first connection, then the server's own name
+(`adopt_server_name`); the nickname is the default identity's (one imported
+from TeamSpeak keeps its nickname there), else the system user's, else
+"Voelin user"; the identity is the default one, there is no default channel.
+There are no gateway or ServerQuery fields: the gateway is looked up from
+the address (DNS SRV records, else the gateway's `/.well-known/tsgw`) when
+the server is saved, selected or connected
+([gateway-admin.md](gateway-admin.md#letting-voelin-find-the-gateway)), one
+found is stored, and a new address looks again. `bookmark` and
+`bookmark:edit` open it (below).
+
+Selecting a server observes it invisibly through its gateway (or a query
+login an older version stored), so its channels, members and chats show
+without joining; there is no Observe button. Without a gateway, observing
+starts once one is found.
 
 Settings → Profiles (`ProfilesSection` in `screens/settings-pages.slint`;
 `settings_pages.rs`, and `identities.rs` for the default and the import

@@ -173,7 +173,11 @@ async fn chat_pins_reactions_topics() {
 		unreachable!()
 	};
 	assert_eq!((id, message.text.as_str()), (hello.id, "hello"));
-	assert!(fx.fake.posted().contains(&(2, 1, "[Bob] hello".into())));
+	// Under Bob's name: "Bob1", as Bob is online with voice as "Bob". The
+	// relay takes its own name back after the post.
+	assert!(fx.fake.posted().contains(&(2, 1, "hello".into())));
+	assert!(fx.fake.posted_by().contains(&("Bob1".into(), "hello".into())));
+	assert_eq!(fx.fake.state.lock().unwrap().nicknames.last().unwrap(), "Chat Relay 1");
 
 	// Pins: moderators only by default; Alice is an admin.
 	assert_eq!(code(b.pin(hello.id).await), ErrorCode::Forbidden);
@@ -213,7 +217,7 @@ async fn chat_pins_reactions_topics() {
 	assert_eq!(t.id, topic.id);
 	let in_topic = b.post(LOBBY, "saturday?".into(), Some(topic.id)).await.unwrap();
 	assert_eq!(in_topic.topic_id, Some(topic.id));
-	assert!(fx.fake.posted().contains(&(2, 1, "[Bob] [#Plans] saturday?".into())));
+	assert!(fx.fake.posted_by().contains(&("Bob1".into(), "[#Plans] saturday?".into())));
 	expect(
 		&mut c_rx,
 		"prefixed chat event",
@@ -456,7 +460,7 @@ async fn admin_settings_apply_live() {
 
 	// Feature switches reach connected clients at once.
 	let first = b.post(LOBBY, "one".into(), None).await.unwrap();
-	assert!(fx.fake.posted().contains(&(2, 1, "<Bob> one".into())));
+	assert!(fx.fake.posted_by().contains(&("Bob1".into(), "one".into())));
 	let entry = a.config_set("features.pins".into(), json!(false)).await.unwrap();
 	assert_eq!(entry.source, voelin_gateway_proto::ConfigSource::Db);
 	expect(
@@ -506,10 +510,22 @@ async fn admin_settings_apply_live() {
 	// 0: no limit.
 	a.config_set("limits.posts_per_window".into(), json!(0)).await.unwrap();
 
-	// Relay settings apply without a restart.
+	// Relay settings apply without a restart. The format is for posts the
+	// relay cannot make under Bob's name: every variant of it is taken.
+	for (clid, nick) in [(21, "Bob1"), (22, "Bob2"), (23, "Bob3")] {
+		fx.fake.add_online(Online {
+			clid,
+			cid: 2,
+			uid: format!("other-{nick}"),
+			nickname: nick.into(),
+			server_groups: Vec::new(),
+			streaming: false,
+		});
+	}
 	a.config_set("relay.format".into(), json!("{nick}: {text}")).await.unwrap();
 	b.post(LOBBY, "two".into(), None).await.unwrap();
 	assert!(fx.fake.posted().contains(&(2, 1, "Bob: two".into())));
+	assert!(fx.fake.posted_by().contains(&("Chat Relay 1".into(), "Bob: two".into())));
 	a.config_set("relay.nickname".into(), json!("Bridge")).await.unwrap();
 	for _ in 0..100 {
 		if fx.fake.state.lock().unwrap().nicknames.iter().any(|n| n == "Bridge 1") {

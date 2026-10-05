@@ -160,7 +160,7 @@ pub static KEYS: &[KeyDef] = &[
 		"relay.format",
 		Kind::Str,
 		"\"[{nick}] {text}\"",
-		"How posts appear in TeamSpeak; {nick} and {text} are replaced",
+		"How posts appear when the relay cannot take the user's nickname; {nick} and {text} are replaced",
 	),
 	key(
 		"relay.idle_teardown_secs",

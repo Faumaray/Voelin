@@ -1,8 +1,9 @@
 //! Desktop account state. Only the UI thread mutates state or persists credentials.
 use serde::{Deserialize, Serialize};
-use slint::ComponentHandle;
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use std::path::PathBuf;
 use std::sync::Arc;
-use voelin_myts::{Client, Login, ServerIdentity, SessionToken};
+use voelin_myts::{Client, Login, Profile, ServerIdentity, SessionToken};
 use voelin_store::Secrets;
 
 use crate::app::{App, Bridge, MytsForm, later};
@@ -25,13 +26,81 @@ struct Saved {
 	// Private account identity belongs in the same secret-store transaction.
 	#[serde(default)]
 	identity: Option<ServerIdentity>,
+	/// What the account service tells about the account, shown at once on
+	/// the next start.
+	#[serde(default)]
+	profile: SavedProfile,
+}
+
+/// The profile of [`voelin_myts::Profile`] worth keeping between runs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+struct SavedProfile {
+	description: String,
+	/// Unix seconds; 0: not known.
+	registered: i64,
+	last_login: i64,
+	badges: Vec<String>,
+	/// "Name · region · date" per signed-in device.
+	devices: Vec<String>,
+	/// The avatar file shown, as the service names it; the picture is
+	/// [`AVATAR_FILE`] in the account directory.
+	avatar: String,
+}
+
+/// The account's avatar picture, in the account directory.
+const AVATAR_FILE: &str = "avatar";
+
+/// A date (Unix seconds) as the profile shows it; empty when not known.
+fn date(seconds: i64) -> String {
+	chrono::DateTime::from_timestamp(seconds, 0)
+		.filter(|_| seconds > 0)
+		.map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
+		.unwrap_or_default()
+}
+
+impl SavedProfile {
+	/// Take what the service told; empty fields keep what was known.
+	fn update(&mut self, profile: &Profile) {
+		if !profile.description.is_empty() {
+			self.description = profile.description.clone();
+		}
+		if profile.registered > 0 {
+			self.registered = profile.registered;
+		}
+		if profile.last_login > 0 {
+			self.last_login = profile.last_login;
+		}
+		if !profile.badges.is_empty() {
+			self.badges = profile.badges.iter().map(|b| b.name.clone()).collect();
+		}
+		if !profile.devices.is_empty() {
+			self.devices = profile
+				.devices
+				.iter()
+				.map(|d| {
+					[d.name.as_str(), d.region.as_str(), &date(d.last_login)]
+						.into_iter()
+						.filter(|part| !part.is_empty())
+						.collect::<Vec<_>>()
+						.join(" · ")
+				})
+				.collect();
+		}
+	}
 }
 
 #[derive(Default)]
 pub(crate) struct Account {
+	/// Where the avatar picture is kept (`<data>/account`); none in tests.
+	dir: Option<PathBuf>,
+	/// The avatar, decoded.
+	avatar: slint::Image,
 	saved: Option<Saved>,
 	signed_in: bool,
 	busy: bool,
+	/// The saved session is being checked (not a password sign-in).
+	checking: bool,
 	otp_required: bool,
 	status: i32,
 	persistence_status: i32,
@@ -44,10 +113,56 @@ pub(crate) struct Account {
 }
 
 impl Account {
+	pub(crate) fn new(dir: PathBuf) -> Self {
+		Self { dir: Some(dir), ..Default::default() }
+	}
+
+	fn avatar_path(&self) -> Option<PathBuf> {
+		self.dir.as_ref().map(|dir| dir.join(AVATAR_FILE))
+	}
+
+	/// The kept picture, shown while the session is checked.
+	fn load_avatar(&mut self) {
+		let bytes = self.avatar_path().and_then(|path| std::fs::read(path).ok());
+		self.avatar = bytes.map(|b| crate::images::picture("myts-avatar", &b)).unwrap_or_default();
+	}
+
+	/// A new picture from the service: kept on disk and shown.
+	fn set_avatar(&mut self, name: String, bytes: &[u8]) {
+		crate::images::forget_picture("myts-avatar");
+		self.avatar = crate::images::picture("myts-avatar", bytes);
+		if self.avatar.size().width == 0 {
+			return;
+		}
+		if let Some(path) = self.avatar_path() {
+			let written = path
+				.parent()
+				.map_or(Ok(()), std::fs::create_dir_all)
+				.and_then(|()| std::fs::write(&path, bytes));
+			if let Err(error) = written {
+				tracing::warn!(%error, "could not keep the account's avatar");
+			}
+		}
+		if let Some(saved) = self.saved.as_mut() {
+			saved.profile.avatar = name;
+		}
+	}
+
+	fn forget_avatar(&mut self) {
+		self.avatar = slint::Image::default();
+		crate::images::forget_picture("myts-avatar");
+		if let Some(path) = self.avatar_path() {
+			let _ = std::fs::remove_file(path);
+		}
+	}
+
 	fn load(&mut self, secrets: &dyn Secrets) {
 		match read_saved(secrets) {
 			Ok(saved) => {
 				self.saved = saved;
+				if self.saved.is_some() {
+					self.load_avatar();
+				}
 				self.can_forget = false;
 				self.status = 0;
 				self.persistence_status = 0;
@@ -80,7 +195,17 @@ impl Account {
 			.renewal
 			.map(|renewal| (renewal.token, renewal.device_id, renewal.otp_token))
 			.unwrap_or_default();
+		// Another account's picture is not this one's.
+		let same_account =
+			self.saved.as_ref().is_some_and(|s| !s.uuid.is_empty() && s.uuid == login.uuid);
+		let mut profile =
+			if same_account { self.saved.take().unwrap().profile } else { SavedProfile::default() };
+		if !same_account {
+			self.forget_avatar();
+		}
+		profile.update(&login.profile);
 		let saved = Saved {
+			profile,
 			session: login.token.into_inner(),
 			email,
 			username: login.username,
@@ -108,12 +233,44 @@ impl Account {
 			self.status = 9;
 		}
 	}
+	/// Store what the account service told (`Client::profile`).
+	fn take_profile(&mut self, secrets: &dyn Secrets, profile: &Profile) {
+		let Some(saved) = self.saved.as_mut() else { return };
+		if !profile.username.is_empty() {
+			saved.username = profile.username.clone();
+		}
+		saved.profile.update(profile);
+		if self.persistence_status == 0 && !save(secrets, saved) {
+			self.persistence_status = 5;
+		}
+	}
+
 	fn form(&self) -> MytsForm {
 		let identity = self.identity();
+		let profile = self.saved.as_ref().map(|s| s.profile.clone()).unwrap_or_default();
+		let name = self
+			.saved
+			.as_ref()
+			.map(|s| if s.username.is_empty() { s.email.as_str() } else { s.username.as_str() })
+			.unwrap_or_default();
+		let strings = |items: Vec<String>| -> ModelRc<SharedString> {
+			ModelRc::new(VecModel::from(
+				items.into_iter().map(SharedString::from).collect::<Vec<_>>(),
+			))
+		};
 		MytsForm {
 			available: true,
 			prompt: self.prompt,
 			signed_in: self.signed_in,
+			// A saved session being checked: its profile shows, not the form.
+			restoring: !self.signed_in && self.busy && self.checking && self.saved.is_some(),
+			avatar: self.avatar.clone(),
+			initials: crate::vm::avatar::initials(name).into(),
+			description: profile.description.into(),
+			member_since: date(profile.registered).into(),
+			last_login: date(profile.last_login).into(),
+			badges: strings(profile.badges),
+			devices: strings(profile.devices),
 			email: self.saved.as_ref().map(|s| s.email.as_str()).unwrap_or_default().into(),
 			username: self.saved.as_ref().map(|s| s.username.as_str()).unwrap_or_default().into(),
 			uuid: self.saved.as_ref().map(|s| s.uuid.as_str()).unwrap_or_default().into(),
@@ -143,6 +300,7 @@ impl Account {
 		}
 		self.generation += 1;
 		self.busy = true;
+		self.checking = false;
 		self.status = 0;
 		Some(self.generation)
 	}
@@ -152,12 +310,14 @@ impl Account {
 			return false;
 		}
 		self.busy = false;
+		self.checking = false;
 		true
 	}
 
 	fn forget(&mut self, secrets: &dyn Secrets) -> bool {
 		self.generation += 1;
 		self.busy = false;
+		self.checking = false;
 		self.signed_in = false;
 		self.prompt = true;
 		self.saved = None;
@@ -166,6 +326,7 @@ impl Account {
 		let cleared = secrets.delete(KEY).is_ok();
 		self.persistence_status = if cleared { 0 } else { 8 };
 		self.can_forget = !cleared;
+		self.forget_avatar();
 		cleared
 	}
 }
@@ -238,13 +399,66 @@ impl App {
 			self.refresh_myts();
 			return;
 		}
-		self.myts.prompt = true;
+		self.myts.load(self.secrets.as_ref());
+		// Signed in before: no login page. The saved session is checked in
+		// the background, and only one that has expired asks again. Without
+		// one, the page shows unless "Continue without an account" was
+		// chosen before.
+		self.myts.prompt = self.myts.saved.is_none() && !self.settings.skip_account_prompt;
 		self.myts_retry();
 	}
 
 	pub(crate) fn myts_dismiss(&mut self) {
 		self.myts.prompt = false;
+		if !self.demo_ui && !self.settings.skip_account_prompt {
+			self.settings.skip_account_prompt = true;
+			self.store_settings();
+		}
 		self.refresh_myts();
+	}
+
+	/// Ask the account service for the profile and avatar of the signed-in
+	/// account; what comes back is stored and shown.
+	fn refresh_myts_profile(&self) {
+		let Some(token) =
+			self.myts.saved.as_ref().and_then(|s| SessionToken::new(s.session.clone()).ok())
+		else {
+			return;
+		};
+		let shown = self.myts.saved.as_ref().map(|s| s.profile.avatar.clone()).unwrap_or_default();
+		let has_picture = self.myts.avatar.size().width > 0;
+		let generation = self.myts.generation;
+		self.runtime.spawn(async move {
+			let client = match Client::new() {
+				Ok(client) => client,
+				Err(error) => return tracing::debug!(%error, "no account client"),
+			};
+			let profile = match client.profile(&token).await {
+				Ok(profile) => profile,
+				Err(error) => return tracing::info!(%error, "account profile not refreshed"),
+			};
+			let avatar = profile.avatars.first().cloned();
+			later(move |app| {
+				if app.myts.generation == generation && app.myts.signed_in {
+					app.myts.take_profile(app.secrets.as_ref(), &profile);
+					app.refresh_myts();
+				}
+			});
+			// The picture only when it changed (or was never fetched).
+			let Some(name) = avatar.filter(|name| *name != shown || !has_picture) else { return };
+			match client.avatar(&name).await {
+				Ok(bytes) => later(move |app| {
+					if app.myts.generation == generation && app.myts.signed_in {
+						app.myts.set_avatar(name, &bytes);
+						if let Some(saved) = app.myts.saved.as_ref() {
+							let _ = save(app.secrets.as_ref(), saved);
+						}
+						app.refresh_myts();
+					}
+				}),
+				Err(error) => tracing::info!(%error, "account avatar not fetched"),
+			}
+		});
 	}
 
 	pub(crate) fn myts_portal(&mut self, action: i32) {
@@ -269,6 +483,7 @@ impl App {
 		};
 		let token = SessionToken::new(saved.session.clone()).expect("validated stored token");
 		let generation = self.myts.begin().expect("startup is idle");
+		self.myts.checking = true;
 		self.refresh_myts();
 		self.runtime.spawn(async move {
 			// Password login does not provide the separate auth token required
@@ -280,7 +495,10 @@ impl App {
 				}
 				let was_signed_in = app.myts.signed_in;
 				match result {
-					Ok(()) => app.myts.restored(),
+					Ok(()) => {
+						app.myts.restored();
+						app.refresh_myts_profile();
+					}
 					Err(error) => {
 						app.myts.otp_required =
 							error.is_otp_required() || error.status_code() == Some(209);
@@ -288,6 +506,8 @@ impl App {
 						if error.is_invalid_session() {
 							app.myts.signed_in = false;
 							app.myts.status = 15;
+							// Expired: ask to sign in again.
+							app.myts.prompt = true;
 						}
 					}
 				}
@@ -331,6 +551,11 @@ impl App {
 					Ok(login) => {
 						app.myts.accept(app.secrets.as_ref(), login, email.trim().to_owned());
 						app.publish_myts_identity();
+						if app.settings.skip_account_prompt {
+							app.settings.skip_account_prompt = false;
+							app.store_settings();
+						}
+						app.refresh_myts_profile();
 					}
 					Err(error) => {
 						app.myts.otp_required =
@@ -398,6 +623,7 @@ impl App {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use slint::Model;
 	use voelin_store::MemorySecrets;
 
 	fn login(name: &str) -> Login {
@@ -406,6 +632,11 @@ mod tests {
 			uuid: format!("{name}-uuid"),
 			username: name.into(),
 			identity: Ok(server_identity()),
+			profile: Profile {
+				description: format!("{name}'s profile"),
+				avatars: vec![format!("{name}.png")],
+				..Default::default()
+			},
 			renewal: Some(voelin_myts::Renewal {
 				token: format!("{name}-renewal"),
 				otp_token: format!("{name}-otp"),
@@ -599,6 +830,59 @@ mod tests {
 	}
 
 	#[test]
+	fn a_saved_session_being_checked_shows_its_profile_not_the_form() {
+		let secrets = MemorySecrets::default();
+		let mut account = Account::default();
+		account.accept(&secrets, login("Alice"), "alice@example.test".into());
+		assert_eq!(account.form().description, "Alice's profile");
+		let mut restarted = Account { prompt: true, ..Default::default() };
+		restarted.load(&secrets);
+		restarted.begin().unwrap();
+		restarted.checking = true;
+		let form = restarted.form();
+		assert!(form.restoring && !form.signed_in);
+		assert_eq!((form.username.as_str(), form.initials.as_str()), ("Alice", "AL"));
+		// A password sign-in over an expired saved session shows the form.
+		restarted.finish(restarted.generation);
+		restarted.begin().unwrap();
+		assert!(!restarted.form().restoring);
+	}
+
+	#[test]
+	fn the_service_profile_is_kept_and_another_account_starts_empty() {
+		let secrets = MemorySecrets::default();
+		let mut account = Account::default();
+		account.accept(&secrets, login("Alice"), "alice@example.test".into());
+		let profile = Profile {
+			username: "Alice B".into(),
+			registered: 1_600_000_000,
+			badges: vec![voelin_myts::Badge { name: "Early".into(), ..Default::default() }],
+			devices: vec![voelin_myts::Device {
+				name: "Voelin".into(),
+				region: "EU".into(),
+				last_login: 0,
+			}],
+			..Default::default()
+		};
+		account.take_profile(&secrets, &profile);
+		let saved = read_saved(&secrets).unwrap().unwrap();
+		assert_eq!(saved.username, "Alice B");
+		assert_eq!(saved.profile.registered, 1_600_000_000);
+		assert_eq!(saved.profile.badges, ["Early"]);
+		assert_eq!(saved.profile.devices, ["Voelin · EU"]);
+		assert_eq!(saved.profile.description, "Alice's profile", "kept: not in this reply");
+		let form = account.form();
+		assert_eq!(form.member_since, date(1_600_000_000));
+		assert_eq!(form.badges.row_count(), 1);
+		// The same account signing in again keeps it, another one does not.
+		account.accept(&secrets, login("Alice"), "alice@example.test".into());
+		assert_eq!(account.saved.as_ref().unwrap().profile.registered, 1_600_000_000);
+		account.accept(&secrets, login("Bob"), "bob@example.test".into());
+		let bob = &account.saved.as_ref().unwrap().profile;
+		assert_eq!((bob.registered, bob.description.as_str()), (0, "Bob's profile"));
+	}
+
+	#[test]
 	fn form_exposes_signed_out_busy_otp_and_signed_in_states_without_tokens() {
 		let mut account = Account::default();
 		assert!(account.form().available);
@@ -639,6 +923,7 @@ mod tests {
 			otp_token: "otp renewal".into(),
 			uuid: "account-uuid".into(),
 			identity: Some(server_identity()),
+			profile: SavedProfile { description: "Hi".into(), ..Default::default() },
 		};
 		assert!(save(&secrets, &saved));
 		let loaded = read_saved(&secrets).unwrap().unwrap();

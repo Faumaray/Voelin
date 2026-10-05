@@ -134,7 +134,8 @@ pub struct ConnectArgs {
 	/// Identity file. Without it a temporary identity is generated.
 	#[arg(long, env = "VOELINCTL_IDENTITY")]
 	identity: Option<PathBuf>,
-	/// Signed client version: `default`, an index or `<platform>@<version>` from `voelinctl versions`.
+	/// Signed client version: `default` (the newest signed 6.x build of this OS), `generic`
+	/// (3.?.?), an index or `<platform>@<version>` from `voelinctl versions`.
 	#[arg(long, default_value = "default")]
 	client_version: String,
 	/// Server password.

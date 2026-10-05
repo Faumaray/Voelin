@@ -2,10 +2,10 @@
 //! server card and the channel tree.
 
 use slint::{ComponentHandle, SharedString};
-use tracing::warn;
+use tracing::{info, warn};
 use voelin_core::identity::LaunchImport;
 use voelin_core::{Command, ObserveState, Source, VoiceOptions, VoiceState};
-use voelin_store::{Bookmark, QueryConfig, QueryTransport};
+use voelin_store::{Bookmark, QueryTransport};
 
 use crate::app::{App, BookmarkForm, Bridge, SessionView, later};
 use crate::vm;
@@ -35,7 +35,9 @@ pub(crate) fn imported_status(report: &LaunchImport) -> Option<String> {
 /// like the identity, the default channel or the client version, stays; a
 /// new server has none of it). Only the address is needed: the name is the
 /// address until the server tells its own (`adopt_server_name`), the
-/// nickname `default_nickname`, the gateway is looked up later.
+/// nickname `default_nickname`, the gateway is looked up in DNS
+/// (`discover_gateway`). A new address drops the gateway and the query
+/// login found or set for the old one.
 fn bookmark_from_form(
 	old: Option<&Bookmark>,
 	form: &BookmarkForm,
@@ -46,6 +48,8 @@ fn bookmark_from_form(
 	bookmark.address = form.address.trim().to_string();
 	if old.is_some_and(|old| old.address != bookmark.address) {
 		bookmark.cached_server_icon = None;
+		bookmark.gateway_url = None;
+		bookmark.query = None;
 	}
 	bookmark.name = match form.name.trim() {
 		"" => bookmark.address.clone(),
@@ -54,35 +58,6 @@ fn bookmark_from_form(
 	bookmark.nickname = match form.nickname.trim() {
 		"" => default_nickname(),
 		nickname => nickname.to_string(),
-	};
-	bookmark.gateway_url = Some(form.gateway_url.trim().to_string()).filter(|u| !u.is_empty());
-	bookmark.query = match form.query_transport.as_str() {
-		"none" | "" => None,
-		t => {
-			let (host, port) = form
-				.query_addr
-				.rsplit_once(':')
-				.map_or((form.query_addr.to_string(), None), |(h, p)| {
-					(h.to_string(), p.parse().ok())
-				});
-			let transport = match t {
-				"raw" => QueryTransport::Raw,
-				"http" => QueryTransport::Http,
-				_ => QueryTransport::Ssh,
-			};
-			let default_port = match transport {
-				QueryTransport::Raw => 10011,
-				QueryTransport::Ssh => 10022,
-				QueryTransport::Http => 10080,
-			};
-			Some(QueryConfig {
-				transport,
-				host,
-				port: port.unwrap_or(default_port),
-				user: form.query_user.to_string(),
-				server_port: bookmark.query.as_ref().and_then(|q| q.server_port),
-			})
-		}
 	};
 	bookmark
 }
@@ -159,12 +134,16 @@ impl App {
 			.unwrap_or_else(|| "Voelin user".to_owned())
 	}
 
-	/// Look up the gateway of a server that has none in DNS
-	/// ([`voelin_core::discover`]); one found is kept as if typed.
-	pub(crate) fn discover_gateway(&self, id: i64) {
-		let Some(b) = self.bookmark(id).filter(|b| b.gateway_url.is_none() && !self.demo_ui) else {
+	/// Look up the gateway of a server ([`voelin_core::discover`]), once a
+	/// run: one found is kept as if typed, and takes the place of a stored
+	/// one that is no longer what the server publishes (a gateway that
+	/// moved, or one typed into an older version, which showed the field).
+	/// Nothing found keeps what is stored.
+	pub(crate) fn discover_gateway(&mut self, id: i64) {
+		if self.demo_ui || !self.gateways_looked_up.insert(id) {
 			return;
-		};
+		}
+		let Some(b) = self.bookmark(id) else { return };
 		let address = b.address.clone();
 		self.engine.runtime().spawn(async move {
 			if let Some(url) = voelin_core::discover::gateway(&address).await {
@@ -174,23 +153,32 @@ impl App {
 	}
 
 	/// A gateway was found for the server at `address`; it is kept unless
-	/// the server changed meanwhile.
+	/// the server changed meanwhile, and the server is observed through it
+	/// if it is the one shown. Users never hear of it (logged only).
 	fn gateway_found(&mut self, id: i64, address: &str, url: String) {
-		let Some(b) = self
-			.bookmarks
-			.iter_mut()
-			.find(|b| b.id == id && b.address == address && b.gateway_url.is_none())
-		else {
+		let Some(b) = self.bookmarks.iter_mut().find(|b| b.id == id && b.address == address) else {
 			return;
 		};
-		b.gateway_url = Some(url.clone());
-		let name = b.name.clone();
+		if b.gateway_url.as_deref() == Some(url.as_str()) {
+			return;
+		}
+		let previous = b.gateway_url.replace(url.clone());
 		if let Err(e) = self.store.update_bookmark(b) {
 			warn!(%e, "could not keep the gateway found");
 			return;
 		}
-		self.set_status(format!("Found the gateway of {name}: {url}"));
+		info!(server = %b.address, %url, ?previous, "gateway found");
 		self.refresh_toolbar();
+		// Observed through the old one: through this one now.
+		if previous.is_some() {
+			self.engine.send(Command::StopObserving { session: id as u64 });
+			if let Some(view) = self.sessions.get_mut(&id) {
+				view.state.observe = ObserveState::Off;
+			}
+		}
+		if self.current == Some(id) {
+			self.observe(id);
+		}
 	}
 
 	/// The server told its name: a server still named by its address takes
@@ -210,13 +198,19 @@ impl App {
 		self.refresh_toolbar();
 	}
 
-	pub(crate) fn toggle_observe(&mut self) {
-		let Some(b) = self.current.and_then(|id| self.bookmark(id)).cloned() else { return };
+	/// Observe the server invisibly, unless it is already: through its
+	/// gateway, else its own query login. Without either the gateway is
+	/// looked up first, and observing starts when it is found
+	/// (`gateway_found`).
+	pub(crate) fn observe(&mut self, id: i64) {
+		let Some(b) = self.bookmark(id).cloned() else { return };
+		if self.demo_ui {
+			return;
+		}
 		let session = b.id as u64;
 		let observing =
 			self.sessions.get(&b.id).is_some_and(|v| v.state.observe != ObserveState::Off);
 		if observing {
-			self.engine.send(Command::StopObserving { session });
 			return;
 		}
 		if let Some(url) = &b.gateway_url {
@@ -225,6 +219,8 @@ impl App {
 				url: url.clone(),
 				identity: Box::new(self.identity_for(Some(b.id))),
 			});
+			// Still the one the server publishes?
+			self.discover_gateway(b.id);
 		} else if let Some(q) = &b.query {
 			let secret = self.secrets.get(&b.query_password_key()).ok().flatten();
 			let transport = match q.transport {
@@ -242,13 +238,18 @@ impl App {
 				line: Default::default(),
 			};
 			self.engine.send(Command::ObserveQuery { session, connect: Box::new(connect) });
+		} else {
+			self.discover_gateway(b.id);
+			return;
 		}
 		self.set_status("Observing invisibly…");
 	}
 
+	/// Show a server, and observe it.
 	pub(crate) fn select_server(&mut self, id: i64) {
 		self.current = Some(id);
 		self.refresh_all();
+		self.observe(id);
 	}
 
 	pub(crate) fn bookmark_form(&self, id: i64) -> BookmarkForm {
@@ -256,25 +257,11 @@ impl App {
 			return BookmarkForm {
 				id: -1,
 				nickname: self.default_nickname().into(),
-				query_transport: "none".into(),
-				query_user: "serveradmin".into(),
 				..Default::default()
 			};
 		};
 		let secret = |key: String| -> SharedString {
 			self.secrets.get(&key).ok().flatten().unwrap_or_default().into()
-		};
-		let (transport, addr, user) = match &b.query {
-			Some(q) => (
-				match q.transport {
-					QueryTransport::Raw => "raw",
-					QueryTransport::Ssh => "ssh",
-					QueryTransport::Http => "http",
-				},
-				format!("{}:{}", q.host, q.port),
-				q.user.clone(),
-			),
-			None => ("none", String::new(), "serveradmin".to_string()),
 		};
 		BookmarkForm {
 			id: b.id as i32,
@@ -283,17 +270,12 @@ impl App {
 			address: b.address.clone().into(),
 			nickname: b.nickname.clone().into(),
 			server_password: secret(b.server_password_key()),
-			gateway_url: b.gateway_url.clone().unwrap_or_default().into(),
-			query_transport: transport.into(),
-			query_addr: addr.into(),
-			query_user: user.into(),
-			query_password: secret(b.query_password_key()),
 		}
 	}
 
 	pub(crate) fn save_bookmark(&mut self, form: BookmarkForm) {
-		let mut bookmark =
-			bookmark_from_form(self.bookmark(form.id as i64), &form, || self.default_nickname());
+		let old = self.bookmark(form.id as i64).cloned();
+		let mut bookmark = bookmark_from_form(old.as_ref(), &form, || self.default_nickname());
 		let result = if bookmark.id < 0 {
 			self.store.add_bookmark(&bookmark).map(|id| bookmark.id = id)
 		} else {
@@ -303,23 +285,29 @@ impl App {
 			self.set_status(format!("Could not save: {e}"));
 			return;
 		}
-		for (key, value) in [
-			(bookmark.server_password_key(), &form.server_password),
-			(bookmark.query_password_key(), &form.query_password),
-		] {
-			let result = if value.is_empty() {
-				self.secrets.delete(&key)
-			} else {
-				self.secrets.set(&key, value)
-			};
-			if let Err(e) = result {
-				warn!(%e, "could not store secret");
+		let key = bookmark.server_password_key();
+		let result = if form.server_password.is_empty() {
+			self.secrets.delete(&key)
+		} else {
+			self.secrets.set(&key, &form.server_password)
+		};
+		if let Err(e) = result {
+			warn!(%e, "could not store secret");
+		}
+		// Another server: what was observed is the old one's, and its
+		// gateway is looked up anew.
+		if let Some(old) = old.filter(|old| old.address != bookmark.address) {
+			if old.query.is_some() {
+				let _ = self.secrets.delete(&old.query_password_key());
+			}
+			self.gateways_looked_up.remove(&bookmark.id);
+			self.engine.send(Command::StopObserving { session: bookmark.id as u64 });
+			if let Some(view) = self.sessions.get_mut(&bookmark.id) {
+				view.state.observe = ObserveState::Off;
 			}
 		}
-		self.current = Some(bookmark.id);
 		self.bookmarks = self.store.bookmarks().unwrap_or_default();
-		self.refresh_all();
-		self.discover_gateway(bookmark.id);
+		self.select_server(bookmark.id);
 	}
 
 	pub(crate) fn delete_bookmark(&mut self, id: i64) {
@@ -330,6 +318,7 @@ impl App {
 		}
 		let _ = self.store.delete_bookmark(id);
 		self.sessions.remove(&id);
+		self.gateways_looked_up.remove(&id);
 		self.bookmarks = self.store.bookmarks().unwrap_or_default();
 		self.current = self.bookmarks.first().map(|b| b.id);
 		self.refresh_all();
@@ -436,9 +425,6 @@ impl App {
 		bridge.set_voice_connected(state.voice == VoiceState::Connected);
 		bridge.set_voice_connecting(state.voice == VoiceState::Connecting);
 		bridge.set_observing(state.observe != ObserveState::Off);
-		bridge.set_can_observe(
-			bookmark.is_some_and(|b| b.gateway_url.is_some() || b.query.is_some()),
-		);
 		bridge.set_input_muted(state.input_muted);
 		bridge.set_output_muted(state.output_muted);
 		bridge.set_transmitting(state.transmitting);
@@ -558,6 +544,7 @@ mod tests {
 	use voelin_core::identity::Found;
 
 	use super::*;
+	use voelin_store::QueryConfig;
 
 	#[test]
 	fn edited_server_rejects_queued_icons_and_failed_reconnect_keeps_them_hidden() {
@@ -600,12 +587,8 @@ mod tests {
 
 	#[test]
 	fn the_address_alone_makes_a_server() {
-		let form = BookmarkForm {
-			id: -1,
-			address: " ts.example.test ".into(),
-			query_transport: "none".into(),
-			..Default::default()
-		};
+		let form =
+			BookmarkForm { id: -1, address: " ts.example.test ".into(), ..Default::default() };
 		let b = bookmark_from_form(None, &form, || "Nick".into());
 		assert_eq!((b.address.as_str(), b.name.as_str()), ("ts.example.test", "ts.example.test"));
 		assert_eq!(b.nickname, "Nick");
@@ -632,31 +615,27 @@ mod tests {
 				id: 1234,
 			}),
 		};
-		let form = BookmarkForm {
+		// Same address: the gateway found and the query login stay.
+		let same = BookmarkForm {
 			id: 7,
 			name: "Mine".into(),
-			address: "new.example.test:9988".into(),
+			address: "old.example.test".into(),
 			nickname: "Other".into(),
-			// Cleared: looked up again.
-			gateway_url: "".into(),
-			query_transport: "raw".into(),
-			query_addr: "q.example.test".into(),
-			query_user: "serveradmin".into(),
 			..Default::default()
 		};
-		let b = bookmark_from_form(Some(&old), &form, || unreachable!("a nickname was given"));
+		let b = bookmark_from_form(Some(&old), &same, || unreachable!("a nickname was given"));
 		assert_eq!((b.id, b.name.as_str(), b.nickname.as_str()), (7, "Mine", "Other"));
+		assert_eq!(b.gateway_url, old.gateway_url);
+		assert_eq!(b.query, old.query);
+		assert_eq!(b.cached_server_icon, old.cached_server_icon);
+		// Another address: looked up again, for the new server.
+		let form = BookmarkForm { address: "new.example.test:9988".into(), ..same };
+		let b = bookmark_from_form(Some(&old), &form, || unreachable!("a nickname was given"));
 		assert_eq!(b.address, "new.example.test:9988");
 		assert!(b.cached_server_icon.is_none());
 		assert_eq!((b.identity, b.default_channel), (Some(2), Some("Lobby/Sub".into())));
 		assert_eq!(b.client_version.as_deref(), Some("linux"));
-		assert_eq!(b.gateway_url, None);
-		let q = b.query.unwrap();
-		assert_eq!(
-			(q.transport, q.host.as_str(), q.port),
-			(QueryTransport::Raw, "q.example.test", 10011)
-		);
-		assert_eq!(q.server_port, Some(9988));
+		assert_eq!((b.gateway_url, b.query), (None, None));
 	}
 
 	#[test]

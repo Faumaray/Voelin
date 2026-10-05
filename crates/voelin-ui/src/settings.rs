@@ -268,6 +268,9 @@ pub struct UiSettings {
 	pub share: ShareDefaults,
 	/// Write crash reports to disk (opt-in; never uploaded).
 	pub crash_reports: bool,
+	/// "Continue without an account" was chosen on the login page: it does
+	/// not show at start any more (signing in clears it).
+	pub skip_account_prompt: bool,
 }
 
 impl Default for UiSettings {
@@ -279,6 +282,7 @@ impl Default for UiSettings {
 			portal_restore_token: None,
 			share: ShareDefaults::default(),
 			crash_reports: false,
+			skip_account_prompt: false,
 		}
 	}
 }

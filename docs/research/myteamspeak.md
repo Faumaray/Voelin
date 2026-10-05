@@ -84,11 +84,43 @@ are stored together as a single `myts/session` item through the app's secret
 store, never in plaintext settings. Replacing one item prevents a partial write
 from mixing credentials from different accounts. The bundle also stores the
 account UUID, username and email, with backward-compatible defaults for older
-bundles. Startup validates a saved session before showing its profile as signed
-in. A valid session closes the login page; errors leave retry and manual sign-in
-available. Transport failures retain saved credentials. A locked keyring can be
-retried without restarting. Continue without an account dismisses the prompt
-for the current run and leaves server features available.
+bundles. With a saved session the login page does not open at all: startup
+validates the session in the background (Settings → My Account shows the saved
+profile as "Checking session…" meanwhile) and only an expired session brings
+the page back. Errors leave retry and manual sign-in available. Transport
+failures retain saved credentials. A locked keyring can be retried without
+restarting. Continue without an account dismisses the page and is remembered
+(`ui.skip_account_prompt`), so it does not ask at the next start; signing in
+clears that.
+
+### Profile and avatar
+
+After a sign-in or a validated saved session the app asks the user service,
+`https://clientapi.myteamspeak.com/user` (the route string is in the TS6
+client next to `/authentication` and `/session`), for `getAccountData` with the
+basic info, avatars, description, badges and authenticated devices, and shows
+them in Settings → My Account (and the avatar in the sidebar's profile when
+the server has none for us). An avatar's file name (the "online" one first)
+is its download link: it is fetched as it is with a plain GET, HTTPS only, at
+most 4 MiB, and kept in `<data>/account/avatar` for the next start; it is
+fetched again only when the name changes. The login response's own avatar
+file names and description are used until then. What is kept goes into the
+same secret-store bundle as the session (`profile`), never the token into a
+URL.
+
+`requestAvatarSignedUrl` is not a download call: it signs *upload* links.
+In the TS6 6.0.0-beta4.1 Linux client, `Account_Manager_Impl::
+request_avatar_signed_urls`'s reply goes only to `upload_avatar`, whose
+upload (`Cloud_Sync_Impl::upload_avatar_to_intermediate_bucket`) is an
+`http_v2::Http_Client::put`, followed by `requestUploadAvatar`. The client's
+own avatar comes from `MyTeamSpeak::Account::request_own_myts_avatar`
+(0x1ae1a50): it parses the stored `AvatarData` and hands each map entry's
+state and name, unchanged, to `Avatar_Cache::request_avatar_from_urls`
+(0x12d6e20), which passes the name as the URL to `Http_Client::get` with an
+empty header list (0x12d78c1). An early Voelin fetched the signed link with
+a GET instead and was refused with HTTP 403 by the live service; a refused
+download is now logged as "avatar download returned HTTP …", apart from
+the account service's errors.
 
 Sign-out returns to login, clears local account material and attempts remote
 session deletion; storage or remote errors are reported. A late completion
@@ -131,7 +163,7 @@ The main account is shared by all voice connections. Each new connection signs
 its own challenge. Account changes cancel an unfinished handshake; connected
 clients send `updatemytsid`, and logout sends an empty myTS ID. Rejected or
 unanswered account updates disconnect rather than retaining a previous account
-association. Cloud avatar retrieval is outside this branch.
+association.
 
 Static TS3 evidence in the binary identified above: proof helper `0x1018580`,
 `clientinit` invocation `0x1020c3b`, live update `0x1049659`, scalar signing
@@ -163,7 +195,11 @@ sizes using synthetic account data.
 ### Client reporting
 
 The voice engine chooses an unchanged signed compatibility tuple for the
-actual operating system. A bookmark's explicit compatibility-version override
+actual operating system: the newest TeamSpeak 6 client build signed for it
+(`6.0.0-beta4.1 [Build: 1779880475]` on Linux, captured from the official
+Linux client's `clientinit`; `6.0.0-beta2` on Windows, from upstream
+tsdeclarations), else the generic `3.?.? [Build: 5680278000]`. Every row of
+`Versions.csv` verifies against TeamSpeak's version-signing key. A bookmark's explicit compatibility-version override
 is honored and validated. `client_meta_data` identifies `Voelin`, its package
 version and native OS. The CLI uses the same catalogue and native default.
 TeamSpeak signs compatibility versions: replacing the signed version with an

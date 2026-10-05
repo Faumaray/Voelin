@@ -21,6 +21,13 @@
 #                     x86_64-pc-windows-gnu (default: none, target/release)
 #   MAKENSIS          the NSIS compiler (default: makensis on PATH, then the
 #                     default install location on Windows)
+#   FFMPEG_DLL_DIR    FFmpeg's DLLs for the Windows packages, from
+#                     scripts/fetch-ffmpeg-windows.sh (default: none; the
+#                     packages then have no FFmpeg)
+#
+# The Linux .tar.gz carries libvpx and libdav1d (lib/, found through the
+# binary's RUNPATH, set with patchelf) and bin/voelin-install-deps for what
+# the system provides; the .deb depends on and recommends the system's.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -83,6 +90,25 @@ make_deb() {
 	files+=("${pkg}_${ver}_$deb_arch.deb")
 }
 
+# Libraries of <exe> whose sonames differ between distributions (libvpx 7
+# to 11, libdav1d 6 and 7), copied into <dir>; <exe> then finds them there
+# (RUNPATH $ORIGIN/../lib) and the system's other libraries as usual.
+bundle_libs() {
+	local exe=$1 dir=$2 lib path
+	if ! command -v patchelf >/dev/null; then
+		echo "patchelf not found: the .tar.gz uses the system's libvpx and libdav1d" >&2
+		return
+	fi
+	mkdir -p "$dir"
+	while read -r lib path; do
+		case $lib in
+			libvpx.so.* | libdav1d.so.*) install -m644 "$path" "$dir/$lib" ;;
+		esac
+	done < <(ldd "$exe" | awk '$2 == "=>" && $3 ~ /^\// { print $1, $3 }')
+	# shellcheck disable=SC2016 # $ORIGIN is for the dynamic linker.
+	patchelf --set-rpath '$ORIGIN/../lib' "$exe"
+}
+
 package_linux() {
 	local bin=$target_dir/release arch name stage root gw_version
 	arch=$(uname -m)
@@ -92,11 +118,12 @@ package_linux() {
 	# `tar -xzf … --strip-components=1 -C ~/.local`.
 	name=voelin-$version-linux-$arch
 	stage=$tmp/$name
-	install -Dm755 "$bin/voelin" -t "$stage/bin"
+	install -Dm755 "$bin/voelin" packaging/linux/voelin-install-deps -t "$stage/bin"
 	install -Dm644 packaging/linux/$app_id.desktop -t "$stage/share/applications"
 	install -Dm644 packaging/linux/$app_id.metainfo.xml -t "$stage/share/metainfo"
 	install -Dm644 packaging/linux/$app_id.svg -t "$stage/share/icons/hicolor/scalable/apps"
 	install -Dm644 THIRD_PARTY_NOTICES.md -t "$stage/share/doc/voelin"
+	bundle_libs "$stage/bin/voelin" "$stage/lib"
 	tar -C "$tmp" -czf "$out/$name.tar.gz" "$name"
 	files+=("$name.tar.gz")
 
@@ -118,8 +145,10 @@ package_linux() {
 	install -Dm644 packaging/linux/$app_id.svg -t "$root/usr/share/icons/hicolor/scalable/apps"
 	install -Dm644 THIRD_PARTY_NOTICES.md -t "$root/usr/share/doc/voelin"
 	# libxkbcommon, Wayland/X11 and EGL are loaded at run time (dlopen), so
-	# dpkg-shlibdeps cannot see them.
-	deb_extra="Recommends: libwayland-client0, libwayland-cursor0, libxkbcommon-x11-0, libx11-xcb1, libxcursor1, libxi6, libxrandr2, libegl1" \
+	# dpkg-shlibdeps cannot see them; neither FFmpeg (hardware and extra
+	# encoders and decoders) and libva (GPU colour conversion), nor what
+	# screen sharing, Wayland hotkeys and saved passwords talk to.
+	deb_extra="Recommends: libwayland-client0, libwayland-cursor0, libxkbcommon-x11-0, libx11-xcb1, libxcursor1, libxi6, libxrandr2, libegl1, libavcodec61 | libavcodec60 | libavcodec59 | libavcodec-extra, libavformat61 | libavformat60 | libavformat59, libva2, libva-drm2, mesa-va-drivers | va-driver-all | intel-media-va-driver, pipewire, xdg-desktop-portal, gnome-keyring | kwalletmanager | keepassxc" \
 		make_deb voelin "$version" libxkbcommon0 \
 		"Voelin, a TeamSpeak 3 and 6 client" \
 		"Desktop client for TeamSpeak 3 and TeamSpeak 6 servers: voice, chat," \
@@ -149,6 +178,14 @@ package_windows() {
 	stage=$tmp/$name
 	mkdir -p "$stage"
 	cp "$bin/voelin.exe" THIRD_PARTY_NOTICES.md "$stage/"
+	# FFmpeg's DLLs next to voelin.exe, where the app looks for them first.
+	local ffmpeg=()
+	if [[ -n ${FFMPEG_DLL_DIR:-} ]]; then
+		cp "$FFMPEG_DLL_DIR"/*.dll "$FFMPEG_DLL_DIR"/FFMPEG-*.txt "$stage/"
+		ffmpeg=(-DFFMPEG="$(native_path "$(cd "$FFMPEG_DLL_DIR" && pwd)")")
+	else
+		echo "FFMPEG_DLL_DIR not set: the Windows packages have no FFmpeg" >&2
+	fi
 	if command -v zip >/dev/null; then
 		(cd "$tmp" && zip -qr "$out/$name.zip" "$name")
 	elif command -v 7z >/dev/null; then
@@ -169,7 +206,7 @@ package_windows() {
 	fi
 	# Absolute paths: makensis changes into the script's directory.
 	"$makensis" -V2 -DVERSION="$version" -DVERSION_NUMERIC="${version%%-*}" \
-		-DOUTDIR="$(native_path "$out")" \
+		-DOUTDIR="$(native_path "$out")" "${ffmpeg[@]}" \
 		-DBINARY="$(native_path "$(cd "$bin" && pwd)/voelin.exe")" packaging/windows/installer.nsi
 	files+=("voelin-$version-setup.exe")
 }

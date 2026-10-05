@@ -319,7 +319,7 @@ export component EventsPage inherits VerticalLayout {
         }
     }
     if !Bridge.has-events: Banner {
-        text: @tr("This server's gateway does not keep events (or there is no gateway).");
+        text: @tr("This server does not keep events.");
         icon: Icons.info;
         tone: Theme.info;
     }

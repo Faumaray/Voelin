@@ -160,7 +160,11 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 			with_app(|app| app.connect_voice());
 		}
 		Some("observe") => {
-			with_app(|app| app.toggle_observe());
+			with_app(|app| {
+				if let Some(id) = app.current {
+					app.observe(id);
+				}
+			});
 		}
 		_ => {}
 	}
@@ -180,6 +184,18 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 					account.uuid = "00000000-0000-0000-0000-000000000001".into();
 					account.myts_id = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB".into();
 					account.identity_status = 1;
+					account.initials = "AE".into();
+					account.description = "Usually in the Raid channel after 8.".into();
+					account.member_since = "2019-03-14".into();
+					account.last_login = "2026-10-03".into();
+					let strings = |items: &[&str]| {
+						slint::ModelRc::new(slint::VecModel::from(
+							items.iter().map(|s| slint::SharedString::from(*s)).collect::<Vec<_>>(),
+						))
+					};
+					account.badges = strings(&["TeamSpeak 6 Beta", "Early supporter"]);
+					account.devices =
+						strings(&["Voelin · EU · 2026-10-03", "TeamSpeak · EU · 2026-09-28"]);
 					nav.invoke_open_settings(SettingsSection::Account);
 				}
 				account.otp_required = arg == "otp";

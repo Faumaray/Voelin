@@ -1,0 +1,42 @@
+#!/bin/sh
+# Install what Voelin loads at run time from the system, for the .tar.gz
+# (the .deb and the Flatpak get them on their own): FFmpeg (hardware and
+# extra encoders and decoders), VA-API drivers, PipeWire and the desktop
+# portal (screen sharing, push-to-talk on Wayland), the Secret Service
+# (saved passwords). libvpx and libdav1d come with the archive (lib/).
+#
+#   voelin-install-deps [--dry-run]
+#
+# Uses apt, dnf, pacman or zypper through sudo (unless run as root).
+set -eu
+
+dry=
+[ "${1:-}" = "--dry-run" ] && dry=echo
+sudo=
+[ "$(id -u)" -eq 0 ] || sudo=sudo
+
+run() {
+	echo "+ $*"
+	[ -n "$dry" ] || $sudo "$@"
+}
+
+if command -v apt-get >/dev/null 2>&1; then
+	# ffmpeg pulls in the libav* libraries of the release.
+	run apt-get update
+	run apt-get install -y ffmpeg libva2 libva-drm2 mesa-va-drivers pipewire xdg-desktop-portal \
+		gnome-keyring libegl1 libxkbcommon-x11-0
+elif command -v dnf >/dev/null 2>&1; then
+	# Fedora's ffmpeg-free; RPM Fusion's ffmpeg adds H.264/HEVC encoders.
+	run dnf install -y ffmpeg-free libva mesa-va-drivers pipewire xdg-desktop-portal gnome-keyring \
+		libxkbcommon-x11
+elif command -v pacman >/dev/null 2>&1; then
+	run pacman -S --needed --noconfirm ffmpeg libva mesa pipewire xdg-desktop-portal gnome-keyring \
+		libxkbcommon-x11
+elif command -v zypper >/dev/null 2>&1; then
+	run zypper --non-interactive install ffmpeg libva2 Mesa-dri pipewire xdg-desktop-portal \
+		gnome-keyring libxkbcommon-x11-0
+else
+	echo "No apt, dnf, pacman or zypper: install FFmpeg (libavcodec), VA-API drivers," >&2
+	echo "PipeWire, xdg-desktop-portal and a Secret Service keyring with your package manager." >&2
+	exit 1
+fi

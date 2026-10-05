@@ -1,12 +1,13 @@
 name: System dependencies
 description: >
   Native libraries and tools the workspace builds against: apt packages on
-  Linux; NASM and libvpx (vcpkg, cached) on Windows, exporting VPX_LIB_DIR,
-  VPX_INCLUDE_DIR, VPX_VERSION and VPX_STATIC for libvpx-native-sys.
+  Linux; NASM, libvpx and dav1d (vcpkg, cached) on Windows, exporting
+  VPX_LIB_DIR, VPX_INCLUDE_DIR, VPX_VERSION and VPX_STATIC for
+  libvpx-native-sys and SYSTEM_DEPS_DAV1D_* for dav1d-sys.
 
 inputs:
   vpx-triplet:
-    description: vcpkg triplet for libvpx on Windows (static library, dynamic CRT like Rust's default)
+    description: vcpkg triplet for libvpx and dav1d on Windows (static libraries, dynamic CRT like Rust's default)
     default: x64-windows-static-md
 
 runs:
@@ -47,8 +48,8 @@ runs:
       uses: actions/cache@v4
       with:
         path: ${{ runner.temp }}\vcpkg-archives
-        key: vcpkg-libvpx-${{ inputs.vpx-triplet }}-${{ steps.vcpkg.outputs.commit }}
-        restore-keys: vcpkg-libvpx-${{ inputs.vpx-triplet }}-
+        key: vcpkg-libvpx-dav1d-${{ inputs.vpx-triplet }}-${{ steps.vcpkg.outputs.commit }}
+        restore-keys: vcpkg-libvpx-dav1d-${{ inputs.vpx-triplet }}-
 
     - name: libvpx
       if: runner.os == 'Windows'
@@ -60,7 +61,7 @@ runs:
         $ErrorActionPreference = 'Stop'
         $vcpkg = Join-Path $env:VCPKG_INSTALLATION_ROOT 'vcpkg.exe'
         New-Item -ItemType Directory -Force (Join-Path $env:RUNNER_TEMP 'vcpkg-archives') | Out-Null
-        & $vcpkg install "libvpx:$env:TRIPLET"
+        & $vcpkg install "libvpx:$env:TRIPLET" "dav1d:$env:TRIPLET"
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
         # "libvpx:x64-windows-static-md   1.15.2#1   The reference ..."
@@ -85,3 +86,19 @@ runs:
         "VPX_VERSION=$version" >> $env:GITHUB_ENV
         "VPX_STATIC=1" >> $env:GITHUB_ENV
         Write-Host "libvpx $version from $libdir"
+
+        # dav1d-sys (AV1 decoding) through system-deps, without pkg-config:
+        # the static library, linked as dav1d.lib.
+        $davdir = Join-Path $root 'lib'
+        if (-not (Test-Path (Join-Path $davdir 'dav1d.lib'))) {
+          $lib = Get-ChildItem $davdir -Filter '*dav1d*.lib' | Select-Object -First 1
+          if (-not $lib) { Get-ChildItem $davdir; throw "no dav1d library in $davdir" }
+          $davdir = Join-Path $env:RUNNER_TEMP 'dav1d-lib'
+          New-Item -ItemType Directory -Force $davdir | Out-Null
+          Copy-Item $lib.FullName (Join-Path $davdir 'dav1d.lib')
+        }
+        "SYSTEM_DEPS_DAV1D_NO_PKG_CONFIG=1" >> $env:GITHUB_ENV
+        "SYSTEM_DEPS_DAV1D_SEARCH_NATIVE=$davdir" >> $env:GITHUB_ENV
+        "SYSTEM_DEPS_DAV1D_LIB=dav1d" >> $env:GITHUB_ENV
+        "SYSTEM_DEPS_DAV1D_LINK=static" >> $env:GITHUB_ENV
+        Write-Host "dav1d from $davdir"

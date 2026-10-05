@@ -25,6 +25,15 @@ use std::sync::Arc;
 use crate::frame::VideoFrame;
 use crate::{Error, Result};
 
+/// dav1d's threads with a frame delay of one (ours and FFmpeg's `libdav1d`):
+/// a quarter of the cores, 1 to 4. They wait on each other where cores are
+/// few (on 4 cores, 1080p: 211 fps on one thread, 155-166 on 3 or 4) and
+/// help where there are many (32 cores, 1440p: 412 fps on 8).
+#[cfg_attr(not(any(feature = "av1", feature = "ffmpeg")), allow(dead_code))]
+pub(crate) fn dav1d_threads() -> usize {
+	std::thread::available_parallelism().map_or(1, |n| (n.get() / 4).clamp(1, 4))
+}
+
 #[cfg(feature = "av1")]
 pub mod av1;
 #[cfg(feature = "openh264")]
@@ -1051,7 +1060,17 @@ mod tests {
 		assert!(codecs.new_decoder(Codec::H265).is_err());
 		#[cfg(feature = "vpx")]
 		{
-			assert_eq!(codecs.decoders()[..2], [Codec::Vp9, Codec::Vp8]);
+			// AV1 (dav1d, feature `av1`) comes first where it is built in.
+			let vpx: Vec<_> = codecs
+				.decoders()
+				.into_iter()
+				.filter(|c| matches!(c, Codec::Vp8 | Codec::Vp9))
+				.collect();
+			assert_eq!(vpx, [Codec::Vp9, Codec::Vp8]);
+			assert_eq!(
+				codecs.decoders()[0],
+				if cfg!(feature = "av1") { Codec::Av1 } else { Codec::Vp9 }
+			);
 			assert_eq!(codecs.encoder_codecs()[0], Codec::Vp8);
 			assert_eq!(codecs.pick_encoder(&[Codec::H264, Codec::Vp9]), Some(Codec::Vp9));
 			assert_eq!(codecs.pick_encoder(&[Codec::Vp8, Codec::Vp9]), Some(Codec::Vp8));

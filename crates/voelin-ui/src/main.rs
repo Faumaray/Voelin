@@ -5,14 +5,41 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use anyhow::Result;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{EnvFilter, Layer, fmt, prelude::*};
+use voelin_platform::logs;
+
+/// What the log file gets without `VOELIN_LOG`: our crates' information,
+/// everyone's warnings. zbus's warnings are left out: it warns when a desktop
+/// portal's request or session object is gone before it reads the object's
+/// properties, which is harmless; its errors stay.
+const FILE_FILTER: &str = "warn,zbus=error,voelin=info,voelin_ui=info,voelin_core=info,voelin_media=info,\
+	voelin_stream=info,voelin_audio=info,voelin_store=info,voelin_myts=info,voelin_observer=info,\
+	voelin_query=info,voelin_gateway_proto=info,voelin_platform=info,tsclientlib=info";
 
 fn main() -> Result<()> {
-	tracing_subscriber::fmt()
-		.with_env_filter(
-			EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+	// The terminal (RUST_LOG, warnings by default) and the log file in the
+	// state directory (VOELIN_LOG, `FILE_FILTER` by default): release builds
+	// on Windows have no terminal.
+	let file = logs::LogFile::open(logs::default_dir());
+	let console = fmt::layer().with_writer(std::io::stderr).with_filter(
+		EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,zbus=error")),
+	);
+	let to_file = file.as_ref().ok().map(|log| {
+		let log = log.clone();
+		fmt::layer().with_ansi(false).with_writer(move || log.clone()).with_filter(
+			EnvFilter::try_from_env("VOELIN_LOG").unwrap_or_else(|_| EnvFilter::new(FILE_FILTER)),
 		)
-		.init();
+	});
+	tracing_subscriber::registry().with(console).with(to_file).init();
+	match &file {
+		Ok(log) => tracing::info!(
+			version = env!("CARGO_PKG_VERSION"),
+			os = std::env::consts::OS,
+			log = %log.path().display(),
+			"Voelin starting"
+		),
+		Err(error) => tracing::warn!(%error, "no log file this time"),
+	}
 	let options = voelin_ui::RunOptions {
 		setting_overrides: setting_overrides(std::env::args().skip(1)),
 		..Default::default()

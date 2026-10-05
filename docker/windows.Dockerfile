@@ -11,13 +11,13 @@
 # on Windows 10 and 11. Unsigned, like CI's (signing: docs/release.md).
 
 FROM ubuntu:24.04 AS toolchain
-# Serial builds keep the generated Slint UI within the CI memory budget.
-ENV CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0
 ARG DEBIAN_FRONTEND=noninteractive
-# mingw-w64 (C compiler and linker), NASM (aws-lc and libvpx assembly), CMake
-# (the bundled libopus, aws-lc), NSIS (the installer), zip.
+# mingw-w64 (C compiler and linker), NASM (aws-lc, libvpx and dav1d
+# assembly), CMake (the bundled libopus, aws-lc), Meson and Ninja (dav1d),
+# NSIS (the installer), zip and unzip.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-		build-essential ca-certificates cmake curl git mingw-w64 nasm nsis perl pkg-config zip \
+		build-essential ca-certificates cmake curl git meson mingw-w64 nasm ninja-build nsis perl \
+		pkg-config unzip zip \
 	&& rm -rf /var/lib/apt/lists/* \
 	&& update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix \
 	&& update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
@@ -53,18 +53,49 @@ RUN git clone --quiet --depth 1 --branch "v$LIBVPX_VERSION" \
 	&& make -j"$(nproc)" && make install \
 	&& rm -rf /tmp/libvpx
 
+# dav1d (AV1 decoding) as a static mingw library (CI's Windows jobs take it
+# from vcpkg), from upstream's git at a pinned commit.
+FROM toolchain AS dav1d
+ARG DAV1D_VERSION=1.5.4
+ARG DAV1D_COMMIT=54706fc6bc0cdecab7e9593974a4039cc038fca7
+RUN git clone --quiet --depth 1 --branch "$DAV1D_VERSION" \
+		https://code.videolan.org/videolan/dav1d.git /tmp/dav1d \
+	&& test "$(git -C /tmp/dav1d rev-parse HEAD)" = "$DAV1D_COMMIT" \
+	&& printf '%s\n' \
+		"[binaries]" \
+		"c = 'x86_64-w64-mingw32-gcc'" \
+		"ar = 'x86_64-w64-mingw32-ar'" \
+		"strip = 'x86_64-w64-mingw32-strip'" \
+		"windres = 'x86_64-w64-mingw32-windres'" \
+		"[host_machine]" \
+		"system = 'windows'" \
+		"cpu_family = 'x86_64'" \
+		"cpu = 'x86_64'" \
+		"endian = 'little'" >/tmp/mingw.ini \
+	&& meson setup /tmp/dav1d/build /tmp/dav1d --cross-file /tmp/mingw.ini \
+		--prefix=/opt/dav1d --libdir=lib --buildtype=release -Ddefault_library=static \
+		-Denable_tools=false -Denable_tests=false -Denable_examples=false \
+	&& ninja -C /tmp/dav1d/build install \
+	&& rm -rf /tmp/dav1d
+
 FROM toolchain AS build
 COPY --from=libvpx /opt/libvpx /opt/libvpx
+COPY --from=dav1d /opt/dav1d /opt/dav1d
 ARG LIBVPX_VERSION=1.15.2
-# libvpx-native-sys: the library above, linked statically.
+# libvpx-native-sys: the library above, linked statically; dav1d-sys
+# through system-deps, without pkg-config.
 ENV VPX_LIB_DIR=/opt/libvpx/lib VPX_INCLUDE_DIR=/opt/libvpx/include \
-	VPX_VERSION=$LIBVPX_VERSION VPX_STATIC=1
+	VPX_VERSION=$LIBVPX_VERSION VPX_STATIC=1 \
+	SYSTEM_DEPS_DAV1D_NO_PKG_CONFIG=1 SYSTEM_DEPS_DAV1D_SEARCH_NATIVE=/opt/dav1d/lib \
+	SYSTEM_DEPS_DAV1D_LIB=dav1d SYSTEM_DEPS_DAV1D_LINK=static
 WORKDIR /src
 COPY . .
+# FFmpeg's LGPL DLLs go into the packages (scripts/fetch-ffmpeg-windows.sh).
 RUN --mount=type=cache,id=voelin-cargo-registry,target=/usr/local/cargo/registry \
 	--mount=type=cache,id=voelin-target-windows,target=/src/target \
 	cargo build --release --locked --target x86_64-pc-windows-gnu -p voelin-ui \
-	&& WINDOWS_TARGET=x86_64-pc-windows-gnu scripts/package.sh windows /out
+	&& scripts/fetch-ffmpeg-windows.sh /tmp/ffmpeg \
+	&& FFMPEG_DLL_DIR=/tmp/ffmpeg WINDOWS_TARGET=x86_64-pc-windows-gnu scripts/package.sh windows /out
 
 FROM scratch AS artifacts
 COPY --from=build /out /

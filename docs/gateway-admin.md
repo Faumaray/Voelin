@@ -15,7 +15,7 @@ appear in the channel as `[#topic] text`).
 | Feature | How |
 |---|---|
 | Presence | One query session watches the server; each user sees the channels their `i_channel_subscribe_power` allows, without query clients |
-| Channel chat | A relay query session is moved into each channel someone opened; it forwards what is said and posts users' messages as `[Nick] text` |
+| Channel chat | A relay query session is moved into each channel someone opened; it forwards what is said and posts users' messages under their own nickname, as if they wrote them |
 | Server chat | Read by the watcher, posted by the gateway's lookup session |
 | History | Relayed messages are stored (SQLite) with stable ids; pages by id or time in both directions, without a size limit unless you set one; `sync` returns what changed since a revision |
 | Pins | Pinned messages per chat, kept even when older messages are pruned |
@@ -26,7 +26,13 @@ appear in the channel as `[#topic] text`).
 | Activity feed | Streams started and stopped, events scheduled, starting or cancelled, topics started, messages pinned |
 
 The nickname in relayed posts is the one the server has on record for the
-user's identity (from `clientdbinfo`), not something the user can choose.
+user's identity (from `clientdbinfo`), not something the user can choose. For
+each post the relay (or, for server chat, the lookup session) takes that
+nickname, sends the message and takes its own name back; while someone on the
+server has the nickname it uses `Nick1` to `Nick3`, as TeamSpeak names a second
+client of the same name. Only when it can take none of them (a nickname under
+three characters, the server refusing the change) does the post go out under
+the relay's own name, as `relay.format` (`[Nick] text`).
 Each feature can be turned off (`features.*`); pins, reactions and topics
 need `history.enabled`.
 
@@ -80,20 +86,25 @@ Every login, post and settings change is written to the audit table.
 5. Install tsgw ([below](#install)), copy the example config to
    `/etc/tsgw/tsgw.toml` and set the query address and credentials
    (`TSGW_QUERY_PASSWORD` or `password_file`).
-6. Run it behind TLS (Caddy, nginx) and publish it in DNS
-   ([below](#letting-voelin-find-the-gateway)), so users only add the
-   server's address; or give them the `wss://…/v1` URL.
+6. Run it behind TLS (Caddy, nginx) and publish it in DNS, or let it
+   answer on its default port next to the server
+   ([below](#letting-voelin-find-the-gateway)): users only add the
+   server's address and never see the gateway.
 
 ## Letting Voelin find the gateway
 
 When a user adds a server by its address (`ts.example.org`), Voelin looks
 for its gateway the way TeamSpeak looks for the voice server (SRV
-`_ts3._udp`, then TSDNS), and uses what it finds as if the user had typed
-the URL (the field stays editable under *Advanced*). It asks at the
-server's host name and then at each parent domain down to the registered
-domain, the most specific name first; for `ts.example.org` that is
-`ts.example.org`, then `example.org`. It looks again when the server is
-saved with an empty gateway URL and when it connects with voice.
+`_ts3._udp`, then TSDNS), and observes the server through it as soon as the
+user selects the server (users do not type gateway URLs or query logins).
+It asks at the server's host name and then at each parent domain down to the
+registered domain, the most specific name first; for `ts.example.org` that
+is `ts.example.org`, then `example.org`. It looks once per run when the
+server is selected or connects with voice, and again when its address
+changes: what is published takes the place of what was found before (a
+lookup that finds nothing keeps it). A gateway that cannot be reached is
+tried again by itself (after 2, 5, 15, 30, then every 60 seconds); users
+see nothing of it, the log file has the URL and the error.
 
 **DNS records** (preferred). An SRV record names the gateway's host and
 port, the service name says whether it speaks TLS:
@@ -119,6 +130,11 @@ _tsgw._tcp.ts.example.org.  3600 IN SRV 0 0 7788 ts.example.org.
 ;   -> ws://ts.example.org:7788/v1, only for ts.example.org
 ```
 
+The record's service name must match what listens on the port: tsgw
+itself speaks plain WebSocket, so its own port (7788) is published as
+`_tsgw`; a `_tsgws` record there makes Voelin start TLS with it, which
+fails. Publish `_tsgws` only for a port with TLS in front.
+
 One domain with several servers and several gateways: publish one record
 per server host (`_tsgws._tcp.ts1.example.org`, `_tsgws._tcp.ts2.example.org`);
 a record at the domain itself applies to every host below it that has none
@@ -138,7 +154,7 @@ Discovery is as trustworthy as DNS and the network, like TSDNS: prefer a
 use one from a public CA (Caddy's automatic Let's Encrypt certificates
 work); the Android app cannot reach `wss://` gateways yet (it has no
 system store to read). A user logs in with
-their own identity, and only when they choose to observe the server.
+their own identity, when they select the server in Voelin.
 
 ## Install
 
@@ -187,9 +203,9 @@ docker run -v $PWD/tsgw.toml:/etc/tsgw/tsgw.toml -e TSGW_QUERY_PASSWORD=… -p 7
 Query clients are not hidden by the server; official clients hide them from
 users whose `i_client_serverquery_view_power` is below the query client's
 needed view power (100 by default). Server Admins, and third-party clients
-that ignore the rule, see the gateway's sessions. Relayed channels show the
-relay's posts under its own nickname (`Chat Relay <cid>`), so people in the
-channel can tell the messages come through the gateway.
+that ignore the rule, see the gateway's sessions. Relayed posts show the
+user's nickname, like a message the user wrote in TeamSpeak; whoever can see
+query clients sees that it came from a query session.
 
 ## Configuration
 
@@ -241,7 +257,7 @@ you set here.
 | `auth.min_security_level` | `0` | On top of the server's own requirement |
 | `auth.token_ttl_hours` | `720` | Lifetime of login tokens |
 | `relay.nickname` | `"Chat Relay"` | Relay sessions are named `<nickname> <cid>`, the lookup session `<nickname> Gateway` |
-| `relay.format` | `"[{nick}] {text}"` | How posts appear in TeamSpeak |
+| `relay.format` | `"[{nick}] {text}"` | How posts appear when the relay cannot take the user's nickname |
 | `relay.idle_teardown_secs` | `120` | Close a relay this long after its last reader left |
 | `relay.max_channel_relays` | `6` | Concurrent relays (0: no limit) |
 | `relay.pinned_channels` | `[]` | Always relayed, so their history is complete |

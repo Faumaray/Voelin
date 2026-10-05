@@ -14,4 +14,4 @@ mod relay;
 
 pub use convert::{channel_from_row, client_from_row, delta_from_notification, is_text_message};
 pub use observer::{Observer, ObserverConfig, ObserverEvent};
-pub use relay::{RelayConfig, RelayEvent, RelayPool};
+pub use relay::{RelayConfig, RelayEvent, RelayPool, post_as};
