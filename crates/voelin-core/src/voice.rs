@@ -295,17 +295,21 @@ impl Job {
 	}
 }
 
-/// How long a picture of `size` bytes may take to arrive: half a minute,
-/// plus its size at [`cache::MIN_PICTURE_RATE`], so large banners arrive on
-/// slow links while a stalled transfer still ends.
+/// How long a picture of `size` bytes may take to arrive: a minute, plus
+/// its size at [`cache::MIN_PICTURE_RATE`], so large banners arrive on slow
+/// links while a stalled transfer still ends.
 fn image_download_time(size: u64) -> Duration {
-	Duration::from_secs(30 + size / cache::MIN_PICTURE_RATE)
+	Duration::from_secs(60 + size / cache::MIN_PICTURE_RATE)
 }
+
+/// How long the server may take to start an image transfer (a busy server
+/// answers the requests of a large channel tree in turn).
+const IMAGE_NEGOTIATION: Duration = Duration::from_secs(30);
 
 /// Bound background image handshakes without imposing a deadline on user transfers.
 fn expire_image_jobs(jobs: &mut HashMap<FiletransferHandle, Job>, now: Instant) {
 	jobs.retain(|_, job| {
-		if matches!(job, Job::Download { transfer: None, started, .. } if now.duration_since(*started) >= Duration::from_secs(15)) {
+		if matches!(job, Job::Download { transfer: None, started, .. } if now.duration_since(*started) >= IMAGE_NEGOTIATION) {
 			job.report()(TransferState::Failed("image transfer negotiation timed out".into()));
 			false
 		} else {
@@ -1136,10 +1140,10 @@ mod image_download_tests {
 				},
 			);
 		}
-		expire_image_jobs(&mut jobs, started + Duration::from_secs(14));
+		expire_image_jobs(&mut jobs, started + IMAGE_NEGOTIATION - Duration::from_secs(1));
 		assert_eq!(jobs.len(), 2);
 		assert!(reports.lock().unwrap().is_empty());
-		expire_image_jobs(&mut jobs, started + Duration::from_secs(15));
+		expire_image_jobs(&mut jobs, started + IMAGE_NEGOTIATION);
 		assert_eq!(jobs.len(), 1);
 		assert!(jobs.contains_key(&FiletransferHandle(2)));
 		assert!(
@@ -1151,10 +1155,10 @@ mod image_download_tests {
 
 	#[test]
 	fn large_pictures_get_time_to_arrive() {
-		assert_eq!(image_download_time(0), Duration::from_secs(30));
-		assert_eq!(image_download_time(100 << 10), Duration::from_secs(33));
+		assert_eq!(image_download_time(0), Duration::from_secs(60));
+		assert_eq!(image_download_time(100 << 10), Duration::from_secs(72));
 		// The largest picture, at the slowest rate allowed.
-		assert_eq!(image_download_time(cache::MAX_PICTURE_BYTES), Duration::from_secs(30 + 2048));
+		assert_eq!(image_download_time(cache::MAX_PICTURE_BYTES), Duration::from_secs(60 + 16384));
 	}
 }
 

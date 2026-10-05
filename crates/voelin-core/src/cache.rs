@@ -80,16 +80,17 @@ pub(crate) fn icon_key(id: u32) -> String {
 /// The largest picture downloaded into the cache, from the web or from the
 /// server's files: animated banners of several megabytes are common. The
 /// download goes to disk as it arrives, so this bounds the disk, not memory.
-pub(crate) const MAX_PICTURE_BYTES: u64 = 64 << 20;
+pub(crate) const MAX_PICTURE_BYTES: u64 = 128 << 20;
 
 /// The slowest a picture may arrive on average after its first seconds:
 /// a large banner on a slow link still arrives, one trickling in forever
 /// does not hold a download slot.
-pub(crate) const MIN_PICTURE_RATE: u64 = 32 << 10;
+pub(crate) const MIN_PICTURE_RATE: u64 = 8 << 10;
 
 /// The cache key of a picture on the web: only `http` and `https`
-/// addresses.
+/// addresses (blanks around one are not part of it).
 pub(crate) fn picture_key(url: &str) -> Option<String> {
+	let url = url.trim();
 	let (scheme, rest) = url.split_once("://")?;
 	let web = scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https");
 	(web && !rest.is_empty()).then(|| format!("pictures/{:x}", md5::compute(url)))

@@ -46,7 +46,7 @@ fn server_details(server: &data::Server, uid: Option<&str>) -> ServerDetails {
 			tsclientlib::HostMessageMode::Modalquit => HostMessageMode::ModalQuit,
 		},
 		banner_url: server.hostbanner_url.clone(),
-		banner_gfx_url: server.hostbanner_gfx_url.clone(),
+		banner_gfx_url: server.hostbanner_gfx_url.trim().to_owned(),
 		banner_gfx_interval_s: server.hostbanner_gfx_interval.whole_seconds().max(0) as u64,
 		banner_mode: match server.hostbanner_mode {
 			tsclientlib::HostBannerMode::NoAdjust => BannerMode::NoAdjust,
@@ -115,7 +115,12 @@ pub(crate) fn presence_from_book(
 						needed_talk_power: c.needed_talk_power.unwrap_or(0),
 						is_default: c.is_default.unwrap_or(false),
 						icon: c.icon.map_or(0, |i| i.0),
-						banner_gfx_url: c.banner_gfx_url.clone().filter(|u| !u.is_empty()),
+						banner_gfx_url: c
+							.banner_gfx_url
+							.as_deref()
+							.map(str::trim)
+							.filter(|u| !u.is_empty())
+							.map(str::to_owned),
 						// A number the book keeps as text.
 						banner_mode: c
 							.banner_mode

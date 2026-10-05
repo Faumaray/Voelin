@@ -93,7 +93,7 @@ fn svg_cost(svg_len: usize) -> usize {
 }
 
 thread_local! {
-	static CACHE: RefCell<Lru<Image>> = RefCell::new(Lru::new(64 << 20));
+	static CACHE: RefCell<Lru<Image>> = RefCell::new(Lru::new(256 << 20));
 }
 
 /// Set the budget in megabytes.
@@ -138,35 +138,59 @@ pub fn forget(path: &std::path::Path) {
 	CACHE.with(|c| c.borrow_mut().remove(&path.to_string_lossy()));
 }
 
+/// The largest side a raster picture keeps: larger ones (a banner made for
+/// print) are scaled down when decoded, as nothing shows them larger.
+const MAX_SIDE: u32 = 4096;
+/// A picture with more pixels than this (RGBA bytes) is not decoded at all.
+const MAX_DECODED_BYTES: u64 = 512 << 20;
+
 /// Compressed pictures can be small on disk but huge when decoded. Check
 /// raster dimensions before Slint allocates pixels on the UI thread. SVGs
 /// keep Slint's native vector loader and are rasterized at the displayed size.
 fn decode(bytes: &[u8]) -> Option<(Image, usize)> {
 	let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
 	let reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?;
-	let cost = if reader.format().is_some() {
-		let (width, height) = reader.into_dimensions().ok()?;
-		// At most the default decoded-image cache (64 MiB of RGBA).
-		if width == 0
-			|| height == 0
-			|| width > 16_384
-			|| height > 16_384
-			|| u64::from(width) * u64::from(height) * 4 > 64 << 20
-		{
-			tracing::debug!(width, height, "image exceeds the decoded raster size limit");
-			return None;
-		}
-		width as usize * height as usize * 4
-	} else {
+	if reader.format().is_none() {
 		let start = bytes.trim_ascii_start();
-		if !start.starts_with(b"<svg") && !start.starts_with(b"<?xml") {
+		if !is_svg(start) {
 			return None;
 		}
 		// Intrinsic SVG dimensions describe coordinates, not an allocated
 		// pixel buffer. Use the same vector cost as the emoji cache.
 		return Image::load_from_svg_data(start).ok().map(|image| (image, svg_cost(bytes.len())));
-	};
-	Image::load_from_data(bytes, None).ok().map(|image| (image, cost))
+	}
+	let (width, height) = reader.into_dimensions().ok()?;
+	if width == 0 || height == 0 || u64::from(width) * u64::from(height) * 4 > MAX_DECODED_BYTES {
+		tracing::warn!(width, height, "picture not shown: too large to decode");
+		return None;
+	}
+	if width <= MAX_SIDE && height <= MAX_SIDE {
+		let cost = width as usize * height as usize * 4;
+		return Image::load_from_data(bytes, None).ok().map(|image| (image, cost));
+	}
+	// Scaled down (the first frame of an animation).
+	let mut reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?;
+	let mut limits = image::Limits::default();
+	limits.max_alloc = Some(MAX_DECODED_BYTES + (64 << 20));
+	reader.limits(limits);
+	let small = reader.decode().ok()?.thumbnail(MAX_SIDE, MAX_SIDE).to_rgba8();
+	let (width, height) = small.dimensions();
+	let pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+		small.as_raw(),
+		width,
+		height,
+	);
+	Some((Image::from_rgba8(pixels), width as usize * height as usize * 4))
+}
+
+/// Whether `start` (without a BOM and leading blanks) is an SVG document:
+/// `<svg`, `<?xml`, or a comment or a DOCTYPE with `<svg` after it.
+fn is_svg(start: &[u8]) -> bool {
+	let prolog = start.starts_with(b"<!--")
+		|| start.get(..9).is_some_and(|s| s.eq_ignore_ascii_case(b"<!doctype"));
+	start.starts_with(b"<svg")
+		|| start.starts_with(b"<?xml")
+		|| (prolog && start.windows(4).any(|w| w == b"<svg"))
 }
 
 /// A picture from encoded bytes (PNG, JPEG, GIF, WebP), decoded once and
@@ -264,7 +288,25 @@ mod tests {
 	}
 
 	#[test]
-	fn oversized_rasters_are_refused_before_pixels_are_read() {
+	fn svg_after_a_comment_or_doctype_decodes() {
+		let svg = b"<!-- tool --><!DOCTYPE svg><svg xmlns='http://www.w3.org/2000/svg' width='8' height='4'><rect width='8' height='4'/></svg>";
+		assert_eq!(picture("test:svg-prolog", svg).size().width, 8);
+		assert!(decode(b"<!-- a page --><html></html>").is_none());
+	}
+
+	#[test]
+	fn rasters_beyond_the_pixel_cap_are_refused_before_pixels_are_read() {
+		// Only the header: its size is all that is read.
+		let mut bytes = Vec::new();
+		let mut encoder = png::Encoder::new(&mut bytes, 20_000, 20_000);
+		encoder.set_color(png::ColorType::Rgba);
+		encoder.set_depth(png::BitDepth::Eight);
+		std::mem::forget(encoder.write_header().unwrap());
+		assert!(decode(&bytes).is_none());
+	}
+
+	#[test]
+	fn large_rasters_are_scaled_down() {
 		use std::io::Write;
 		for (width, height) in [(6000, 6000), (16_385, 1), (1, 16_385)] {
 			let mut bytes = Vec::new();
@@ -279,19 +321,13 @@ mod tests {
 			}
 			stream.finish().unwrap();
 			writer.finish().unwrap();
-			// A valid solid picture fits the download cap but not the
-			// decoded budget. Generate it a row at a time, without ever
-			// allocating the large pixel buffer this test guards against.
+			// Generated a row at a time.
 			assert!(bytes.len() < 4 << 20);
-			assert_eq!(
-				image::ImageReader::new(Cursor::new(&bytes))
-					.with_guessed_format()
-					.unwrap()
-					.into_dimensions()
-					.unwrap(),
-				(width, height)
-			);
-			assert!(decode(&bytes).is_none());
+			let (image, cost) = decode(&bytes).unwrap();
+			let size = image.size();
+			assert!(size.width <= MAX_SIDE && size.height <= MAX_SIDE, "{size:?}");
+			assert_eq!(size.width.max(size.height), MAX_SIDE);
+			assert_eq!(cost, size.width as usize * size.height as usize * 4);
 		}
 	}
 

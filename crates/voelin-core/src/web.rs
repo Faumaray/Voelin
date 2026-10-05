@@ -25,18 +25,22 @@ use tokio::io::AsyncWriteExt;
 
 use crate::cache::{self, Cache, Fetch, Waiter};
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const READ_TIMEOUT: Duration = Duration::from_secs(20);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a download may start slowly before its rate counts.
-const GRACE: Duration = Duration::from_secs(30);
-/// The first bytes, enough to tell a picture from an error page.
-const SNIFF: usize = 1024;
+const GRACE: Duration = Duration::from_secs(120);
+/// The first bytes, enough to tell a picture from an error page (SVG with
+/// a comment or a DOCTYPE before it too).
+const SNIFF: usize = 4096;
 /// The pictures the UI decodes, so a host choosing between formats
 /// (`Accept`) does not answer with one it cannot show (AVIF, JPEG XL).
-const ACCEPT: &str = "image/png,image/jpeg,image/gif,image/webp,image/svg+xml;q=0.9,*/*;q=0.1";
+const ACCEPT: &str = "image/png,image/jpeg,image/gif,image/webp,image/svg+xml,image/bmp,\
+	image/x-icon;q=0.9,*/*;q=0.1";
 /// Fetch independent URLs in parallel without letting a large channel tree
 /// open unbounded connections or buffer unbounded image data.
-static DOWNLOADS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+static DOWNLOADS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
+/// Redirects followed, as many as a browser does.
+const REDIRECTS: usize = 20;
 /// The host banner is reloaded at most this often, whatever the server
 /// asks (TeamSpeak 3 and 6 servers refuse intervals below a minute).
 pub(crate) const MIN_RELOAD: Duration = Duration::from_secs(60);
@@ -45,6 +49,7 @@ static CLIENT: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(|| {
 	reqwest::Client::builder()
 		.connect_timeout(CONNECT_TIMEOUT)
 		.read_timeout(READ_TIMEOUT)
+		.redirect(reqwest::redirect::Policy::limited(REDIRECTS))
 		.user_agent(concat!("Voelin/", env!("CARGO_PKG_VERSION")))
 		.build()
 		.map_err(|e| e.to_string())
@@ -79,7 +84,7 @@ fn fetch_within(
 	let url = url.to_owned();
 	tokio::spawn(async move {
 		let _permit = DOWNLOADS.acquire().await.expect("download semaphore stays open");
-		let result = download(&url, &temp, limits).await;
+		let result = download(url.trim(), &temp, limits).await;
 		cache.finish(&key, &temp, result, max_cache_bytes);
 	});
 }
@@ -108,7 +113,7 @@ async fn download(url: &str, to: &Path, limits: &Limits) -> Result<(), String> {
 		.send()
 		.await
 		.and_then(reqwest::Response::error_for_status)
-		.map_err(|e| e.to_string())?;
+		.map_err(describe)?;
 	if response.content_length().is_some_and(|n| n > limits.max_bytes) {
 		return Err(too_big());
 	}
@@ -119,7 +124,7 @@ async fn download(url: &str, to: &Path, limits: &Limits) -> Result<(), String> {
 	let started = tokio::time::Instant::now();
 	let mut head = Vec::with_capacity(SNIFF);
 	let mut received = 0u64;
-	while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+	while let Some(chunk) = response.chunk().await.map_err(describe)? {
 		received += chunk.len() as u64;
 		if received > limits.max_bytes {
 			return Err(too_big());
@@ -128,7 +133,7 @@ async fn download(url: &str, to: &Path, limits: &Limits) -> Result<(), String> {
 			head.extend_from_slice(&chunk[..chunk.len().min(SNIFF - head.len())]);
 			// An error page is refused without waiting for all of it.
 			if head.len() == SNIFF && !is_picture(&head) {
-				return Err("not a picture".into());
+				return Err(not_a_picture(&head));
 			}
 		}
 		let elapsed = started.elapsed();
@@ -141,20 +146,92 @@ async fn download(url: &str, to: &Path, limits: &Limits) -> Result<(), String> {
 	file.flush().await.map_err(|e| e.to_string())?;
 	drop(file);
 	if !is_picture(&head) {
-		return Err("not a picture".into());
+		return Err(not_a_picture(&head));
 	}
 	Ok(())
 }
 
+/// What went wrong, for the log: the status, or the whole chain of causes
+/// (a TLS, DNS or timeout reason); never the address, whose query may be
+/// a signed link's secret.
+fn describe(error: reqwest::Error) -> String {
+	if let Some(status) = error.status() {
+		return format!("HTTP {status}");
+	}
+	let error = error.without_url();
+	let mut text = if error.is_timeout() {
+		"timed out".to_owned()
+	} else if error.is_connect() {
+		"could not connect".to_owned()
+	} else if error.is_redirect() {
+		"too many redirects".to_owned()
+	} else {
+		error.to_string()
+	};
+	let mut source = std::error::Error::source(&error);
+	while let Some(cause) = source {
+		text.push_str(": ");
+		text.push_str(&cause.to_string());
+		source = cause.source();
+	}
+	text
+}
+
+/// What arrived instead of a picture, for the log.
+fn not_a_picture(head: &[u8]) -> String {
+	let start = head.trim_ascii_start();
+	let lower =
+		start.get(..15.min(start.len())).map(<[u8]>::to_ascii_lowercase).unwrap_or_default();
+	let what = if lower.starts_with(b"<!doctype html") || lower.starts_with(b"<html") {
+		"an HTML page"
+	} else if head.len() >= 12 && &head[4..8] == b"ftyp" {
+		"AVIF or HEIF, which cannot be shown"
+	} else if start.starts_with(b"{") {
+		"JSON"
+	} else {
+		"something else"
+	};
+	format!("not a picture ({what})")
+}
+
+/// The host of `url`, for the log; the scheme for one without (a server
+/// file, `ts3image://`).
+pub(crate) fn host_of(url: &str) -> String {
+	match reqwest::Url::parse(url.trim()) {
+		Ok(u) if matches!(u.scheme(), "http" | "https") => u.host_str().unwrap_or("?").to_owned(),
+		Ok(u) => u.scheme().to_owned(),
+		Err(_) => "?".to_owned(),
+	}
+}
+
 /// Whether `data` is a picture the UI decodes, told by its content as the
-/// UI tells it (SVG by its start, without leading blanks).
+/// UI tells it (SVG by its start, without leading blanks, or after a
+/// comment or a DOCTYPE).
 fn is_picture(data: &[u8]) -> bool {
-	const STARTS: [&[u8]; 4] = [b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a"];
-	let xml = data.strip_prefix(b"\xef\xbb\xbf").unwrap_or(data).trim_ascii_start();
+	const STARTS: [&[u8]; 7] = [
+		b"\x89PNG\r\n\x1a\n",
+		b"\xff\xd8\xff",
+		b"GIF87a",
+		b"GIF89a",
+		b"BM",
+		// ICO and CUR.
+		b"\0\0\x01\0",
+		b"\0\0\x02\0",
+	];
 	STARTS.iter().any(|s| data.starts_with(s))
-		|| xml.starts_with(b"<?xml")
-		|| xml.starts_with(b"<svg")
 		|| (data.len() >= 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP")
+		|| is_svg(data)
+}
+
+/// Whether `data` starts an SVG document: after a BOM and blanks, with
+/// `<svg`, `<?xml`, or a comment or a DOCTYPE with `<svg` after it.
+pub(crate) fn is_svg(data: &[u8]) -> bool {
+	let xml = data.strip_prefix(b"\xef\xbb\xbf").unwrap_or(data).trim_ascii_start();
+	let prolog = xml.starts_with(b"<!--")
+		|| xml.get(..9).is_some_and(|s| s.eq_ignore_ascii_case(b"<!doctype"));
+	xml.starts_with(b"<?xml")
+		|| xml.starts_with(b"<svg")
+		|| (prolog && xml.windows(4).any(|w| w == b"<svg"))
 }
 
 #[cfg(test)]
@@ -286,7 +363,7 @@ mod tests {
 		// A failed download is reported and leaves nothing behind.
 		fetch(cache.clone(), &format!("{base}/page"), false, 0, waiter(&tx));
 		let failed = tokio::task::spawn_blocking(move || rx.recv().unwrap()).await.unwrap();
-		assert_eq!(failed, Err("not a picture".into()));
+		assert_eq!(failed, Err("not a picture (an HTML page)".into()));
 		assert_eq!(cache.size(), PNG.len() as u64);
 		std::fs::remove_dir_all(dir).unwrap();
 	}
@@ -393,5 +470,19 @@ mod tests {
 		assert!(!is_picture(b"<!DOCTYPE html>"));
 		assert!(!is_picture(b"RIFF\x24\0\0\0WAVEfmt "));
 		assert!(!is_picture(b""));
+		// What browsers show too: BMP, ICO, SVG after a comment or DOCTYPE.
+		assert!(is_picture(b"BM\x36\0\0\0"));
+		assert!(is_picture(b"\0\0\x01\0\x01\0"));
+		assert!(is_picture(b"<!-- made with a tool -->\n<svg/>"));
+		assert!(is_picture(b"<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\"><svg/>"));
+		assert!(!is_picture(b"<!-- a page --><html></html>"));
+		// What came instead is told.
+		assert_eq!(not_a_picture(b"<!DOCTYPE html><html>"), "not a picture (an HTML page)");
+		assert_eq!(
+			not_a_picture(b"\0\0\0\x1cftypavif"),
+			"not a picture (AVIF or HEIF, which cannot be shown)"
+		);
+		assert_eq!(host_of(" https://cdn.example.test/b.png?sig=x "), "cdn.example.test");
+		assert_eq!(host_of("ts3image://banner.png?channel=1"), "ts3image");
 	}
 }

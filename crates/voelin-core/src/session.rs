@@ -15,7 +15,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use tokio::sync::{broadcast, mpsc, watch};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use tsclientlib::ClientId;
 use voelin_audio::AudioSettings;
 use voelin_gateway_proto::{ErrorCode, HistoryEntry, StreamEntry, StreamSpec, feature};
@@ -167,11 +167,52 @@ impl Drop for ImageDownload {
 	}
 }
 
-/// At most three retries (after 1, 4 and 16 seconds) per image version.
-/// Keeping exhausted entries prevents presence traffic from causing a retry storm.
+/// Retries per image version ([`retry_delay`]). Keeping exhausted entries
+/// prevents presence traffic from causing a retry storm.
 struct ImageRetry {
 	failures: u8,
 	due: Option<Instant>,
+}
+
+/// When to try an image again after its `failures`-th failed download:
+/// a banner after 1, 4, 16, 60, 300 and 900 seconds, then every 15 minutes
+/// while it is shown (its host may be away for a while); avatars and icons
+/// after 1, 4 and 16 seconds, then no more.
+fn retry_delay(request: &ImageRequest, failures: u8) -> Option<Duration> {
+	const BANNERS: [u64; 6] = [1, 4, 16, 60, 300, 900];
+	let failures = usize::from(failures.max(1));
+	match request {
+		ImageRequest::Picture(_) => Some(Duration::from_secs(BANNERS[(failures - 1).min(5)])),
+		_ if failures <= 3 => Some(Duration::from_secs(1 << (2 * (failures - 1)))),
+		_ => None,
+	}
+}
+
+/// A failed image download in the log, with what it was and why (the
+/// host, never the whole address): banners at once, avatars and icons in
+/// the server's files when they give up (their files unreachable, a
+/// closed file transfer port).
+fn log_image_failure(
+	request: &ImageRequest,
+	failures: u8,
+	retry_in: Option<Duration>,
+	error: &str,
+) {
+	let retry_in_s = retry_in.map(|d| d.as_secs());
+	match request {
+		ImageRequest::Picture(url) if failures <= 6 => {
+			let host = web::host_of(url);
+			info!(%host, failures, ?retry_in_s, %error, "banner not downloaded");
+		}
+		ImageRequest::MytsAvatar { url, .. } if retry_in.is_none() => {
+			let host = web::host_of(url);
+			info!(%host, %error, "myTeamSpeak avatar not downloaded");
+		}
+		ImageRequest::Avatar { .. } | ImageRequest::Icon(_) if retry_in.is_none() => {
+			info!(?request, %error, "server file not downloaded (avatar or icon)");
+		}
+		_ => debug!(?request, failures, ?retry_in_s, %error, "image download failed"),
+	}
 }
 
 /// Whether an explicitly requested image belongs to the voice connection
@@ -250,6 +291,9 @@ struct Session {
 	icons: HashSet<u32>,
 	/// Pictures on the web (banners) reported or being fetched, by address.
 	pictures: HashSet<String>,
+	/// Banner addresses that cannot be fetched at all (another scheme),
+	/// logged once.
+	unfetchable: HashSet<String>,
 	image_epoch: u64,
 	images_enabled: bool,
 	image_retries: HashMap<ImageRequest, ImageRetry>,
@@ -289,6 +333,7 @@ impl Session {
 			server_avatars_failed: HashSet::new(),
 			icons: HashSet::new(),
 			pictures: HashSet::new(),
+			unfetchable: HashSet::new(),
 			image_epoch: 0,
 			images_enabled: settings.current().get(&CACHE_FETCH_IMAGES),
 			image_retries: HashMap::new(),
@@ -866,6 +911,7 @@ impl Session {
 		self.server_avatars_failed.clear();
 		self.icons.clear();
 		self.pictures.clear();
+		self.unfetchable.clear();
 		self.contact_audio.clear();
 		self.stream_friends.clear();
 		self.details = None;
@@ -1030,22 +1076,18 @@ impl Session {
 				});
 			}
 			Err(error) => {
-				debug!(?request, %error, "image download failed");
 				let avatar_of = match &request {
 					ImageRequest::Avatar { uid, .. } => Some(uid.clone()),
 					_ => None,
 				};
 				let retry = self
 					.image_retries
-					.entry(request)
+					.entry(request.clone())
 					.or_insert(ImageRetry { failures: 0, due: None });
 				retry.failures = retry.failures.saturating_add(1);
-				retry.due = match retry.failures {
-					1..=3 => {
-						Some(Instant::now() + Duration::from_secs(1 << (2 * (retry.failures - 1))))
-					}
-					_ => None,
-				};
+				let delay = retry_delay(&request, retry.failures);
+				retry.due = delay.map(|delay| Instant::now() + delay);
+				log_image_failure(&request, retry.failures, delay, &error);
 				// The server's avatar gave up (its files unreachable): the
 				// myTeamSpeak one, if the client has one.
 				if let (None, Some(uid)) = (retry.due, avatar_of)
@@ -1148,11 +1190,18 @@ impl Session {
 		if !enabled {
 			return;
 		}
-		let urls: HashSet<_> = std::iter::once(&p.server.banner_gfx_url)
+		let all = std::iter::once(&p.server.banner_gfx_url)
 			.chain(p.channels.values().filter_map(|c| c.banner_gfx_url.as_ref()))
-			.filter(|u| self.can_fetch_picture(u))
-			.cloned()
-			.collect();
+			.filter(|u| !u.is_empty());
+		let mut urls = HashSet::new();
+		for url in all {
+			if self.can_fetch_picture(url) {
+				urls.insert(url.clone());
+			} else if files::server_image(url).is_none() && self.unfetchable.insert(url.clone()) {
+				let scheme = url.split(':').next().unwrap_or_default();
+				info!(%scheme, "banner not downloaded: only http, https and ts3image addresses");
+			}
+		}
 		self.pictures.retain(|url| urls.contains(url));
 		for url in &urls {
 			if self.pictures.insert(url.clone()) {
@@ -2249,6 +2298,16 @@ mod banner_tests {
 		let _ = std::fs::remove_dir_all(cache.dir());
 	}
 
+	#[test]
+	fn banners_keep_trying_avatars_and_icons_give_up() {
+		let banner = ImageRequest::Picture("https://example.com/b.png".into());
+		let delays: Vec<_> = (1..=8).map(|f| retry_delay(&banner, f).unwrap().as_secs()).collect();
+		assert_eq!(delays, [1, 4, 16, 60, 300, 900, 900, 900]);
+		let icon = ImageRequest::Icon(1234);
+		let delays: Vec<_> = (1..=4).map(|f| retry_delay(&icon, f).map(|d| d.as_secs())).collect();
+		assert_eq!(delays, [Some(1), Some(4), Some(16), None]);
+	}
+
 	#[tokio::test]
 	async fn retries_are_bounded_and_obey_policy_presence_and_epoch() {
 		let (mut session, mut events) = session("retry-guards");
@@ -2264,7 +2323,8 @@ mod banner_tests {
 			);
 			let retry = &session.image_retries[&request];
 			assert_eq!(retry.failures, failure);
-			assert_eq!(retry.due.is_some(), failure <= 3);
+			// A banner is tried again while it is shown.
+			assert!(retry.due.is_some());
 		}
 		assert!(events.try_recv().is_err());
 		// Disabling fetch invalidates pending retries and completions.
