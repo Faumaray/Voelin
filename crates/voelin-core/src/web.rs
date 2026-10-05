@@ -54,6 +54,23 @@ static CLIENT: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(|| {
 /// ask (again with `fresh`: it changes at its address); `waiter` is told
 /// where it is. `max_cache_bytes`: `cache.max_mb` in bytes.
 pub(crate) fn fetch(cache: Cache, url: &str, fresh: bool, max_cache_bytes: u64, waiter: Waiter) {
+	fetch_within(cache, url, fresh, max_cache_bytes, &LIMITS, waiter);
+}
+
+/// [`fetch`] a myTeamSpeak avatar: a picture of at most
+/// [`AVATAR_LIMITS`]'s size, once (its link changes with it).
+pub(crate) fn fetch_avatar(cache: Cache, url: &str, max_cache_bytes: u64, waiter: Waiter) {
+	fetch_within(cache, url, false, max_cache_bytes, &AVATAR_LIMITS, waiter);
+}
+
+fn fetch_within(
+	cache: Cache,
+	url: &str,
+	fresh: bool,
+	max_cache_bytes: u64,
+	limits: &'static Limits,
+	waiter: Waiter,
+) {
 	let Some(key) = cache::picture_key(url) else {
 		waiter(Err("not an http or https address".into()));
 		return;
@@ -62,7 +79,7 @@ pub(crate) fn fetch(cache: Cache, url: &str, fresh: bool, max_cache_bytes: u64, 
 	let url = url.to_owned();
 	tokio::spawn(async move {
 		let _permit = DOWNLOADS.acquire().await.expect("download semaphore stays open");
-		let result = download(&url, &temp, &LIMITS).await;
+		let result = download(&url, &temp, limits).await;
 		cache.finish(&key, &temp, result, max_cache_bytes);
 	});
 }
@@ -77,6 +94,8 @@ struct Limits {
 
 const LIMITS: Limits =
 	Limits { max_bytes: cache::MAX_PICTURE_BYTES, grace: GRACE, min_rate: cache::MIN_PICTURE_RATE };
+/// Avatars are small pictures (as myTeamSpeak's own, 4 MiB at most).
+const AVATAR_LIMITS: Limits = Limits { max_bytes: 4 << 20, ..LIMITS };
 
 /// Download the picture at `url` into `to` within `limits`, and only if it
 /// is a picture (what arrived stays in `to` on failure; the cache removes it).

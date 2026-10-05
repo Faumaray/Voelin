@@ -3,7 +3,7 @@
 use tsclientlib::{ClientType, MaxClients, data};
 use voelin_model::{
 	BannerMode, ChannelInfo, ClientInfo, GroupInfo, GroupNamingMode, GroupType, HostMessageMode,
-	Presence, ServerDetails, parse_badges,
+	Presence, ServerDetails, myts_avatar_url, parse_badges,
 };
 
 fn group_info(
@@ -147,6 +147,7 @@ pub(crate) fn presence_from_book(
 						server_groups,
 						country: Some(c.country_code.clone()).filter(|c| !c.is_empty()),
 						avatar: Some(c.avatar_hash.clone()).filter(|h| !h.is_empty()),
+						myts_avatar: c.my_team_speak_avatar.as_deref().and_then(myts_avatar_url),
 						description: Some(c.description.clone()).filter(|d| !d.is_empty()),
 						talk_power: c.talk_power,
 						talker: c.talk_power_granted,
@@ -177,10 +178,8 @@ mod tests {
 		InMessage::new(&packet.header(), text.as_bytes()).unwrap()
 	}
 
-	/// Channel banners as a TeamSpeak 6 server (6.0.0-beta13.1) sends them:
-	/// in the channel list, when a channel is created and when it is edited.
-	#[test]
-	fn channel_banners() {
+	/// The book of a TeamSpeak 6 server (6.0.0-beta13.1) after `initserver`.
+	fn ts6_book() -> data::Connection {
 		let InMessage::InitServer(init) = message(concat!(
 			"initserver virtualserver_name=Test virtualserver_welcomemessage ",
 			"virtualserver_platform=Linux virtualserver_version=6.0.0-beta13.1 ",
@@ -200,20 +199,29 @@ mod tests {
 		)) else {
 			panic!("not an initserver");
 		};
-		let mut book = data::Connection::new(EccKeyPrivP256::create().to_pub(), &init);
-		let channel = |cid: u64, order: u64, name: &str, banner: &str| {
-			format!(
-				"cid={cid} cpid=0 channel_name={name} channel_topic channel_codec=4 \
-				 channel_codec_quality=6 channel_maxclients=-1 channel_maxfamilyclients=-1 \
-				 channel_order={order} channel_flag_permanent=1 channel_flag_semi_permanent=0 \
-				 channel_flag_default=0 channel_flag_password=0 channel_codec_latency_factor=1 \
-				 channel_codec_is_unencrypted=1 channel_delete_delay=0 \
-				 channel_flag_maxclients_unlimited=1 channel_flag_maxfamilyclients_unlimited=1 \
-				 channel_flag_maxfamilyclients_inherited=0 channel_needed_talk_power=0 \
-				 channel_forced_silence=0 channel_name_phonetic channel_icon_id=0 {banner} \
-				 channel_storage_quota=4294967295"
-			)
-		};
+		data::Connection::new(EccKeyPrivP256::create().to_pub(), &init)
+	}
+
+	/// A `channellist` entry as TeamSpeak 6 sends it.
+	fn channel(cid: u64, order: u64, name: &str, banner: &str) -> String {
+		format!(
+			"cid={cid} cpid=0 channel_name={name} channel_topic channel_codec=4 \
+			 channel_codec_quality=6 channel_maxclients=-1 channel_maxfamilyclients=-1 \
+			 channel_order={order} channel_flag_permanent=1 channel_flag_semi_permanent=0 \
+			 channel_flag_default=0 channel_flag_password=0 channel_codec_latency_factor=1 \
+			 channel_codec_is_unencrypted=1 channel_delete_delay=0 \
+			 channel_flag_maxclients_unlimited=1 channel_flag_maxfamilyclients_unlimited=1 \
+			 channel_flag_maxfamilyclients_inherited=0 channel_needed_talk_power=0 \
+			 channel_forced_silence=0 channel_name_phonetic channel_icon_id=0 {banner} \
+			 channel_storage_quota=4294967295"
+		)
+	}
+
+	/// Channel banners as a TeamSpeak 6 server (6.0.0-beta13.1) sends them:
+	/// in the channel list, when a channel is created and when it is edited.
+	#[test]
+	fn channel_banners() {
+		let mut book = ts6_book();
 		let list = format!(
 			"channellist {}|{}",
 			channel(1, 0, "Lobby", "channel_banner_gfx_url channel_banner_mode=0"),
@@ -265,5 +273,51 @@ mod tests {
 		assert_eq!(p.server.banner_gfx_interval_s, 60);
 		assert_eq!(p.server.banner_mode, BannerMode::KeepAspect);
 		assert_eq!(BannerMode::from_wire("7"), BannerMode::NoAdjust);
+	}
+
+	/// The myTeamSpeak avatar of a client as a TeamSpeak 6 server sends it:
+	/// when the client enters and when it changes.
+	#[test]
+	fn myts_avatars() {
+		let mut book = ts6_book();
+		book.handle_command(&message(&format!("channellist {}", channel(1, 0, "Lobby", ""))))
+			.unwrap();
+		let enter = |clid: u16, avatar: &str| {
+			format!(
+				"notifycliententerview reasonid=0 ctid=1 clid={clid} client_database_id={clid} \
+				 client_nickname=c{clid} client_type=0 cfid=0 client_unique_identifier=u{clid}= \
+				 client_flag_avatar client_description client_icon_id=0 client_input_muted=0 \
+				 client_output_muted=0 client_outputonly_muted=0 client_input_hardware=1 \
+				 client_output_hardware=1 client_meta_data client_is_recording=0 \
+				 client_channel_group_id=8 client_channel_group_inherited_channel_id=1 \
+				 client_servergroups=8 client_away=0 client_away_message client_talk_power=75 \
+				 client_talk_request=0 client_talk_request_msg client_is_talker=0 \
+				 client_is_priority_speaker=0 client_unread_messages=0 client_nickname_phonetic \
+				 client_needed_serverquery_view_power=75 client_is_channel_commander=0 \
+				 client_country=RU client_badges client_myteamspeak_id=m{clid} \
+				 client_integrations{avatar}"
+			)
+		};
+		for text in [
+			enter(
+				5,
+				r" client_myteamspeak_avatar=3,https:\/\/a.example\/away.png;2,https:\/\/a.example\/on.png",
+			),
+			// A TeamSpeak 3 server, or a client without one.
+			enter(6, ""),
+			enter(7, " client_myteamspeak_avatar"),
+		] {
+			book.handle_command(&message(&text)).unwrap();
+		}
+		let p = presence_from_book(&book, None, |_| false);
+		let avatar = |p: &Presence, clid: u16| p.clients[&clid].myts_avatar.clone();
+		assert_eq!(avatar(&p, 5).as_deref(), Some("https://a.example/on.png"));
+		assert_eq!((avatar(&p, 6), avatar(&p, 7)), (None, None));
+		book.handle_command(&message(
+			r"notifyclientupdated clid=6 client_myteamspeak_avatar=4,https:\/\/a.example\/off.png",
+		))
+		.unwrap();
+		let p = presence_from_book(&book, None, |_| false);
+		assert_eq!(avatar(&p, 6).as_deref(), Some("https://a.example/off.png"));
 	}
 }

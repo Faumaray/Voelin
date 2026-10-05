@@ -89,6 +89,7 @@ pub fn client_from_row(row: &Row) -> Option<ClientInfo> {
 		// What the row carries (`notifycliententerview` all of it,
 		// `clientlist -voice -groups -icon` some).
 		avatar: row.get("client_flag_avatar").filter(|a| !a.is_empty()).map(str::to_string),
+		myts_avatar: row.get("client_myteamspeak_avatar").and_then(voelin_model::myts_avatar_url),
 		description: row.get("client_description").filter(|d| !d.is_empty()).map(str::to_string),
 		talk_power: row.parse("client_talk_power").unwrap_or(0),
 		talker: row.flag("client_is_talker").unwrap_or(false),

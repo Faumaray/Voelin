@@ -125,7 +125,15 @@ enum SourceEvent {
 /// Identity of a wanted image, independent of its transport.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ImageRequest {
-	Avatar { uid: String, hash: String },
+	Avatar {
+		uid: String,
+		hash: String,
+	},
+	/// A client's myTeamSpeak avatar (TeamSpeak 6), on the web.
+	MytsAvatar {
+		uid: String,
+		url: String,
+	},
 	Icon(u32),
 	Picture(String),
 }
@@ -162,6 +170,13 @@ impl Drop for ImageDownload {
 struct ImageRetry {
 	failures: u8,
 	due: Option<Instant>,
+}
+
+/// Whether an explicitly requested image belongs to the voice connection
+/// (downloaded over it, so dropped with it); a myTeamSpeak avatar is on the
+/// web.
+fn voice_bound(request: &ImageRequest) -> bool {
+	!matches!(request, ImageRequest::MytsAvatar { .. })
 }
 
 /// Our live stream, for the gateway's directory.
@@ -222,6 +237,12 @@ struct Session {
 	contacts_rx: Option<watch::Receiver<u64>>,
 	/// Avatars reported per client unique id (their hash), voice only.
 	avatars: HashMap<String, String>,
+	/// myTeamSpeak avatars wanted per client unique id (their link), any
+	/// presence: where the server's avatar is not shown.
+	myts_avatars: HashMap<String, String>,
+	/// Clients whose server avatar could not be downloaded (retries used
+	/// up): their myTeamSpeak avatar is shown instead.
+	server_avatars_failed: HashSet<String>,
 	/// Icons reported or being fetched, voice only.
 	icons: HashSet<u32>,
 	/// Pictures on the web (banners) reported or being fetched, by address.
@@ -259,6 +280,8 @@ impl Session {
 			contacts,
 			contacts_rx,
 			avatars: HashMap::new(),
+			myts_avatars: HashMap::new(),
+			server_avatars_failed: HashSet::new(),
 			icons: HashSet::new(),
 			pictures: HashSet::new(),
 			image_epoch: 0,
@@ -673,9 +696,13 @@ impl Session {
 					.voice_presence
 					.as_ref()
 					.and_then(|p| p.client_by_uid(&client_uid))
-					.and_then(|c| c.avatar.clone());
-				if let Some(hash) = hash {
+					.and_then(|c| c.avatar.clone())
+					.filter(|_| !self.server_avatars_failed.contains(&client_uid));
+				let myts = self.shown_client(&client_uid).and_then(|c| c.myts_avatar.clone());
+				if let Some(hash) = hash.filter(|_| self.voice.is_some()) {
 					self.fetch_avatar(&client_uid, &hash, true);
+				} else if let Some(url) = myts {
+					self.fetch_myts_avatar(&client_uid, &url, true);
 				}
 			}
 			Command::ListOfflineMessages { request, .. } => {
@@ -828,6 +855,8 @@ impl Session {
 		self.image_epoch += 1;
 		self.image_retries.clear();
 		self.avatars.clear();
+		self.myts_avatars.clear();
+		self.server_avatars_failed.clear();
 		self.icons.clear();
 		self.pictures.clear();
 		self.contact_audio.clear();
@@ -866,7 +895,7 @@ impl Session {
 	}
 
 	fn image_waiter(&self, request: ImageRequest, requested: bool) -> Waiter {
-		let epoch = if requested {
+		let epoch = if requested && voice_bound(&request) {
 			self.voice.as_ref().map_or(0, |(generation, _)| *generation)
 		} else {
 			self.image_epoch
@@ -884,6 +913,45 @@ impl Session {
 		self.fetch_image(key, files::avatar_path(uid).map(|path| (0, path)), false, waiter);
 	}
 
+	/// The myTeamSpeak avatars of the presence shown (any source) where the
+	/// server's avatar is not shown: none set, no voice connection to
+	/// download it over, or its download gave up. As the official client:
+	/// the server's avatar first.
+	fn fetch_myts_avatars(&mut self, p: &Presence) {
+		if !self.settings.current().get(&CACHE_FETCH_IMAGES) {
+			return;
+		}
+		let mut wanted = HashMap::with_capacity(self.myts_avatars.len());
+		for c in p.clients.values() {
+			let (Some(uid), Some(url)) = (&c.uid, &c.myts_avatar) else { continue };
+			let server_avatar = c.avatar.is_some()
+				&& self.voice.is_some()
+				&& !self.server_avatars_failed.contains(uid);
+			if server_avatar {
+				continue;
+			}
+			if self.myts_avatars.get(uid) != Some(url) {
+				self.fetch_myts_avatar(uid, url, false);
+			}
+			wanted.insert(uid.clone(), url.clone());
+		}
+		self.myts_avatars = wanted;
+	}
+
+	fn fetch_myts_avatar(&self, uid: &str, url: &str, requested: bool) {
+		let request = ImageRequest::MytsAvatar { uid: uid.into(), url: url.into() };
+		let waiter = self.image_waiter(request, requested);
+		web::fetch_avatar(self.cache.current(), url, max_cache_bytes(&self.settings), waiter);
+	}
+
+	/// The client shown (any presence) with this unique id.
+	fn shown_client(&self, uid: &str) -> Option<&voelin_model::ClientInfo> {
+		[&self.voice_presence, &self.gateway_presence, &self.query_presence]
+			.into_iter()
+			.find_map(|p| p.as_ref())
+			.and_then(|p| p.client_by_uid(uid))
+	}
+
 	fn fetch_icon(&self, icon: u32) {
 		let waiter = self.image_waiter(ImageRequest::Icon(icon), false);
 		self.fetch_image(cache::icon_key(icon), Some((0, files::icon_path(icon))), false, waiter);
@@ -894,6 +962,7 @@ impl Session {
 			ImageRequest::Avatar { uid, hash } => {
 				self.voice.is_some() && self.avatars.get(uid) == Some(hash)
 			}
+			ImageRequest::MytsAvatar { uid, url } => self.myts_avatars.get(uid) == Some(url),
 			ImageRequest::Icon(id) => self.voice.is_some() && self.icons.contains(id),
 			ImageRequest::Picture(url) => self.pictures.contains(url),
 		}
@@ -907,13 +976,25 @@ impl Session {
 		result: Result<PathBuf, String>,
 	) {
 		let wanted = if requested {
-			matches!(&request, ImageRequest::Avatar { uid, hash }
-				if self.voice.is_some() && self.voice_presence.as_ref()
-					.and_then(|p| p.client_by_uid(uid)).and_then(|c| c.avatar.as_ref()) == Some(hash))
+			match &request {
+				ImageRequest::Avatar { uid, hash } => {
+					self.voice.is_some()
+						&& self
+							.voice_presence
+							.as_ref()
+							.and_then(|p| p.client_by_uid(uid))
+							.and_then(|c| c.avatar.as_ref())
+							== Some(hash)
+				}
+				ImageRequest::MytsAvatar { uid, url } => {
+					self.shown_client(uid).and_then(|c| c.myts_avatar.as_ref()) == Some(url)
+				}
+				_ => false,
+			}
 		} else {
 			self.wants_image(&request)
 		};
-		let current = if requested {
+		let current = if requested && voice_bound(&request) {
 			self.is_current(Source::Voice, epoch)
 		} else {
 			epoch == self.image_epoch
@@ -932,12 +1013,21 @@ impl Session {
 					ImageRequest::Avatar { uid: client_uid, hash } => {
 						Event::AvatarReady { session, client_uid, hash, path }
 					}
+					// The address in place of a hash: it changes with the
+					// picture.
+					ImageRequest::MytsAvatar { uid: client_uid, url } => {
+						Event::AvatarReady { session, client_uid, hash: url, path }
+					}
 					ImageRequest::Icon(icon) => Event::IconReady { session, icon, path },
 					ImageRequest::Picture(url) => Event::PictureReady { session, url, path },
 				});
 			}
 			Err(error) => {
 				debug!(?request, %error, "image download failed");
+				let avatar_of = match &request {
+					ImageRequest::Avatar { uid, .. } => Some(uid.clone()),
+					_ => None,
+				};
 				let retry = self
 					.image_retries
 					.entry(request)
@@ -949,6 +1039,14 @@ impl Session {
 					}
 					_ => None,
 				};
+				// The server's avatar gave up (its files unreachable): the
+				// myTeamSpeak one, if the client has one.
+				if let (None, Some(uid)) = (retry.due, avatar_of)
+					&& self.server_avatars_failed.insert(uid)
+					&& let Some(presence) = self.voice_presence.clone()
+				{
+					self.fetch_myts_avatars(&presence);
+				}
 			}
 		}
 	}
@@ -959,6 +1057,7 @@ impl Session {
 			self.images_enabled = enabled;
 			self.image_epoch += 1;
 			self.avatars.clear();
+			self.myts_avatars.clear();
 			self.icons.clear();
 			self.pictures.clear();
 			self.image_retries.clear();
@@ -996,6 +1095,7 @@ impl Session {
 		for request in ready {
 			match request {
 				ImageRequest::Avatar { uid, hash } => self.fetch_avatar(&uid, &hash, false),
+				ImageRequest::MytsAvatar { uid, url } => self.fetch_myts_avatar(&uid, &url, false),
 				ImageRequest::Icon(icon) => self.fetch_icon(icon),
 				ImageRequest::Picture(url) => self.fetch_picture(&url, true),
 			}
@@ -1927,6 +2027,7 @@ impl Session {
 			self.emit_state();
 		}
 		self.fetch_pictures(&presence);
+		self.fetch_myts_avatars(&presence);
 		let presence = Arc::new(presence);
 		self.contacts.presence(self.id, presence.clone());
 		self.emit(Event::Presence { session: self.id, presence });
@@ -2216,6 +2317,76 @@ mod banner_tests {
 		assert!(
 			matches!(events.try_recv(), Ok(Event::AvatarReady { client_uid, .. }) if client_uid == uid)
 		);
+		std::fs::remove_dir_all(cache.dir()).unwrap();
+	}
+
+	/// myTeamSpeak avatars (TeamSpeak 6) come from the web where the
+	/// server's avatar is not shown: none set, no voice connection to get it
+	/// over (observing), or its download gave up.
+	#[tokio::test]
+	async fn myts_avatars_where_the_servers_is_not_shown() {
+		let (mut session, mut events) = session("myts-avatar");
+		let cache = session.cache.current();
+		let client = |id, uid: &str, avatar: Option<&str>, myts: &str| voelin_model::ClientInfo {
+			id,
+			uid: Some(uid.into()),
+			avatar: avatar.map(Into::into),
+			myts_avatar: Some(myts.into()),
+			..Default::default()
+		};
+		let (a, b) = ("https://a.example.test/a.png", "https://a.example.test/b.png");
+		let hash = "0123456789abcdef0123456789abcdef";
+		let mut presence = Presence::default();
+		presence.clients.insert(1, client(1, "A=", None, a));
+		presence.clients.insert(2, client(2, "B=", Some(hash), b));
+		// Owned here, so nothing goes to the network.
+		let temps: Vec<_> = [a, b]
+			.iter()
+			.map(|url| {
+				let key = cache::picture_key(url).unwrap();
+				let Fetch::Download(temp) = cache.fetch(&key, false, Box::new(|_| {})) else {
+					panic!("first download");
+				};
+				(key, temp)
+			})
+			.collect();
+		// Observing: both, even the one with a server avatar.
+		session.gateway_presence = Some(presence.clone());
+		session.publish_presence();
+		assert_eq!(session.myts_avatars.len(), 2);
+		for (key, temp) in &temps {
+			std::fs::create_dir_all(temp.parent().unwrap()).unwrap();
+			std::fs::write(temp, b"\x89PNG\r\n\x1a\npicture").unwrap();
+			cache.finish(key, temp, Ok(()), 0);
+			let done = session.sources_rx.as_mut().unwrap().recv().await.unwrap();
+			session.source_event(done);
+		}
+		let mut ready = Vec::new();
+		while let Ok(event) = events.try_recv() {
+			if let Event::AvatarReady { client_uid, hash, .. } = event {
+				ready.push((client_uid, hash));
+			}
+		}
+		ready.sort();
+		assert_eq!(ready, [("A=".to_owned(), a.to_owned()), ("B=".to_owned(), b.to_owned())]);
+		// With voice the server's avatar is shown where there is one.
+		let (tx, _rx) = mpsc::unbounded_channel();
+		session.voice = Some((1, tx));
+		session.voice_presence = Some(presence.clone());
+		session.publish_presence();
+		assert_eq!(session.myts_avatars.keys().collect::<Vec<_>>(), ["A="]);
+		// Until its download gives up (the server's files unreachable).
+		let request = ImageRequest::Avatar { uid: "B=".into(), hash: hash.into() };
+		session.avatars.insert("B=".into(), hash.into());
+		for _ in 0..4 {
+			session.image_finished(
+				false,
+				session.image_epoch,
+				request.clone(),
+				Err("refused".into()),
+			);
+		}
+		assert_eq!(session.myts_avatars.get("B=").map(String::as_str), Some(b));
 		std::fs::remove_dir_all(cache.dir()).unwrap();
 	}
 

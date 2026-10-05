@@ -98,6 +98,11 @@ pub struct ClientInfo {
 	/// no avatar. A new hash means a new avatar.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub avatar: Option<String>,
+	/// The myTeamSpeak avatar's picture (TeamSpeak 6, an HTTPS link from
+	/// `client_myteamspeak_avatar`, [`myts_avatar_url`]): shown where the
+	/// server has no avatar for the client.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub myts_avatar: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub description: Option<String>,
 	#[serde(default, skip_serializing_if = "is_zero_i32")]
@@ -134,6 +139,34 @@ pub fn parse_badges(value: &str) -> Vec<String> {
 		.filter(|g| !g.is_empty())
 		.map(str::to_owned)
 		.collect()
+}
+
+/// The picture to show of a `client_myteamspeak_avatar` value (TeamSpeak
+/// 6): `<state>,<url>;<state>,<url>…`, states as myTeamSpeak's
+/// `AvatarState` (1 do not disturb, 2 online, 3 away, 4 offline). As the
+/// official client reads it: an entry that is not `<number>,<url>` (an
+/// empty one too, from a trailing `;`) makes the whole value no avatar;
+/// the "online" picture is shown whatever the client's state (an unknown
+/// state counts as online), else away, do not disturb, offline, the first
+/// of a kind. Only an HTTPS link of at most 4 KiB.
+pub fn myts_avatar_url(value: &str) -> Option<String> {
+	let mut best: Option<(u8, &str)> = None;
+	for entry in value.split(';') {
+		let mut parts = entry.split(',');
+		let state: u32 = parts.next()?.trim().parse().ok()?;
+		let url = parts.next()?.trim();
+		let rank = match state {
+			3 => 1,
+			1 => 2,
+			4 => 3,
+			_ => 0,
+		};
+		if best.is_none_or(|(r, _)| rank < r) {
+			best = Some((rank, url));
+		}
+	}
+	let url = best?.1;
+	(url.starts_with("https://") && url.len() <= 4096).then(|| url.to_owned())
 }
 
 /// How a group's name is shown next to its members.
@@ -346,6 +379,38 @@ mod tests {
 		}
 		assert_eq!(state, new);
 		assert!(new.diff(&new).is_empty());
+	}
+
+	#[test]
+	fn myts_avatars_as_the_official_client_reads_them() {
+		let on = "https://a.example.test/on.png";
+		assert_eq!(myts_avatar_url(&format!("3,https://a/away;2,{on}")).as_deref(), Some(on));
+		// Away before do not disturb before offline; the first of a kind.
+		assert_eq!(
+			myts_avatar_url("4,https://a/off;1,https://a/dnd;3,https://a/away;3,https://a/b")
+				.as_deref(),
+			Some("https://a/away")
+		);
+		assert_eq!(
+			myts_avatar_url("1,https://a/dnd;4,https://a/off").as_deref(),
+			Some("https://a/dnd")
+		);
+		// An unknown state counts as online.
+		assert_eq!(
+			myts_avatar_url("3,https://a/away;9,https://a/x").as_deref(),
+			Some("https://a/x")
+		);
+		// One bad entry spoils the value.
+		for bad in ["", "2", "x,https://a/on", "2,https://a/on;", "2,https://a/on;;3,https://a/b"] {
+			assert_eq!(myts_avatar_url(bad), None, "{bad:?}");
+		}
+		// Only HTTPS, and not endless.
+		assert_eq!(myts_avatar_url("2,http://a/on"), None);
+		assert_eq!(myts_avatar_url(&format!("2,https://a/{}", "x".repeat(4096))), None);
+		// Older JSON without the field still loads.
+		let client: ClientInfo =
+			serde_json::from_str(r#"{"id":1,"nickname":"a","channel":1}"#).unwrap();
+		assert_eq!(client.myts_avatar, None);
 	}
 
 	#[test]
