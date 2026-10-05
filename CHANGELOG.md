@@ -21,6 +21,15 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
   decoders work without installing FFmpeg.
 - AV1 decoding through dav1d in every desktop build.
 - 122 more signed client versions (`Versions.csv`).
+- Other users' myTeamSpeak avatars (TeamSpeak 6), as the official client
+  shows them: where the server has no avatar of them, its avatar could not
+  be downloaded, or the server is only observed.
+- Voice connections show servers the account's avatar and badges, as the
+  official client does, so other TeamSpeak 6 users see them; again after
+  a reconnect.
+- Every gateway a server publishes is tried in turn (TLS first, 20 seconds
+  each) before waiting to try again, so a TLS proxy that fails falls back to
+  the plain gateway published next to it.
 
 ### Changed
 
@@ -48,6 +57,12 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
 - A server's published gateway replaces one stored before (found or typed
   into an older version), so a gateway that moved is followed.
 - zbus's warnings about desktop portal requests are left out of the logs.
+- Banners: up to 128 MiB, more time on slow hosts, BMP and ICO too, and
+  SVG after a comment or DOCTYPE; pictures larger than 4096 pixels on a
+  side are scaled down. A banner that fails is tried again for as long as
+  it is shown (every 15 minutes at most), and the log says why it is
+  missing (HTTP status, an HTML page, a video, too large). The picture
+  cache defaults to 1 GiB, the decoded images to 256 MB.
 
 ### Fixed
 
