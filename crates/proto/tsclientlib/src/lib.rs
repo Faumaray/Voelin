@@ -61,6 +61,7 @@ pub use ts_bookkeeping::messages::s2c::InMessage;
 pub use ts_bookkeeping::*;
 pub use tsproto::resend::{ConnectionStats, PacketStat};
 pub use tsproto::Identity;
+pub use myts::MytsData;
 pub use tsproto_types::errors::Error as TsError;
 
 /// Wait this time for initserver, in seconds.

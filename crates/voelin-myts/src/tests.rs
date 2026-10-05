@@ -145,6 +145,26 @@ async fn login_roundtrip_keeps_credentials_in_body_and_redacts_results() {
 	assert!(!data.skip_session);
 }
 
+/// What servers are shown of the account comes with the login: the
+/// certificate, and the avatar as it came.
+#[tokio::test]
+async fn the_login_brings_the_accounts_presentation() {
+	let avatar = api::AvatarData { timestamp: 42, sign: vec![1; 64], ..Default::default() };
+	let response = api::LoginSession {
+		mytsid_user_cert: Some(api::MyTsUserCertificate { cert: vec![9, 8, 7] }),
+		user_avatar: Some(avatar.clone()),
+		..success()
+	};
+	let (client, _server) = mock(200, "", wire::encode(&response)).await;
+	let login = client.login("mail", "password", None, "device").await.unwrap();
+	assert_eq!(login.presentation.certificate, [9, 8, 7]);
+	assert_eq!(login.presentation.avatar, wire::encode(&avatar));
+	// Without them: nothing to show.
+	let (client, _server) = mock(200, "", wire::encode(&success())).await;
+	let login = client.login("mail", "password", None, "device").await.unwrap();
+	assert!(login.presentation.is_empty() && login.presentation.avatar.is_empty());
+}
+
 #[tokio::test]
 async fn login_requires_explicit_success_nonempty_token_and_preserves_status() {
 	for code in [0, 202, 208, 98765] {

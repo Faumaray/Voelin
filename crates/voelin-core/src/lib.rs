@@ -104,6 +104,10 @@ pub type SessionId = u64;
 pub enum Command {
 	/// Main account proof for every current and future voice connection.
 	SetMytsIdentity(Option<Arc<tsproto::myts::Identity>>),
+	/// What voice servers are shown of the main account (its certificate
+	/// and avatar, TeamSpeak 6): sent to every connection that presents the
+	/// account, once connected and when it changes.
+	SetMytsData(Option<Arc<tsclientlib::MytsData>>),
 	ConnectVoice {
 		session: SessionId,
 		options: Box<VoiceOptions>,
@@ -818,6 +822,7 @@ async fn run(
 	contacts.load().await;
 	let mut sessions: HashMap<SessionId, session::SessionHandle> = HashMap::new();
 	let (myts_identity, _) = watch::channel(None);
+	let (myts_data, _) = watch::channel(None);
 	let mut current = shared.current();
 	// Pruning: at start, then hourly (and when the setting changes).
 	let mut prune = tokio::time::interval(std::time::Duration::from_secs(3600));
@@ -871,6 +876,16 @@ async fn run(
 						return false;
 					}
 					*current = identity;
+					true
+				});
+				continue;
+			}
+			Command::SetMytsData(data) => {
+				myts_data.send_if_modified(|current| {
+					if *current == data {
+						return false;
+					}
+					*current = data;
 					true
 				});
 				continue;
@@ -951,6 +966,7 @@ async fn run(
 					settings.clone(),
 					engine.clone(),
 					myts_identity.subscribe(),
+					myts_data.subscribe(),
 				);
 				if let Some(profiles) = &srtp_profiles {
 					s.send(Command::SetSrtpProfiles(profiles.clone()));
@@ -1029,6 +1045,7 @@ fn command_session(command: &Command) -> SessionId {
 		| Command::SetOfflineMessageRead { session, .. }
 		| Command::CloseSession { session } => *session,
 		Command::SetMytsIdentity(_)
+		| Command::SetMytsData(_)
 		| Command::SetAudioSettings(_)
 		| Command::SetSrtpProfiles(_)
 		| Command::TestMicrophone { .. }

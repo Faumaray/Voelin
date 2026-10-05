@@ -108,6 +108,43 @@ file names and description are used until then. What is kept goes into the
 same secret-store bundle as the session (`profile`), never the token into a
 URL.
 
+### Presenting the account's avatar, and other clients' avatars (TeamSpeak 6)
+
+Voice servers show the account's avatar (and the blurred banner behind it
+in the client-info view) from what the client sends once connected, not
+from `clientinit` (the official 6.0.0-beta4.1 client never sets
+`client_myteamspeak_avatar` or `client_signed_badges` itself):
+
+    updatemytsdata myts_certificate=<cert> [myts_signed_badge=<list>] [myts_avatar=<AvatarData>]
+
+built at 0x1f38520: `myts_certificate` is `LoginSession.mytsid_user_cert.cert`,
+`myts_avatar` the serialized `LoginSession.user_avatar` (`AvatarData` with its
+timestamp and myTeamSpeak's signature, which covers `AvatarInfo`, the myTS
+id and the timestamp), `myts_signed_badge` a `UserBadgesSignedList` from
+`getSignedBadges`. The values are the raw bytes with TeamSpeak's escaping
+only (`\a` and `\b` included), no base64. It is sent once the connection is
+established, after a sign-in (after `updatemytsid`), after an avatar upload
+and after a badge change. Voelin sends the certificate and the avatar: both
+come only from a password sign-in (`LoginSession`, fields 10 and 11), the
+avatar sliced out of the response as it came (encoding it again would drop
+fields this version does not know and break the signature). They are kept
+in `<data>/account/presentation.json` (public data) and sent to every
+connection that presents the account; a refusal is only logged.
+
+Other clients' avatars arrive as `client_myteamspeak_avatar`, plain text
+`<state>,<url>;<state>,<url>…` with myTeamSpeak's `AvatarState` numbers
+(`request_avatar_with_ts_server_client_property`, 0x1ae2840): an entry
+that is not `<number>,<url>` (an empty one from a trailing `;` too) spoils
+the whole value; the online picture is shown, else away, do not disturb,
+offline; the server's own avatar (`client_flag_avatar`) wins when it loads.
+Voelin downloads it (HTTPS, 4 MiB) where the server's is not shown: none
+set, no voice connection (observing), or its download gave up.
+
+`client_user_tag` (the "User Tag", a TeamSpeak chat alias) is set by the
+client as JSON `{"myts_token":…,"tag":…,"updated":<ms>}` with a token from
+`requestSignedAllowedIdentifierList` at `/tschat`; receivers show it only
+after verifying the token. Voelin does not set it yet.
+
 `requestAvatarSignedUrl` is not a download call: it signs *upload* links.
 In the TS6 6.0.0-beta4.1 Linux client, `Account_Manager_Impl::
 request_avatar_signed_urls`'s reply goes only to `upload_avatar`, whose

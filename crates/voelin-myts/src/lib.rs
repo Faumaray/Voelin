@@ -6,7 +6,7 @@ mod identity;
 mod profile;
 mod transport;
 pub use identity::IdentityError;
-pub use profile::{Badge, Device, Profile};
+pub use profile::{Badge, Device, Presentation, Profile};
 pub use tsproto::myts::Identity as ServerIdentity;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -27,6 +27,9 @@ pub struct Login {
 	/// What the login response tells about the account (the avatar's file
 	/// names, the description); [`Client::profile`] tells more.
 	pub profile: Profile,
+	/// What voice servers are shown of the account (its avatar), as
+	/// signed by myTeamSpeak.
+	pub presentation: Presentation,
 }
 
 /// Server-provided alternative login material, stored only in a secret store.
@@ -181,7 +184,17 @@ impl Client {
 		encryption_key: Option<Zeroizing<[u8; 32]>>,
 	) -> Result<Login, Error> {
 		let bytes = self.transport.call("authentication", method, body).await?;
+		// The avatar exactly as it came: its signature covers its bytes.
+		let avatar = profile::raw_field(&bytes, profile::USER_AVATAR).unwrap_or_default().to_vec();
 		let response: api::LoginSession = wire::decode(bytes)?;
+		let presentation = Presentation {
+			certificate: response
+				.mytsid_user_cert
+				.as_ref()
+				.map(|c| c.cert.clone())
+				.unwrap_or_default(),
+			avatar,
+		};
 		let token = SessionToken::try_from(&response)?;
 		let (response, identity) = tokio::task::spawn_blocking(move || {
 			let identity = match encryption_key {
@@ -197,6 +210,7 @@ impl Client {
 			token,
 			identity,
 			profile,
+			presentation,
 			uuid: response.uuid,
 			username: response.username,
 			renewal: response.alternative_login_info.map(|info| Renewal {

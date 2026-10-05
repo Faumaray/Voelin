@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use std::path::PathBuf;
 use std::sync::Arc;
-use voelin_myts::{Client, Login, Profile, ServerIdentity, SessionToken};
+use voelin_myts::{Client, Login, Presentation, Profile, ServerIdentity, SessionToken};
 use voelin_store::Secrets;
 
 use crate::app::{App, Bridge, MytsForm, later};
@@ -50,6 +50,18 @@ struct SavedProfile {
 
 /// The account's avatar picture, in the account directory.
 const AVATAR_FILE: &str = "avatar";
+/// What servers are shown of the account ([`Presentation`]), in the
+/// account directory: public data, so not in the keyring (whose items are
+/// small on some systems).
+const PRESENTATION_FILE: &str = "presentation.json";
+
+/// [`PRESENTATION_FILE`]: whose it is, and what.
+#[derive(Serialize, Deserialize)]
+struct SavedPresentation {
+	uuid: String,
+	certificate: Vec<u8>,
+	avatar: Vec<u8>,
+}
 
 /// A date (Unix seconds) as the profile shows it; empty when not known.
 fn date(seconds: i64) -> String {
@@ -97,6 +109,9 @@ pub(crate) struct Account {
 	/// The avatar, decoded.
 	avatar: slint::Image,
 	saved: Option<Saved>,
+	/// What servers are shown of the account; only from a password
+	/// sign-in (a kept session is not told again).
+	presentation: Option<Presentation>,
 	signed_in: bool,
 	busy: bool,
 	/// The saved session is being checked (not a password sign-in).
@@ -119,6 +134,57 @@ impl Account {
 
 	fn avatar_path(&self) -> Option<PathBuf> {
 		self.dir.as_ref().map(|dir| dir.join(AVATAR_FILE))
+	}
+
+	fn presentation_path(&self) -> Option<PathBuf> {
+		self.dir.as_ref().map(|dir| dir.join(PRESENTATION_FILE))
+	}
+
+	/// The kept presentation, if it is the saved account's.
+	fn load_presentation(&mut self) {
+		let uuid = self.saved.as_ref().map(|s| s.uuid.as_str()).unwrap_or_default();
+		self.presentation = self
+			.presentation_path()
+			.and_then(|path| std::fs::read(path).ok())
+			.and_then(|bytes| serde_json::from_slice::<SavedPresentation>(&bytes).ok())
+			.filter(|kept| !uuid.is_empty() && kept.uuid == uuid)
+			.map(|kept| Presentation { certificate: kept.certificate, avatar: kept.avatar });
+	}
+
+	/// A sign-in's presentation, kept for the next start.
+	fn set_presentation(&mut self, uuid: &str, presentation: Presentation) {
+		if let Some(path) = self.presentation_path() {
+			let kept = SavedPresentation {
+				uuid: uuid.to_owned(),
+				certificate: presentation.certificate.clone(),
+				avatar: presentation.avatar.clone(),
+			};
+			let written =
+				serde_json::to_vec(&kept).map_err(std::io::Error::other).and_then(|json| {
+					path.parent().map_or(Ok(()), std::fs::create_dir_all)?;
+					std::fs::write(&path, json)
+				});
+			if let Err(error) = written {
+				tracing::warn!(%error, "could not keep what servers are shown of the account");
+			}
+		}
+		self.presentation = Some(presentation);
+	}
+
+	fn forget_presentation(&mut self) {
+		self.presentation = None;
+		if let Some(path) = self.presentation_path() {
+			let _ = std::fs::remove_file(path);
+		}
+	}
+
+	/// What voice servers are shown of the signed-in account.
+	fn myts_data(&self) -> Option<tsclientlib::MytsData> {
+		self.identity()?;
+		self.presentation.as_ref().filter(|p| !p.is_empty()).map(|p| tsclientlib::MytsData {
+			certificate: p.certificate.clone(),
+			avatar: p.avatar.clone(),
+		})
 	}
 
 	/// The kept picture, shown while the session is checked.
@@ -162,6 +228,7 @@ impl Account {
 				self.saved = saved;
 				if self.saved.is_some() {
 					self.load_avatar();
+					self.load_presentation();
 				}
 				self.can_forget = false;
 				self.status = 0;
@@ -202,6 +269,11 @@ impl Account {
 			if same_account { self.saved.take().unwrap().profile } else { SavedProfile::default() };
 		if !same_account {
 			self.forget_avatar();
+			self.forget_presentation();
+		}
+		// A sign-in without it keeps the same account's known one.
+		if !login.presentation.is_empty() {
+			self.set_presentation(&login.uuid, login.presentation);
 		}
 		profile.update(&login.profile);
 		let saved = Saved {
@@ -327,6 +399,7 @@ impl Account {
 		self.persistence_status = if cleared { 0 } else { 8 };
 		self.can_forget = !cleared;
 		self.forget_avatar();
+		self.forget_presentation();
 		cleared
 	}
 }
@@ -381,6 +454,13 @@ impl App {
 		self.engine.send(voelin_core::Command::SetMytsIdentity(
 			self.myts.identity().cloned().map(Arc::new),
 		));
+		// What servers are shown of it (its avatar), after the proof.
+		let data = self.myts.myts_data();
+		if data.is_none() && self.myts.identity().is_some() {
+			// Signed in before Voelin kept it: only a password sign-in tells it.
+			tracing::info!("servers see no avatar of the account until the next password sign-in");
+		}
+		self.engine.send(voelin_core::Command::SetMytsData(data.map(Arc::new)));
 	}
 
 	pub(crate) fn refresh_myts(&self) {
@@ -642,7 +722,35 @@ mod tests {
 				otp_token: format!("{name}-otp"),
 				device_id: format!("{name}-device"),
 			}),
+			presentation: Presentation {
+				certificate: format!("{name}-cert").into_bytes(),
+				avatar: format!("{name}-avatar").into_bytes(),
+			},
 		}
+	}
+
+	/// What servers are shown of the account is kept for it, told once its
+	/// session is valid again, and never shown for another account.
+	#[test]
+	fn what_servers_are_shown_is_kept_per_account() {
+		let dir = std::env::temp_dir().join(format!("voelin-presentation-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&dir);
+		let secrets = MemorySecrets::default();
+		let mut account = Account::new(dir.clone());
+		account.accept(&secrets, login("Alice"), "alice@example.test".into());
+		assert_eq!(account.myts_data().unwrap().certificate, b"Alice-cert");
+		let mut restarted = Account::new(dir.clone());
+		restarted.load(&secrets);
+		assert!(restarted.myts_data().is_none(), "not before the session is checked");
+		restarted.restored();
+		assert_eq!(restarted.myts_data().unwrap().avatar, b"Alice-avatar");
+		restarted.forget(&secrets);
+		assert!(!dir.join(PRESENTATION_FILE).exists());
+		let mut bob = login("Bob");
+		bob.presentation = Presentation::default();
+		restarted.accept(&secrets, bob, "bob@example.test".into());
+		assert!(restarted.myts_data().is_none());
+		let _ = std::fs::remove_dir_all(dir);
 	}
 
 	fn server_identity() -> ServerIdentity {

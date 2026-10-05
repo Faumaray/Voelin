@@ -87,10 +87,12 @@ impl SessionHandle {
 		audio_settings: AudioSettings,
 		shared: Shared,
 		myts_identity: watch::Receiver<Option<Arc<tsproto::myts::Identity>>>,
+		myts_data: watch::Receiver<Option<Arc<tsclientlib::MytsData>>>,
 	) -> Self {
 		let (tx, rx) = mpsc::unbounded_channel();
 		tokio::spawn(
-			Session::new(id, events, frames, audio_settings, shared, myts_identity).run(rx),
+			Session::new(id, events, frames, audio_settings, shared, myts_identity, myts_data)
+				.run(rx),
 		);
 		Self { tx }
 	}
@@ -190,6 +192,7 @@ struct OwnStream {
 
 struct Session {
 	myts_identity: watch::Receiver<Option<Arc<tsproto::myts::Identity>>>,
+	myts_data: watch::Receiver<Option<Arc<tsclientlib::MytsData>>>,
 	id: SessionId,
 	events: broadcast::Sender<Event>,
 	state: SessionState,
@@ -270,12 +273,14 @@ impl Session {
 		audio_settings: AudioSettings,
 		shared: Shared,
 		myts_identity: watch::Receiver<Option<Arc<tsproto::myts::Identity>>>,
+		myts_data: watch::Receiver<Option<Arc<tsclientlib::MytsData>>>,
 	) -> Self {
 		let (sources_tx, sources_rx) = mpsc::unbounded_channel();
 		let Shared { settings, history, cache, contacts } = shared;
 		let contacts_rx = Some(contacts.watch());
 		Self {
 			myts_identity,
+			myts_data,
 			cache,
 			contacts,
 			contacts_rx,
@@ -411,6 +416,7 @@ impl Session {
 				}
 				let link = VoiceLink {
 					myts_identity: self.myts_identity.clone(),
+					myts_data: self.myts_data.clone(),
 					session: self.id,
 					events: self.events.clone(),
 					settings: self.settings.clone(),
@@ -733,6 +739,7 @@ impl Session {
 			}
 			// Engine-wide.
 			Command::SetMytsIdentity(_)
+			| Command::SetMytsData(_)
 			| Command::CloseSession { .. }
 			| Command::TestMicrophone { .. }
 			| Command::SetSetting { .. }
@@ -2056,7 +2063,17 @@ mod banner_tests {
 		// No myTeamSpeak account; its source stays open, as the engine's does
 		// (a closed one ends voice connections).
 		let myts_identity = Box::leak(Box::new(watch::Sender::new(None))).subscribe();
-		(Session::new(1, events, frames, AudioSettings::default(), shared, myts_identity), receiver)
+		let myts_data = Box::leak(Box::new(watch::Sender::new(None))).subscribe();
+		let session = Session::new(
+			1,
+			events,
+			frames,
+			AudioSettings::default(),
+			shared,
+			myts_identity,
+			myts_data,
+		);
+		(session, receiver)
 	}
 
 	#[tokio::test]

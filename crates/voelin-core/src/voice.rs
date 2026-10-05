@@ -70,6 +70,8 @@ impl VoiceOptions {
 #[derive(Clone)]
 pub(crate) struct VoiceLink {
 	pub myts_identity: watch::Receiver<Option<Arc<tsproto::myts::Identity>>>,
+	/// What the server is shown of the account ([`crate::Command::SetMytsData`]).
+	pub myts_data: watch::Receiver<Option<Arc<tsclientlib::MytsData>>>,
 	pub session: SessionId,
 	pub events: broadcast::Sender<Event>,
 	pub settings: SharedSettings,
@@ -227,6 +229,7 @@ fn now_ms() -> i64 {
 
 enum Input {
 	MytsIdentityChanged,
+	MytsDataChanged,
 	AccountSourceClosed,
 	Item(Option<Result<StreamItem, tsclientlib::Error>>),
 	Cmd(Option<VoiceCmd>),
@@ -236,6 +239,8 @@ enum Input {
 /// A command waiting for the server's answer.
 enum Pending {
 	MytsIdentity(Instant),
+	/// `updatemytsdata`: its answer is only logged.
+	MytsData,
 	Stream(Request),
 	FileList {
 		request: RequestId,
@@ -366,6 +371,7 @@ async fn run_inner(
 		builder = builder.channel(channel.clone());
 	}
 	let mut identity = link.myts_identity.clone();
+	let mut data = link.myts_data.clone();
 	// A changed account invalidates an in-flight handshake. Drop that connection
 	// and take a fresh snapshot before publishing any connected state.
 	let mut con = timeout(Duration::from_secs(30), async {
@@ -435,6 +441,10 @@ async fn run_inner(
 		transfers: HashMap::new(),
 	};
 	voice.publish_state()?;
+	// The account's avatar, for everyone on the server (as the official
+	// client, once connected).
+	data.borrow_and_update();
+	voice.send_myts_data(&identity, &data);
 
 	let mut tick = tokio::time::interval(Duration::from_millis(250));
 	let result = loop {
@@ -445,7 +455,9 @@ async fn run_inner(
 		}) {
 			break Err(anyhow::anyhow!("myTeamSpeak account update timed out"));
 		}
-		let input = next_input(&mut voice.con.events(), commands, &mut tick, &mut identity).await;
+		let input =
+			next_input(&mut voice.con.events(), commands, &mut tick, &mut identity, &mut data)
+				.await;
 		match input {
 			Input::AccountSourceClosed => break Err(anyhow::anyhow!("account source closed")),
 			Input::MytsIdentityChanged => {
@@ -456,6 +468,12 @@ async fn run_inner(
 					}
 					Err(e) => break Err(anyhow::anyhow!("myTeamSpeak account update: {e}")),
 				}
+				// After the proof, what is shown of the account (a sign-in).
+				voice.send_myts_data(&identity, &data);
+			}
+			Input::MytsDataChanged => {
+				data.borrow_and_update();
+				voice.send_myts_data(&identity, &data);
 			}
 			Input::Item(None) => break Err(anyhow::anyhow!("connection closed")),
 			Input::Item(Some(Err(e))) => break Err(e.into()),
@@ -488,11 +506,17 @@ async fn next_input(
 	commands: &mut mpsc::UnboundedReceiver<VoiceCmd>,
 	tick: &mut tokio::time::Interval,
 	identity: &mut watch::Receiver<Option<Arc<tsproto::myts::Identity>>>,
+	data: &mut watch::Receiver<Option<Arc<tsclientlib::MytsData>>>,
 ) -> Input {
 	tokio::select! {
 		biased;
 		changed = identity.changed() => if changed.is_ok() {
 			Input::MytsIdentityChanged
+		} else {
+			Input::AccountSourceClosed
+		},
+		changed = data.changed() => if changed.is_ok() {
+			Input::MytsDataChanged
 		} else {
 			Input::AccountSourceClosed
 		},
@@ -802,11 +826,36 @@ impl Voice {
 				self.link.emit(Event::OfflineMessage { session, request, result });
 			}
 			Pending::Quiet | Pending::MytsIdentity(_) => {}
+			Pending::MytsData => match result {
+				Ok(()) => debug!("the server took the account's avatar"),
+				Err(e) => warn!(error = %e, "the server refused the account's avatar"),
+			},
 			Pending::Report(what) => {
 				if let Err(e) = result {
 					let _ = self.events.send(VoiceEvent::Error(format!("{what}: {e}")));
 				}
 			}
+		}
+	}
+
+	/// Show the server the account's certificate and avatar
+	/// (`updatemytsdata`), when connected with the account.
+	fn send_myts_data(
+		&mut self,
+		identity: &watch::Receiver<Option<Arc<tsproto::myts::Identity>>>,
+		data: &watch::Receiver<Option<Arc<tsclientlib::MytsData>>>,
+	) {
+		if identity.borrow().is_none() {
+			return;
+		}
+		let Some(data) = data.borrow().clone().filter(|d| !d.certificate.is_empty()) else {
+			return;
+		};
+		match self.con.send_myts_data(&data) {
+			Ok(handle) => {
+				self.pending.insert(handle, Pending::MytsData);
+			}
+			Err(e) => warn!(error = %e, "the account's avatar was not sent"),
 		}
 	}
 
@@ -1116,6 +1165,7 @@ mod account_tests {
 	#[tokio::test(start_paused = true)]
 	async fn account_priority_preserves_ready_network_and_timer_progress() {
 		let (account, mut identity) = watch::channel(None);
+		let (account_data, mut data) = watch::channel(None);
 		let (commands, mut receiver) = mpsc::unbounded_channel();
 		for _ in 0..512 {
 			commands.send(VoiceCmd::SetInputMuted(false)).unwrap();
@@ -1126,14 +1176,22 @@ mod account_tests {
 		let mut tick = tokio::time::interval(Duration::from_millis(1));
 		account.send_replace(None);
 		assert!(matches!(
-			next_input(&mut stream, &mut receiver, &mut tick, &mut identity).await,
+			next_input(&mut stream, &mut receiver, &mut tick, &mut identity, &mut data).await,
 			Input::MytsIdentityChanged
 		));
 		identity.borrow_and_update();
+		// What is shown of the account changes too, ahead of the rest.
+		account_data.send_replace(Some(Arc::new(tsclientlib::MytsData::default())));
+		assert!(matches!(
+			next_input(&mut stream, &mut receiver, &mut tick, &mut identity, &mut data).await,
+			Input::MytsDataChanged
+		));
+		data.borrow_and_update();
 		let (mut network, mut timers, mut audio) = (0, 0, 0);
 		for _ in 0..512 {
 			tokio::time::advance(Duration::from_millis(1)).await;
-			match next_input(&mut stream, &mut receiver, &mut tick, &mut identity).await {
+			match next_input(&mut stream, &mut receiver, &mut tick, &mut identity, &mut data).await
+			{
 				Input::Item(_) => network += 1,
 				Input::Tick => timers += 1,
 				Input::Cmd(_) => audio += 1,
@@ -1168,6 +1226,7 @@ mod account_tests {
 			events,
 			settings: SharedSettings::new(crate::settings::Settings::default()),
 			myts_identity: identity,
+			myts_data: watch::channel(None).1,
 		};
 		let (_commands, commands) = mpsc::unbounded_channel();
 		let (events, mut received) = mpsc::unbounded_channel();
