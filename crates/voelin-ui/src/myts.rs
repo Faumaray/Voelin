@@ -446,7 +446,7 @@ impl App {
 			});
 			// The picture only when it changed (or was never fetched).
 			let Some(name) = avatar.filter(|name| *name != shown || !has_picture) else { return };
-			match client.avatar(&token, &name).await {
+			match client.avatar(&name).await {
 				Ok(bytes) => later(move |app| {
 					if app.myts.generation == generation && app.myts.signed_in {
 						app.myts.set_avatar(name, &bytes);

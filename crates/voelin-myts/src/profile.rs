@@ -21,7 +21,8 @@ pub struct Profile {
 	/// The last sign-in before this one, Unix seconds (0: not told).
 	pub last_login: i64,
 	pub badges: Vec<Badge>,
-	/// The avatar's file names, the one for "online" first.
+	/// The avatar's file names, the one for "online" first: each is the
+	/// picture's download link.
 	pub avatars: Vec<String>,
 	/// Devices signed in to the account.
 	pub devices: Vec<Device>,
@@ -97,24 +98,16 @@ pub(crate) fn from_account_data(data: user::UserAccountData) -> Result<Profile, 
 	})
 }
 
-/// The signed link for `file_name`; only HTTPS (and loopback HTTP in tests).
-pub(crate) fn signed_url(
-	response: user::AvatarSignedUrlResponse,
-	file_name: &str,
-) -> Result<String, Error> {
-	check(response.return_code.as_ref())?;
-	let url = response
-		.signed_urls
-		.into_iter()
-		.find(|u| u.file_name == file_name || u.file_name.is_empty())
-		.map(|u| u.signed_url)
-		.ok_or(Error::AvatarUrl)?;
+/// An avatar file name as a download link: the official client
+/// (`Avatar_Cache::request_avatar_from_urls`) GETs the names of the avatar
+/// map as they are. Only HTTPS (and loopback HTTP in tests).
+pub(crate) fn avatar_link(name: &str) -> Result<&str, Error> {
 	let allowed =
-		url.starts_with("https://") || (cfg!(test) && url.starts_with("http://127.0.0.1:"));
-	if !allowed || url.len() > 4096 {
+		name.starts_with("https://") || (cfg!(test) && name.starts_with("http://127.0.0.1:"));
+	if !allowed || name.len() > 4096 {
 		return Err(Error::AvatarUrl);
 	}
-	Ok(url)
+	Ok(name)
 }
 
 /// A refusal: `success` unset with an error code. (A reply without a return
@@ -204,26 +197,15 @@ mod tests {
 		};
 		let error = from_account_data(refused).unwrap_err();
 		assert!(error.is_invalid_session());
-		let response = |url: &str| user::AvatarSignedUrlResponse {
-			return_code: Some(user::ReturnCode { success: true, ..Default::default() }),
-			signed_urls: vec![user::avatar_signed_url_response::SignedUrl {
-				file_name: "a.png".into(),
-				signed_url: url.into(),
-			}],
-		};
 		assert_eq!(
-			signed_url(response("https://cdn.example.test/a.png?sig=1"), "a.png").unwrap(),
+			avatar_link("https://cdn.example.test/a.png?sig=1").unwrap(),
 			"https://cdn.example.test/a.png?sig=1"
 		);
-		assert!(matches!(
-			signed_url(response("http://cdn.example.test/a"), "a.png"),
-			Err(Error::AvatarUrl)
-		));
-		assert!(matches!(
-			signed_url(response("file:///etc/passwd"), "a.png"),
-			Err(Error::AvatarUrl)
-		));
-		assert!(matches!(signed_url(response("https://x"), "b.png"), Err(Error::AvatarUrl)));
+		for bad in ["http://cdn.example.test/a", "file:///etc/passwd", "a.png", ""] {
+			assert!(matches!(avatar_link(bad), Err(Error::AvatarUrl)), "{bad}");
+		}
+		let long = format!("https://cdn.example.test/{}", "a".repeat(4096));
+		assert!(matches!(avatar_link(&long), Err(Error::AvatarUrl)));
 	}
 
 	#[test]

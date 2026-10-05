@@ -74,8 +74,10 @@ pub enum Error {
 	MissingRenewalCredentials,
 	#[error("account service refused the request (code {0})")]
 	Refused(i32),
-	#[error("account service returned no usable avatar link")]
+	#[error("the account's avatar is not an HTTPS link")]
 	AvatarUrl,
+	#[error("avatar download returned HTTP {0}")]
+	Download(u16),
 }
 impl Error {
 	pub fn status_code(&self) -> Option<i32> {
@@ -214,19 +216,13 @@ impl Client {
 		profile::from_account_data(wire::decode(bytes)?)
 	}
 
-	/// The picture of an avatar file of the signed-in user (one of
-	/// [`Profile::avatars`]): the service signs a download link
-	/// (`requestAvatarSignedUrl` at `/user`), which is then fetched.
-	pub async fn avatar(&self, token: &SessionToken, file_name: &str) -> Result<Vec<u8>, Error> {
-		transport::check_input_size(&[token.as_str(), file_name])?;
-		let request = api::user::AvatarSignedUrlRequest {
-			session: token.as_str().into(),
-			file_names: vec![file_name.into()],
-		};
-		let bytes =
-			self.transport.call("user", "requestAvatarSignedUrl", &wire::encode(&request)).await?;
-		let url = profile::signed_url(wire::decode(bytes)?, file_name)?;
-		self.transport.download(&url, profile::MAX_AVATAR_BYTES).await
+	/// The picture of an avatar of the signed-in user (one of
+	/// [`Profile::avatars`]). An avatar's "file name" is its download link,
+	/// fetched as it is: the official client GETs it without headers.
+	/// (`requestAvatarSignedUrl` signs upload links, not download links.)
+	pub async fn avatar(&self, file_name: &str) -> Result<Vec<u8>, Error> {
+		let url = profile::avatar_link(file_name)?;
+		self.transport.download(url, profile::MAX_AVATAR_BYTES).await
 	}
 
 	pub async fn validate_session(&self, token: &SessionToken) -> Result<(), Error> {

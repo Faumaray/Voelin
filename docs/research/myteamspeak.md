@@ -100,14 +100,27 @@ After a sign-in or a validated saved session the app asks the user service,
 client next to `/authentication` and `/session`), for `getAccountData` with the
 basic info, avatars, description, badges and authenticated devices, and shows
 them in Settings → My Account (and the avatar in the sidebar's profile when
-the server has none for us). `requestAvatarSignedUrl` turns the avatar's file
-name (the "online" one first) into a signed HTTPS link, which is fetched
-(at most 4 MiB) and kept in `<data>/account/avatar` for the next start; it is
-fetched again only when the file name changes. The login response's own
-avatar file names and description are used until then. What is kept goes into
-the same secret-store bundle as the session (`profile`), never the token into
-a URL. Neither call has been run against the live service from this
-environment.
+the server has none for us). An avatar's file name (the "online" one first)
+is its download link: it is fetched as it is with a plain GET, HTTPS only, at
+most 4 MiB, and kept in `<data>/account/avatar` for the next start; it is
+fetched again only when the name changes. The login response's own avatar
+file names and description are used until then. What is kept goes into the
+same secret-store bundle as the session (`profile`), never the token into a
+URL.
+
+`requestAvatarSignedUrl` is not a download call: it signs *upload* links.
+In the TS6 6.0.0-beta4.1 Linux client, `Account_Manager_Impl::
+request_avatar_signed_urls`'s reply goes only to `upload_avatar`, whose
+upload (`Cloud_Sync_Impl::upload_avatar_to_intermediate_bucket`) is an
+`http_v2::Http_Client::put`, followed by `requestUploadAvatar`. The client's
+own avatar comes from `MyTeamSpeak::Account::request_own_myts_avatar`
+(0x1ae1a50): it parses the stored `AvatarData` and hands each map entry's
+state and name, unchanged, to `Avatar_Cache::request_avatar_from_urls`
+(0x12d6e20), which passes the name as the URL to `Http_Client::get` with an
+empty header list (0x12d78c1). An early Voelin fetched the signed link with
+a GET instead and was refused with HTTP 403 by the live service; a refused
+download is now logged as "avatar download returned HTTP …", apart from
+the account service's errors.
 
 Sign-out returns to login, clears local account material and attempts remote
 session deletion; storage or remote errors are reported. A late completion
