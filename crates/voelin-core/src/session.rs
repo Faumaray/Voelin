@@ -15,10 +15,10 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use tokio::sync::{broadcast, mpsc, watch};
-use tracing::debug;
+use tracing::{debug, warn};
 use tsclientlib::ClientId;
 use voelin_audio::AudioSettings;
-use voelin_gateway_proto::{HistoryEntry, StreamEntry, StreamSpec, feature};
+use voelin_gateway_proto::{ErrorCode, HistoryEntry, StreamEntry, StreamSpec, feature};
 use voelin_model::{ChatMessage, ChatTarget, GroupInfo, Presence, ServerDetails};
 use voelin_stream::ClientState;
 
@@ -1736,6 +1736,15 @@ impl Session {
 				self.publish_presence();
 			}
 			GatewayEvent::Push(push) => self.gateway_push(*push),
+			// Away for now (logged where it happened): observing resumes
+			// when it is back. Users never hear of the gateway.
+			GatewayEvent::Retrying(reason) => {
+				self.gateway_gone(Some(reason));
+				self.gateway_presence = None;
+				self.state.observe = ObserveState::Connecting;
+				self.emit_state();
+				self.publish_presence();
+			}
 			GatewayEvent::Disconnected(reason) => {
 				self.gateway = None;
 				self.gateway_gone(reason.clone());
@@ -1743,7 +1752,7 @@ impl Session {
 				self.state.observe = ObserveState::Off;
 				self.emit_state();
 				if let Some(reason) = reason {
-					self.error(format!("gateway: {reason}"));
+					warn!(%reason, "not observing through the gateway");
 				}
 				self.publish_presence();
 			}
@@ -1814,7 +1823,18 @@ impl Session {
 			Push::Capabilities(capabilities) => {
 				self.gateway_update(GatewayUpdate::Capabilities { capabilities });
 			}
-			Push::Error { code, message } => self.error(format!("gateway: {code:?}: {message}")),
+			Push::Error { code, message } => {
+				warn!(?code, %message, "gateway error");
+				// What answers the user's own doing; the rest is the
+				// gateway's business.
+				let told = match code {
+					ErrorCode::Forbidden => "Not allowed on this server.",
+					ErrorCode::RateLimited => "Too many messages; try again in a moment.",
+					ErrorCode::QuotaExceeded => "This server's limit is reached.",
+					_ => return,
+				};
+				self.error(told);
+			}
 			Push::PresenceSnapshot(_)
 			| Push::PresenceDelta(_)
 			| Push::Other(_)
@@ -1833,7 +1853,8 @@ impl Session {
 				self.publish_presence();
 			}
 			QueryEvent::Chat(msg) => self.chat(msg, MessageSource::Query, None),
-			QueryEvent::Error(message) => self.error(format!("query: {message}")),
+			// The relay's business, not the user's (as the gateway's).
+			QueryEvent::Error(message) => warn!(%message, "query relay"),
 			QueryEvent::Disconnected => {
 				self.query = None;
 				self.query_presence = None;

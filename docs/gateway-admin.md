@@ -86,9 +86,10 @@ Every login, post and settings change is written to the audit table.
 5. Install tsgw ([below](#install)), copy the example config to
    `/etc/tsgw/tsgw.toml` and set the query address and credentials
    (`TSGW_QUERY_PASSWORD` or `password_file`).
-6. Run it behind TLS (Caddy, nginx) and publish it in DNS
-   ([below](#letting-voelin-find-the-gateway)), so users only add the
-   server's address; or give them the `wss://…/v1` URL.
+6. Run it behind TLS (Caddy, nginx) and publish it in DNS, or let it
+   answer on its default port next to the server
+   ([below](#letting-voelin-find-the-gateway)): users only add the
+   server's address and never see the gateway.
 
 ## Letting Voelin find the gateway
 
@@ -98,9 +99,12 @@ for its gateway the way TeamSpeak looks for the voice server (SRV
 user selects the server (users do not type gateway URLs or query logins).
 It asks at the server's host name and then at each parent domain down to the
 registered domain, the most specific name first; for `ts.example.org` that
-is `ts.example.org`, then `example.org`. It looks again when the server is
-selected or saved without a gateway (a new address drops the old one) and
-when it connects with voice.
+is `ts.example.org`, then `example.org`. It looks once per run when the
+server is selected or connects with voice, and again when its address
+changes: what is published takes the place of what was found before (a
+lookup that finds nothing keeps it). A gateway that cannot be reached is
+tried again by itself (after 2, 5, 15, 30, then every 60 seconds); users
+see nothing of it, the log file has the URL and the error.
 
 **DNS records** (preferred). An SRV record names the gateway's host and
 port, the service name says whether it speaks TLS:
@@ -125,6 +129,11 @@ _tsgws._tcp.example.org.  3600 IN TXT "path=/tsgw/v1"
 _tsgw._tcp.ts.example.org.  3600 IN SRV 0 0 7788 ts.example.org.
 ;   -> ws://ts.example.org:7788/v1, only for ts.example.org
 ```
+
+The record's service name must match what listens on the port: tsgw
+itself speaks plain WebSocket, so its own port (7788) is published as
+`_tsgw`; a `_tsgws` record there makes Voelin start TLS with it, which
+fails. Publish `_tsgws` only for a port with TLS in front.
 
 One domain with several servers and several gateways: publish one record
 per server host (`_tsgws._tcp.ts1.example.org`, `_tsgws._tcp.ts2.example.org`);

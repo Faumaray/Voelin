@@ -2,7 +2,7 @@
 //! server card and the channel tree.
 
 use slint::{ComponentHandle, SharedString};
-use tracing::warn;
+use tracing::{info, warn};
 use voelin_core::identity::LaunchImport;
 use voelin_core::{Command, ObserveState, Source, VoiceOptions, VoiceState};
 use voelin_store::{Bookmark, QueryTransport};
@@ -134,12 +134,16 @@ impl App {
 			.unwrap_or_else(|| "Voelin user".to_owned())
 	}
 
-	/// Look up the gateway of a server that has none in DNS
-	/// ([`voelin_core::discover`]); one found is kept as if typed.
-	pub(crate) fn discover_gateway(&self, id: i64) {
-		let Some(b) = self.bookmark(id).filter(|b| b.gateway_url.is_none() && !self.demo_ui) else {
+	/// Look up the gateway of a server ([`voelin_core::discover`]), once a
+	/// run: one found is kept as if typed, and takes the place of a stored
+	/// one that is no longer what the server publishes (a gateway that
+	/// moved, or one typed into an older version, which showed the field).
+	/// Nothing found keeps what is stored.
+	pub(crate) fn discover_gateway(&mut self, id: i64) {
+		if self.demo_ui || !self.gateways_looked_up.insert(id) {
 			return;
-		};
+		}
+		let Some(b) = self.bookmark(id) else { return };
 		let address = b.address.clone();
 		self.engine.runtime().spawn(async move {
 			if let Some(url) = voelin_core::discover::gateway(&address).await {
@@ -150,23 +154,28 @@ impl App {
 
 	/// A gateway was found for the server at `address`; it is kept unless
 	/// the server changed meanwhile, and the server is observed through it
-	/// if it is the one shown.
+	/// if it is the one shown. Users never hear of it (logged only).
 	fn gateway_found(&mut self, id: i64, address: &str, url: String) {
-		let Some(b) = self
-			.bookmarks
-			.iter_mut()
-			.find(|b| b.id == id && b.address == address && b.gateway_url.is_none())
-		else {
+		let Some(b) = self.bookmarks.iter_mut().find(|b| b.id == id && b.address == address) else {
 			return;
 		};
-		b.gateway_url = Some(url.clone());
-		let name = b.name.clone();
+		if b.gateway_url.as_deref() == Some(url.as_str()) {
+			return;
+		}
+		let previous = b.gateway_url.replace(url.clone());
 		if let Err(e) = self.store.update_bookmark(b) {
 			warn!(%e, "could not keep the gateway found");
 			return;
 		}
-		self.set_status(format!("Found the gateway of {name}: {url}"));
+		info!(server = %b.address, %url, ?previous, "gateway found");
 		self.refresh_toolbar();
+		// Observed through the old one: through this one now.
+		if previous.is_some() {
+			self.engine.send(Command::StopObserving { session: id as u64 });
+			if let Some(view) = self.sessions.get_mut(&id) {
+				view.state.observe = ObserveState::Off;
+			}
+		}
 		if self.current == Some(id) {
 			self.observe(id);
 		}
@@ -210,6 +219,8 @@ impl App {
 				url: url.clone(),
 				identity: Box::new(self.identity_for(Some(b.id))),
 			});
+			// Still the one the server publishes?
+			self.discover_gateway(b.id);
 		} else if let Some(q) = &b.query {
 			let secret = self.secrets.get(&b.query_password_key()).ok().flatten();
 			let transport = match q.transport {
@@ -283,11 +294,13 @@ impl App {
 		if let Err(e) = result {
 			warn!(%e, "could not store secret");
 		}
-		// Another server: what was observed is the old one's.
+		// Another server: what was observed is the old one's, and its
+		// gateway is looked up anew.
 		if let Some(old) = old.filter(|old| old.address != bookmark.address) {
 			if old.query.is_some() {
 				let _ = self.secrets.delete(&old.query_password_key());
 			}
+			self.gateways_looked_up.remove(&bookmark.id);
 			self.engine.send(Command::StopObserving { session: bookmark.id as u64 });
 			if let Some(view) = self.sessions.get_mut(&bookmark.id) {
 				view.state.observe = ObserveState::Off;
@@ -305,6 +318,7 @@ impl App {
 		}
 		let _ = self.store.delete_bookmark(id);
 		self.sessions.remove(&id);
+		self.gateways_looked_up.remove(&id);
 		self.bookmarks = self.store.bookmarks().unwrap_or_default();
 		self.current = self.bookmarks.first().map(|b| b.id);
 		self.refresh_all();

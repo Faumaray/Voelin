@@ -16,7 +16,7 @@ use voelin_core::{
 	Command, DownloadTo, GatewayRequest, GatewayUpdate, HistoryMessage, HistorySource,
 	TransferState,
 };
-use voelin_gateway_proto::{TopicInfo, feature};
+use voelin_gateway_proto::{ErrorCode, TopicInfo, feature};
 use voelin_model::{ChatMessage, ChatTarget};
 
 use crate::app::{App, Bridge, ChatLine, ChatTab, FileItem, Msg, PinItem, SessionView, Tab};
@@ -546,8 +546,11 @@ impl App {
 				}
 				tab.topic_messages.sort_by_key(|m| (m.message.message.ts_ms, m.message.id));
 			}
-			GatewayUpdate::Failed { request, message, .. } => {
-				self.set_status(format!("{request}: {message}"));
+			GatewayUpdate::Failed { request, code, message } => {
+				tracing::warn!(%request, ?code, %message, "gateway request failed");
+				if let Some(text) = failure_text(&request, code, &message) {
+					self.set_status(text);
+				}
 				return;
 			}
 			// The stream directory: how many watch each stream.
@@ -809,6 +812,40 @@ impl App {
 }
 
 /// A directory entry's stream id and viewer count, when it has both.
+/// What a failed gateway request tells the user. What the app asked for by
+/// itself (history, lists, subscriptions) fails quietly; what the user did
+/// says so in plain words, never the gateway's; the gateway's own
+/// administration page shows its message as it is.
+fn failure_text(request: &str, code: Option<ErrorCode>, message: &str) -> Option<String> {
+	if request.starts_with("config_") || request.starts_with("perm_") {
+		return Some(format!("{request}: {message}"));
+	}
+	let done_by_user = matches!(
+		request,
+		"post"
+			| "pin" | "unpin"
+			| "react" | "unreact"
+			| "create_topic"
+			| "update_topic"
+			| "create_event"
+			| "update_event"
+			| "delete_event"
+			| "rsvp"
+	);
+	if !done_by_user {
+		return None;
+	}
+	let text = match code {
+		Some(ErrorCode::Forbidden) => "Not allowed on this server.",
+		Some(ErrorCode::RateLimited) => "Too many requests; try again in a moment.",
+		Some(ErrorCode::QuotaExceeded) => "This server's limit is reached.",
+		Some(ErrorCode::NotFound) => "That is no longer there.",
+		Some(ErrorCode::FeatureDisabled) => "This server does not offer that.",
+		_ => "That did not work; try again later.",
+	};
+	Some(text.to_owned())
+}
+
 fn viewers_of(entry: &voelin_gateway_proto::StreamEntry) -> Option<(String, u32)> {
 	Some((entry.stream_id.clone()?, entry.viewers?))
 }
@@ -835,5 +872,26 @@ mod tests {
 		assert_eq!(ago(now - 3 * 60_000), "3 min ago");
 		assert_eq!(ago(now - 3 * 3_600_000), "3 hours ago");
 		assert_eq!(ago(now - 36 * 3_600_000), "yesterday");
+	}
+
+	#[test]
+	fn failures_say_what_the_user_did_never_the_gateway() {
+		let lost = "websocket: IO error: Connection refused (os error 111)";
+		// The app's own requests fail quietly.
+		for request in ["history", "sync", "pins", "events", "subscribe_streams"] {
+			assert_eq!(failure_text(request, None, lost), None, "{request}");
+		}
+		// The user's own, in plain words.
+		assert_eq!(
+			failure_text("pin", Some(ErrorCode::Forbidden), "no b_pin").as_deref(),
+			Some("Not allowed on this server.")
+		);
+		let text = failure_text("post", None, lost).unwrap();
+		assert!(!text.contains("websocket") && !text.to_lowercase().contains("gateway"), "{text}");
+		// The gateway's administration page shows its message.
+		assert_eq!(
+			failure_text("config_set", Some(ErrorCode::BadRequest), "bad value").as_deref(),
+			Some("config_set: bad value")
+		);
 	}
 }

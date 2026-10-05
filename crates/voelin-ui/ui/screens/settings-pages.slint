@@ -882,7 +882,7 @@ export component IntegrationsSection inherits VerticalLayout {
         icon: Icons.plug;
         subtitle: @tr("A gateway gives a server invisible presence, chat without joining, history, pins, reactions, topics, events and the stream directory.");
         if Bridge.gateways.length == 0: Hint {
-            text: @tr("None of your servers has a gateway. Add its URL to a server's bookmark (Edit server).");
+            text: @tr("None of your servers has a gateway. Voelin finds one by the server's address when the server's admin publishes it.");
         }
         for gw in Bridge.gateways: VerticalLayout {
             spacing: Theme.space-2;

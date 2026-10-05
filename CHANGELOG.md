@@ -40,6 +40,19 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
   fewer threads. A 1440p60 VP8 stream from a 6-8 core sender showed 35-49
   fps; FFmpeg decodes it at 95-101 fps on one thread against 54-60 on four.
 - Release builds no longer limit Cargo to one job.
+- The gateway is invisible: relayed messages look like everyone else's (no
+  "via relay"), and a gateway that is away is tried again quietly instead
+  of showing a WebSocket error; only what the user did and failed is
+  told, in plain words. A server whose gateway is away no longer shows as
+  connecting, so it can always be joined.
+- A server's published gateway replaces one stored before (found or typed
+  into an older version), so a gateway that moved is followed.
+- zbus's warnings about desktop portal requests are left out of the logs.
+
+### Fixed
+
+- The account's avatar is downloaded from its own link; it was asked for
+  as an upload link and refused with HTTP 403.
 
 ## [0.0.1-alpha] - 2026-10-04
 

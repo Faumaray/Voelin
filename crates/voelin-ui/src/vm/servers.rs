@@ -12,11 +12,13 @@ pub fn cached_icon(bookmark: &Bookmark, cache: &voelin_core::Cache) -> slint::Im
 	avatar::image(bookmark.server_icon_id().and_then(|id| cache.icon(id)).as_ref())
 }
 
-/// "offline", "connecting", "observing" or "connected".
+/// "offline", "connecting", "observing" or "connected". "connecting" is
+/// voice only: observing that is not there yet (a gateway that is away and
+/// tried again) is "offline", as users never hear of the gateway.
 pub fn status(state: &SessionState) -> &'static str {
 	match (state.voice, state.observe) {
 		(VoiceState::Connected, _) => "connected",
-		(VoiceState::Connecting, _) | (_, ObserveState::Connecting) => "connecting",
+		(VoiceState::Connecting, _) => "connecting",
 		(_, ObserveState::Observing) => "observing",
 		_ => "offline",
 	}
@@ -151,6 +153,8 @@ mod tests {
 	#[test]
 	fn states() {
 		let mut s = SessionState::default();
+		assert_eq!(status(&s), "offline");
+		s.observe = ObserveState::Connecting;
 		assert_eq!(status(&s), "offline");
 		s.observe = ObserveState::Observing;
 		assert_eq!(status(&s), "observing");

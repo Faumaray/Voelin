@@ -127,7 +127,12 @@ struct FakeGateway {
 
 impl FakeGateway {
 	async fn start() -> Self {
-		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		Self::start_on(0).await
+	}
+
+	/// A gateway at `port` of the loopback address (0: any free port).
+	async fn start_on(port: u16) -> Self {
+		let listener = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
 		let url = format!("ws://{}/v1", listener.local_addr().unwrap());
 		let state: Arc<Mutex<State>> = Arc::default();
 		let st = state.clone();
@@ -705,5 +710,59 @@ async fn store_history_off_keeps_the_database_empty() {
 		1
 	);
 	drop((engine, history));
+	let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+/// A gateway that is away is tried again by itself and quietly: no error for
+/// the user, "connecting" meanwhile, then observing once it is there, with
+/// the open chats opened again.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreachable_gateway_is_tried_again_quietly() {
+	// Nothing listens there yet: the connection is refused.
+	let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+	let path = temp_db("retry");
+	let engine = Engine::start_with(Settings::in_memory(), History::open(&path).unwrap());
+	let mut rx = engine.subscribe();
+	engine.send(Command::OpenChat { session: 3, target: LOBBY });
+	engine.send(Command::ObserveGateway {
+		session: 3,
+		url: format!("ws://127.0.0.1:{port}/v1"),
+		identity: Box::new(tsclientlib::Identity::create()),
+	});
+	// The first attempt fails (the next one is 2 s later): still connecting,
+	// and the user is told nothing.
+	let mut connecting = false;
+	let quiet = timeout(Duration::from_millis(1500), async {
+		loop {
+			match rx.recv().await {
+				Ok(Event::Error { message, .. }) => panic!("the user was told: {message}"),
+				Ok(Event::State { session: 3, state }) => {
+					// (Off before observing starts.)
+					assert!(!connecting || state.observe != ObserveState::Off, "gave up");
+					connecting |= state.observe == ObserveState::Connecting;
+				}
+				Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+				Err(e) => panic!("{e}"),
+			}
+		}
+	});
+	assert!(quiet.await.is_err(), "the event stream ended");
+	assert!(connecting, "never started observing");
+	// The gateway comes up: observing, and the open chat is opened again.
+	let gw = FakeGateway::start_on(port).await;
+	wait(&mut rx, "observing", |e| match e {
+		Event::Error { message, .. } => panic!("the user was told: {message}"),
+		Event::State { session: 3, state } if state.observe == ObserveState::Observing => Some(()),
+		_ => None,
+	})
+	.await;
+	timeout(Duration::from_secs(5), async {
+		while !gw.requests().contains(&"open_chat".to_owned()) {
+			tokio::time::sleep(Duration::from_millis(50)).await;
+		}
+	})
+	.await
+	.unwrap_or_else(|_| panic!("the chat was not opened again: {:?}", gw.requests()));
+	drop(engine);
 	let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }

@@ -39,9 +39,11 @@
 //!   streams look for streams that started before we joined, next to the
 //!   server's `requeststreaminfo`.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{debug, info, warn};
 use voelin_gateway_proto::client::Login;
 pub use voelin_gateway_proto::client::{ClientError, GatewayClient, Push};
 use voelin_gateway_proto::{
@@ -68,6 +70,10 @@ pub(crate) enum GatewayEvent {
 	Presence(Box<Presence>),
 	/// A push other than presence.
 	Push(Box<Push>),
+	/// The gateway could not be reached, or the connection was lost; the
+	/// next attempt follows by itself.
+	Retrying(String),
+	/// Stopped, or the gateway refused the login (the reason).
 	Disconnected(Option<String>),
 }
 
@@ -87,9 +93,131 @@ pub(crate) async fn run(
 	mut commands: mpsc::UnboundedReceiver<GatewayCmd>,
 	events: mpsc::UnboundedSender<GatewayEvent>,
 ) {
-	let reason =
-		run_inner(&url, &identity, &mut commands, &events).await.err().map(|e| e.to_string());
+	// A gateway that is away (down, restarting, a network change) is tried
+	// again until the session stops observing; only a refused login ends it.
+	let mut chats = Chats::default();
+	let mut failures = 0;
+	let mut last_reason = String::new();
+	let reason = loop {
+		match attempt(&url, &identity, &mut commands, &events, &mut chats, &mut failures).await {
+			Ended::Stopped => break None,
+			Ended::Refused(reason) => break Some(reason),
+			Ended::Lost(reason) => {
+				failures += 1;
+				let delay = retry_delay(failures);
+				// Once per cause, not every minute of a long absence.
+				if reason != last_reason {
+					warn!(%url, error = %reason, retry_in_s = delay.as_secs(), "gateway unreachable");
+				} else {
+					debug!(%url, error = %reason, retry_in_s = delay.as_secs(), "gateway still unreachable");
+				}
+				last_reason.clone_from(&reason);
+				let _ = events.send(GatewayEvent::Retrying(reason));
+				if !chats.wait(delay, &mut commands).await {
+					break None;
+				}
+			}
+		}
+	};
 	let _ = events.send(GatewayEvent::Disconnected(reason));
+}
+
+/// How one connection to the gateway ended.
+enum Ended {
+	/// The session stopped observing.
+	Stopped,
+	/// The gateway refused the login: trying again would not help.
+	Refused(String),
+	/// Not reached, or lost: try again.
+	Lost(String),
+}
+
+/// The wait before the next attempt after `failures` failed ones in a row.
+fn retry_delay(failures: u32) -> Duration {
+	const SECONDS: [u64; 5] = [2, 5, 15, 30, 60];
+	let index = (failures.max(1) as usize - 1).min(SECONDS.len() - 1);
+	Duration::from_secs(SECONDS[index])
+}
+
+/// Messages written while the gateway is away, at most this many, go out
+/// when it is back.
+const MAX_UNSENT: usize = 64;
+
+/// What a new connection restores: the chats open at the gateway, and
+/// messages written while it was away.
+#[derive(Default)]
+struct Chats {
+	open: Vec<ChatTarget>,
+	unsent: Vec<(ChatTarget, String)>,
+}
+
+impl Chats {
+	/// Note a chat command; it goes out when connected.
+	fn note(&mut self, cmd: GatewayCmd) {
+		match cmd {
+			GatewayCmd::OpenChat(target) => {
+				if !self.open.contains(&target) {
+					self.open.push(target);
+				}
+			}
+			GatewayCmd::CloseChat(target) => self.open.retain(|open| *open != target),
+			GatewayCmd::SendChat(target, text) => {
+				if self.unsent.len() < MAX_UNSENT {
+					self.unsent.push((target, text));
+				}
+			}
+			GatewayCmd::Stop => {}
+		}
+	}
+
+	/// Carry out a chat command on a connected gateway.
+	fn apply(&mut self, client: &GatewayClient, cmd: GatewayCmd) -> Result<(), ClientError> {
+		match cmd {
+			GatewayCmd::OpenChat(target) => {
+				if !self.open.contains(&target) {
+					self.open.push(target.clone());
+				}
+				client.send(ClientMsg::OpenChat { target })
+			}
+			GatewayCmd::CloseChat(target) => {
+				self.open.retain(|open| *open != target);
+				client.send(ClientMsg::CloseChat { target })
+			}
+			GatewayCmd::SendChat(target, text) => client.send(ClientMsg::SendChat { target, text }),
+			GatewayCmd::Stop => Ok(()),
+		}
+	}
+
+	/// Open the chats again on a new connection and send what waited.
+	fn restore(&mut self, client: &GatewayClient) -> Result<(), ClientError> {
+		for target in &self.open {
+			client.send(ClientMsg::OpenChat { target: target.clone() })?;
+		}
+		for (target, text) in std::mem::take(&mut self.unsent) {
+			client.send(ClientMsg::SendChat { target, text })?;
+		}
+		Ok(())
+	}
+
+	/// Wait `delay` before the next attempt, noting the commands that come
+	/// meanwhile; false when the session stops observing.
+	async fn wait(
+		&mut self,
+		delay: Duration,
+		commands: &mut mpsc::UnboundedReceiver<GatewayCmd>,
+	) -> bool {
+		let sleep = tokio::time::sleep(delay);
+		tokio::pin!(sleep);
+		loop {
+			tokio::select! {
+				() = &mut sleep => return true,
+				cmd = commands.recv() => match cmd {
+					None | Some(GatewayCmd::Stop) => return false,
+					Some(cmd) => self.note(cmd),
+				},
+			}
+		}
+	}
 }
 
 /// Features whose pushes for open chats need [`ClientMsg::Enable`].
@@ -100,22 +228,38 @@ const CHAT_EXTENSIONS: [&str; 4] = [
 	voelin_gateway_proto::feature::TOPICS,
 ];
 
-async fn run_inner(
+/// One connection: log in, then relay until it ends.
+async fn attempt(
 	url: &str,
 	identity: &tsclientlib::Identity,
 	commands: &mut mpsc::UnboundedReceiver<GatewayCmd>,
 	events: &mpsc::UnboundedSender<GatewayEvent>,
-) -> anyhow::Result<()> {
+	chats: &mut Chats,
+	failures: &mut u32,
+) -> Ended {
 	let (client, mut pushes) = match connect(url, identity).await {
 		Ok(connected) => connected,
 		Err(ClientError::Gateway { code, message }) => {
-			let _ = events
-				.send(GatewayEvent::Push(Box::new(Push::Error { code, message: message.clone() })));
-			anyhow::bail!("gateway refused login: {message}");
+			warn!(%url, ?code, %message, "gateway refused the login");
+			return Ended::Refused(format!("gateway refused login: {code:?}: {message}"));
 		}
-		Err(e) => return Err(e.into()),
+		Err(e) => return Ended::Lost(e.to_string()),
 	};
-	info!(server_name = %client.info().server_name, capabilities = ?client.capabilities(), "gateway connected");
+	*failures = 0;
+	info!(%url, server_name = %client.info().server_name, capabilities = ?client.capabilities(), "gateway connected");
+	match relay(&client, &mut pushes, commands, events, chats).await {
+		Ok(ended) => ended,
+		Err(e) => Ended::Lost(e.to_string()),
+	}
+}
+
+async fn relay(
+	client: &GatewayClient,
+	pushes: &mut mpsc::UnboundedReceiver<Push>,
+	commands: &mut mpsc::UnboundedReceiver<GatewayCmd>,
+	events: &mpsc::UnboundedSender<GatewayEvent>,
+	chats: &mut Chats,
+) -> Result<Ended, ClientError> {
 	// Messages with their gateway ids, pins, reactions and topics of open
 	// chats (older gateways answer `unknown_type` as a push; ignored).
 	if CHAT_EXTENSIONS.iter().any(|f| client.has(f)) {
@@ -123,13 +267,16 @@ async fn run_inner(
 	}
 	let _ = events.send(GatewayEvent::Connected(client.clone()));
 	client.subscribe_presence()?;
+	chats.restore(client)?;
 	let mut presence = Presence::default();
 
 	loop {
 		tokio::select! {
 			push = pushes.recv() => match push {
-				None | Some(Push::Disconnected(None)) => return Ok(()),
-				Some(Push::Disconnected(Some(reason))) => anyhow::bail!(reason),
+				None | Some(Push::Disconnected(None)) => {
+					return Ok(Ended::Lost("the gateway closed the connection".into()));
+				}
+				Some(Push::Disconnected(Some(reason))) => return Ok(Ended::Lost(reason)),
 				Some(Push::PresenceSnapshot(snapshot)) => {
 					presence = Presence::from_snapshot(snapshot);
 					let _ = events.send(GatewayEvent::Presence(Box::new(presence.clone())));
@@ -140,24 +287,17 @@ async fn run_inner(
 				}
 				// Answers to requests sent without waiting.
 				Some(Push::Other(_) | Push::Error { code: ErrorCode::UnknownType, .. }) => {}
+				// The gateway forgot the login (restarted): log in again.
 				Some(Push::Error { code: ErrorCode::NotAuthenticated, message }) => {
-					let _ = events.send(GatewayEvent::Push(Box::new(Push::Error {
-						code: ErrorCode::NotAuthenticated,
-						message: message.clone(),
-					})));
-					anyhow::bail!("gateway session lost: {message}");
+					return Ok(Ended::Lost(format!("gateway session lost: {message}")));
 				}
 				Some(push) => {
 					let _ = events.send(GatewayEvent::Push(Box::new(push)));
 				}
 			},
 			cmd = commands.recv() => match cmd {
-				None | Some(GatewayCmd::Stop) => return Ok(()),
-				Some(GatewayCmd::OpenChat(target)) => client.send(ClientMsg::OpenChat { target })?,
-				Some(GatewayCmd::CloseChat(target)) => client.send(ClientMsg::CloseChat { target })?,
-				Some(GatewayCmd::SendChat(target, text)) => {
-					client.send(ClientMsg::SendChat { target, text })?;
-				}
+				None | Some(GatewayCmd::Stop) => return Ok(Ended::Stopped),
+				Some(cmd) => chats.apply(client, cmd)?,
 			},
 		}
 	}

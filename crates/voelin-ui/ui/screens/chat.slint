@@ -337,7 +337,7 @@ export component MessageRow inherits Rectangle {
                 alignment: start;
                 Text {
                     text: line.author;
-                    color: line.relayed ? Theme.accent-text : Theme.name-text;
+                    color: Theme.name-text;
                     font-size: Theme.font-lg;
                     font-weight: Theme.weight-medium;
                     vertical-alignment: center;
@@ -347,12 +347,6 @@ export component MessageRow inherits Rectangle {
                     color: Theme.text-muted;
                     font-size: Theme.font-sm;
                     vertical-alignment: center;
-                }
-                if line.relayed: Chip {
-                    text: @tr("via relay");
-                    icon: Icons.radio;
-                    tint: Theme.accent-text;
-                    y: (parent.height - self.height) / 2;
                 }
                 if line.pinned: Chip {
                     text: @tr("pinned");
