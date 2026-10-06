@@ -1,10 +1,12 @@
 import { Theme } from "../theme.slint";
 import { Icon } from "icon.slint";
 
-// A red count bubble (unread, requests).
+// A count bubble (unread, requests), red unless `fill` says otherwise.
 export component CountBadge inherits Rectangle {
     in property <int> count;
     in property <color> fill: Theme.live;
+    // The number's colour.
+    in property <color> ink: Theme.on-accent;
     width: max(18px, label.preferred-width + 10px);
     height: 18px;
     border-radius: 9px;
@@ -16,7 +18,7 @@ export component CountBadge inherits Rectangle {
         padding-right: 5px;
         label := Text {
             text: root.count > 99 ? "99+" : root.count;
-            color: #ffffff;
+            color: root.ink;
             font-size: Theme.font-xs;
             font-weight: Theme.weight-bold;
             horizontal-alignment: center;

@@ -5,6 +5,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Icon } from "icon.slint";
 import { IconButton } from "button.slint";
+import { HoverTooltip } from "tooltip.slint";
 
 // An entry of a `PopupMenu`.
 export struct MenuEntry {
@@ -102,39 +103,13 @@ export component PopupMenu inherits Rectangle {
     }
 }
 
-// Hover help: wraps @children and shows `text` in a bubble after a moment.
+// Hover help: wraps @children and shows `text` in a bubble near the
+// pointer after a moment, until the pointer leaves (desktop only).
 export component Tooltip inherits Rectangle {
     in property <string> text;
-    // Above (default) or below the element.
-    in property <bool> below;
-    area := TouchArea {
-        @children
-    }
-    Timer {
-        interval: 600ms;
-        running: area.has-hover && root.text != "";
-        triggered => {
-            self.running = false;
-            bubble.show();
-        }
-    }
-    bubble := PopupWindow {
-        x: (root.width - self.width) / 2;
-        y: root.below ? root.height + 6px : -self.height - 6px;
-        width: label.preferred-width + 20px;
-        height: label.preferred-height + 12px;
-        close-policy: PopupClosePolicy.close-on-click-outside;
-        Rectangle {
-            border-radius: Theme.radius-sm;
-            background: Theme.surface-4;
-            border-width: 1px;
-            border-color: Theme.border-strong;
-            label := Text {
-                text: root.text;
-                color: Theme.text;
-                font-size: Theme.font-sm;
-            }
-        }
+    @children
+    HoverTooltip {
+        text: root.text;
     }
 }
 

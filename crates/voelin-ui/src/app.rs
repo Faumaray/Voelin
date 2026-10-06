@@ -643,6 +643,7 @@ pub fn run(options: RunOptions) -> Result<()> {
 	let bridge = ui.global::<Bridge>();
 	bridge.set_app_name(voelin_platform::APP_NAME.into());
 	bridge.set_app_version(env!("CARGO_PKG_VERSION").into());
+	bridge.set_desktop(cfg!(not(target_os = "android")));
 	let models = Models::new(&bridge);
 	// Wayland and X11 find the desktop file (and icon) by this id.
 	#[cfg(not(target_os = "android"))]

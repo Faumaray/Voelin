@@ -84,13 +84,18 @@ The standard widgets (scroll bars, context menus) follow through
 
 All in `ui/components/`, exported by `components/index.slint`.
 
+A component used in many places keeps `opacity`, `visible`, shadows and
+animations off its root element: Slint inlines such a component at every
+use, which grows the generated code and the compiler's memory (IconButton
+puts them on an inner `face`).
+
 | Component | File | Key properties |
 |---|---|---|
 | `Icon` | icon.slint | `source` (an `Icons.*`), `size`, `tint` |
 | `Spinner` | icon.slint | `size`, `tint`, `running` |
 | `Button` | button.slint | `text`, `icon`, `kind` (`ButtonKind.primary/secondary/danger/ghost`), `enabled`, `checked`, `small`; `clicked` |
-| `IconButton` | button.slint | `icon`, `label` (screen readers), `checked`, `danger`, `round`, `filled`, `size`, `icon-size`, `tint`, `dot`; `clicked` |
-| `ActionButton` | button.slint | round button with a caption (Mute, Deafen, Go Live): `icon`, `text`, `checked`, `danger` |
+| `IconButton` | button.slint | `icon`, `label` (screen readers), `tooltip` (default `label`, "" for none; on hover, also while disabled, desktop only), `checked`, `danger`, `round`, `filled`, `size`, `icon-size`, `tint`, `dot`, `count` (a neutral number at the top right, hidden at 0 or less); `clicked` |
+| `ActionButton` | button.slint | round button with a caption (Mute, Deafen, Go Live), no tooltip: `icon`, `text`, `checked`, `danger` |
 | `FocusRing` | button.slint | the accent ring of focused controls |
 | `TextField` | text-field.slint | `text`, `placeholder`, `input-type`, `icon`, `label`, `bare`, `read-only`; `accepted`, `edited`, `key-pressed`; `clear()`, `select-all()` |
 | `SearchBox` | text-field.slint | a TextField with a magnifier and the Ctrl K hint (`show-shortcut`) |
@@ -104,7 +109,7 @@ All in `ui/components/`, exported by `components/index.slint`.
 | `SegmentedTabs` | tabs.slint | `model`, `current-index`, `label`; `selected(int)` |
 | `TabItem` | tabs.slint | underlined tab: `text`, `selected`, `badge`, `closable`; `clicked`, `close` |
 | `Avatar` | avatar.slint | `image` or `initials` + `tint`, `size`, `status` (`Status.online/idle/dnd/offline/info`), `speaking` (green ring), `crown`, `square` (server icons) |
-| `CountBadge` | badge.slint | red count bubble: `count`, `fill` |
+| `CountBadge` | badge.slint | count bubble: `count`, `fill` (red), `ink` (the number) |
 | `LiveBadge` | badge.slint | `text` (LIVE), `large` |
 | `Chip` | badge.slint | tag: `text`, `icon`, `tint`, `fill`, `outlined` |
 | `Dot` | badge.slint | a status dot |
@@ -117,7 +122,9 @@ All in `ui/components/`, exported by `components/index.slint`.
 | `NavItem` | list-item.slint | navigation entry: `icon`, `text`, `subtitle`, `selected`, `badge`, `chevron`; `clicked` |
 | `ListItem` | list-item.slint | row with a leading slot (@children), `title`, `subtitle`, `trailing`, `selected` |
 | `PopupMenu` | overlay.slint | themed menu: `entries` ([MenuEntry]), `show(x, y)`; `activated(int)` |
-| `Tooltip` | overlay.slint | wraps @children, shows `text` on hover |
+| `Tooltip` | overlay.slint | wraps @children; `text` shows at the pointer after a moment, until it leaves (desktop only: `Bridge.desktop`) |
+| `HoverTooltip` | tooltip.slint | the same, put last in an element (as IconButton does): `text`; `pressed` and `hovered` of the element's TouchArea (a press closes it until the pointer leaves) |
+| `TooltipBubble` | tooltip.slint | a tooltip's bubble: `text`, wrapping at `widest` (400px) |
 | `Modal` | overlay.slint | dialog with backdrop: `title`, `subtitle`, `icon`, `card-width`, `card-height`; `dismissed` (backdrop, Escape, ×) |
 | `Toast` | overlay.slint | `text`, `icon`, `timeout`, `shown` |
 | `ResizeHandle` | overlay.slint | drag to resize a side panel: `size` (two-way), `minimum`, `maximum`, `left` |

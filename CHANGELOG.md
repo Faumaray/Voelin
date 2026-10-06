@@ -21,6 +21,8 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
   decoders work without installing FFmpeg.
 - AV1 decoding through dav1d in every desktop build.
 - 122 more signed client versions (`Versions.csv`).
+- Icon buttons show their name on hover (desktop), also while they are
+  disabled.
 
 ### Changed
 
@@ -53,6 +55,9 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
 
 - The account's avatar is downloaded from its own link; it was asked for
   as an upload link and refused with HTTP 403.
+- Hover help in the Stream Studio (a source's error, the status details)
+  shows each time and closes when the pointer leaves; it showed only once,
+  and stayed open until a click.
 
 ## [0.0.1-alpha] - 2026-10-04
 

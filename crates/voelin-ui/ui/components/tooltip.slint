@@ -1,0 +1,70 @@
+// Tooltips: the bubble, and the hover area that shows it on the desktop.
+// Kept apart from overlay.slint, which imports button.slint, so buttons can
+// use them.
+
+import { Theme } from "../theme.slint";
+import { Bridge } from "../bridge.slint";
+
+// The bubble of a tooltip: short text on a raised surface. Longer text
+// wraps at `widest`.
+export component TooltipBubble inherits Rectangle {
+    in property <string> text;
+    in property <length> widest: 400px;
+    // The tooltip's popup takes this preferred width (a max-width would not
+    // narrow it), and the text wraps inside it.
+    preferred-width: min(root.widest, label.preferred-width + 2 * Theme.space-3);
+    // Slint's own tooltip frame (4px corners) lies under the bubble, so the
+    // corners match it.
+    border-radius: Theme.radius-xs;
+    background: Theme.surface-4;
+    border-width: 1px;
+    border-color: Theme.border-strong;
+    HorizontalLayout {
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-3;
+        padding-top: Theme.space-2;
+        padding-bottom: Theme.space-2;
+        label := Text {
+            text: root.text;
+            color: Theme.text;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// Put last in an element: it fills the element, and once the pointer rests
+// on it for a moment, `text` shows in a bubble at the pointer until the
+// pointer leaves. Desktop only (`Bridge.desktop`).
+//
+// It is Slint's `Tooltip`, whose bubble lets the pointer through: a
+// PopupWindow of our own takes every click and move while it is open, so
+// the element under it would lose the click and its hover. Being last, the
+// hover area sees the pointer before the element's other children, also
+// over a disabled button. Near the window's edges Slint moves the bubble
+// inside.
+export component HoverTooltip inherits Rectangle {
+    in property <string> text;
+    // The element's own TouchArea, if it has one: a press closes the bubble
+    // until the pointer leaves.
+    in property <bool> pressed;
+    in property <bool> hovered;
+    property <bool> clicked;
+    changed pressed => {
+        if self.pressed {
+            self.clicked = true;
+        }
+    }
+    changed hovered => {
+        if !self.hovered {
+            self.clicked = false;
+        }
+    }
+    // Removing the area closes an open bubble.
+    if Bridge.desktop && !root.clicked && root.text != "": Tooltip {
+        TooltipBubble {
+            text: root.text;
+        }
+    }
+}

@@ -934,6 +934,9 @@ export global Bridge {
     // The product name (voelin_platform::APP_NAME, not translated) and version.
     in property <string> app-name: "Voelin";
     in property <string> app-version;
+    // False in the Android app; the one platform flag (tooltips are desktop
+    // only). The studio's own window, desktop only, keeps the default.
+    in property <bool> desktop: true;
     in-out property <ClientAudio> client-audio;
     // Opt-in local crash reports, and a notice about reports on disk.
     in-out property <bool> crash-reports;
