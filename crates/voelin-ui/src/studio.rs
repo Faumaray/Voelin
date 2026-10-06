@@ -874,7 +874,7 @@ impl App {
 			.state
 			.own_channel
 			.and_then(|c| view.presence.channels.get(&c))
-			.map(|c| c.name.clone())
+			.map(|c| vm::tree::channel_title(c).0.to_owned())
 			.unwrap_or_default();
 		let server = if view.presence.server_name.is_empty() {
 			self.bookmark(id).map(|b| b.name.clone()).unwrap_or_default()
@@ -929,8 +929,12 @@ impl App {
 				let target = ChatTarget::Channel(channel);
 				let demo = self.demo_ui;
 				let view = self.sessions.entry(id).or_default();
-				let name = view.presence.channels.get(&channel).map(|c| c.name.clone());
-				let name = name.unwrap_or_default();
+				let name = view
+					.presence
+					.channels
+					.get(&channel)
+					.map(|c| vm::tree::channel_title(c).0.to_owned())
+					.unwrap_or_default();
 				if !view.tabs.iter().any(|t| t.target == target) {
 					view.tabs.push(Tab::new(target.clone(), format!("#{name}")));
 					if !demo {

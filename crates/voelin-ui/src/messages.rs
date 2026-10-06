@@ -195,7 +195,10 @@ impl App {
 				let name = session
 					.and_then(|s| self.sessions.get(&s))
 					.and_then(|v| v.presence.channels.get(cid))
-					.map_or_else(|| format!("#channel {cid}"), |c| format!("#{}", c.name));
+					.map_or_else(
+						|| format!("#channel {cid}"),
+						|c| format!("#{}", vm::tree::channel_title(c).0),
+					);
 				(name, slint::Image::default(), false, 1)
 			}
 			ChatTarget::Server => (server.clone(), slint::Image::default(), false, 0),
@@ -463,8 +466,8 @@ impl App {
 			Some(s) => match &s.away {
 				Some(m) if !m.is_empty() => format!("Away: {m} · {}", s.server),
 				Some(_) => format!("Away · {}", s.server),
-				None if s.channel_name.is_empty() => format!("Online · {}", s.server),
-				None => format!("Online · {} · #{}", s.server, s.channel_name),
+				None if s.channel_title.is_empty() => format!("Online · {}", s.server),
+				None => format!("Online · {} · #{}", s.server, s.channel_title),
 			},
 			None => match contact.filter(|c| c.last_seen_ms > 0) {
 				Some(c) => format!("Offline · last seen {}", ago(c.last_seen_ms)),
@@ -494,10 +497,10 @@ impl App {
 			spots
 				.iter()
 				.map(|s| {
-					if s.channel_name.is_empty() {
+					if s.channel_title.is_empty() {
 						s.server.clone().into()
 					} else {
-						format!("{} · #{}", s.server, s.channel_name).into()
+						format!("{} · #{}", s.server, s.channel_title).into()
 					}
 				})
 				.collect()

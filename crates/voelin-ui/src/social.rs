@@ -130,7 +130,10 @@ pub(crate) struct Spot {
 	pub server: String,
 	pub client: u16,
 	pub channel: u64,
+	/// The channel's name as the server has it (to join it by name).
 	pub channel_name: String,
+	/// The channel's name as shown (a spacer's text).
+	pub channel_title: String,
 	pub away: Option<String>,
 	pub streaming: bool,
 	/// We are connected with voice there (messages, pokes, moving).
@@ -275,16 +278,15 @@ impl App {
 			else {
 				continue;
 			};
+			let channel = view.presence.channels.get(&c.channel);
 			spots.push(Spot {
 				session: id,
 				server: self.server_name(id),
 				client: c.id,
 				channel: c.channel,
-				channel_name: view
-					.presence
-					.channels
-					.get(&c.channel)
-					.map(|ch| ch.name.clone())
+				channel_name: channel.map(|ch| ch.name.clone()).unwrap_or_default(),
+				channel_title: channel
+					.map(|ch| vm::tree::channel_title(ch).0.to_owned())
 					.unwrap_or_default(),
 				away: c.away.clone(),
 				streaming: c.streaming == Some(true),
@@ -328,8 +330,8 @@ impl App {
 			(Some(s), None) => match &s.away {
 				Some(m) if !m.is_empty() => format!("Away: {m}"),
 				Some(_) => "Away".into(),
-				None if s.channel_name.is_empty() => "Online".into(),
-				None => format!("In {}", s.channel_name),
+				None if s.channel_title.is_empty() => "Online".into(),
+				None => format!("In {}", s.channel_title),
 			},
 			(None, None) => "Offline".into(),
 		};
@@ -356,10 +358,10 @@ impl App {
 		let spot_texts: Vec<SharedString> = spots
 			.iter()
 			.map(|s| {
-				if s.channel_name.is_empty() {
+				if s.channel_title.is_empty() {
 					s.server.clone().into()
 				} else {
-					format!("{} · #{}", s.server, s.channel_name).into()
+					format!("{} · #{}", s.server, s.channel_title).into()
 				}
 			})
 			.collect();
@@ -742,7 +744,7 @@ impl App {
 						.sessions
 						.get(&session)
 						.and_then(|v| v.presence.channels.get(cid))
-						.map(|c| format!("#{} · {server}", c.name))
+						.map(|c| format!("#{} · {server}", vm::tree::channel_title(c).0))
 						.unwrap_or(server),
 					_ => server,
 				};
@@ -906,10 +908,15 @@ impl App {
 			});
 			if new {
 				let s = &sessions[0];
-				let place = if s.channel_name.is_empty() {
+				let channel = self
+					.sessions
+					.get(&(s.session as i64))
+					.and_then(|v| v.presence.channels.get(&s.channel))
+					.map_or(s.channel_name.as_str(), |c| vm::tree::channel_title(c).0);
+				let place = if channel.is_empty() {
 					format!("on {}", self.server_name(s.session as i64))
 				} else {
-					format!("on {} · #{}", self.server_name(s.session as i64), s.channel_name)
+					format!("on {} · #{channel}", self.server_name(s.session as i64))
 				};
 				self.notify(
 					NoticeKind::Friend,
@@ -971,15 +978,17 @@ impl App {
 			let mut channels = Vec::new();
 			for b in &self.bookmarks {
 				let Some(view) = self.sessions.get(&b.id) else { continue };
-				for c in view.presence.channels.values().filter(|c| matches(&query, &[&c.name])) {
+				for (channel, title) in
+					vm::social::found_channels(view.presence.channels.values(), &query)
+				{
 					channels.push((
 						SearchItem {
 							kind: "channel".into(),
-							title: c.name.clone().into(),
+							title: title.into(),
 							subtitle: b.name.clone().into(),
 							..Default::default()
 						},
-						Found::Channel(b.id, c.id),
+						Found::Channel(b.id, channel),
 					));
 				}
 			}
@@ -1004,8 +1013,7 @@ impl App {
 						.presence
 						.channels
 						.get(&c.channel)
-						.map(|ch| ch.name.as_str())
-						.unwrap_or("");
+						.map_or("", |ch| vm::tree::channel_title(ch).0);
 					people.push((
 						SearchItem {
 							kind: "person".into(),

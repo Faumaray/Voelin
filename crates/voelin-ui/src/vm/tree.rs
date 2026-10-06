@@ -4,8 +4,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+pub use voelin_model::channel_title;
 use voelin_model::{
-	BannerMode, ChannelId, ChannelInfo, ClientInfo, GroupInfo, Presence, TreeRow, tree_rows,
+	BannerMode, ChannelId, ChannelInfo, ClientInfo, GroupInfo, Presence, Spacer, TreeRow, tree_rows,
 };
 
 use crate::app::{MemberItem, TreeItem};
@@ -104,22 +105,40 @@ fn talking(input: &TreeInput, client: &ClientInfo) -> bool {
 	input.talking.contains(&client.id) || client.talking == Some(true)
 }
 
-/// Centered spacer prefixes are presentation metadata, not part of the title.
-/// Leave other names untouched rather than guessing at the full spacer syntax.
-fn channel_label(name: &str) -> (&str, bool) {
-	if let Some((suffix, label)) = name.strip_prefix("[cspacer").and_then(|s| s.split_once(']'))
-		&& suffix.bytes().all(|b| b.is_ascii_digit())
-	{
-		return (label, true);
+/// A spacer kind as the UI takes it (`TreeItem.spacer`, 0: no spacer).
+fn spacer_index(kind: Spacer) -> i32 {
+	match kind {
+		Spacer::Left => 1,
+		Spacer::Center => 2,
+		Spacer::Right => 3,
+		Spacer::Fill => 4,
 	}
-	(name, false)
 }
 
-/// A channel's name as shown, and whether it is a centred spacer. Only
-/// top-level channels are spacers, as in TeamSpeak: a sub-channel keeps its
-/// name as it is.
-pub fn channel_title(channel: &ChannelInfo) -> (&str, bool) {
-	if channel.parent == 0 { channel_label(&channel.name) } else { (&channel.name, false) }
+/// A channel's title for lists and pickers (the search, the event form);
+/// none for a spacer that only separates.
+pub fn listed_title(channel: &ChannelInfo) -> Option<&str> {
+	match channel_title(channel) {
+		(text, Some(kind)) if kind.separates(text) => None,
+		(text, _) => Some(text),
+	}
+}
+
+/// About as many characters as a fill spacer's row holds: more than the
+/// widest tree shows.
+const FILL_CHARS: usize = 200;
+
+/// A spacer's text as its row shows it: a fill pattern repeated across the
+/// row, a blank text empty.
+fn spacer_text(kind: Spacer, text: &str) -> String {
+	match kind {
+		Spacer::Fill => match text.chars().count() {
+			0 => String::new(),
+			n => text.repeat((FILL_CHARS / n).max(1)),
+		},
+		_ if text.trim().is_empty() => String::new(),
+		_ => text.to_owned(),
+	}
 }
 
 /// The rows of the tree, channels with their clients below.
@@ -129,9 +148,12 @@ pub fn rows(input: &TreeInput) -> Vec<TreeItem> {
 		.into_iter()
 		.map(|row| match row {
 			TreeRow::Channel { depth, channel } => {
-				let (name, centered_spacer) = channel_title(channel);
+				let (name, spacer) = match channel_title(channel) {
+					(text, Some(kind)) => (spacer_text(kind, text), spacer_index(kind)),
+					(name, None) => (name.to_owned(), 0),
+				};
 				TreeItem {
-					centered_spacer,
+					spacer,
 					is_channel: true,
 					depth: depth as i32,
 					id: channel.id as i32,
@@ -183,14 +205,24 @@ pub fn rows(input: &TreeInput) -> Vec<TreeItem> {
 	filter(rows, input.filter)
 }
 
-/// Rows that match `query`, and the channels above them.
+/// A spacer row that only separates: a line, or no text.
+fn separator(row: &TreeItem) -> bool {
+	row.is_channel
+		&& (row.spacer == spacer_index(Spacer::Fill) || (row.spacer != 0 && row.name.is_empty()))
+}
+
+/// Rows that match `query`, and the channels above them. A separator
+/// never matches (`---` is no channel to look for), but stays above what
+/// does.
 fn filter(rows: Vec<TreeItem>, query: &str) -> Vec<TreeItem> {
 	let query = query.trim().to_lowercase();
 	if query.is_empty() {
 		return rows;
 	}
-	let matches: Vec<bool> =
-		rows.iter().map(|r| r.name.to_lowercase().contains(query.as_str())).collect();
+	let matches: Vec<bool> = rows
+		.iter()
+		.map(|r| !separator(r) && r.name.to_lowercase().contains(query.as_str()))
+		.collect();
 	let mut keep = matches.clone();
 	// A channel stays if anything below it matches.
 	for i in 0..rows.len() {
@@ -505,28 +537,85 @@ mod tests {
 	}
 
 	#[test]
-	fn centered_spacer_titles_keep_tree_identity_and_search() {
+	fn spacer_rows_keep_tree_identity() {
 		let mut p = presence();
 		p.channels.get_mut(&2).unwrap().name = "[cspacer12]Гамесы".into();
+		let more = |id, order, name: &str| ChannelInfo {
+			id,
+			order,
+			name: name.into(),
+			has_password: id == 5,
+			..Default::default()
+		};
+		for c in
+			[more(4, 2, "[*spacer1]-="), more(5, 4, "[rspacer2]Staff"), more(6, 5, "[spacer3]")]
+		{
+			p.channels.insert(c.id, c);
+		}
 		let (t, c, pb) = (HashSet::new(), HashSet::from([2]), ClientPlaybackMap::new());
 		let e = Extras::default();
-		let rows = rows(&input(&p, &t, &c, &pb, "Гамесы", &e));
-		assert_eq!(rows.len(), 1);
-		assert_eq!(rows[0].name, "Гамесы");
-		assert!(rows[0].centered_spacer && rows[0].collapsed);
-		assert_eq!(rows[0].id, 2);
-		assert_eq!(channel_label("[cspacer]Games"), ("Games", true));
-		for name in ["[cspacerx]Games", "[cspacer2Games", "Games", "[spacer0]Games"] {
-			assert_eq!(channel_label(name), (name, false));
-		}
+		let rows = rows(&input(&p, &t, &c, &pb, "", &e));
+		let channels: Vec<_> = rows
+			.iter()
+			.filter(|r| r.is_channel)
+			.map(|r| (r.id, r.spacer, r.name.chars().take(6).collect::<String>()))
+			.collect();
+		let row = |id, spacer, name: &str| (id, spacer, name.to_owned());
+		assert_eq!(
+			channels,
+			[
+				row(1, 0, "Lobby"),
+				row(2, 2, "Гамесы"),
+				row(4, 4, "-=-=-="),
+				row(5, 3, "Staff"),
+				row(6, 1, ""),
+			]
+		);
+		// A fill line repeats its pattern across the row.
+		let fill = &rows.iter().find(|r| r.id == 4 && r.is_channel).unwrap().name;
+		assert_eq!(fill.chars().count(), FILL_CHARS);
+		assert_eq!(spacer_text(Spacer::Fill, ""), "");
+		assert_eq!(spacer_text(Spacer::Fill, "x".repeat(300).as_str()).len(), 300);
+		let games = rows.iter().find(|r| r.id == 2 && r.is_channel).unwrap();
+		assert!(games.collapsed && games.members == 1);
+		assert!(rows.iter().any(|r| r.id == 5 && r.is_channel && r.locked));
 		// Only top-level channels are spacers: a sub-channel keeps its name.
 		p.channels.get_mut(&3).unwrap().name = "[cspacer1]Chess".into();
-		let (t, c) = (HashSet::new(), HashSet::new());
-		let found = super::rows(&input(&p, &t, &c, &pb, "Chess", &e));
-		let chess = found.iter().find(|r| r.is_channel && r.id == 3).unwrap();
-		assert_eq!((chess.name.as_str(), chess.centered_spacer), ("[cspacer1]Chess", false));
-		assert_eq!(channel_title(&p.channels[&2]), ("Гамесы", true));
-		assert_eq!(channel_title(&p.channels[&3]), ("[cspacer1]Chess", false));
+		let c = HashSet::new();
+		let rows = super::rows(&input(&p, &t, &c, &pb, "", &e));
+		let chess = rows.iter().find(|r| r.is_channel && r.id == 3).unwrap();
+		assert_eq!((chess.name.as_str(), chess.spacer), ("[cspacer1]Chess", 0));
+		assert_eq!(channel_title(&p.channels[&2]), ("Гамесы", Some(Spacer::Center)));
+		assert_eq!(channel_title(&p.channels[&3]), ("[cspacer1]Chess", None));
+		// Lists and pickers leave out what only separates.
+		let listed: Vec<_> = p.channels.values().filter_map(listed_title).collect();
+		assert_eq!(listed, ["Lobby", "Гамесы", "[cspacer1]Chess", "Staff"]);
+	}
+
+	/// The search finds a spacer by its text, never a separator, but keeps
+	/// separators above what it finds.
+	#[test]
+	fn search_skips_separators() {
+		let mut p = presence();
+		p.channels.get_mut(&2).unwrap().name = "[*spacer1]---".into();
+		p.channels.get_mut(&1).unwrap().name = "[cspacer]Lobby".into();
+		p.channels.insert(
+			4,
+			ChannelInfo { id: 4, order: 2, name: "[spacer4]".into(), ..Default::default() },
+		);
+		let (t, c, pb) = (HashSet::new(), HashSet::new(), ClientPlaybackMap::new());
+		let e = Extras::default();
+		let names = |filter| {
+			super::rows(&input(&p, &t, &c, &pb, filter, &e))
+				.iter()
+				.map(|r| r.name.chars().take(3).collect::<String>())
+				.collect::<Vec<_>>()
+		};
+		assert!(names("-").is_empty());
+		assert!(names("spacer").is_empty());
+		assert_eq!(names("lob"), ["Lob"]);
+		// The line stays as the parent of Chess.
+		assert_eq!(names("chess"), ["---", "Che"]);
 	}
 
 	#[test]

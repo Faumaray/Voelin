@@ -16,4 +16,4 @@ pub use presence::{
 pub use server::{
 	BannerMode, Capabilities, HostMessageMode, ServerDetails, ServerFlavor, ServerVersion,
 };
-pub use tree::{TreeRow, order_siblings, tree_rows};
+pub use tree::{Spacer, TreeRow, channel_title, order_siblings, parse_spacer, tree_rows};

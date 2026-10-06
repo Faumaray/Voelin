@@ -436,7 +436,8 @@ impl App {
 		);
 		let channel = u16::try_from(streamer).ok().and_then(|id| {
 			let view = self.view()?;
-			view.presence.channels.get(&view.channel_of(id)?).map(|c| c.name.clone())
+			let channel = view.presence.channels.get(&view.channel_of(id)?)?;
+			Some(crate::vm::tree::channel_title(channel).0.to_owned())
 		});
 		bridge.set_viewer_channel(channel.unwrap_or_default().into());
 		bridge.set_viewer_elapsed(watch.elapsed().into());

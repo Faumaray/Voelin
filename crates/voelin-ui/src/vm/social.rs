@@ -120,6 +120,19 @@ pub fn matches(query: &str, fields: &[&str]) -> bool {
 	q.is_empty() || fields.iter().any(|f| f.to_lowercase().contains(&q))
 }
 
+/// The channels the search (Ctrl+K) finds for `query`, with their titles:
+/// a spacer by its text, never a line or an empty spacer.
+pub fn found_channels<'a>(
+	channels: impl IntoIterator<Item = &'a voelin_model::ChannelInfo>,
+	query: &str,
+) -> Vec<(u64, &'a str)> {
+	channels
+		.into_iter()
+		.filter_map(|c| Some((c.id, crate::vm::tree::listed_title(c)?)))
+		.filter(|(_, title)| matches(query, &[*title]))
+		.collect()
+}
+
 /// The date block of an event: "SAT", "26", "APR".
 pub fn date_block(ts_ms: i64) -> (String, String, String) {
 	local(ts_ms)
@@ -222,6 +235,31 @@ mod tests {
 		assert!(matches("kai", &["Kairo", "x"]));
 		assert!(matches("", &[]));
 		assert!(!matches("zz", &["Kairo"]));
+	}
+
+	/// The search shows spacers by their text and leaves out lines.
+	#[test]
+	fn search_channels() {
+		let channel = |id, parent, name: &str| voelin_model::ChannelInfo {
+			id,
+			parent,
+			name: name.into(),
+			..Default::default()
+		};
+		let channels = [
+			channel(1, 0, "[cspacer0]Gaming"),
+			channel(2, 0, "[*spacer]---"),
+			channel(3, 0, "[spacer1]"),
+			// Only top-level channels are spacers.
+			channel(4, 1, "[cspacer]Game Night"),
+			channel(5, 0, "Lobby"),
+		];
+		assert_eq!(found_channels(&channels, "gam"), [(1, "Gaming"), (4, "[cspacer]Game Night")]);
+		assert!(found_channels(&channels, "-").is_empty());
+		// A spacer is not found by its prefix; a sub-channel's name is all
+		// its own.
+		assert_eq!(found_channels(&channels, "spacer"), [(4, "[cspacer]Game Night")]);
+		assert_eq!(found_channels(&channels, "").len(), 3);
 	}
 
 	#[test]

@@ -463,10 +463,16 @@ The compact server card shows its icon over the host banner. TeamSpeak 6
 channel banners sit behind their titles in fixed-height tree rows (34 pixels),
 and behind desktop and phone chat/voice headers. Artwork uses centred cover
 cropping without distortion; it never adds height to navigation. Custom channel
-icons lead the title, and recognized `[cspacerN]` labels are centred without
-showing the prefix. A theme-aware surface gradient (74% to 66% opacity) keeps
-primary text above 4.5:1 contrast even on all-white or all-black artwork, while
-leaving the image visible. Missing pictures retain the normal background.
+icons lead the title. Top-level spacer channels show their text without the
+prefix and without an icon or a member count: `[spacerN]` and `[lspacerN]` on
+the left, `[cspacerN]` centred, `[rspacerN]` on the right, and `[*spacerN]---`
+repeats its text across the row as a line (any text may follow `spacer`, as
+it only keeps names unique). Every screen that names a channel, and the
+Android voice notification, shows a spacer's text; the tree search, Ctrl+K and
+the event form leave out lines and empty spacers. A theme-aware surface
+gradient (74% to 66% opacity) keeps primary text above 4.5:1 contrast even on
+all-white or all-black artwork, while leaving the image visible. Missing
+pictures retain the normal background.
 
 Bookmarks remember the server icon ID and the address that supplied it. The
 server list, search results and server header load its cached bytes before

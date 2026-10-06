@@ -290,7 +290,7 @@ impl SessionView {
 		self.channel_of(client)
 			.filter(|c| Some(*c) != self.state.own_channel)
 			.and_then(|c| self.presence.channels.get(&c))
-			.map_or_else(String::new, |c| c.name.clone())
+			.map_or_else(String::new, |c| crate::vm::tree::channel_title(c).0.to_owned())
 	}
 
 	/// A client's nickname, or its id.

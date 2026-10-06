@@ -62,6 +62,10 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
 - Hover help in the Stream Studio (a source's error, the status details)
   shows each time and closes when the pointer leaves; it showed only once,
   and stayed open until a click.
+- Spacer channels: `[spacer]`, `[lspacer]`, `[rspacer]` and `[*spacer]` lines
+  are drawn as TeamSpeak draws them, like `[cspacer]` was, and chats, search
+  results, notifications and the other screens show a spacer's text instead
+  of its raw name.
 
 ## [0.0.1-alpha] - 2026-10-04
 

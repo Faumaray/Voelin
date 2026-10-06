@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use voelin_core::stream::{StreamState, ViewerInfo, ViewerState};
 use voelin_core::{Event, SessionId, VoiceState};
-use voelin_model::Presence;
+use voelin_model::{Presence, channel_title};
 
 /// What the voice notification shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,13 +72,13 @@ impl Session {
 		self.name.as_deref().unwrap_or("a server")
 	}
 
-	/// Our channel's name and how many are in it.
+	/// Our channel's name (a spacer's text) and how many are in it.
 	fn channel(&self) -> Option<(&str, usize)> {
 		let id = self.own_channel?;
 		let channel = self.presence.channels.get(&id)?;
 		let people =
 			self.presence.clients.values().filter(|c| c.channel == id && !c.is_query).count();
-		Some((channel.name.as_str(), people))
+		Some((channel_title(channel).0, people))
 	}
 }
 
@@ -222,8 +222,11 @@ mod tests {
 
 	fn presence(people: u16) -> Event {
 		let mut p = Presence::default();
-		p.channels
-			.insert(2, ChannelInfo { id: 2, name: "Chill Zone".into(), ..Default::default() });
+		// A spacer shows its text.
+		p.channels.insert(
+			2,
+			ChannelInfo { id: 2, name: "[cspacer1]Chill Zone".into(), ..Default::default() },
+		);
 		for id in 1..=people {
 			p.clients.insert(id, ClientInfo { id, channel: 2, ..Default::default() });
 		}

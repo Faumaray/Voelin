@@ -67,7 +67,8 @@ impl App {
 				_ => view.state.own_channel,
 			}
 			.map(|c| {
-				let name = view.presence.channels.get(&c).map(|c| c.name.as_str());
+				let name =
+					view.presence.channels.get(&c).map(|c| crate::vm::tree::channel_title(c).0);
 				(c, name.map_or_else(|| "the channel".to_owned(), |n| format!("#{n}")))
 			});
 			Some((id, tab.title.clone(), channel))

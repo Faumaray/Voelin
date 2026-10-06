@@ -444,16 +444,20 @@ fn demo_ui(app: &mut App) {
 	music.icon = DEMO_MUSIC_ICON;
 	music.banner_gfx_url = Some(DEMO_MUSIC_BANNER.into());
 	music.banner_mode = BannerMode::NoAdjust;
-	let mut locked = channel(7, 0, 6, "Officers");
+	let mut locked = channel(7, 0, 9, "Officers");
 	locked.has_password = true;
+	// Spacers as servers name them: a centred heading, one on the right and
+	// a line.
 	for c in [
 		channel(1, 0, 0, "Lobby"),
 		chill,
 		channel(3, 0, 2, "[cspacer0]Gaming"),
 		raid,
 		music,
-		channel(6, 0, 5, "AFK"),
+		channel(9, 0, 5, "[rspacer2]Staff"),
 		locked,
+		channel(8, 0, 7, "[*spacer1]---"),
+		channel(6, 0, 8, "AFK"),
 	] {
 		p.channels.insert(c.id, c);
 	}

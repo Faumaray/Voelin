@@ -35,7 +35,7 @@ impl App {
 			let Some(view) = self.sessions.get(&b.id) else { continue };
 			let channel_of = |cid: Option<u64>| {
 				cid.and_then(|c| view.presence.channels.get(&c))
-					.map(|c| c.name.clone())
+					.map(|c| vm::tree::channel_title(c).0.to_owned())
 					.unwrap_or_default()
 			};
 			let backdrop = vm::avatar::tint(&b.name);

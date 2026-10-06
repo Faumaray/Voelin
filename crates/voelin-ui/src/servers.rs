@@ -509,7 +509,8 @@ impl App {
 		let bookmark = self.current.and_then(|id| self.bookmark(id)).map(|b| b.address.clone());
 		let path = self.view().and_then(|v| {
 			let mut names = Vec::new();
-			let mut channel = v.presence.channels.get(&v.state.own_channel?)?;
+			let own = v.presence.channels.get(&v.state.own_channel?)?;
+			let mut channel = own;
 			loop {
 				names.push(channel.name.clone());
 				match v.presence.channels.get(&channel.parent) {
@@ -518,16 +519,17 @@ impl App {
 				}
 			}
 			names.reverse();
-			Some(names)
+			// The link names the channels as the server has them; the
+			// toast as the tree shows them.
+			Some((names, vm::tree::channel_title(own).0.to_owned()))
 		});
-		let (Some(address), Some(path)) = (bookmark, path) else {
+		let (Some(address), Some((path, title))) = (bookmark, path) else {
 			self.set_status("Join a voice channel to invite others to it");
 			return String::new();
 		};
 		let path: Vec<&str> = path.iter().map(String::as_str).collect();
 		let link = vm::servers::invite_link(&address, &path);
-		self.copy_note =
-			Some(format!("Copied an invite to {}: {link}", path.last().unwrap_or(&"")));
+		self.copy_note = Some(format!("Copied an invite to {title}: {link}"));
 		link
 	}
 

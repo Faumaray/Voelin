@@ -145,7 +145,7 @@ impl App {
 				view.presence
 					.channels
 					.get(cid)
-					.map(|c| c.name.clone())
+					.map(|c| vm::tree::channel_title(c).0.to_owned())
 					.unwrap_or_else(|| cid.to_string())
 			),
 			ChatTarget::Private(_) => format!("@{author}"),
