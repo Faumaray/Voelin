@@ -3,13 +3,20 @@
 //! memory once (`Command::DownloadChatFile` with `DownloadTo::Memory`,
 //! voice connections only) and decoded once into the image cache
 //! (`images.rs`); the chat shows it as a picture card, and a click opens
-//! it larger.
+//! it larger. A picture on the web a message shows (`[img]`) comes the way
+//! banners do, into the engine's cache (`Command::FetchPicture`, up to the
+//! same size, only with `cache.fetch_images`), and until it is there the
+//! message shows its address.
 
+use std::borrow::Cow;
+
+use voelin_core::settings::CACHE_FETCH_IMAGES;
 use voelin_core::{Bytes, Command, DownloadTo, TransferState, VoiceState};
 use voelin_model::{ChatTarget, FileRef};
 
 use crate::app::{App, SessionView};
 use crate::settings::UI_IMAGE_PREVIEW_KB;
+use crate::vm;
 
 /// A linked picture.
 #[derive(Clone, Debug)]
@@ -59,11 +66,12 @@ impl App {
 			return;
 		}
 		let limit = u64::from(self.prefs.get(&UI_IMAGE_PREVIEW_KB)) * 1024;
+		if limit == 0 {
+			return;
+		}
+		self.fetch_web_pictures(session, limit);
 		let Some(view) = self.sessions.get_mut(&session) else { return };
-		if limit == 0
-			|| view.state.voice != VoiceState::Connected
-			|| !view.capabilities.file_transfer
-		{
+		if view.state.voice != VoiceState::Connected || !view.capabilities.file_transfer {
 			return;
 		}
 		let Some(tab) = view.tabs.get(view.current_tab) else { return };
@@ -90,6 +98,38 @@ impl App {
 				file,
 				password: None,
 				to: DownloadTo::Memory,
+			});
+		}
+	}
+
+	/// Ask the engine for the pictures on the web (`[img]`) of the current
+	/// chat of `session` that it has not reported; it fetches each once.
+	fn fetch_web_pictures(&self, session: i64, limit: u64) {
+		if !self.prefs.get(&CACHE_FETCH_IMAGES) {
+			return;
+		}
+		let Some(view) = self.sessions.get(&session) else { return };
+		let Some(tab) = view.tabs.get(view.current_tab) else { return };
+		// The server chat starts with the server's messages.
+		let server = match tab.target {
+			ChatTarget::Server => crate::chat::server_texts(&view.presence.server),
+			_ => Vec::new(),
+		};
+		let wanted: Vec<String> = tab
+			.messages
+			.iter()
+			.rev()
+			.take(200)
+			.map(|m| m.message.message.text.as_str())
+			.chain(server.into_iter().map(|(text, _)| text))
+			.flat_map(vm::chat::web_pictures)
+			.filter(|url| !view.pictures.contains_key(url))
+			.collect();
+		for url in wanted {
+			self.engine.send(Command::FetchPicture {
+				session: session as u64,
+				url,
+				max_bytes: limit,
 			});
 		}
 	}
@@ -133,15 +173,27 @@ impl App {
 		true
 	}
 
-	/// The picture of link `index` of a message of the current chat, for
-	/// the large view.
+	/// The picture of link `index` of a message of the current chat (its
+	/// files, then its pictures on the web), for the large view.
 	pub(crate) fn open_preview(&self, key: i32, index: i32) -> slint::Image {
 		let Some(view) = self.view() else { return slint::Image::default() };
 		let Some(tab) = view.tabs.get(view.current_tab) else { return slint::Image::default() };
-		tab.message(key)
-			.and_then(|m| m.message.file_refs().into_iter().nth(index.max(0) as usize))
-			.and_then(|f| image_of(view, &f))
-			.unwrap_or_default()
+		let message = match tab.message(key) {
+			Some(message) => Cow::Borrowed(&message.message),
+			// A line of the server.
+			None => match crate::chat::server_text(view, tab, key) {
+				Some(text) => Cow::Owned(vm::chat::server_message("", text)),
+				None => return slint::Image::default(),
+			},
+		};
+		let index = index.max(0) as usize;
+		match message.file_refs().get(index) {
+			Some(file) => image_of(view, file).unwrap_or_default(),
+			None => vm::chat::picture_link(&message, index)
+				.and_then(|url| view.pictures.get(&url))
+				.map(|path| crate::images::file(path))
+				.unwrap_or_default(),
+		}
 	}
 }
 

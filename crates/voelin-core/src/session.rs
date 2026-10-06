@@ -227,6 +227,10 @@ struct Session {
 	/// Pictures on the web (banners, badges) reported or being fetched, by
 	/// address.
 	pictures: HashSet<String>,
+	/// Pictures on the web that chat messages show, reported or being
+	/// fetched, by address, with the size they may have
+	/// ([`Command::FetchPicture`]).
+	chat_pictures: HashMap<String, u64>,
 	image_epoch: u64,
 	images_enabled: bool,
 	image_retries: HashMap<ImageRequest, ImageRetry>,
@@ -265,6 +269,7 @@ impl Session {
 			avatars: HashMap::new(),
 			icons: HashSet::new(),
 			pictures: HashSet::new(),
+			chat_pictures: HashMap::new(),
 			image_epoch: 0,
 			images_enabled: settings.current().get(&CACHE_FETCH_IMAGES),
 			image_retries: HashMap::new(),
@@ -676,6 +681,15 @@ impl Session {
 					self.fetch_avatar(&client_uid, &hash, true);
 				}
 			}
+			Command::FetchPicture { url, max_bytes, .. } => {
+				if self.settings.current().get(&CACHE_FETCH_IMAGES)
+					&& cache::picture_key(&url).is_some()
+					&& !self.chat_pictures.contains_key(&url)
+				{
+					self.chat_pictures.insert(url.clone(), max_bytes);
+					self.fetch_picture(&url, false);
+				}
+			}
 			Command::ListOfflineMessages { request, .. } => {
 				if self.voice.is_none() {
 					let result = Err(NO_VOICE.into());
@@ -828,6 +842,7 @@ impl Session {
 		self.avatars.clear();
 		self.icons.clear();
 		self.pictures.clear();
+		self.chat_pictures.clear();
 		self.contact_audio.clear();
 		self.priority_audio = Default::default();
 		self.stream_friends.clear();
@@ -894,7 +909,18 @@ impl Session {
 				self.voice.is_some() && self.avatars.get(uid) == Some(hash)
 			}
 			ImageRequest::Icon(id) => self.voice.is_some() && self.icons.contains(id),
-			ImageRequest::Picture(url) => self.pictures.contains(url),
+			ImageRequest::Picture(url) => {
+				self.pictures.contains(url) || self.chat_pictures.contains_key(url)
+			}
+		}
+	}
+
+	/// How large the picture at `url` may be: a chat picture as large as
+	/// it was asked for, unless it is also a banner or badge.
+	fn picture_limit(&self, url: &str) -> u64 {
+		match self.chat_pictures.get(url) {
+			Some(max) if !self.pictures.contains(url) => (*max).min(cache::MAX_PICTURE_BYTES),
+			_ => cache::MAX_PICTURE_BYTES,
 		}
 	}
 
@@ -924,6 +950,13 @@ impl Session {
 			Ok(path) => {
 				self.image_retries.remove(&request);
 				if !requested && !self.settings.current().get(&CACHE_FETCH_IMAGES) {
+					return;
+				}
+				// A chat picture already in the cache may be larger than
+				// asked for now.
+				if let ImageRequest::Picture(url) = &request
+					&& std::fs::metadata(&path).is_ok_and(|m| m.len() > self.picture_limit(url))
+				{
 					return;
 				}
 				let session = self.id;
@@ -960,6 +993,7 @@ impl Session {
 			self.avatars.clear();
 			self.icons.clear();
 			self.pictures.clear();
+			self.chat_pictures.clear();
 			self.image_retries.clear();
 			if let Some((.., timer)) = self.banner_reload.take() {
 				timer.abort();
@@ -1069,7 +1103,8 @@ impl Session {
 			let key = cache::server_picture_key(server, url);
 			self.fetch_image(key, Some(file), fresh, waiter);
 		} else {
-			web::fetch(self.cache.current(), url, fresh, max_cache_bytes(&self.settings), waiter);
+			let (max_cache, max) = (max_cache_bytes(&self.settings), self.picture_limit(url));
+			web::fetch(self.cache.current(), url, fresh, max_cache, max, waiter);
 		}
 	}
 
@@ -2235,6 +2270,50 @@ mod banner_tests {
 		assert!(
 			matches!(events.try_recv(), Ok(Event::AvatarReady { client_uid, .. }) if client_uid == uid)
 		);
+		std::fs::remove_dir_all(cache.dir()).unwrap();
+	}
+
+	/// A picture a chat message shows comes only with `cache.fetch_images`,
+	/// is fetched once, and is reported only while it is no larger than
+	/// asked for.
+	#[tokio::test]
+	async fn chat_pictures_obey_policy_and_their_size() {
+		let (mut session, mut events) = session("chat-pictures");
+		let url = "https://example.com/meme.png";
+		let cache = session.cache.current();
+		let key = cache::picture_key(url).unwrap();
+		let Fetch::Download(temp) = cache.fetch(&key, false, Box::new(|_| {})) else {
+			panic!("first download");
+		};
+		std::fs::create_dir_all(temp.parent().unwrap()).unwrap();
+		std::fs::write(&temp, b"cached image").unwrap();
+		cache.finish(&key, &temp, Ok(()), 0);
+		let fetch = |max_bytes| Command::FetchPicture { session: 1, url: url.into(), max_bytes };
+		let ready = |events: &mut broadcast::Receiver<Event>| {
+			let mut ready = false;
+			while let Ok(event) = events.try_recv() {
+				ready |=
+					matches!(event, Event::PictureReady { url: address, .. } if address == url);
+			}
+			ready
+		};
+		session.settings.current().set(&CACHE_FETCH_IMAGES, false).unwrap();
+		session.command(fetch(100));
+		assert!(session.chat_pictures.is_empty());
+		session.settings.current().set(&CACHE_FETCH_IMAGES, true).unwrap();
+		session.command(fetch(100));
+		let completion = session.sources_rx.as_mut().unwrap().recv().await.unwrap();
+		session.source_event(completion);
+		assert!(ready(&mut events));
+		// Asked for again: nothing more.
+		session.command(fetch(100));
+		assert!(session.sources_rx.as_mut().unwrap().try_recv().is_err());
+		// The file is larger than asked for now: not reported.
+		session.forget_images();
+		session.command(fetch(4));
+		let completion = session.sources_rx.as_mut().unwrap().recv().await.unwrap();
+		session.source_event(completion);
+		assert!(!ready(&mut events));
 		std::fs::remove_dir_all(cache.dir()).unwrap();
 	}
 

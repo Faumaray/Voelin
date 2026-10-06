@@ -959,7 +959,7 @@ impl App {
 			Some((view, tab))
 		});
 		let lines: Vec<ChatLine> = match tab {
-			Some((view, tab)) if view.has_history() => self.lines_of(view, tab, &tab.messages),
+			Some((view, tab)) if view.has_history() => self.lines_of(view, tab, true),
 			// Without stored history the tab's lines are pushed as they come.
 			Some((_, tab)) => tab.lines.iter().collect(),
 			None => Vec::new(),

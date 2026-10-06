@@ -6,7 +6,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, ChatLine, ReactionItem, FileItem, Images } from "../bridge.slint";
 import { Nav } from "../nav.slint";
-import { Icon, IconButton, Avatar, Chip, TabItem, TextField, RichText, Banner, Button, ButtonKind, Spinner, Tooltip, ListView, BannerPicture } from "../components/index.slint";
+import { Icon, IconButton, Avatar, Chip, TabItem, TextField, MessageText, Banner, Button, ButtonKind, Spinner, Tooltip, ListView, BannerPicture } from "../components/index.slint";
 
 // A compact title and actions over the optional channel background.
 export component PageHeader inherits Rectangle {
@@ -361,22 +361,9 @@ export component MessageRow inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                 }
             }
-            if line.blocked: Text {
-                text: @tr("Message from a blocked contact.");
-                color: Theme.text-disabled;
-                font-size: Theme.font-sm;
-                font-italic: true;
-            }
-            if !line.blocked && !line.rich && line.text != "": Text {
-                text: line.text;
-                color: Theme.text;
+            MessageText {
+                line: line;
                 font-size: Theme.font-md;
-                wrap: word-wrap;
-            }
-            if !line.blocked && line.rich: RichText {
-                runs: line.runs;
-                font-size: Theme.font-md;
-                emoji-size: line.jumbo ? 44px : Theme.font-md * 1.4;
             }
             if line.files.length > 0 && !line.blocked: VerticalLayout {
                 padding-top: Theme.space-2;

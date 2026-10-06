@@ -11,8 +11,9 @@
 //!   server needed (nothing is stored).
 //! - `VOELIN_DEMO_STREAM=1`: a local test stream in the viewer.
 //! - `VOELIN_OPEN=<what>[,<what>...]`: open screens on start: `home`,
-//!   `server`, `settings[:<section>]` (voice, keybinds, streaming, privacy,
-//!   appearance, or 0-4), `about`, `share`, `bookmark` (add a server;
+//!   `server` (`server:chat`: its server chat), `settings[:<section>]`
+//!   (voice, keybinds, streaming, privacy, appearance, or 0-4), `about`,
+//!   `share`, `bookmark` (add a server;
 //!   `bookmark:edit` the current one, Advanced open),
 //!   `emoji` (the picker), `client` (the volume dialog of the first other
 //!   client once connected), `panel` / `no-panel` (the members panel),
@@ -214,7 +215,13 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 				bridge.set_myts(account);
 			}
 			"home" => nav.invoke_show(Page::Home),
-			"server" => nav.invoke_show(Page::Server),
+			"server" => {
+				nav.invoke_show(Page::Server);
+				// The server chat, which starts with the welcome message.
+				if arg == "chat" {
+					with_app(|app| app.select_tab(0));
+				}
+			}
 			"settings" => nav.invoke_open_settings(section(arg)),
 			"about" => nav.invoke_open_about(),
 			"share" => {
@@ -1094,6 +1101,8 @@ const DEMO_HOST_BANNER: &str = "https://nightfall.example/banner.png";
 const DEMO_CHILL_BANNER: &str = "https://nightfall.example/chill.png";
 const DEMO_MUSIC_BANNER: &str = "https://nightfall.example/music.png";
 const DEMO_RAID_BANNER: &str = "https://nightfall.example/raid.png";
+/// A picture a message shows (`[img]`).
+const DEMO_LOOT_PICTURE: &str = "https://nightfall.example/loot.png";
 const DEMO_SERVER_ICON: u32 = 3_120_211_001;
 const DEMO_ADMIN_ICON: u32 = 3_120_211_002;
 const DEMO_MOD_ICON: u32 = 3_120_211_003;
@@ -1133,6 +1142,7 @@ fn demo_pictures(app: &mut App) {
 		(DEMO_CHILL_BANNER, demo_picture(900, 120, 11)),
 		(DEMO_RAID_BANNER, demo_picture(240, 240, 5)),
 		(DEMO_MUSIC_BANNER, demo_picture(180, 36, 7)),
+		(DEMO_LOOT_PICTURE, demo_picture(640, 300, 9)),
 	] {
 		let path = save(url.rsplit('/').next().unwrap_or(url), picture);
 		events.push(Event::PictureReady { session, url: url.into(), path });
@@ -1439,6 +1449,44 @@ fn demo_chat(app: &mut App, session: u64) {
 			None,
 		),
 		(DEMO, "dex", 5, "🎉🎉".into(), 10, false, Vec::new(), false, None),
+		// Formatting as TeamSpeak clients send it (BBCode).
+		(
+			DEMO,
+			"Nova",
+			1,
+			"[b]Raid night[/b] moves from [s]20:00[/s] to [color=#ff8a3d]20:30[/color], sign up \
+			 on the [url=https://nightfall.example/raids]raid board[/url]."
+				.into(),
+			9,
+			false,
+			vec![react("👍", 4, true)],
+			true,
+			None,
+		),
+		(
+			DEMO,
+			"Kairo",
+			3,
+			"[quote=Nova]bring elixirs[/quote]\nAlready stocked up 🧪".into(),
+			8,
+			false,
+			Vec::new(),
+			false,
+			None,
+		),
+		(
+			DEMO,
+			"Mira",
+			4,
+			"Roles for tonight:\n[list]\n[*][b]Tank:[/b] Kairo\n[*][b]Healer:[/b] Mira\n\
+			 [*][i]Everyone else:[/i] damage[/list]\nPull timer: [code]/pull 10[/code]"
+				.into(),
+			7,
+			false,
+			Vec::new(),
+			false,
+			None,
+		),
 		(
 			DEMO,
 			"Ari",
@@ -1446,6 +1494,17 @@ fn demo_chat(app: &mut App, session: u64) {
 			"Anyone want to run some co-op later? 👀 Posting from the web.".into(),
 			5,
 			true,
+			Vec::new(),
+			false,
+			None,
+		),
+		(
+			DEMO,
+			"Talon",
+			6,
+			format!("Last week's loot [img]{DEMO_LOOT_PICTURE}[/img]"),
+			6,
+			false,
 			Vec::new(),
 			false,
 			None,

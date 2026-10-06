@@ -4,6 +4,7 @@
 //! [`list::sync`], so a small change redraws only what changed.
 
 pub mod avatar;
+pub mod bbcode;
 pub mod chat;
 pub mod list;
 pub mod servers;

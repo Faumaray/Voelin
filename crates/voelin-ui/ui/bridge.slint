@@ -169,11 +169,34 @@ export struct ChatTab {
     banner-mode: int,
 }
 
-// A piece of a chat line: text, or an emoji shown as an image (`emoji` is
-// its Twemoji key, e.g. "1f600"; `text` then holds the characters).
+// A piece of a chat line: a word in its style, or an emoji shown as an
+// image (`emoji` is its Twemoji key, e.g. "1f600"; `text` then holds the
+// characters).
 export struct TextRun {
     text: string,
     emoji: string,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strike: bool,
+    // Code: on a background.
+    code: bool,
+    // The author's colour, made readable on each theme; transparent: the
+    // text's own.
+    ink-dark: color,
+    ink-light: color,
+    // Where it links to ("": nowhere).
+    link: string,
+}
+
+// A block of a chat line (`vm::bbcode`): its runs, and what it is.
+export struct TextBlock {
+    runs: [TextRun],
+    // 0 = a line, 1 = a quote's line, 2 = a line of code, 3 = a list item,
+    // 4 = a rule (no runs)
+    kind: int,
+    // Who a quote quotes, on its first line.
+    caption: string,
 }
 
 // One emoji under a message, with how many put it there.
@@ -208,10 +231,13 @@ export struct ChatLine {
     // (the engine's ids do not fit a Slint int).
     key: int,
     author: string,
+    // The text without formatting, a line per block (shown as it is when
+    // the message has neither formatting nor emoji, and read out).
     text: string,
     time: string,
-    // The text split into runs; only filled when it has emoji (`rich`).
-    runs: [TextRun],
+    // The text in blocks of styled runs; only filled when it has
+    // formatting or emoji (`rich`).
+    blocks: [TextBlock],
     rich: bool,
     // Only one to three emoji: shown large.
     jumbo: bool,
@@ -232,6 +258,8 @@ export struct ChatLine {
     topic: string,
     // Highlighted after jumping to it from the pins.
     marked: bool,
+    // The first web address it links to, "" if none.
+    link: string,
 }
 
 // A pinned message in the pins drawer.

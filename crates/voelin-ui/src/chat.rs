@@ -8,20 +8,48 @@
 //! touches only the rows that changed. Sessions the engine keeps no history
 //! for (it does not know the server yet) fall back to [`Event::Chat`].
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use slint::{ComponentHandle, ModelRc};
 use voelin_core::gateway::Pin;
+use voelin_core::settings::CACHE_FETCH_IMAGES;
 use voelin_core::{
 	Command, DownloadTo, GatewayRequest, GatewayUpdate, HistoryMessage, HistorySource,
 	TransferState,
 };
 use voelin_gateway_proto::{ErrorCode, TopicInfo, feature};
-use voelin_model::{ChatMessage, ChatTarget};
+use voelin_model::{ChatMessage, ChatTarget, HostMessageMode, ServerDetails};
 
 use crate::app::{App, Bridge, ChatLine, ChatTab, FileItem, Msg, PinItem, SessionView, Tab};
+use crate::settings::UI_IMAGE_PREVIEW_KB;
 use crate::vm;
-use crate::vm::chat::{LineCtx, Previous};
+use crate::vm::chat::{LineCache, LineCtx, Previous};
+
+/// Where the server's welcome and host message keep what their lines were
+/// built from (`LineCache`), apart from the messages' ids.
+const SERVER_LINES: [i64; 2] = [i64::MIN, i64::MIN + 1];
+
+/// What the server says to everyone who connects, with where its line keeps
+/// its parts: its welcome message, and its host message when that goes to
+/// the chat log.
+pub(crate) fn server_texts(details: &ServerDetails) -> Vec<(&str, i64)> {
+	let host = details.host_message_mode == HostMessageMode::Log;
+	[Some(&details.welcome_message), host.then_some(&details.host_message)]
+		.into_iter()
+		.zip(SERVER_LINES)
+		.filter_map(|(text, id)| Some((text.filter(|t| !t.trim().is_empty())?.as_str(), id)))
+		.collect()
+}
+
+/// The text of the server's line `key` (-1, -2, …) of a server chat
+/// ([`App::lines_of`]), if `tab` is one.
+pub(crate) fn server_text<'a>(view: &'a SessionView, tab: &Tab, key: i32) -> Option<&'a str> {
+	if tab.target != ChatTarget::Server || key >= 0 {
+		return None;
+	}
+	server_texts(&view.presence.server).get((-1 - key) as usize).map(|(text, _)| *text)
+}
 
 /// A file being downloaded from a chat message.
 pub(crate) struct Download {
@@ -253,17 +281,20 @@ impl App {
 		self.refresh_chat();
 	}
 
-	/// The lines of a tab, grouped and with everything the row shows (also
-	/// the stream chat of the Stream Studio, studio.rs).
-	pub(crate) fn lines_of(
-		&self,
-		view: &SessionView,
-		tab: &Tab,
-		messages: &[Msg],
-	) -> Vec<ChatLine> {
+	/// The lines of a tab's messages (`main`) or of its open topic, grouped
+	/// and with everything the row shows (also the stream chat of the
+	/// Stream Studio, studio.rs). The server chat starts with what the
+	/// server says to everyone who connects ([`Self::server_lines`]).
+	pub(crate) fn lines_of(&self, view: &SessionView, tab: &Tab, main: bool) -> Vec<ChatLine> {
+		let messages = if main { &tab.messages } else { &tab.topic_messages };
 		let gateway = view.gateway_has(feature::PINS)
 			|| view.gateway_has(feature::REACTIONS)
 			|| view.gateway_has(feature::TOPICS);
+		// Pictures on the web show only while pictures are fetched and
+		// shown.
+		let shown = self.prefs.get(&CACHE_FETCH_IMAGES) && self.prefs.get(&UI_IMAGE_PREVIEW_KB) > 0;
+		let pictures = shown.then_some(&view.pictures);
+		let cache = main.then_some(&tab.cache);
 		let mut previous: Option<Previous> = None;
 		let mut lines: Vec<(i64, ChatLine)> = Vec::with_capacity(messages.len());
 		for m in messages {
@@ -292,6 +323,8 @@ impl App {
 				topic,
 				downloads: self.downloads_of(view, m.key),
 				previews,
+				pictures,
+				cache,
 			};
 			lines.push((
 				m.message.message.ts_ms,
@@ -299,12 +332,42 @@ impl App {
 			));
 			previous = Some(Previous::of(&m.message.message));
 		}
+		if let Some(cache) = cache {
+			let ids = messages.iter().map(|m| m.message.id).chain(SERVER_LINES);
+			cache.keep(ids, messages.len());
+		}
 		// Pokes of a private chat's peer show among its messages.
 		if let (ChatTarget::Private(uid), Some(session)) = (&tab.target, self.current) {
 			lines.extend(self.poke_lines(session, uid));
 			lines.sort_by_key(|(ts, _)| *ts);
 		}
-		lines.into_iter().map(|(_, line)| line).collect()
+		let server = if main && tab.target == ChatTarget::Server {
+			Self::server_lines(view, pictures, cache)
+		} else {
+			Vec::new()
+		};
+		server.into_iter().chain(lines.into_iter().map(|(_, line)| line)).collect()
+	}
+
+	/// What the server says to everyone who connects ([`server_texts`]) as
+	/// the first lines of the server chat: by the server, without actions.
+	fn server_lines(
+		view: &SessionView,
+		pictures: Option<&HashMap<String, PathBuf>>,
+		cache: Option<&LineCache>,
+	) -> Vec<ChatLine> {
+		let name = match view.presence.server_name.as_str() {
+			"" => "Server",
+			name => name,
+		};
+		server_texts(&view.presence.server)
+			.into_iter()
+			.enumerate()
+			.map(|(i, (text, id))| {
+				let ctx = LineCtx { key: -1 - i as i32, pictures, cache, ..Default::default() };
+				vm::chat::server_line(name, text, id, i > 0, &ctx)
+			})
+			.collect()
 	}
 
 	/// The file cards of a message that has downloads running.
@@ -413,7 +476,7 @@ impl App {
 		let tab = &view.tabs[view.current_tab];
 		// Sessions without stored history push their lines themselves.
 		if view.has_history() {
-			vm::list::sync(&tab.lines, &self.lines_of(view, tab, &tab.messages));
+			vm::list::sync(&tab.lines, &self.lines_of(view, tab, true));
 		}
 		let lines = ModelRc::from(tab.lines.clone());
 		if bridge.get_messages() != lines {
@@ -479,7 +542,7 @@ impl App {
 				.unwrap_or_default()
 				.into(),
 		);
-		vm::list::sync(&self.models.topic_messages, &self.lines_of(view, tab, &tab.topic_messages));
+		vm::list::sync(&self.models.topic_messages, &self.lines_of(view, tab, false));
 	}
 
 	// Gateway features of a chat.
@@ -633,8 +696,14 @@ impl App {
 		if tab.topic.take().is_some() {
 			tab.topic_messages.clear();
 		}
-		// Older than what is loaded: only highlighted once it is.
+		// Older than what is loaded: only highlighted once it is. The server
+		// chat's first lines are the server's.
 		let row = tab.marked.and_then(|id| tab.messages.iter().position(|m| m.message.id == id));
+		let first = match tab.target {
+			ChatTarget::Server => server_texts(&view.presence.server).len(),
+			_ => 0,
+		};
+		let row = row.map(|row| row + first);
 		self.refresh_chat();
 		if let (Some(row), Some(ui)) = (row, self.ui.upgrade()) {
 			let bridge = ui.global::<Bridge>();

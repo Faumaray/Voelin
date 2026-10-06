@@ -163,6 +163,8 @@ pub(crate) struct Tab {
 	pub topic_messages: Vec<Msg>,
 	/// The message jumped to from the pins.
 	pub marked: Option<i64>,
+	/// What the lines of `messages` were built from.
+	pub cache: crate::vm::chat::LineCache,
 }
 
 impl Tab {
@@ -185,6 +187,7 @@ impl Tab {
 			topic: None,
 			topic_messages: Vec::new(),
 			marked: None,
+			cache: Default::default(),
 		}
 	}
 
@@ -962,10 +965,18 @@ impl App {
 				self.autoshare();
 			}
 			Event::Presence { session, presence } => {
-				self.sessions.entry(session as i64).or_default().presence = presence;
+				let view = self.sessions.entry(session as i64).or_default();
+				// The server chat shows its welcome and host message, with
+				// their pictures.
+				let said = crate::chat::server_texts(&view.presence.server)
+					!= crate::chat::server_texts(&presence.server);
+				view.presence = presence;
 				self.apply_client_playback(session as i64);
 				self.join_after_connect(session as i64);
 				if self.current == Some(session as i64) {
+					if said {
+						self.fetch_previews(session as i64);
+					}
 					self.refresh_toolbar();
 					self.refresh_tree();
 					self.refresh_chat();

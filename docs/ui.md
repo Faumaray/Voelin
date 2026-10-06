@@ -129,7 +129,8 @@ puts them on an inner `face`).
 | `Modal` | overlay.slint | dialog with backdrop: `title`, `subtitle`, `icon`, `card-width`, `card-height`; `dismissed` (backdrop, Escape, ×) |
 | `Toast` | overlay.slint | `text`, `icon`, `timeout`, `shown` |
 | `ResizeHandle` | overlay.slint | drag to resize a side panel: `size` (two-way), `minimum`, `maximum`, `left` |
-| `RichText` | emoji.slint | text with inline emoji: `runs` ([TextRun]) flow and wrap in a FlexboxLayout |
+| `RichText` | emoji.slint | text with formatting and inline emoji: `blocks` ([TextBlock]) of lines, quotes (a bar and the author), code (on a background), list items and rules; a block's `runs` ([TextRun]: bold, italic, underline, strike, code, the author's colour per theme, links in the accent colour) flow and wrap in a FlexboxLayout |
+| `MessageText` | emoji.slint | a message's text (`line`: ChatLine): one `Text` when it has neither formatting nor emoji, else a `RichText`; a note for a blocked contact's. The chat, the pins drawer and the studio's chat use it |
 | `EmojiPicker` | emoji.slint | search, categories, virtualised grid; `picked(EmojiCell)`, `close` |
 | `ListView`, `ScrollView` | std-widgets | re-exported (virtualised lists) |
 
@@ -145,7 +146,7 @@ comes from the engine's events; what a gateway adds is hidden without it.
 
 | Part | `VOELIN_OPEN` | What it shows | Engine data |
 |---|---|---|---|
-| Chat | `server` | Header with Pinned Messages, Topics, the voice channel and the members button; chat tabs; messages grouped by author ("Today at 10:14"), avatars, emoji, reactions with an add button, pin and topic marks, file cards with download; composer with attach, emoji and send. Opens at the newest message and follows new ones while at the end | `ChatHistory` (and `Chat` for servers without history), `AvatarReady`, `Transfer`, `Gateway` (pins; reactions arrive as stored messages); `Command::LoadOlderHistory`, `DownloadChatFile`, `UploadFile`, `GatewayRequest::React`, `Unreact`, `Pin`, `Unpin` |
+| Chat | `server` (`server:chat`: the server chat) | Header with Pinned Messages, Topics, the voice channel and the members button; chat tabs; messages grouped by author ("Today at 10:14"), avatars, BBCode formatting (see Formatting below), emoji, reactions with an add button, pin and topic marks, file cards with download; composer with attach, emoji and send. The server chat starts with the server's welcome message (and its host message when the server puts it in the chat log). Opens at the newest message and follows new ones while at the end | `ChatHistory` (and `Chat` for servers without history), `Presence` (welcome and host message), `AvatarReady`, `Transfer`, `Gateway` (pins; reactions arrive as stored messages); `Command::LoadOlderHistory`, `DownloadChatFile`, `UploadFile`, `GatewayRequest::React`, `Unreact`, `Pin`, `Unpin` |
 | Members panel | `server` (`panel`, `no-panel`) | "Members — N" and a search; those streaming first (the people in our channel while the voice channel or a stream is shown), then each server group in the server's order with its icon, then those without a group. Rows: avatar with status, name, crown (admin groups), priority speaker, channel commander, recording, up to three myTeamSpeak badges, moderator role, talk power, what they do or the channel they are in. Resizable: the width is `ui.members_width` | `Presence`, `Groups`, `Talking`, `IconReady`, `PictureReady` |
 | Member card | `member` | Description, groups, badges (up to three chips in the client's order, what each is for on hover; "Badge" for one the app does not know), talk power, country; private message, poke, friend, block; volume and mute for us | `ContactsChanged`, `PictureReady` (badges); `Command::SetContact`, `SetClientVolume`, `SetClientMuted`, `Poke` |
 | Poke | `poke` (the first other member's, card open; after `friends` a contact's) | `PokeDialog`, from the member card, a friend's row and the direct message header: an optional message with a "12/100" count, Send off above 100 characters, Enter sends, Escape cancels | `Command::Poke` (trimmed, cut to 100 characters; the engine cuts too) |
@@ -180,7 +181,7 @@ where a server has it.
 | The bell | `notifications` | Mentions, pokes, private messages, event reminders and friends coming online, newest first, unread marked; Mark all read, clear, the settings. Each kind is off, in the app or also a desktop notification (`notify.*`) | `Chat` and `ChatHistory` (mentions, private messages), `Poke`, `GatewayUpdate::EventReminder`, `FriendPresence`; `voelin_platform::notify` |
 | Search | `search[:<text>]` | Ctrl+K: servers, channels of every server, people (on the servers and the contacts) and the settings pages; arrows choose, Enter opens | the sessions, contacts, bookmarks |
 | Events | `events`, `event-form` | Above the channel tree (gateway `events`): a server's events with date, time, channel, scheduled stream, Going, Maybe and Not going with counts, who answered, reminders, Watch while live; create, edit and delete. Members (above the tree too) opens the members panel | `Gateway` events; `GatewayRequest::Events`, `CreateEvent`, `UpdateEvent`, `DeleteEvent`, `Rsvp` |
-| Pictures in chat | `picture` | A linked png, jpg, gif or webp up to `ui.image_preview_kb` is downloaded into memory, decoded once into the image cache and shown as a card in the message; a click opens it larger | `Command::DownloadChatFile` with `DownloadTo::Memory`, `Transfer` |
+| Pictures in chat | `picture` | A linked png, jpg, gif or webp up to `ui.image_preview_kb` is downloaded into memory, decoded once into the image cache and shown as a card in the message; a click opens it larger. A picture on the web a message shows (`[img]`) comes into the engine's picture cache like banners, up to the same size and only with `cache.fetch_images`; until then, or without it, the message shows its address as a link | `Command::DownloadChatFile` with `DownloadTo::Memory`, `Transfer`; `Command::FetchPicture`, `PictureReady` |
 | Join by address | `join` | The add-server dialog that connects once saved | `Command::ConnectVoice` |
 
 Settings sections (`settings:<section>`):
@@ -353,7 +354,7 @@ live when they change (settings page, `--set`, another window):
 | `ui.narrow_breakpoint` | pixels | 800 | below this width the phone layout |
 | `ui.image_cache_mb` | megabytes | 64 | decoded images kept in memory (0: none) |
 | `ui.members_width` | pixels | 280 | width of the members panel (dragging its edge sets it) |
-| `ui.image_preview_kb` | kilobytes | 8192 | pictures linked in chat up to this size show as pictures (0: never) |
+| `ui.image_preview_kb` | kilobytes | 8192 | pictures linked in chat (files and `[img]`) up to this size show as pictures (0: never) |
 | `notify.mentions`, `notify.private_messages`, `notify.pokes`, `notify.event_reminders`, `notify.friends_online` | off / app / desktop | desktop (friends: app) | what the bell and the desktop say about each kind |
 | `video.camera`, `video.background`, `video.resolution`, `video.mirror` | device id; none / blur; auto or WxH; bool | first camera, none, auto, true | the camera of the preview and the default of camera sources |
 | `studio.ui` | JSON | see below | the Stream Studio's stream settings: `title`, `game`, `message` (go-live), `show_viewers`, `show_chat`, `show_now_playing`, `audio` (stream audio), `preview_width` (960), `preview_fps` (15) |
@@ -370,22 +371,57 @@ picker names and categories; 1.9 MB) and embedded in the binary. `emoji.rs`
 splits chat text into grapheme clusters, maps emoji to Twemoji keys (code
 points in hex; U+FE0F dropped outside ZWJ sequences, as Twemoji names its
 files; text-default symbols such as © or digits only with U+FE0F) and makes
-runs: one per word and one per emoji. A message without emoji stays one
-`Text` (fast path); one with emoji is a `RichText`, whose runs wrap in a
-`FlexboxLayout` (lines break between words, not inside them). One to three
-emoji alone are shown large. `Images.emoji(key)` decodes an emoji once
+runs of each span of a message (see Formatting): one per word and one per
+emoji. A message without formatting or emoji stays one `Text` (fast path);
+any other is a `RichText`, whose runs wrap in a `FlexboxLayout` (lines break
+between words, not inside them; a run does not wrap, so a word longer than
+24 characters, such as an address, is cut into runs). One to three emoji
+alone are shown large. `Images.emoji(key)` decodes an emoji once
 (`images.rs`, LRU by bytes) when a visible row asks for it.
 
 The picker lists the emoji without skin-tone variants by category (coarse
 code-point ranges) and searches Unicode names. There are no shortcodes yet.
 
+## Formatting
+
+TeamSpeak clients format chat with BBCode. `vm/bbcode.rs` reads a message
+into a `Doc`: blocks (lines, quote lines, code, list items, rules) of spans
+with a style (bold, italic, underline, strike, code, colour, link) or a
+picture. The Doc does not depend on BBCode, so Markdown (TeamSpeak 6) can be
+a second parser making the same Doc.
+
+- Tags: `[b]`, `[i]`, `[u]`, `[s]`, `[color=#rgb|#rrggbb|name]`, `[url]`,
+  `[url=…]`, `[img]`, `[quote]`, `[quote=Name]`, `[code]` (nothing inside is
+  a tag; one line is inline code, more are a block), `[list]` with `[*]`,
+  `[hr]`. `[left]`, `[center]`, `[right]`, `[size]`, `[table]`, `[th]` and
+  `[td]` are dropped and their text kept; `[tr]` starts a line.
+- Tags are read in any case, and only known ones: `[Nova] hi` and `[1]`
+  stay text. A tag left open ends with the message; a closing tag that
+  closes nothing stays text.
+- A line break starts a block. Bare `http(s)://` and `www.` addresses are
+  links, without the punctuation after them. Links go only to the web,
+  TeamSpeak servers and channel files: `[url=javascript:…]` is no link.
+- Colours are honoured, made readable on each theme (a contrast of 4.5:1 to
+  the chat's background, keeping the hue).
+- Past 16 tags open at once or 1500 spans (or runs), a message is plain
+  text.
+
+`vm::chat` turns a Doc into `TextBlock`s of `TextRun`s, leaves out the file
+links shown as cards, and shows `[img]` pictures that are in the engine's
+cache as picture cards (else their address as a link). `ChatLine.text` is
+the plain text (quotes as `> `, list items as `• `), for screen readers and
+copying; `ChatLine.link` is the first web address. Lists of chats,
+notifications and the home's news show the text on one line
+(`Doc::one_line`). Built lines are kept per message id and revision
+(`LineCache`), so a refresh leaves unchanged rows alone.
+
 ## Development switches and screenshots
 
 Environment variables (see `src/dev.rs`):
 
-- `VOELIN_DEMO_UI=1`: sample servers, channels, members, chat with emoji and
-  a stream, without a server (nothing is stored).
-- `VOELIN_OPEN=<what>[,<what>...]`: `home`, `server`, `settings[:voice|keybinds|streaming|privacy|appearance|profiles]` (`identities` is the same as `profiles`),
+- `VOELIN_DEMO_UI=1`: sample servers, channels, members, chat with
+  formatting and emoji, and a stream, without a server (nothing is stored).
+- `VOELIN_OPEN=<what>[,<what>...]`: `home`, `server` (`server:chat`: the server chat), `settings[:voice|keybinds|streaming|privacy|appearance|profiles]` (`identities` is the same as `profiles`),
   `about`, `share[:live]`, `bookmark[:edit]`, `emoji`, `client`, `panel`, `no-panel`,
   `voice`, `pins`, `topics`, `topic:<id>`, `member`, `poke`,
   `channel-password[:wrong]`, `watch`, `popout`
@@ -506,7 +542,8 @@ client's tree row shows the pictures that arrived right after the name (its
 group and client icons stay at the end); so does its row in the members
 panel.
 
-The engine downloads banners and badges only while `cache.fetch_images` is
+The engine downloads banners and badges, and the pictures chat messages
+show (`[img]`, `Command::FetchPicture`), only while `cache.fetch_images` is
 enabled.
 Banners on the web (`http`, `https`) come from their host; banners in the
 server's own files, linked as `ts3image://` (TeamSpeak 5 and 6:

@@ -371,6 +371,14 @@ pub enum Command {
 		session: SessionId,
 		client_uid: String,
 	},
+	/// Get a picture on the web that a chat message shows (`[img]`) into
+	/// the cache ([`Event::PictureReady`]) while `cache.fetch_images` is on;
+	/// one larger than `max_bytes` is not reported.
+	FetchPicture {
+		session: SessionId,
+		url: String,
+		max_bytes: u64,
+	},
 	/// Our offline messages ([`Event::OfflineMessages`]); see [`offline`].
 	ListOfflineMessages {
 		session: SessionId,
@@ -680,9 +688,10 @@ pub enum Event {
 	},
 	/// A picture on the web is in the cache: the host banner
 	/// ([`ServerDetails::banner_gfx_url`]), a channel's
-	/// ([`voelin_model::ChannelInfo::banner_gfx_url`]) or a badge's
-	/// ([`voelin_model::badges::icon_url`]) at `url` (setting
-	/// `cache.fetch_images`). Comes again when the host banner was reloaded
+	/// ([`voelin_model::ChannelInfo::banner_gfx_url`]), a badge's
+	/// ([`voelin_model::badges::icon_url`]) or one a chat message shows
+	/// ([`Command::FetchPicture`]) at `url` (setting `cache.fetch_images`).
+	/// Comes again when the host banner was reloaded
 	/// (`banner_gfx_interval_s`, at least a minute): the file at `path`
 	/// changed.
 	PictureReady {
@@ -1044,6 +1053,7 @@ fn command_session(command: &Command) -> SessionId {
 		| Command::CreateDirectory { session, .. }
 		| Command::SetAvatar { session, .. }
 		| Command::FetchAvatar { session, .. }
+		| Command::FetchPicture { session, .. }
 		| Command::ListOfflineMessages { session, .. }
 		| Command::GetOfflineMessage { session, .. }
 		| Command::SendOfflineMessage { session, .. }

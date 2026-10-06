@@ -78,6 +78,10 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
   empty.
 - While a priority speaker talks, everyone else (watched streams too) is
   dimmed by the server's setting, as in TeamSpeak; nobody was dimmed before.
+- BBCode from other clients shows as formatting (bold, colours, links,
+  quotes, lists, code, pictures) instead of raw tags, and the server's
+  welcome message opens the server chat. Messages with emoji keep their
+  line breaks.
 - Joining a friend in a subchannel of a server without voice connects into
   that subchannel; it connected into the default channel.
 

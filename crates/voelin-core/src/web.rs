@@ -54,17 +54,26 @@ static CLIENT: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(|| {
 
 /// Get the picture at `url` into `cache`, downloading it once however many
 /// ask (again with `fresh`: it changes at its address); `waiter` is told
-/// where it is. `max_cache_bytes`: `cache.max_mb` in bytes.
-pub(crate) fn fetch(cache: Cache, url: &str, fresh: bool, max_cache_bytes: u64, waiter: Waiter) {
+/// where it is. `max_cache_bytes`: `cache.max_mb` in bytes; `max_bytes`:
+/// the picture's size at most (up to [`cache::MAX_PICTURE_BYTES`]).
+pub(crate) fn fetch(
+	cache: Cache,
+	url: &str,
+	fresh: bool,
+	max_cache_bytes: u64,
+	max_bytes: u64,
+	waiter: Waiter,
+) {
 	let Some(key) = cache::picture_key(url) else {
 		waiter(Err("not an http or https address".into()));
 		return;
 	};
 	let Fetch::Download(temp) = cache.fetch(&key, fresh, waiter) else { return };
 	let url = url.to_owned();
+	let limits = Limits { max_bytes: max_bytes.min(LIMITS.max_bytes), ..LIMITS };
 	tokio::spawn(async move {
 		let _permit = DOWNLOADS.acquire().await.expect("download semaphore stays open");
-		let result = download(&url, &temp, &LIMITS).await;
+		let result = download(&url, &temp, &limits).await;
 		cache.finish(&key, &temp, result, max_cache_bytes);
 	});
 }
@@ -258,18 +267,24 @@ mod tests {
 			Box::new(move |r| tx.send(r).unwrap())
 		};
 		let url = format!("{base}/banner");
-		fetch(cache.clone(), &url, false, 0, waiter(&tx));
+		let max = cache::MAX_PICTURE_BYTES;
+		fetch(cache.clone(), &url, false, 0, max, waiter(&tx));
 		let path = tokio::task::spawn_blocking(move || rx.recv().unwrap()).await.unwrap().unwrap();
 		assert_eq!(path, dir.join(cache::picture_key(&url).unwrap()));
 		assert_eq!(std::fs::read(&path).unwrap(), PNG);
 		// Not on the web: refused at once, nothing cached.
 		let (tx, rx) = mpsc::channel();
-		fetch(cache.clone(), "file:///etc/hostname", false, 0, waiter(&tx));
+		fetch(cache.clone(), "file:///etc/hostname", false, 0, max, waiter(&tx));
 		assert!(rx.recv().unwrap().unwrap_err().contains("http"));
 		// A failed download is reported and leaves nothing behind.
-		fetch(cache.clone(), &format!("{base}/page"), false, 0, waiter(&tx));
+		fetch(cache.clone(), &format!("{base}/page"), false, 0, max, waiter(&tx));
 		let failed = tokio::task::spawn_blocking(move || rx.recv().unwrap()).await.unwrap();
 		assert_eq!(failed, Err("not a picture".into()));
+		// So does one larger than asked for (a chat picture).
+		let (tx, rx) = mpsc::channel();
+		fetch(cache.clone(), &format!("{base}/big"), false, 0, 1000, waiter(&tx));
+		let failed = tokio::task::spawn_blocking(move || rx.recv().unwrap()).await.unwrap();
+		assert!(failed.unwrap_err().contains("larger"));
 		assert_eq!(cache.size(), PNG.len() as u64);
 		std::fs::remove_dir_all(dir).unwrap();
 	}
@@ -340,6 +355,7 @@ mod tests {
 				&format!("{base}/{path}"),
 				false,
 				0,
+				cache::MAX_PICTURE_BYTES,
 				Box::new(move |r| {
 					completed.send(r).unwrap();
 				}),

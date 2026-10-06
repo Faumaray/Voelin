@@ -6,7 +6,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, PinItem, TopicItem, Images } from "../bridge.slint";
 import { Nav } from "../nav.slint";
-import { Icon, IconButton, Button, ButtonKind, TextField, SearchBox, Avatar, RichText, Spinner, Modal, ListView } from "../components/index.slint";
+import { Icon, IconButton, Button, ButtonKind, TextField, SearchBox, Avatar, MessageText, Spinner, Modal, ListView } from "../components/index.slint";
 import { Reactions } from "chat.slint";
 
 // The title row both drawers share, above their content (@children).
@@ -112,13 +112,9 @@ component PinCard inherits Rectangle {
                 clicked => { Bridge.pin(pin.line.key, false); }
             }
         }
-        if !pin.line.rich && pin.line.text != "": Text {
-            text: pin.line.text;
-            color: Theme.text;
-            wrap: word-wrap;
-        }
-        if pin.line.rich: RichText {
-            runs: pin.line.runs;
+        MessageText {
+            line: pin.line;
+            jumbo-size: Theme.font-body * 1.4;
         }
         for file in pin.line.files: HorizontalLayout {
             spacing: Theme.space-2;

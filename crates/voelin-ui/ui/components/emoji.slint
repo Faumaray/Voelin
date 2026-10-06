@@ -1,37 +1,168 @@
 // Emoji as images (Twemoji through Rust's image cache): chat text with
-// inline emoji, and the picker.
+// formatting and inline emoji, and the picker.
 
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
-import { Images, Emoji, TextRun, EmojiCell } from "../bridge.slint";
+import { Images, Emoji, TextRun, TextBlock, ChatLine, EmojiCell } from "../bridge.slint";
 import { Icon } from "icon.slint";
 import { SearchBox } from "text-field.slint";
 import { ListView } from "std-widgets.slint";
 
-// Text with inline emoji: the runs flow and wrap like text (a flexbox of
-// words and emoji). Plain text needs no runs: use a Text then (faster).
-export component RichText inherits FlexboxLayout {
+// A word in its style, or an emoji. A Text draws no lines, so underline
+// (links too) and strike-through are 1 px rectangles over it.
+component Run inherits Rectangle {
+    in property <TextRun> run;
+    in property <length> font-size;
+    // The text's own colour.
+    in property <color> text-color;
+    in property <length> emoji-size;
+    property <bool> emoji: run.emoji != "";
+    property <length> pad: run.code ? 3px : 0px;
+    property <color> ink: run.link != "" ? Theme.accent-text : run.ink-dark.alpha > 0 ? (Theme.dark ? run.ink-dark : run.ink-light) : root.text-color;
+    min-width: self.preferred-width;
+    preferred-width: (root.emoji ? root.emoji-size : label.preferred-width) + 2 * root.pad;
+    preferred-height: root.emoji ? root.emoji-size : label.preferred-height;
+    border-radius: Theme.radius-xs;
+    background: run.code ? Theme.surface-3 : transparent;
+    label := Text {
+        x: root.pad;
+        width: self.preferred-width;
+        text: root.emoji ? "" : run.text;
+        font-size: root.font-size;
+        font-weight: run.bold ? Theme.weight-bold : Theme.weight-regular;
+        font-italic: run.italic;
+        color: root.ink;
+        accessible-role: AccessibleRole.none;
+    }
+    if root.emoji: Image {
+        width: root.emoji-size;
+        height: root.emoji-size;
+        source: Images.emoji(run.emoji);
+        image-fit: contain;
+        accessible-role: AccessibleRole.image;
+        accessible-label: run.text;
+    }
+    if run.underline || run.link != "": Rectangle {
+        x: label.x;
+        y: label.y + root.font-size * 1.1;
+        width: label.width;
+        height: 1px;
+        background: root.ink;
+    }
+    if run.strike: Rectangle {
+        x: label.x;
+        y: label.y + root.font-size * 0.62;
+        width: label.width;
+        height: 1px;
+        background: root.ink;
+    }
+}
+
+// The words and emoji of a block flow and wrap like text.
+component Runs inherits FlexboxLayout {
     in property <[TextRun]> runs;
+    in property <length> font-size;
+    in property <color> color;
+    in property <length> emoji-size;
+    spacing: 0px;
+    cross-axis-alignment: center;
+    for run in root.runs: Run {
+        run: run;
+        font-size: root.font-size;
+        text-color: root.color;
+        emoji-size: root.emoji-size;
+    }
+}
+
+// One block of rich text (`TextBlock`): a line, a quote's line with its bar
+// (the first with who said it), a line of code on a background, a list item
+// or a rule. A component of its own: Slint measures a component's height at
+// its width, but a layout repeated by `for` at a guessed width.
+component Block inherits Rectangle {
+    in property <TextBlock> block;
+    in property <length> font-size;
+    in property <color> text-color;
+    in property <length> emoji-size;
+    background: block.kind == 2 ? Theme.surface-3 : transparent;
+    HorizontalLayout {
+        spacing: Theme.space-3;
+        padding-left: block.kind == 2 ? Theme.space-3 : 0px;
+        padding-right: self.padding-left;
+        padding-top: block.kind == 2 ? 2px : block.kind == 4 ? Theme.space-2 : 0px;
+        padding-bottom: self.padding-top;
+        // A quote's bar.
+        if block.kind == 1: Rectangle {
+            width: 3px;
+            border-radius: 1.5px;
+            background: Theme.border-strong;
+        }
+        if block.kind == 3: Text {
+            text: "•";
+            font-size: root.font-size;
+            color: root.text-color;
+            accessible-role: AccessibleRole.none;
+        }
+        VerticalLayout {
+            if block.caption != "": Text {
+                text: block.caption;
+                font-size: Theme.font-sm;
+                font-weight: Theme.weight-semibold;
+                color: Theme.text-secondary;
+            }
+            Runs {
+                runs: block.runs;
+                font-size: root.font-size;
+                color: root.text-color;
+                emoji-size: root.emoji-size;
+            }
+        }
+    }
+    if block.kind == 4: Rectangle {
+        y: (parent.height - self.height) / 2;
+        height: 1px;
+        background: Theme.border-strong;
+    }
+}
+
+// Text with formatting and inline emoji, in blocks (`TextBlock`): lines,
+// quotes with a bar, code on a background, list items and rules. Plain text
+// needs no blocks: use a Text then (faster).
+export component RichText inherits VerticalLayout {
+    in property <[TextBlock]> blocks;
     in property <length> font-size: Theme.font-body;
     in property <color> color: Theme.text;
     in property <length> emoji-size: font-size * 1.4;
-    spacing: 0px;
-    cross-axis-alignment: center;
-    for run in root.runs: HorizontalLayout {
-        if run.emoji == "": Text {
-            text: run.text;
-            font-size: root.font-size;
-            color: root.color;
-            accessible-role: AccessibleRole.none;
-        }
-        if run.emoji != "": Image {
-            width: root.emoji-size;
-            height: root.emoji-size;
-            source: Images.emoji(run.emoji);
-            image-fit: contain;
-            accessible-role: AccessibleRole.image;
-            accessible-label: run.text;
-        }
+    for block in root.blocks: Block {
+        block: block;
+        font-size: root.font-size;
+        text-color: root.color;
+        emoji-size: root.emoji-size;
+    }
+}
+
+// A message's text: one Text when it has neither formatting nor emoji
+// (fast), else its blocks; a note in place of a blocked contact's.
+export component MessageText inherits VerticalLayout {
+    in property <ChatLine> line;
+    in property <length> font-size: Theme.font-body;
+    // Emoji alone (`jumbo`) are this large.
+    in property <length> jumbo-size: 44px;
+    if line.blocked: Text {
+        text: @tr("Message from a blocked contact.");
+        color: Theme.text-disabled;
+        font-size: Theme.font-sm;
+        font-italic: true;
+    }
+    if !line.blocked && !line.rich && line.text != "": Text {
+        text: line.text;
+        color: Theme.text;
+        font-size: root.font-size;
+        wrap: word-wrap;
+    }
+    if !line.blocked && line.rich: RichText {
+        blocks: line.blocks;
+        font-size: root.font-size;
+        emoji-size: line.jumbo ? root.jumbo-size : root.font-size * 1.4;
     }
 }
 

@@ -1,6 +1,7 @@
 //! Texts of the home, friends, messages, bell and events screens: times
-//! ("12m ago", "Yesterday"), message previews without BBCode, mentions,
-//! event dates, a poke's message; pure, so they are tested here.
+//! ("12m ago", "Yesterday"), message previews without BBCode (read by
+//! `vm::bbcode`), mentions, event dates, a poke's message; pure, so they
+//! are tested here.
 
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 
@@ -50,38 +51,24 @@ pub fn list_time_at(then: NaiveDateTime, now: NaiveDateTime) -> String {
 	}
 }
 
-/// Chat text without BBCode tags (`[b]`, `[URL=…]`, `[/URL]`), on one line.
+/// Chat text without BBCode (`[b]`, `[URL=…]`, `[/URL]`), on one line.
 pub fn plain(text: &str) -> String {
-	let mut out = String::with_capacity(text.len());
-	let mut rest = text;
-	while let Some(open) = rest.find('[') {
-		out.push_str(&rest[..open]);
-		let after = &rest[open + 1..];
-		match after.find(']') {
-			Some(close) if is_tag(&after[..close]) => rest = &after[close + 1..],
-			_ => {
-				out.push('[');
-				rest = after;
-			}
-		}
+	without_emoji(&crate::vm::bbcode::parse(text).one_line())
+}
+
+/// Text without emoji, runs of spaces as one: one line of text draws no
+/// emoji (they are pictures in the chat).
+pub fn without_emoji(text: &str) -> String {
+	let mut words = String::with_capacity(text.len());
+	for run in crate::emoji::split(text).into_iter().filter(|r| r.emoji.is_none()) {
+		words.extend(run.text.chars().filter(|c| !is_emoji(*c)));
 	}
-	out.push_str(rest);
-	// Plain text draws no emoji (they are pictures in the chat): leave
-	// them out of one-line previews.
-	let out: String = out.chars().filter(|c| !is_emoji(*c)).collect();
-	out.split_whitespace().collect::<Vec<_>>().join(" ")
+	words.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Pictographs, symbols and their joiners and variation selectors.
 fn is_emoji(c: char) -> bool {
 	matches!(u32::from(c), 0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0xFE0F | 0x200D)
-}
-
-/// `b`, `/url`, `URL=https://…`, `color=#f00`: a BBCode tag.
-fn is_tag(inside: &str) -> bool {
-	let name = inside.strip_prefix('/').unwrap_or(inside);
-	let name = name.split('=').next().unwrap_or_default();
-	!name.is_empty() && name.len() <= 8 && name.chars().all(|c| c.is_ascii_alphabetic())
 }
 
 /// A one-line preview of a message: "You: …" for our own, "Sent a
@@ -224,6 +211,9 @@ mod tests {
 		assert_eq!(plain("a [not a tag here] b"), "a [not a tag here] b");
 		assert_eq!(plain("[1] item"), "[1] item");
 		assert_eq!(plain("later? 👀 Posting ❤️"), "later? Posting");
+		// Only known tags go.
+		assert_eq!(plain("[nick] hi"), "[nick] hi");
+		assert_eq!(plain("[quote=Mira]raid?[/quote]\nyes [i]now[/i]"), "raid? yes now");
 		assert_eq!(preview("Hello", true, &[]), "You: Hello");
 		let file = |name: &str| voelin_model::FileRef { name: name.into(), ..Default::default() };
 		assert_eq!(
