@@ -33,7 +33,7 @@ use crate::cache;
 use crate::files::{self, FileEntry, Report, RequestId, Sink, TransferId, TransferState};
 use crate::offline::{OfflineMessage, OfflineMessageInfo};
 use crate::settings::{FILES_PROGRESS_MS, SharedSettings};
-use crate::{Event, SessionId};
+use crate::{Event, JoinFailure, SessionId};
 
 #[derive(Clone, Debug)]
 pub struct VoiceOptions {
@@ -45,6 +45,10 @@ pub struct VoiceOptions {
 	pub server_password: Option<String>,
 	/// Channel path to join, e.g. `Lobby/Sub`.
 	pub channel: Option<String>,
+	/// The password of `channel`.
+	pub channel_password: Option<String>,
+	/// A privilege key to use when connecting.
+	pub token: Option<String>,
 	/// Open the audio devices (capture and playback).
 	pub audio: bool,
 	/// Network settings for stream peer connections (TeamSpeak 6).
@@ -60,6 +64,8 @@ impl VoiceOptions {
 			client_version: None,
 			server_password: None,
 			channel: None,
+			channel_password: None,
+			token: None,
 			audio: false,
 			stream_peer: PeerConfig::default(),
 		}
@@ -253,6 +259,10 @@ enum Pending {
 		id: u32,
 		message: Option<OfflineMessage>,
 	},
+	/// Moving ourselves; refusals are reported as [`Event::JoinFailed`].
+	Move {
+		channel: ChannelId,
+	},
 	/// Failures are reported as [`VoiceEvent::Error`] with this label.
 	Report(&'static str),
 	/// Best effort: the answer does not matter.
@@ -364,6 +374,12 @@ async fn run_inner(
 	}
 	if let Some(channel) = &options.channel {
 		builder = builder.channel(channel.clone());
+	}
+	if let Some(pw) = options.channel_password.as_ref().filter(|p| !p.is_empty()) {
+		builder = builder.channel_password(pw.clone());
+	}
+	if let Some(token) = &options.token {
+		builder = builder.default_token(token.clone());
 	}
 	let mut identity = link.myts_identity.clone();
 	// A changed account invalidates an in-flight handshake. Drop that connection
@@ -801,6 +817,13 @@ impl Voice {
 				};
 				self.link.emit(Event::OfflineMessage { session, request, result });
 			}
+			Pending::Move { channel } => {
+				if let Err(e) = result
+					&& let Some(reason) = join_failure(e)
+				{
+					self.link.emit(Event::JoinFailed { session, channel, reason });
+				}
+			}
 			Pending::Quiet | Pending::MytsIdentity(_) => {}
 			Pending::Report(what) => {
 				if let Err(e) = result {
@@ -840,13 +863,15 @@ impl Voice {
 				self.send(out, Pending::Report("message"))?;
 			}
 			VoiceCmd::Move(channel, password) => {
-				let state = self.con.get_state()?;
-				let own = &state.clients[&state.own_client];
-				let mut part = own.client_move(tsclientlib::ChannelId(channel));
-				if let Some(pw) = &password {
-					part = part.set_password(pw);
-				}
-				part.send(&mut self.con)?;
+				let own = self.con.get_state()?.own_client;
+				let cpw = encode_password(password.as_deref());
+				let cmd =
+					c2s::OutClientMoveMessage::new(&mut std::iter::once(c2s::OutClientMovePart {
+						client_id: own,
+						channel_id: tsclientlib::ChannelId(channel),
+						channel_password: (!cpw.is_empty()).then_some(cpw.as_str().into()),
+					}));
+				self.send(cmd, Pending::Move { channel })?;
 			}
 			VoiceCmd::SetInputMuted(muted) => {
 				self.con.get_state()?.client_update().set_input_muted(muted).send(&mut self.con)?;
@@ -1053,6 +1078,39 @@ impl Voice {
 	}
 }
 
+/// Why a move into a channel failed, for the user; `None` when there is
+/// nothing to tell (we are in that channel already).
+fn join_failure(error: TsError) -> Option<JoinFailure> {
+	let text = match error {
+		TsError::ChannelAlreadyIn => return None,
+		TsError::ChannelInvalidPassword => return Some(JoinFailure::Password),
+		TsError::ChannelMaxclientsReached | TsError::ChannelMaxfamilyReached => {
+			return Some(JoinFailure::Full);
+		}
+		TsError::ChannelInvalidId => "The channel does not exist any more.".to_owned(),
+		TsError::PermissionsClientInsufficient | TsError::Permissions => {
+			"You are not allowed to join this channel.".to_owned()
+		}
+		TsError::ClientIsFlooding => "Too many requests: try again in a moment.".to_owned(),
+		// The error's name in words (its Display is the name).
+		e => format!("The server refused to move you: {}.", error_words(e)),
+	};
+	Some(JoinFailure::Other(text))
+}
+
+/// A TeamSpeak error's name in lowercase words:
+/// `ChannelIsPrivateChannel` is "channel is private channel".
+fn error_words(error: TsError) -> String {
+	let mut words = String::new();
+	for c in format!("{error:?}").chars() {
+		if c.is_ascii_uppercase() && !words.is_empty() {
+			words.push(' ');
+		}
+		words.push(c.to_ascii_lowercase());
+	}
+	words
+}
+
 /// A failed transfer, for the user.
 fn transfer_error(error: &tsclientlib::Error) -> String {
 	match error {
@@ -1060,6 +1118,30 @@ fn transfer_error(error: &tsclientlib::Error) -> String {
 			"file not found".into()
 		}
 		e => e.to_string(),
+	}
+}
+
+#[cfg(test)]
+mod join_tests {
+	use super::*;
+
+	#[test]
+	fn refused_moves_say_why() {
+		assert_eq!(join_failure(TsError::ChannelInvalidPassword), Some(JoinFailure::Password));
+		assert_eq!(join_failure(TsError::ChannelMaxclientsReached), Some(JoinFailure::Full));
+		assert_eq!(join_failure(TsError::ChannelMaxfamilyReached), Some(JoinFailure::Full));
+		// Moving to the channel we are in.
+		assert_eq!(join_failure(TsError::ChannelAlreadyIn), None);
+		let other = |text: &str| Some(JoinFailure::Other(text.into()));
+		assert_eq!(
+			join_failure(TsError::PermissionsClientInsufficient),
+			other("You are not allowed to join this channel.")
+		);
+		// The rest in words, not the error's name.
+		assert_eq!(
+			join_failure(TsError::ChannelIsPrivateChannel),
+			other("The server refused to move you: channel is private channel.")
+		);
 	}
 }
 

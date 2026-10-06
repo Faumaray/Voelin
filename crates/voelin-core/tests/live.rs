@@ -123,6 +123,131 @@ async fn ts3_engine() {
 		.await;
 }
 
+/// A channel password and a privilege key work when connecting; a refused
+/// move says why. One connection, as the servers refuse quick reconnects.
+async fn channel_joins(voice_addr: &str, query: voelin_query::Connect) {
+	use voelin_core::JoinFailure;
+	use voelin_query::{Command as Query, QueryClient};
+	let (admin, _) = QueryClient::connect(&query).await.unwrap();
+	let tag = std::process::id() % 10_000;
+	let create = |name: &str| {
+		Query::new("channelcreate")
+			.arg("channel_name", format!("{name}-{tag}"))
+			.arg("channel_flag_semi_permanent", 1)
+	};
+	let locked = admin.send(&create("locked").arg("channel_password", "secret")).await.unwrap()[0]
+		.parse::<u64>("cid")
+		.unwrap();
+	let full =
+		create("full").arg("channel_maxclients", 0).arg("channel_flag_maxclients_unlimited", 0);
+	let full = admin.send(&full).await.unwrap()[0].parse::<u64>("cid").unwrap();
+	// A key for the Normal group, which has to keep to passwords and limits.
+	let groups = admin.send(&Query::new("servergrouplist")).await.unwrap();
+	let normal = groups
+		.iter()
+		.find(|g| g.get("name") == Some("Normal") && g.get("type") == Some("1"))
+		.and_then(|g| g.parse::<u64>("sgid"))
+		.expect("a Normal server group");
+	let key = Query::new("privilegekeyadd")
+		.arg("tokentype", 0)
+		.arg("tokenid1", normal)
+		.arg("tokenid2", 0);
+	let token = admin.send(&key).await.unwrap()[0].get("token").unwrap().to_owned();
+	let channels = admin.send(&Query::new("channellist").flag("-flags")).await.unwrap();
+	let lobby = channels
+		.iter()
+		.find(|c| c.flag("channel_flag_default") == Some(true))
+		.and_then(|c| c.parse::<u64>("cid"))
+		.expect("a default channel");
+
+	let engine = Engine::start();
+	let check = {
+		let (engine, voice_addr, token) = (engine.clone(), voice_addr.to_owned(), token.clone());
+		tokio::spawn(async move {
+			let mut events = engine.subscribe();
+			let mut options = VoiceOptions::new(&voice_addr, format!("joins-{tag}"));
+			options.channel = Some(format!("locked-{tag}"));
+			options.channel_password = Some("secret".into());
+			options.token = Some(token);
+			engine.send(Command::ConnectVoice { session: 1, options: Box::new(options) });
+			let (mut own, mut presence) = (None, None);
+			wait_for(&mut events, "connected into the channel, in the key's group", |e| {
+				match e {
+					Event::State { session: 1, state } => own = state.own_client,
+					Event::Presence { session: 1, presence: p } => presence = Some(p.clone()),
+					_ => {}
+				}
+				let client = own.and_then(|id| presence.as_ref()?.clients.get(&id).cloned());
+				client.is_some_and(|c| c.channel == locked && c.server_groups.contains(&normal))
+			})
+			.await;
+			let moved = async |events: &mut Receiver<Event>, channel: u64| {
+				wait_for(
+					events,
+					"a move",
+					|e| matches!(e, Event::State { session: 1, state } if state.own_channel == Some(channel)),
+				)
+				.await;
+			};
+			let refused =
+				async |events: &mut Receiver<Event>, channel: u64, reason: JoinFailure| {
+					let failed = wait_for(events, "a refused move", |e| {
+						matches!(e, Event::JoinFailed { session: 1, .. })
+					})
+					.await;
+					let Event::JoinFailed { channel: c, reason: r, .. } = failed else {
+						unreachable!()
+					};
+					assert_eq!((c, r), (channel, reason));
+				};
+			let move_to = |channel, password: Option<&str>| Command::MoveToChannel {
+				session: 1,
+				channel,
+				password: password.map(Into::into),
+			};
+			engine.send(move_to(lobby, None));
+			moved(&mut events, lobby).await;
+			engine.send(move_to(locked, None));
+			refused(&mut events, locked, JoinFailure::Password).await;
+			engine.send(move_to(locked, Some("wrong")));
+			refused(&mut events, locked, JoinFailure::Password).await;
+			engine.send(move_to(locked, Some("secret")));
+			moved(&mut events, locked).await;
+			// Moving where we are says nothing: the next refusal is the full channel's.
+			engine.send(move_to(locked, Some("secret")));
+			engine.send(move_to(full, None));
+			refused(&mut events, full, JoinFailure::Full).await;
+		})
+	};
+	let result = check.await;
+	engine.send(Command::CloseSession { session: 1 });
+	tokio::time::sleep(Duration::from_millis(500)).await;
+	// Clean up everything before reporting a failure; the key is gone once used.
+	let _ = admin.send(&Query::new("privilegekeydelete").arg("token", &token)).await;
+	for cid in [locked, full] {
+		admin.send(&Query::new("channeldelete").arg("cid", cid).arg("force", 1)).await.unwrap();
+	}
+	if let Err(error) = result {
+		std::panic::resume_unwind(error.into_panic());
+	}
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ts6_channel_joins() {
+	if !live() {
+		return;
+	}
+	channel_joins("127.0.0.1:9988", query(voelin_query::Transport::Ssh, "127.0.0.1:10022")).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ts3_channel_joins() {
+	if !live() {
+		return;
+	}
+	channel_joins("127.0.0.1:9987", query(voelin_query::Transport::Raw, "127.0.0.1:10011")).await;
+}
+
 /// A 1×1 PNG.
 const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 

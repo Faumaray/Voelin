@@ -129,3 +129,7 @@ against or offered back to upstream.
     Tests cover an independent signature vector, persistence validation/redaction,
     wire field names, clearing and reconnect snapshot replacement. The account
     UUID and the ordinary server identity remain separate.
+15. **Privilege key when connecting** (`tsclientlib/src/lib.rs`, "Voelin patch").
+    `ConnectOptions::default_token` sets `client_default_token` of `clientinit`,
+    which upstream always sent empty, so a privilege key (a bookmark's, or the
+    `token=` of a `ts3server://` link) can be used on connect.

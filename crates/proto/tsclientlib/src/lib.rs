@@ -392,6 +392,7 @@ impl Connection {
 			channel: None,
 			channel_password: None,
 			password: None,
+			default_token: None,
 			input_muted: false,
 			output_muted: false,
 			input_hardware_enabled: true,
@@ -556,7 +557,7 @@ impl Connection {
 			version_sign: Cow::Borrowed(client_version_sign.as_ref()),
 			client_key_offset: counter,
 			phonetic_name: "".into(),
-			default_token: "".into(),
+			default_token: Cow::Borrowed(options.default_token.as_deref().unwrap_or_default()),
 			hardware_id: Cow::Borrowed(options.hardware_id.as_ref()),
 			badges: None,
 			signed_badges: None,
@@ -1730,6 +1731,7 @@ pub struct ConnectOptions {
 	channel: Option<Cow<'static, str>>,
 	channel_password: Option<Cow<'static, str>>,
 	password: Option<Cow<'static, str>>,
+	default_token: Option<Cow<'static, str>>,
 	input_muted: bool,
 	output_muted: bool,
 	input_hardware_enabled: bool,
@@ -1944,6 +1946,20 @@ impl ConnectOptions {
 		self
 	}
 
+	/// Use a privilege key (token) when connecting.
+	/// Voelin patch: sent as `client_default_token` in `clientinit`.
+	///
+	/// # Example
+	/// ```
+	/// # use tsclientlib::Connection;
+	/// let opts = Connection::build("localhost").default_token("My privilege key");
+	/// ```
+	#[inline]
+	pub fn default_token<S: Into<Cow<'static, str>>>(mut self, token: S) -> Self {
+		self.default_token = Some(token.into());
+		self
+	}
+
 	/// Connect to the server in a muted state.
 	///
 	/// # Example
@@ -2063,6 +2079,10 @@ impl ConnectOptions {
 	}
 	#[inline]
 	pub fn get_password(&self) -> Option<&str> { self.password.as_ref().map(AsRef::as_ref) }
+	#[inline]
+	pub fn get_default_token(&self) -> Option<&str> {
+		self.default_token.as_ref().map(AsRef::as_ref)
+	}
 	#[inline]
 	pub fn get_input_muted(&self) -> bool { self.input_muted }
 	#[inline]

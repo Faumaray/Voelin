@@ -153,6 +153,7 @@ pub enum Command {
 		session: SessionId,
 		request: GatewayRequest,
 	},
+	/// Refusals come as [`Event::JoinFailed`].
 	MoveToChannel {
 		session: SessionId,
 		channel: ChannelId,
@@ -469,6 +470,17 @@ pub struct SessionState {
 	pub server_uid: Option<String>,
 }
 
+/// Why the server did not let us into a channel ([`Event::JoinFailed`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JoinFailure {
+	/// The channel's password is missing or wrong.
+	Password,
+	/// The channel, or the channel with its subchannels, is full.
+	Full,
+	/// Anything else, as a sentence for the user.
+	Other(String),
+}
+
 /// What the engine reports.
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -533,6 +545,12 @@ pub enum Event {
 	Error {
 		session: SessionId,
 		message: String,
+	},
+	/// The server refused [`Command::MoveToChannel`] into `channel`.
+	JoinFailed {
+		session: SessionId,
+		channel: ChannelId,
+		reason: JoinFailure,
 	},
 	/// The streams in our channel (TeamSpeak 6), full list.
 	StreamsChanged {

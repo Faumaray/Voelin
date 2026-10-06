@@ -1056,6 +1056,8 @@ impl App {
 			// The sample sessions of VOELIN_DEMO_UI are unknown to the engine.
 			Event::Error { .. } if self.demo_ui => {}
 			Event::Error { message, .. } => self.set_status(message),
+			// Not shown yet: the channel password dialog will handle it.
+			Event::JoinFailed { .. } => {}
 			Event::SettingChanged { key } => self.setting_changed(&key),
 			Event::SettingRejected { key, message } => {
 				self.set_status(format!("Setting {key}: {message}"));
