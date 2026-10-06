@@ -50,6 +50,8 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
 - A server's published gateway replaces one stored before (found or typed
   into an older version), so a gateway that moved is followed.
 - zbus's warnings about desktop portal requests are left out of the logs.
+- Pop-ups, menus and tooltips have a clearer edge, and the member card, the
+  emoji picker and the notifications panel dim the window behind them.
 
 ### Fixed
 

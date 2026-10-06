@@ -39,11 +39,16 @@ export global Theme {
     out property <color> surface-4: dark ? #1c2b5c : #dce5f7;
     // Dimmed backdrop behind modals.
     out property <color> scrim: dark ? #02050fc0 : #0b132b80;
+    // A lighter dim behind pop-ups: the member card, emoji picker, bell.
+    out property <color> scrim-light: dark ? #02050f73 : #0b132b33;
     // Translucent bar over video.
     out property <color> overlay: dark ? #060a18c8 : #0b1330b0;
 
     out property <color> border: dark ? #1b2750 : #d3dcee;
     out property <color> border-strong: dark ? #2a3a6e : #b9c6e2;
+    // The edge of pop-ups, menus and tooltips, which lie over surfaces of
+    // about their own colour.
+    out property <color> border-popup: dark ? #3d5296 : #9fb0d4;
 
     // Accent (buttons, selection, links).
     out property <color> accent: dark ? #2d6bff : #2458e6;

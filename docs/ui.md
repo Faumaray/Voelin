@@ -64,8 +64,8 @@ literal colours.
 | Group | Tokens |
 |---|---|
 | Mode | `mode` ("dark", "light", "system"; set from `ui.theme`), `dark` (resolved), `font-scale` (from `ui.font_scale`) |
-| Backgrounds | `bg-app`, `backdrop` (gradient), `bg-rail`, `surface` (panels), `surface-2` (cards, inputs), `surface-3` (hover, menus), `surface-4` (pressed), `scrim`, `overlay` |
-| Lines | `border`, `border-strong`, `glow`, `glow-width` (focus/selection ring; the software renderer draws no shadows) |
+| Backgrounds | `bg-app`, `backdrop` (gradient), `bg-rail`, `surface` (panels), `surface-2` (cards, inputs), `surface-3` (hover, menus), `surface-4` (pressed), `scrim` (behind modals), `scrim-light` (behind pop-ups), `overlay` |
+| Lines | `border`, `border-strong`, `border-popup` (pop-ups, menus, tooltips), `glow`, `glow-width` (focus/selection ring; the software renderer draws no shadows) |
 | Accent | `accent`, `accent-hover`, `accent-pressed`, `accent-soft` (selected rows), `accent-soft-hover`, `accent-text` (links), `name-text` (chat authors), `on-accent` |
 | States | `live`, `live-soft`, `danger`, `danger-soft`, `success`, `success-soft`, `warning`, `warning-soft`, `idle`, `dnd`, `offline`, `gold` (crown), `info` |
 | Text | `text`, `text-secondary`, `text-muted`, `text-disabled`, `icon` |

@@ -287,19 +287,11 @@ export component MainWindow inherits Window {
         }
     }
 
-    toast := Toast {
-        x: (parent.width - self.width) / 2;
-        y: parent.height - self.height - (Nav.narrow ? 140px : 96px);
-        text: Bridge.status-text;
-        visible: self.shown && !Bridge.myts.prompt;
-        // A notice from the start (an imported identity) waits for the
-        // account prompt to close.
-        paused: Bridge.myts.prompt;
-        widest: min(560px, parent.width - 32px);
-    }
-
-    // The member card of the members panel, over everything.
+    // The member card of the members panel, over everything. Like the emoji
+    // picker and the bell's panel below, it dims the window a little, and a
+    // click outside it closes it.
     if !Bridge.myts.prompt && (Bridge.member-card.open): Rectangle {
+        background: Theme.scrim-light;
         TouchArea {
             clicked => { Bridge.open-member(-1); }
         }
@@ -310,6 +302,7 @@ export component MainWindow inherits Window {
     }
 
     if !Bridge.myts.prompt && (Nav.emoji-open): Rectangle {
+        background: Theme.scrim-light;
         // Clicks outside the picker close it.
         TouchArea {
             clicked => { Nav.emoji-open = false; }
@@ -336,6 +329,7 @@ export component MainWindow inherits Window {
 
     // The bell's panel, under the bell (the phone: the whole width).
     if !Bridge.myts.prompt && (Nav.notifications-open): Rectangle {
+        background: Theme.scrim-light;
         TouchArea {
             clicked => { Nav.notifications-open = false; }
         }
@@ -345,6 +339,19 @@ export component MainWindow inherits Window {
             width: Nav.narrow ? parent.width - 16px : 400px;
             height: min(parent.height - self.y - 16px, 560px);
         }
+    }
+
+    // Over the pop-ups, so their scrim does not dim it (a poke from the
+    // member card says so here); under the dialogs.
+    toast := Toast {
+        x: (parent.width - self.width) / 2;
+        y: parent.height - self.height - (Nav.narrow ? 140px : 96px);
+        text: Bridge.status-text;
+        visible: self.shown && !Bridge.myts.prompt;
+        // A notice from the start (an imported identity) waits for the
+        // account prompt to close.
+        paused: Bridge.myts.prompt;
+        widest: min(560px, parent.width - 32px);
     }
 
     if !Bridge.myts.prompt && (Nav.search-open): SearchPalette { }
