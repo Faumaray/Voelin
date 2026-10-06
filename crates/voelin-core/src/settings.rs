@@ -1125,11 +1125,11 @@ pub static CACHE_MAX_MB: Key<u64> = Key::new(
 	|| 256,
 );
 
-/// Download the avatars, icons and banners of servers we are on.
+/// Download the avatars, icons, banners and badges of servers we are on.
 pub static CACHE_FETCH_IMAGES: Key<bool> = Key::new(
 	"cache.fetch_images",
 	Kind::Bool,
-	"Download avatars, icons and banners of the servers we are on.",
+	"Download avatars, icons, banners and badges of the servers we are on.",
 	|| true,
 );
 

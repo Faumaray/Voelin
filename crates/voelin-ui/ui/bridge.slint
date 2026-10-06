@@ -62,6 +62,11 @@ export struct TreeItem {
     icon: image,
     icon-2: image,
     icon-3: image,
+    // A client's badges (myTeamSpeak), the first three in its order, empty
+    // where absent; shown after the name.
+    badge: image,
+    badge-2: image,
+    badge-3: image,
     // A channel's banner picture (TeamSpeak 6), drawn behind the row;
     // Wire sizing metadata; compact decorative backgrounds always cover.
     banner: image,
@@ -103,6 +108,18 @@ export struct MemberItem {
     recording: bool,
     // `client_talk_power`; shown when the channel needs it.
     talk-power: int,
+    // myTeamSpeak badges, as in `TreeItem`.
+    badge: image,
+    badge-2: image,
+    badge-3: image,
+}
+
+// A myTeamSpeak badge on the member card: "Badge" and its GUID for one
+// the app does not know; its picture is empty until it is downloaded.
+export struct BadgeItem {
+    name: string,
+    description: string,
+    icon: image,
 }
 
 // The member card over a member row: everything about one client and what
@@ -118,6 +135,8 @@ export struct MemberCard {
     description: string,
     // Server groups, one per line.
     groups: [string],
+    // The badges the client shows (at most three, in its order).
+    badges: [BadgeItem],
     country: string,
     talk-power: int,
     friend: bool,

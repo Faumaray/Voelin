@@ -161,7 +161,9 @@ platform, version and priority speaker dimming; the server and channel groups
 `Event::ServerDetails` and `Event::Groups` come when those parts change.
 Gateway and query presence fill what their rows have. The new fields are
 optional in JSON, so gateways and clients of different versions still
-understand each other.
+understand each other. Badges are GUIDs: `voelin_model::badges` names them
+from a table and gives the address of their pictures on TeamSpeak's server,
+which the engine fetches like web banners.
 
 ## Files, avatars and icons
 

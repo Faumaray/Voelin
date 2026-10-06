@@ -219,7 +219,8 @@ pub(crate) struct SessionView {
 	pub avatars: HashMap<String, PathBuf>,
 	/// Icons in the engine's cache, by icon id ([`Event::IconReady`]).
 	pub icons: HashMap<u32, PathBuf>,
-	/// Banners in the engine's cache, by address ([`Event::PictureReady`]).
+	/// Banners and badges in the engine's cache, by address
+	/// ([`Event::PictureReady`]).
 	pub pictures: HashMap<String, PathBuf>,
 	/// The server's icon id as its voice connection last told it
 	/// ([`Event::ServerDetails`]); kept while disconnected, for the rail.
@@ -1062,6 +1063,7 @@ impl App {
 					self.refresh_toolbar();
 					self.refresh_tree();
 					self.refresh_chat();
+					self.refresh_member_card();
 				}
 			}
 			Event::Transfer { session, transfer, state } => {

@@ -6,10 +6,11 @@ use std::path::PathBuf;
 
 pub use voelin_model::channel_title;
 use voelin_model::{
-	BannerMode, ChannelId, ChannelInfo, ClientInfo, GroupInfo, Presence, Spacer, TreeRow, tree_rows,
+	BannerMode, ChannelId, ChannelInfo, ClientInfo, GroupInfo, Presence, Spacer, TreeRow, badges,
+	tree_rows,
 };
 
-use crate::app::{MemberItem, TreeItem};
+use crate::app::{BadgeItem, MemberItem, TreeItem};
 use crate::settings::ClientPlaybackMap;
 use crate::vm::avatar;
 
@@ -25,6 +26,31 @@ pub fn banner_mode(mode: BannerMode) -> i32 {
 /// The picture of a banner address, if the engine fetched it.
 pub fn banner(pictures: &HashMap<String, PathBuf>, url: Option<&str>) -> slint::Image {
 	avatar::image(url.and_then(|u| pictures.get(u)))
+}
+
+/// A badge's picture, if the engine fetched it.
+fn badge_icon(pictures: &HashMap<String, PathBuf>, guid: &str) -> slint::Image {
+	avatar::image(badges::icon_url(guid).and_then(|url| pictures.get(&url)))
+}
+
+/// A client's badges for the member card: the first three in its order.
+/// One the app does not know is "Badge", with its GUID as description.
+pub fn badge_items(guids: &[String], pictures: &HashMap<String, PathBuf>) -> Vec<BadgeItem> {
+	guids
+		.iter()
+		.take(badges::SHOWN)
+		.map(|guid| {
+			let (name, description) = match badges::info(guid) {
+				Some(info) => (info.name.as_str(), info.description.as_str()),
+				None => ("Badge", guid.as_str()),
+			};
+			BadgeItem {
+				name: name.into(),
+				description: description.into(),
+				icon: badge_icon(pictures, guid),
+			}
+		})
+		.collect()
 }
 
 /// What the tree shows besides the presence.
@@ -43,7 +69,7 @@ pub struct TreeInput<'a> {
 	/// Icons in the engine's cache, by icon id (channel, group and client
 	/// icons).
 	pub icons: &'a HashMap<u32, PathBuf>,
-	/// Banner pictures in the engine's cache, by address.
+	/// Banners and badges in the engine's cache, by address.
 	pub pictures: &'a HashMap<String, PathBuf>,
 	/// The server groups in display order; members are grouped by the
 	/// first one each client is in.
@@ -75,6 +101,18 @@ impl TreeInput<'_> {
 			.chain([client.icon])
 			.filter_map(|id| self.icon(id))
 			.collect()
+	}
+
+	/// The pictures of the badges a client shows that arrived, in its
+	/// order; empty slots last.
+	fn badges(&self, client: &ClientInfo) -> [slint::Image; badges::SHOWN] {
+		let mut icons = client
+			.badges
+			.iter()
+			.take(badges::SHOWN)
+			.map(|guid| badge_icon(self.pictures, guid))
+			.filter(|i| i.size().width > 0);
+		std::array::from_fn(|_| icons.next().unwrap_or_default())
 	}
 
 	/// The group a client is sorted under: the first of its server groups
@@ -178,6 +216,7 @@ pub fn rows(input: &TreeInput) -> Vec<TreeItem> {
 					.copied()
 					.unwrap_or_default();
 				let mut icons = input.client_icons(client).into_iter();
+				let [badge, badge_2, badge_3] = input.badges(client);
 				TreeItem {
 					is_channel: false,
 					depth: depth as i32,
@@ -197,6 +236,9 @@ pub fn rows(input: &TreeInput) -> Vec<TreeItem> {
 					icon: icons.next().unwrap_or_default(),
 					icon_2: icons.next().unwrap_or_default(),
 					icon_3: icons.next().unwrap_or_default(),
+					badge,
+					badge_2,
+					badge_3,
 					..Default::default()
 				}
 			}
@@ -279,6 +321,7 @@ impl TreeInput<'_> {
 			Some(channel) if elsewhere => format!("In {}", channel_title(channel).0),
 			_ => status_of(c, talking),
 		};
+		let [badge, badge_2, badge_3] = self.badges(c);
 		MemberItem {
 			id: c.id as i32,
 			name: c.nickname.clone().into(),
@@ -303,6 +346,9 @@ impl TreeInput<'_> {
 			commander: c.channel_commander,
 			recording: c.recording,
 			talk_power: c.talk_power,
+			badge,
+			badge_2,
+			badge_3,
 		}
 	}
 }
@@ -533,6 +579,46 @@ mod tests {
 		let games = &rows[2];
 		assert_eq!((width(&games.icon), width(&games.banner), games.banner_mode), (0, 0, 0));
 		assert_eq!(width(&rows[3].avatar), 0);
+		std::fs::remove_dir_all(dir).unwrap();
+	}
+
+	/// A client's badges: the first three in its order, on the card by name
+	/// ("Badge" for one the app does not know), in the rows the pictures
+	/// that arrived.
+	#[test]
+	fn badges_on_the_card_and_in_rows() {
+		let dir = std::env::temp_dir().join(format!("voelin-tree-badges-{}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		let guids: Vec<String> = [
+			"4b27be5a-b92a-4b30-8b2d-14b59653f427",
+			"00000000-0000-0000-0000-000000000000",
+			"05114019-6b46-4b13-b5a1-e5179ef69fb5",
+			"2bf80270-8efe-46dc-a472-3280a0479145",
+		]
+		.map(String::from)
+		.into();
+		let picture = |i: usize, width| {
+			(badges::icon_url(&guids[i]).unwrap(), picture_file(&dir, &format!("badge-{i}"), width))
+		};
+		let e = Extras {
+			pictures: HashMap::from([picture(0, 3), picture(2, 5), picture(3, 7)]),
+			..Default::default()
+		};
+		let width = |i: &slint::Image| i.size().width;
+		let card = badge_items(&guids, &e.pictures);
+		let names: Vec<_> = card.iter().map(|b| b.name.as_str()).collect();
+		assert_eq!(names, ["20th Anniversary", "Badge", "April Fools!"]);
+		assert_eq!(card[1].description.as_str(), guids[1]);
+		assert_eq!(card.iter().map(|b| width(&b.icon)).collect::<Vec<_>>(), [3, 0, 5]);
+
+		let mut p = presence();
+		p.clients.get_mut(&11).unwrap().badges = guids;
+		let (t, c, pb) = (HashSet::new(), HashSet::new(), ClientPlaybackMap::new());
+		let tree = input(&p, &t, &c, &pb, "", &e);
+		let bob = rows(&tree).into_iter().find(|r| !r.is_channel && r.id == 11).unwrap();
+		assert_eq!([&bob.badge, &bob.badge_2, &bob.badge_3].map(width), [3, 5, 0]);
+		let bob = members(&tree).into_iter().find(|m| m.id == 11).unwrap();
+		assert_eq!([&bob.badge, &bob.badge_2, &bob.badge_3].map(width), [3, 5, 0]);
 		std::fs::remove_dir_all(dir).unwrap();
 	}
 

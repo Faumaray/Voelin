@@ -3,6 +3,7 @@
 //! Nothing in here does IO; the types describe what a server offers and what
 //! the user sees.
 
+pub mod badges;
 mod chat;
 mod presence;
 mod server;

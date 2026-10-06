@@ -53,6 +53,8 @@ export component LiveBadge inherits Rectangle {
 export component Chip inherits Rectangle {
     in property <string> text;
     in property <image> icon;
+    // A picture in its own colours (a badge's), instead of a tinted icon.
+    in property <image> picture;
     in property <color> tint: Theme.text-secondary;
     in property <brush> fill: Theme.surface-3;
     in property <bool> outlined;
@@ -76,6 +78,14 @@ export component Chip inherits Rectangle {
             tint: root.tint;
             y: (parent.height - self.height) / 2;
         }
+        if root.picture.width > 0: Image {
+            source: root.picture;
+            width: 14px;
+            height: 14px;
+            image-fit: contain;
+            y: (parent.height - self.height) / 2;
+            accessible-role: AccessibleRole.none;
+        }
         Text {
             text: root.text;
             color: root.tint;
@@ -83,6 +93,37 @@ export component Chip inherits Rectangle {
             font-weight: Theme.weight-medium;
             vertical-alignment: center;
         }
+    }
+}
+
+// Up to three badge pictures in their own colours, 14 px high, after a
+// name; empty ones take no room.
+export component BadgeIcons inherits HorizontalLayout {
+    in property <image> first;
+    in property <image> second;
+    in property <image> third;
+    spacing: 2px;
+    cross-axis-alignment: center;
+    Image {
+        source: root.first;
+        width: root.first.width > 0 ? 14px : 0px;
+        height: 14px;
+        image-fit: contain;
+        accessible-role: AccessibleRole.none;
+    }
+    Image {
+        source: root.second;
+        width: root.second.width > 0 ? 14px : 0px;
+        height: 14px;
+        image-fit: contain;
+        accessible-role: AccessibleRole.none;
+    }
+    Image {
+        source: root.third;
+        width: root.third.width > 0 ? 14px : 0px;
+        height: 14px;
+        image-fit: contain;
+        accessible-role: AccessibleRole.none;
     }
 }
 

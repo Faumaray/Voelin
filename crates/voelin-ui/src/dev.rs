@@ -536,6 +536,9 @@ fn demo_ui(app: &mut App) {
 	clients[5].server_groups = vec![GROUP_MEMBER];
 	clients[6].server_groups = vec![GROUP_GUEST];
 	clients[7].server_groups = vec![GROUP_GUEST];
+	// myTeamSpeak badges; their pictures arrive below.
+	clients[0].badges = DEMO_BADGES[..2].iter().map(|g| g.to_string()).collect();
+	clients[1].badges = DEMO_BADGES[2..].iter().map(|g| g.to_string()).collect();
 	for c in clients {
 		p.clients.insert(c.id, c);
 	}
@@ -1095,9 +1098,18 @@ const DEMO_SERVER_ICON: u32 = 3_120_211_001;
 const DEMO_ADMIN_ICON: u32 = 3_120_211_002;
 const DEMO_MOD_ICON: u32 = 3_120_211_003;
 const DEMO_MUSIC_ICON: u32 = 3_120_211_004;
+/// Real badge GUIDs: 20th Anniversary, TeamSpeak Jedi (Nova's), Gamescom
+/// 2019, Pride and Year of the Tiger 2022 (Lumen's).
+const DEMO_BADGES: [&str; 5] = [
+	"4b27be5a-b92a-4b30-8b2d-14b59653f427",
+	"64221fd1-706c-4bb2-ba55-996c39effa79",
+	"b82a45a5-b235-4926-be77-de102222e5eb",
+	"ceee2445-4fbf-4f06-9421-286f0f4e875a",
+	"92356386-0451-4a97-87d9-10ff4f43260c",
+];
 
-/// Avatars, icons and banners as the engine reports them once they are in
-/// its cache (here a folder of synthetic pictures in the temporary
+/// Avatars, icons, banners and badges as the engine reports them once they
+/// are in its cache (here a folder of synthetic pictures in the temporary
 /// directory).
 fn demo_pictures(app: &mut App) {
 	let session = DEMO as u64;
@@ -1133,6 +1145,19 @@ fn demo_pictures(app: &mut App) {
 	] {
 		let path = save(&icon.to_string(), demo_icon(color, shape));
 		events.push(Event::IconReady { session, icon, path });
+	}
+	// Stand-ins for the badges' pictures on TeamSpeak's server.
+	let badge_looks = [
+		([242, 178, 44], Shape::Ring),
+		([90, 170, 255], Shape::Moon),
+		([45, 196, 132], Shape::Diamond),
+		([240, 110, 160], Shape::Disc),
+		([255, 140, 90], Shape::Diamond),
+	];
+	for (guid, (color, shape)) in DEMO_BADGES.into_iter().zip(badge_looks) {
+		let Some(url) = voelin_model::badges::icon_url(guid) else { continue };
+		let path = save(&format!("badge-{guid}"), demo_icon(color, shape));
+		events.push(Event::PictureReady { session, url, path });
 	}
 	// Some people have pictures, the rest initials.
 	for (sample_session, uid, seed) in [

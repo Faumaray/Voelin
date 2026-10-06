@@ -39,9 +39,9 @@
 //! [`Event::Poke`]), private messages to any client (a
 //! [`ChatTarget::Private`] chat, stored under the peer's unique id), the
 //! channels' file browsers, avatars and icons ([`files`], cached in
-//! [`cache`]) and offline messages ([`offline`]). The host banner and
-//! channel banners are pictures on the web, fetched into the same cache
-//! ([`Event::PictureReady`]). Contacts (friends, blocked people, per-person
+//! [`cache`]) and offline messages ([`offline`]). The host banner, channel
+//! banners and the clients' badges are pictures on the web, fetched into the
+//! same cache ([`Event::PictureReady`]). Contacts (friends, blocked people, per-person
 //! volume) are engine-wide ([`contacts`]).
 
 mod audio;
@@ -679,8 +679,9 @@ pub enum Event {
 		path: PathBuf,
 	},
 	/// A picture on the web is in the cache: the host banner
-	/// ([`ServerDetails::banner_gfx_url`]) or a channel's
-	/// ([`voelin_model::ChannelInfo::banner_gfx_url`]) at `url` (setting
+	/// ([`ServerDetails::banner_gfx_url`]), a channel's
+	/// ([`voelin_model::ChannelInfo::banner_gfx_url`]) or a badge's
+	/// ([`voelin_model::badges::icon_url`]) at `url` (setting
 	/// `cache.fetch_images`). Comes again when the host banner was reloaded
 	/// (`banner_gfx_interval_s`, at least a minute): the file at `path`
 	/// changed.

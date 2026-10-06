@@ -19,7 +19,7 @@ use tracing::{debug, warn};
 use tsclientlib::ClientId;
 use voelin_audio::AudioSettings;
 use voelin_gateway_proto::{ErrorCode, HistoryEntry, StreamEntry, StreamSpec, feature};
-use voelin_model::{ChatMessage, ChatTarget, GroupInfo, Presence, ServerDetails};
+use voelin_model::{ChatMessage, ChatTarget, GroupInfo, Presence, ServerDetails, badges};
 use voelin_stream::ClientState;
 
 use crate::audio::{self, AudioEvent, AudioHandle, AudioIn};
@@ -224,7 +224,8 @@ struct Session {
 	avatars: HashMap<String, String>,
 	/// Icons reported or being fetched, voice only.
 	icons: HashSet<u32>,
-	/// Pictures on the web (banners) reported or being fetched, by address.
+	/// Pictures on the web (banners, badges) reported or being fetched, by
+	/// address.
 	pictures: HashSet<String>,
 	image_epoch: u64,
 	images_enabled: bool,
@@ -1007,8 +1008,9 @@ impl Session {
 			|| (self.voice_presence.is_some() && files::server_image(url).is_some())
 	}
 
-	/// Fetch the banners of the presence shown (any source) that are new,
-	/// and have the host banner reloaded as often as the server asks.
+	/// Fetch the banners and the clients' badges of the presence shown (any
+	/// source) that are new, and have the host banner reloaded as often as
+	/// the server asks.
 	fn fetch_pictures(&mut self, p: &Presence) {
 		let enabled = self.settings.current().get(&CACHE_FETCH_IMAGES);
 		let reload = Some((&p.server.banner_gfx_url, p.server.banner_gfx_interval_s))
@@ -1039,10 +1041,16 @@ impl Session {
 		if !enabled {
 			return;
 		}
-		let urls: HashSet<_> = std::iter::once(&p.server.banner_gfx_url)
-			.chain(p.channels.values().filter_map(|c| c.banner_gfx_url.as_ref()))
+		// The badges shown, from TeamSpeak's server.
+		let badge_urls = p
+			.clients
+			.values()
+			.flat_map(|c| c.badges.iter().take(badges::SHOWN))
+			.filter_map(|guid| badges::icon_url(guid));
+		let urls: HashSet<String> = std::iter::once(p.server.banner_gfx_url.clone())
+			.chain(p.channels.values().filter_map(|c| c.banner_gfx_url.clone()))
+			.chain(badge_urls)
 			.filter(|u| self.can_fetch_picture(u))
-			.cloned()
 			.collect();
 		self.pictures.retain(|url| urls.contains(url));
 		for url in &urls {
@@ -2291,6 +2299,50 @@ mod banner_tests {
 		assert!(session.banner_reload.is_none());
 		tokio::task::yield_now().await;
 		assert!(timer.is_finished());
+	}
+
+	/// The pictures of the badges clients show (the first three of each, the
+	/// known ones) come with the presence, and only with
+	/// `cache.fetch_images`.
+	#[tokio::test]
+	async fn badge_pictures_come_with_the_presence() {
+		let (mut session, _) = session("badges");
+		let guids = [
+			"4b27be5a-b92a-4b30-8b2d-14b59653f427",
+			"00000000-0000-0000-0000-000000000000",
+			"2bf80270-8efe-46dc-a472-3280a0479145",
+			"05114019-6b46-4b13-b5a1-e5179ef69fb5",
+		];
+		let mut presence = Presence::default();
+		let client = voelin_model::ClientInfo {
+			id: 1,
+			badges: guids.iter().map(|g| g.to_string()).collect(),
+			..Default::default()
+		};
+		presence.clients.insert(1, client);
+		// Own the downloads, so none goes to the network.
+		let cache = session.cache.current();
+		let urls: Vec<String> = guids.iter().filter_map(|g| badges::icon_url(g)).collect();
+		for url in &urls {
+			let _pending = cache.fetch(&cache::picture_key(url).unwrap(), false, Box::new(|_| {}));
+		}
+		session.settings.current().set(&CACHE_FETCH_IMAGES, false).unwrap();
+		session.fetch_pictures(&presence);
+		assert!(session.pictures.is_empty());
+		session.settings.current().set(&CACHE_FETCH_IMAGES, true).unwrap();
+		session.fetch_pictures(&presence);
+		let mut fetched: Vec<_> = session.pictures.iter().cloned().collect();
+		fetched.sort();
+		let mut shown = urls[..2].to_vec();
+		shown.sort();
+		assert_eq!(
+			fetched, shown,
+			"the unknown second badge has no picture; the fourth is not shown"
+		);
+		// Gone with the client.
+		session.fetch_pictures(&Presence::default());
+		assert!(session.pictures.is_empty());
+		let _ = std::fs::remove_dir_all(cache.dir());
 	}
 
 	/// The priority speakers and the server's dimming reach the audio thread

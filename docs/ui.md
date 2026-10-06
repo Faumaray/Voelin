@@ -111,7 +111,8 @@ puts them on an inner `face`).
 | `Avatar` | avatar.slint | `image` or `initials` + `tint`, `size`, `status` (`Status.online/idle/dnd/offline/info`), `speaking` (green ring), `crown`, `square` (server icons) |
 | `CountBadge` | badge.slint | count bubble: `count`, `fill` (red), `ink` (the number) |
 | `LiveBadge` | badge.slint | `text` (LIVE), `large` |
-| `Chip` | badge.slint | tag: `text`, `icon`, `tint`, `fill`, `outlined` |
+| `Chip` | badge.slint | tag: `text`, `icon`, `picture` (in its own colours, a badge's), `tint`, `fill`, `outlined` |
+| `BadgeIcons` | badge.slint | up to three 14 px pictures after a name (`first`, `second`, `third`); empty ones take no room |
 | `Dot` | badge.slint | a status dot |
 | `Card` | card.slint | panel card with optional `title`, `icon`, `subtitle`, `selected`; `inset`, `gap` |
 | `SectionHeader` | card.slint | `text`, `icon`, `count`, `action` ("See All >"), `small`; `action-clicked` |
@@ -145,8 +146,8 @@ comes from the engine's events; what a gateway adds is hidden without it.
 | Part | `VOELIN_OPEN` | What it shows | Engine data |
 |---|---|---|---|
 | Chat | `server` | Header with Pinned Messages, Topics, the voice channel and the members button; chat tabs; messages grouped by author ("Today at 10:14"), avatars, emoji, reactions with an add button, pin and topic marks, file cards with download; composer with attach, emoji and send. Opens at the newest message and follows new ones while at the end | `ChatHistory` (and `Chat` for servers without history), `AvatarReady`, `Transfer`, `Gateway` (pins; reactions arrive as stored messages); `Command::LoadOlderHistory`, `DownloadChatFile`, `UploadFile`, `GatewayRequest::React`, `Unreact`, `Pin`, `Unpin` |
-| Members panel | `server` (`panel`, `no-panel`) | "Members — N" and a search; those streaming first (the people in our channel while the voice channel or a stream is shown), then each server group in the server's order with its icon, then those without a group. Rows: avatar with status, name, crown (admin groups), priority speaker, channel commander, recording, moderator role, talk power, what they do or the channel they are in. Resizable: the width is `ui.members_width` | `Presence`, `Groups`, `Talking`, `IconReady` |
-| Member card | `member` | Description, groups, talk power, country; private message, poke, friend, block; volume and mute for us | `ContactsChanged`; `Command::SetContact`, `SetClientVolume`, `SetClientMuted`, `Poke` |
+| Members panel | `server` (`panel`, `no-panel`) | "Members — N" and a search; those streaming first (the people in our channel while the voice channel or a stream is shown), then each server group in the server's order with its icon, then those without a group. Rows: avatar with status, name, crown (admin groups), priority speaker, channel commander, recording, up to three myTeamSpeak badges, moderator role, talk power, what they do or the channel they are in. Resizable: the width is `ui.members_width` | `Presence`, `Groups`, `Talking`, `IconReady`, `PictureReady` |
+| Member card | `member` | Description, groups, badges (up to three chips in the client's order, what each is for on hover; "Badge" for one the app does not know), talk power, country; private message, poke, friend, block; volume and mute for us | `ContactsChanged`, `PictureReady` (badges); `Command::SetContact`, `SetClientVolume`, `SetClientMuted`, `Poke` |
 | Poke | `poke` (the first other member's, card open; after `friends` a contact's) | `PokeDialog`, from the member card, a friend's row and the direct message header: an optional message with a "12/100" count, Send off above 100 characters, Enter sends, Escape cancels | `Command::Poke` (trimmed, cut to 100 characters; the engine cuts too) |
 | Channel password | `channel-password`, `channel-password:wrong` | Joining a channel (a double-click in the tree, joining a friend) moves there with voice, or connects into it (by its id) without; when the server puts us elsewhere on connecting, as it does for a wrong password, it is joined again, which says why. A locked channel first asks for its password in `ChannelPasswordDialog`, unless one was given since voice connected; a refused one asks again under "Wrong password". A full channel or another refusal is a toast | `Presence` (`has_password`), `JoinFailed`; `Command::MoveToChannel`, `ConnectVoice` (`channel_password`) |
 | Pinned messages | `pins` | In the members panel's place: cards with author, time, text, files and reactions; the pin unpins, a click jumps to the message | `Gateway` `Pins`, `Pinned`, `Unpinned`; `GatewayRequest::Pins`, `Unpin` |
@@ -494,7 +495,19 @@ profile requires account setup before the server list, so no fresh-profile
 network capture was obtained. These observations do not establish that every
 server or client version lacks a pre-login mechanism.
 
-The engine downloads banners only while `cache.fetch_images` is enabled.
+Badges arrive as GUIDs (`client_badges`). Their names and descriptions come
+from a table in `voelin-model` (`badges::info`, tsclientlib's list and the
+newer entries of TeamSpeak's own, `https://badges-content.teamspeak.com/list`,
+as of October 2026); newer badges show as "Badge". Their pictures are SVGs
+on TeamSpeak's server (`https://badges-content.teamspeak.com/<guid>/<filename>.svg`,
+`badges::icon_url`), fetched like web banners for the first three badges of
+each client in the presence shown, and reported with `PictureReady`. A
+client's tree row shows the pictures that arrived right after the name (its
+group and client icons stay at the end); so does its row in the members
+panel.
+
+The engine downloads banners and badges only while `cache.fetch_images` is
+enabled.
 Banners on the web (`http`, `https`) come from their host; banners in the
 server's own files, linked as `ts3image://` (TeamSpeak 5 and 6:
 `ts3image://<host>?port=…&channel=…&path=…&filename=…`, the file browser's

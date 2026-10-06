@@ -6,7 +6,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, TreeItem } from "../bridge.slint";
 import { Nav } from "../nav.slint";
-import { Icon, Button, ButtonKind, IconButton, Avatar, LiveBadge, Chip, SectionHeader, SpeakingBars, PopupMenu, MenuEntry, ListView, BannerPicture } from "../components/index.slint";
+import { Icon, Button, ButtonKind, IconButton, Avatar, LiveBadge, Chip, BadgeIcons, SectionHeader, SpeakingBars, PopupMenu, MenuEntry, ListView, BannerPicture } from "../components/index.slint";
 
 // The banner at the top of the sidebar: server name, counts, a menu.
 export component ServerHeader inherits Rectangle {
@@ -257,13 +257,21 @@ component TreeRow inherits Rectangle {
                 label: item.name;
             }
         }
+        // The name elides first; its badges follow it, then the free room.
         Text {
             text: item.name;
             color: item.away ? Theme.text-muted : item.myself ? Theme.accent-text : Theme.text-secondary;
             font-weight: item.myself ? Theme.weight-semibold : Theme.weight-regular;
             vertical-alignment: center;
-            horizontal-stretch: 1;
+            horizontal-stretch: 0;
             overflow: elide;
+        }
+        BadgeIcons {
+            horizontal-stretch: 1;
+            alignment: start;
+            first: item.badge;
+            second: item.badge-2;
+            third: item.badge-3;
         }
         if item.talking: VerticalLayout {
             alignment: center;

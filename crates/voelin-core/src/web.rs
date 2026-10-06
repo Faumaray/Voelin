@@ -1,5 +1,7 @@
 //! Pictures from the web: the host banner and TeamSpeak 6 channel banners,
-//! which servers give as `http(s)` addresses on any host.
+//! which servers give as `http(s)` addresses on any host, and the pictures
+//! of the clients' badges on TeamSpeak's server
+//! ([`voelin_model::badges::icon_url`]).
 //!
 //! They go into the engine's cache ([`crate::cache`], named by the MD5 hash
 //! of the address) like avatars and icons, and only with

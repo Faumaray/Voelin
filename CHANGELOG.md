@@ -25,6 +25,9 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
   disabled.
 - The voice channel view on desktop can copy an invite link to the channel,
   as the phone's Invite button does.
+- Other people's myTeamSpeak badges: up to three pictures after their name
+  in the channel tree and the members panel, and their names on the member
+  card (what each is for on hover).
 
 ### Changed
 

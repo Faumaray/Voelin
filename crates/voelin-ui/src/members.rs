@@ -53,6 +53,7 @@ impl App {
 					.filter_map(|g| view.server_groups.iter().find(|i| i.id == *g))
 					.map(|g| g.name.clone().into())
 					.collect();
+				let badges = vm::tree::badge_items(&client.badges, &view.pictures);
 				Some(MemberCard {
 					open: true,
 					id: i32::from(id),
@@ -63,6 +64,7 @@ impl App {
 					status: vm::tree::status_of(client, view.talking.contains(&id)).into(),
 					description: client.description.clone().unwrap_or_default().into(),
 					groups: crate::app::model(groups),
+					badges: crate::app::model(badges),
 					country: client.country.clone().unwrap_or_default().into(),
 					talk_power: client.talk_power,
 					friend: contact.is_some_and(|c| c.relation == Relation::Friend),
