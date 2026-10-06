@@ -60,6 +60,8 @@ fn server_details(server: &data::Server, uid: Option<&str>) -> ServerDetails {
 		platform: server.platform.clone(),
 		version: server.version.clone(),
 		max_clients: server.max_clients,
+		// `as` saturates (and turns NaN into 0); the mixer clamps it.
+		priority_speaker_dimm_db: server.priority_speaker_dimm_modificator.round() as i32,
 		default_server_group: Some(server.default_server_group.0),
 		default_channel_group: Some(server.default_channel_group.0),
 	}
@@ -265,5 +267,6 @@ mod tests {
 		assert_eq!(p.server.banner_gfx_interval_s, 60);
 		assert_eq!(p.server.banner_mode, BannerMode::KeepAspect);
 		assert_eq!(BannerMode::from_wire("7"), BannerMode::NoAdjust);
+		assert_eq!(p.server.priority_speaker_dimm_db, -18);
 	}
 }

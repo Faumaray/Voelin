@@ -156,11 +156,12 @@ description, talk power, channel group, server groups, badges, icon, away
 message, mute, talk, recording and stream flags; per server
 (`Presence::server`, `ServerDetails`) the welcome and host message, host
 banner (link, image, reload interval, scaling), host button, icon, unique id,
-platform and version; the server and channel groups (name, icon, sort id,
-naming mode, type). `Event::Presence` carries all of it; `Event::ServerDetails`
-and `Event::Groups` come when those parts change. Gateway and query presence
-fill what their rows have. The new fields are optional in JSON, so gateways
-and clients of different versions still understand each other.
+platform, version and priority speaker dimming; the server and channel groups
+(name, icon, sort id, naming mode, type). `Event::Presence` carries all of it;
+`Event::ServerDetails` and `Event::Groups` come when those parts change.
+Gateway and query presence fill what their rows have. The new fields are
+optional in JSON, so gateways and clients of different versions still
+understand each other.
 
 ## Files, avatars and icons
 

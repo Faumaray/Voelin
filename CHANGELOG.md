@@ -73,6 +73,8 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
   server refuses says why; joining did nothing before.
 - Pokes can carry a message (up to 100 characters); they were always sent
   empty.
+- While a priority speaker talks, everyone else (watched streams too) is
+  dimmed by the server's setting, as in TeamSpeak; nobody was dimmed before.
 - Joining a friend in a subchannel of a server without voice connects into
   that subchannel; it connected into the default channel.
 

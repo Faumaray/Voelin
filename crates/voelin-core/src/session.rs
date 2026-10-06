@@ -234,6 +234,9 @@ struct Session {
 	banner_reload: Option<(String, u64, tokio::task::AbortHandle)>,
 	/// Contact volume and mute applied per client.
 	contact_audio: HashMap<u16, (f32, bool)>,
+	/// Priority speakers and the server's dimming (dB) as told to the
+	/// audio thread.
+	priority_audio: (BTreeSet<u16>, i32),
 	/// Friends' client ids, as last told to the streams.
 	stream_friends: BTreeSet<u16>,
 	/// The server's details and groups as last reported.
@@ -266,6 +269,7 @@ impl Session {
 			image_retries: HashMap::new(),
 			banner_reload: None,
 			contact_audio: HashMap::new(),
+			priority_audio: Default::default(),
 			stream_friends: BTreeSet::new(),
 			details: None,
 			groups: None,
@@ -824,6 +828,7 @@ impl Session {
 		self.icons.clear();
 		self.pictures.clear();
 		self.contact_audio.clear();
+		self.priority_audio = Default::default();
 		self.stream_friends.clear();
 		self.details = None;
 		self.groups = None;
@@ -1136,6 +1141,19 @@ impl Session {
 			if let Some(s) = &self.streams {
 				s.send(StreamInput::Friends(friends));
 			}
+		}
+	}
+
+	/// Tell the audio thread who the priority speakers are and how much they
+	/// dim the others, when that changed (voice presence).
+	fn apply_priority(&mut self, p: &Presence) {
+		let Some(a) = &self.audio else { return };
+		let clients = p.clients.values().filter(|c| c.priority_speaker).map(|c| c.id).collect();
+		let wanted = (clients, p.server.priority_speaker_dimm_db);
+		if wanted != self.priority_audio {
+			let clients = wanted.0.iter().map(|c| ClientId(*c)).collect();
+			a.send(AudioIn::PrioritySpeakers { clients, dimm_db: wanted.1 as f32 });
+			self.priority_audio = wanted;
 		}
 	}
 
@@ -1649,6 +1667,7 @@ impl Session {
 				self.report_details(&p);
 				self.fetch_images(&p);
 				self.apply_contacts(&p);
+				self.apply_priority(&p);
 				self.voice_presence = Some(*p);
 				self.publish_presence();
 			}
@@ -2272,5 +2291,45 @@ mod banner_tests {
 		assert!(session.banner_reload.is_none());
 		tokio::task::yield_now().await;
 		assert!(timer.is_finished());
+	}
+
+	/// The priority speakers and the server's dimming reach the audio thread
+	/// once, and again when either changes.
+	#[tokio::test]
+	async fn priority_speakers_reach_the_audio_thread_when_changed() {
+		let (mut session, _) = session("priority");
+		let (audio, rx) = AudioHandle::channel();
+		session.audio = Some(audio);
+		let mut presence = Presence::default();
+		presence.server.priority_speaker_dimm_db = -18;
+		for (id, priority_speaker) in [(2, false), (5, true)] {
+			let client = voelin_model::ClientInfo { id, priority_speaker, ..Default::default() };
+			presence.clients.insert(id, client);
+		}
+		let sent = || -> Vec<(Vec<u16>, f32)> {
+			rx.try_iter()
+				.filter_map(|msg| match msg {
+					AudioIn::PrioritySpeakers { clients, dimm_db } => {
+						Some((clients.iter().map(|c| c.0).collect(), dimm_db))
+					}
+					_ => None,
+				})
+				.collect()
+		};
+		session.apply_priority(&presence);
+		assert_eq!(sent(), [(vec![5], -18.0)]);
+		session.apply_priority(&presence);
+		assert!(sent().is_empty());
+		presence.server.priority_speaker_dimm_db = -30;
+		session.apply_priority(&presence);
+		assert_eq!(sent(), [(vec![5], -30.0)]);
+		presence.clients.get_mut(&5).unwrap().priority_speaker = false;
+		session.apply_priority(&presence);
+		assert_eq!(sent(), [(vec![], -30.0)]);
+		// A new connection has a new audio thread: told again.
+		session.forget_images();
+		session.apply_priority(&presence);
+		assert_eq!(sent(), [(vec![], -30.0)]);
+		session.stop_all();
 	}
 }
