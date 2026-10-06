@@ -430,6 +430,9 @@ pub(crate) struct App {
 	pub sessions: HashMap<i64, SessionView>,
 	pub models: Models,
 	pub status: String,
+	/// What the toast of the next copy says instead of "Copied" (an invite
+	/// names its channel and link).
+	pub copy_note: Option<String>,
 	/// The members panel's search.
 	pub member_filter: String,
 	/// The topics drawer's search.
@@ -679,6 +682,7 @@ pub fn run(options: RunOptions) -> Result<()> {
 		sessions: HashMap::new(),
 		models,
 		status: String::new(),
+		copy_note: None,
 		member_filter: String::new(),
 		topic_filter: String::new(),
 		voice_view: false,
@@ -842,6 +846,12 @@ impl App {
 		if let Some(ui) = self.ui.upgrade() {
 			ui.global::<Bridge>().set_status_text(self.status.clone().into());
 		}
+	}
+
+	/// Nav.copy put text on the clipboard: one toast says so.
+	pub fn copied(&mut self) {
+		let text = self.copy_note.take().unwrap_or_else(|| "Copied".to_owned());
+		self.set_status(text);
 	}
 
 	pub fn store_settings(&self) {

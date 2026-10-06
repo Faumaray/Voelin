@@ -149,7 +149,7 @@ comes from the engine's events; what a gateway adds is hidden without it.
 | Member card | `member` | Description, groups, talk power, country; private message, poke, friend, block; volume and mute for us | `ContactsChanged`; `Command::SetContact`, `SetClientVolume`, `SetClientMuted`, `Poke` |
 | Pinned messages | `pins` | In the members panel's place: cards with author, time, text, files and reactions; the pin unpins, a click jumps to the message | `Gateway` `Pins`, `Pinned`, `Unpinned`; `GatewayRequest::Pins`, `Unpin` |
 | Topics | `topics`, `topic:<id>` | In the members panel's place: search, cards with the message count, creator and last activity, Create Topic; an open topic replaces the chat's messages and takes replies | `Gateway` `Topics`, `Topic`, `TopicHistory`; `GatewayRequest::Topics`, `TopicHistory`, `CreateTopic`, `Post` |
-| Voice channel | `voice` | Title, topic, "5 in voice / 50 total", Voice Settings, Leave; the people as large avatars (talking ring and bars, muted, crown, streaming); the streams as cards (LIVE, viewers, kind, bitrate, sound, Watch Stream); the channel's chat | `Presence`, `Talking`, `StreamsChanged`, viewer counts from `StreamsChanged`, else the `Gateway` stream directory |
+| Voice channel | `voice` | Title, topic, "5 in voice / 50 total", Copy invite link (a `ts3server://` link to the channel; the phone's Invite button does the same), Chat only, Voice Settings, Leave; the people as large avatars (talking ring and bars, muted, crown, streaming); the streams as cards (LIVE, viewers, kind, bitrate, sound, Watch Stream); the channel's chat | `Presence`, `Talking`, `StreamsChanged`, viewer counts from `StreamsChanged`, else the `Gateway` stream directory |
 | Watching a stream | `watch`, `popout` | The channel's header with "5 in voice" and Leave; the player with the streamer, title, viewers, LIVE, the picture's height (the simulcast picker when a Voelin streamer offers layers), volume, elapsed time, what arrives (codec, size, frame rate, bitrate), back to the chat, pop out, full screen; a note that the stream belongs to the channel; the channel's chat and a Stream Info tab. Popped out (and in full screen) it fills the window | `WatchState`, `WatchLayers`, decoded frames and their stats (`src/video.rs`), `StreamsChanged` (viewer counts; the `Gateway` stream directory where the server gives none) |
 
 The pins and topics share the place of the members panel: opening one
@@ -322,7 +322,8 @@ for importing the official clients' identities on start
 1. Write the screen in `ui/screens/<name>.slint` from the components
    (`import { ... } from "../components/index.slint";`), reading data from
    `Bridge` and navigating through `Nav` (e.g. `Nav.open-settings(...)`,
-   `Nav.show(Page.home)`).
+   `Nav.show(Page.home)`). Text goes to the clipboard with `Nav.copy(text)`
+   (through a hidden text field in `MainWindow`; a toast confirms it).
 2. New data: add a struct and a property (models: `[Struct]`) and callbacks to
    `ui/bridge.slint`.
 3. Place it: add a `Page` value in `ui/nav.slint` if it is a page, and in

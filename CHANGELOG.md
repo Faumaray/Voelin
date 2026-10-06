@@ -23,6 +23,8 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
 - 122 more signed client versions (`Versions.csv`).
 - Icon buttons show their name on hover (desktop), also while they are
   disabled.
+- The voice channel view on desktop can copy an invite link to the channel,
+  as the phone's Invite button does.
 
 ### Changed
 

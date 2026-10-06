@@ -1030,8 +1030,10 @@ export global Bridge {
     callback dismiss-crash-notice();
     callback open-about();
     // A link to our voice channel (`ts3server://`) to hand to others; the
-    // caller copies it.
+    // caller copies it (Nav.copy).
     callback invite() -> string;
+    // Nav.copy put text on the clipboard: Rust says so in the toast.
+    callback copied();
 
     // Home, friends, direct messages, notifications, search, events and
     // the settings pages.

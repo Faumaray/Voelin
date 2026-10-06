@@ -503,7 +503,8 @@ impl App {
 	}
 
 	/// A link to the voice channel we are in, for the Invite button (which
-	/// copies it); empty, with a note, without one.
+	/// copies it, and the copy's toast names the channel); empty, with a
+	/// note, without one.
 	pub(crate) fn invite_link(&mut self) -> String {
 		let bookmark = self.current.and_then(|id| self.bookmark(id)).map(|b| b.address.clone());
 		let path = self.view().and_then(|v| {
@@ -525,7 +526,8 @@ impl App {
 		};
 		let path: Vec<&str> = path.iter().map(String::as_str).collect();
 		let link = vm::servers::invite_link(&address, &path);
-		self.set_status(format!("Copied an invite to {}: {link}", path.last().unwrap_or(&"")));
+		self.copy_note =
+			Some(format!("Copied an invite to {}: {link}", path.last().unwrap_or(&"")));
 		link
 	}
 

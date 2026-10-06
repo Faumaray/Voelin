@@ -4,7 +4,7 @@ use slint::ComponentHandle;
 use voelin_core::Command;
 use voelin_model::ChannelId;
 
-use crate::app::{Bridge, MainWindow, with_app};
+use crate::app::{App, Bridge, MainWindow, with_app};
 
 pub(super) fn wire(ui: &MainWindow) {
 	let bridge = ui.global::<Bridge>();
@@ -56,4 +56,8 @@ pub(super) fn wire(ui: &MainWindow) {
 		with_app(|app| app.client_playback_changed(&form));
 	});
 	bridge.on_invite(|| with_app(|app| app.invite_link()).unwrap_or_default().into());
+	// Nav.copy, from any screen.
+	bridge.on_copied(|| {
+		with_app(App::copied);
+	});
 }

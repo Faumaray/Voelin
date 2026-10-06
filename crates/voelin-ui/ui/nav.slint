@@ -102,6 +102,11 @@ export global Nav {
     in-out property <int> dm-tab;
     in-out property <bool> join-open;
 
+    // Text for the clipboard, and a counter that changes with every copy:
+    // MainWindow copies it through a hidden text field (`copy` below).
+    in-out property <string> clip-text;
+    in-out property <int> clip-requests;
+
     // The phone layout (narrow windows).
     // The server's members as a page of their own (the desktop shows them
     // beside the chat).
@@ -305,5 +310,14 @@ export global Nav {
     public function select-server(id: int) {
         show(Page.server);
         Bridge.select-server(id);
+    }
+
+    // Put text on the clipboard; a toast says so. Nothing to copy (an
+    // invite without a channel, which Rust explains) does nothing.
+    public function copy(text: string) {
+        if text != "" {
+            clip-text = text;
+            clip-requests += 1;
+        }
     }
 }

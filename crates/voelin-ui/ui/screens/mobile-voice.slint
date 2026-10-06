@@ -631,11 +631,6 @@ export component MobileVoice inherits VerticalLayout {
             Nav.mobile-tab = MobileTab.chat;
         }
     }
-    clip := TextInput {
-        visible: false;
-        width: 0;
-        height: 0;
-    }
     ChannelBar { }
     sv := ScrollView {
         // The stream, the people and the chat header scroll away together
@@ -678,13 +673,7 @@ export component MobileVoice inherits VerticalLayout {
                                 filled: true;
                                 size: 62px;
                                 icon-size: 24px;
-                                // Through a text field: Slint copies only
-                                // what is selected in one.
-                                clicked => {
-                                    clip.text = Bridge.invite();
-                                    clip.select-all();
-                                    clip.copy();
-                                }
+                                clicked => { Nav.copy(Bridge.invite()); }
                             }
                         }
                         Text {
