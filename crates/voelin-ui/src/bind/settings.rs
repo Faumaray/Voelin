@@ -25,6 +25,9 @@ pub(super) fn wire(ui: &MainWindow) {
 		bridge.on_myts_portal(|action| {
 			with_app(|app| app.myts_portal(action));
 		});
+		bridge.on_myts_badge(|index, on| {
+			with_app(|app| app.myts_badge(index, on));
+		});
 	}
 	bridge.on_open_settings(|| {
 		with_app(|app| app.open_settings());

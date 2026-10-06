@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use voelin_query::{Command, escape};
 
 /// Permission ids the fake server uses.
@@ -60,12 +60,18 @@ pub struct State {
 	/// Relay connections by channel.
 	relays: Vec<(u64, mpsc::UnboundedSender<String>)>,
 	next_clid: u16,
+	/// Permission lookups (`permsid`) to refuse for flooding, and how often.
+	refusals: HashMap<String, usize>,
+	/// The commands received, in order (`login` left out).
+	commands: Vec<String>,
 }
 
 #[derive(Clone)]
 pub struct FakeServer {
 	pub addr: SocketAddr,
 	pub state: Arc<Mutex<State>>,
+	/// Ends every open connection, like a server restart.
+	kick: broadcast::Sender<()>,
 }
 
 impl FakeServer {
@@ -73,7 +79,7 @@ impl FakeServer {
 		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let addr = listener.local_addr().unwrap();
 		let state = Arc::new(Mutex::new(State { next_clid: 100, ..Default::default() }));
-		let server = Self { addr, state };
+		let server = Self { addr, state, kick: broadcast::channel(1).0 };
 		let s = server.clone();
 		tokio::spawn(async move {
 			while let Ok((stream, _)) = listener.accept().await {
@@ -120,6 +126,35 @@ impl FakeServer {
 		}
 	}
 
+	/// Answer looking up permission `permsid` with the flood protection's
+	/// refusal, the next `times` times.
+	pub fn refuse(&self, permsid: &str, times: usize) {
+		self.state.lock().unwrap().refusals.insert(permsid.to_string(), times);
+	}
+
+	/// The commands received so far, in order (`login` left out).
+	pub fn commands(&self) -> Vec<String> {
+		self.state.lock().unwrap().commands.clone()
+	}
+
+	/// An observer connection is registered for server events.
+	pub fn observed(&self) -> bool {
+		!self.state.lock().unwrap().observers.is_empty()
+	}
+
+	/// Channels with a relay listening.
+	pub fn relayed_channels(&self) -> Vec<u64> {
+		self.state.lock().unwrap().relays.iter().map(|(c, _)| *c).collect()
+	}
+
+	/// Drop every query connection, as a restarting server does.
+	pub fn drop_connections(&self) {
+		let mut s = self.state.lock().unwrap();
+		s.observers.clear();
+		s.relays.clear();
+		let _ = self.kick.send(());
+	}
+
 	pub fn posted(&self) -> Vec<(u8, u64, String)> {
 		self.state.lock().unwrap().posted.clone()
 	}
@@ -134,6 +169,7 @@ impl FakeServer {
 		let (r, mut w) = stream.into_split();
 		let mut lines = BufReader::new(r).lines();
 		let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+		let mut kicked = self.kick.subscribe();
 		let clid = {
 			let mut s = self.state.lock().unwrap();
 			s.next_clid += 1;
@@ -148,6 +184,9 @@ impl FakeServer {
 				line = lines.next_line() => {
 					let Ok(Some(line)) = line else { return };
 					let Some(cmd) = Command::parse(&line) else { continue };
+					if cmd.name != "login" {
+						self.state.lock().unwrap().commands.push(line.clone());
+					}
 					let reply = self.answer(&cmd, clid, &mut channel, &tx);
 					if w.write_all(reply.as_bytes()).await.is_err() {
 						return;
@@ -158,6 +197,7 @@ impl FakeServer {
 						return;
 					}
 				}
+				_ = kicked.recv() => return,
 			}
 		}
 	}
@@ -194,6 +234,12 @@ impl FakeServer {
 			]),
 			"permidgetbyname" => {
 				let name = arg("permsid").unwrap_or_default();
+				if let Some(left @ 1..) = s.refusals.get_mut(&name) {
+					*left -= 1;
+					return "error id=524 msg=client\\sis\\sflooding \
+					        extra_msg=please\\swait\\s1\\sseconds\n\r"
+						.into();
+				}
 				match PERMS.iter().find(|(n, _)| *n == name) {
 					Some((_, id)) => data(vec![format!("permsid={name} permid={id}")]),
 					None => "error id=2 msg=invalid\\spermission\n\r".into(),

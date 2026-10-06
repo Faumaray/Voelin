@@ -461,7 +461,11 @@ impl Runner<'_> {
 				{
 					let data = std::fs::read(&path)?;
 					let actual = format!("{:x}", md5_of(&data));
-					if actual != hash {
+					// A server avatar is named by its MD5; a myTeamSpeak
+					// avatar by its address.
+					let server_avatar =
+						hash.len() == 32 && hash.bytes().all(|b| b.is_ascii_hexdigit());
+					if server_avatar && actual != hash {
 						bail!("avatar file hash {actual} is not the announced {hash}");
 					}
 					if let Some(md5) = md5

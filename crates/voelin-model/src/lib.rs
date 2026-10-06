@@ -11,7 +11,7 @@ mod tree;
 pub use chat::{ChatMessage, ChatTarget, FileRef, parse_file_links, relay_text, split_message};
 pub use presence::{
 	ChannelId, ChannelInfo, ClientId, ClientInfo, GroupId, GroupInfo, GroupNamingMode, GroupType,
-	Presence, PresenceDelta, PresenceSnapshot, parse_badges,
+	Presence, PresenceDelta, PresenceSnapshot, myts_avatar_url, parse_badges,
 };
 pub use server::{
 	BannerMode, Capabilities, HostMessageMode, ServerDetails, ServerFlavor, ServerVersion,

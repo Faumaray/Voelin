@@ -21,6 +21,32 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
   decoders work without installing FFmpeg.
 - AV1 decoding through dav1d in every desktop build.
 - 122 more signed client versions (`Versions.csv`).
+- Other users' myTeamSpeak avatars (TeamSpeak 6), as the official client
+  shows them: where the server has no avatar of them, its avatar could not
+  be downloaded, or the server is only observed.
+- Voice connections show servers the account's avatar, the badges chosen
+  in Settings → My Account (up to three) and its User Tag, as the official
+  client does, so other TeamSpeak 6 users see them; again after a
+  reconnect or an account change, and cleared on sign-out. A saved session
+  is enough: the avatar, its certificate, the signed badges and the User
+  Tag's token come from myTeamSpeak's services, and Voelin checks each
+  signature as the server does before sending it. The log says what the
+  server published.
+- Settings → My Account shows the account's User Tag and lets you choose the
+  badges servers show.
+- Pictures (banners, avatars) go through the desktop's proxy where the
+  desktop portal names one (Linux), and through the system proxy on
+  Windows and macOS; SOCKS proxies work too.
+- tsgw logs what it does: a startup summary, the address the TeamSpeak
+  server sees for its queries (with a hint when that address is not
+  allowlisted), every app connection with its logins and how long they
+  took, refused logins, slow requests, ServerQuery failures, relays and the
+  observer. `log.level` (`TSGW_LOG_LEVEL`) sets what is logged, `log.file`
+  (`TSGW_LOG_FILE`) also writes to a file that is rotated at 20 MB (five
+  kept); colour only on a terminal.
+- Every gateway a server publishes is tried in turn (TLS first, 20 seconds
+  each) before waiting to try again, so a TLS proxy that fails falls back to
+  the plain gateway published next to it.
 
 ### Changed
 
@@ -48,11 +74,40 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
 - A server's published gateway replaces one stored before (found or typed
   into an older version), so a gateway that moved is followed.
 - zbus's warnings about desktop portal requests are left out of the logs.
+- Banners: up to 128 MiB, more time on slow hosts, BMP and ICO too, and
+  SVG after a comment or DOCTYPE; pictures larger than 4096 pixels on a
+  side are scaled down. A banner that fails is tried again for as long as
+  it is shown (every 15 minutes at most), and the log says why it is
+  missing (HTTP status, an HTML page, a video, too large). The picture
+  cache defaults to 1 GiB, the decoded images to 256 MB.
+- Banners that fail: the log names the URL (without its query) the first
+  time, says when a connection stalled and after how much data, and when it
+  could not connect at all. A banner that is not there (HTTP 400, 404, 410)
+  is tried again after 15 minutes and then hourly; a host that asks to wait
+  (429, 503) is waited for. A banner shown again is only checked for
+  changes (ETag, Last-Modified), not downloaded again. At most 6 downloads
+  run per host, so a slow host cannot hold up the others.
+- The gateway: only a refused login stops observing; anything else is tried
+  again after 1, 2, 5, 10, 20, then every 30 seconds, and at once when voice
+  connects. A connection that stops answering is noticed within 90 seconds.
+  Finding a server's gateway asks DNS and the gateway at once instead of one
+  after the other. The log says what was found, which gateway was tried,
+  how long each step took and why one failed.
+- tsgw answers faster: each ServerQuery command takes under 2 ms instead of
+  about 45 ms (TCP_QUICKACK), so logins and startup take milliseconds.
+  TeamSpeak's flood protection is shared by all of tsgw's query
+  connections, so tsgw no longer earns a 600 second ban. It starts while
+  the TeamSpeak server is still down and connects once it is up, its
+  `/health` says what is missing, and it stops cleanly on SIGTERM.
 
 ### Fixed
 
 - The account's avatar is downloaded from its own link; it was asked for
   as an upload link and refused with HTTP 403.
+- Observing no longer stops for the whole run the first time a server is
+  joined with a new identity (the gateway did not know it yet).
+- tsgw reconnects its query connection for logins when the TeamSpeak server
+  restarts; before, every login was refused until tsgw was restarted.
 
 ## [0.0.1-alpha] - 2026-10-04
 

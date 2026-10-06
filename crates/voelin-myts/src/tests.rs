@@ -145,6 +145,26 @@ async fn login_roundtrip_keeps_credentials_in_body_and_redacts_results() {
 	assert!(!data.skip_session);
 }
 
+/// What servers are shown of the account comes with the login: the
+/// certificate, and the avatar as it came.
+#[tokio::test]
+async fn the_login_brings_the_accounts_presentation() {
+	let avatar = api::AvatarData { timestamp: 42, sign: vec![1; 64], ..Default::default() };
+	let response = api::LoginSession {
+		mytsid_user_cert: Some(api::MyTsUserCertificate { cert: vec![9, 8, 7] }),
+		user_avatar: Some(avatar.clone()),
+		..success()
+	};
+	let (client, _server) = mock(200, "", wire::encode(&response)).await;
+	let login = client.login("mail", "password", None, "device").await.unwrap();
+	assert_eq!(login.presentation.certificate, [9, 8, 7]);
+	assert_eq!(login.presentation.avatar, wire::encode(&avatar));
+	// Without them: nothing to show.
+	let (client, _server) = mock(200, "", wire::encode(&success())).await;
+	let login = client.login("mail", "password", None, "device").await.unwrap();
+	assert!(login.presentation.is_empty() && login.presentation.avatar.is_empty());
+}
+
 #[tokio::test]
 async fn login_requires_explicit_success_nonempty_token_and_preserves_status() {
 	for code in [0, 202, 208, 98765] {
@@ -337,6 +357,76 @@ async fn owner_live_login_validate_logout() {
 	let login =
 		client.login(&email, &password, otp.as_deref(), &device).await.expect("live login failed");
 	let validation = client.validate_session(&login.token).await;
+	// What servers can be shown without a password, next to what the
+	// sign-in brought: which certificate is of which kind, valid until
+	// when, and verifies what. Public data only (certificates, ids, links
+	// are not secret); never the session.
+	if let Ok(identity) = &login.identity {
+		let id = identity.id_bytes();
+		let now =
+			std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+				as i64;
+		let own = client.own_avatar(&login.token, id).await;
+		let badges = client.signed_badges(&login.token).await;
+		let tag = client.user_tag(&login.token).await;
+		let tag_token = client.user_tag_token(&login.token).await;
+		let service = own.as_ref().ok().and_then(Option::as_ref);
+		// The candidates, in the order the UI tries them: the sign-in's, the
+		// avatar service's, the myTS ID's (pubSignCert).
+		let certificates: [&[u8]; 3] = [
+			&login.presentation.certificate,
+			service.map_or(&[][..], |o| o.certificate.as_slice()),
+			identity.public_signature_certificate(),
+		];
+		for (name, certificate) in
+			["sign-in", "avatar service", "pubSignCert"].iter().zip(certificates)
+		{
+			// Leaf block type, validity window (Unix seconds) and public key.
+			let parsed = tsproto::myts::Certificate::parse(certificate, &ROOT_KEY);
+			println!(
+				"{name} certificate: {} bytes, {:?}, valid now: {:?}",
+				certificate.len(),
+				parsed,
+				parsed.as_ref().map(|c| (c.signs_myts_data(), c.valid_at(now)))
+			);
+		}
+		println!(
+			"pubSignCert equals the sign-in's: {}, the avatar service's: {}",
+			certificates[2] == certificates[0],
+			certificates[2] == certificates[1]
+		);
+		println!(
+			"avatar service: {:?}, the sign-in's certificate: {:?}",
+			own.as_ref().map(|o| o.is_some()),
+			service.map(|o| o.certificate == login.presentation.certificate)
+		);
+		let avatars =
+			[login.presentation.avatar.as_slice(), service.map_or(&[][..], |o| &o.avatar)];
+		println!(
+			"avatar (avatar, certificate): {:?}",
+			choose_avatar(&avatars, &certificates, id, now)
+		);
+		println!(
+			"badges: {:?}",
+			badges.as_ref().map(|b| b.as_ref().map(|b| (
+				b.iter().map(|b| b.uuid.as_str()).collect::<Vec<_>>(),
+				choose_badges_certificate(&b.iter().collect::<Vec<_>>(), &certificates, id, now),
+			)))
+		);
+		println!("tag: {:?}", tag.as_ref().map(|t| t.is_some()));
+		match (&tag, &tag_token) {
+			(Ok(Some(tag)), Ok(token)) => {
+				let decoded = wire::decode::<api::tschat::MatrixIdentifierToken>(token.as_slice());
+				let parsed = decoded
+					.as_ref()
+					.map(|d| tsproto::myts::Certificate::parse(&d.sign_certificate, &ROOT_KEY));
+				println!("tag token certificate: {parsed:?}");
+				println!("tag token: {:?}", check_user_tag(token, tag, id, now));
+			}
+			(_, Err(error)) => println!("tag token: {error}"),
+			_ => {}
+		}
+	}
 	let logout = client.logout(&login.token).await;
 	validation.expect("live validation failed");
 	logout.expect("live logout failed");
@@ -398,4 +488,229 @@ async fn an_avatar_is_fetched_from_its_own_link() {
 	assert!(matches!(error, Error::Download(403)), "{error:?}");
 	// A name that is not a link is never fetched.
 	assert!(matches!(client.avatar("online.png").await, Err(Error::AvatarUrl)));
+}
+
+/// Several requests in turn, each answered with the next body; their heads
+/// and bodies come back.
+async fn mock_each(
+	bodies: Vec<Vec<u8>>,
+) -> (Client, tokio::task::JoinHandle<Vec<(String, Vec<u8>)>>) {
+	let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let client = Client {
+		transport: transport::Transport::mock(
+			format!("http://{}", listener.local_addr().unwrap()),
+			Duration::from_secs(2),
+		),
+	};
+	let task = tokio::spawn(async move {
+		let mut requests = Vec::new();
+		for body in bodies {
+			let (mut stream, _) = listener.accept().await.unwrap();
+			let mut head = Vec::new();
+			while !head.ends_with(b"\r\n\r\n") {
+				let mut byte = [0];
+				stream.read_exact(&mut byte).await.unwrap();
+				head.push(byte[0]);
+			}
+			let head = String::from_utf8(head).unwrap();
+			let length: usize = head
+				.lines()
+				.find_map(|line| {
+					line.to_ascii_lowercase().strip_prefix("content-length: ").map(str::to_owned)
+				})
+				.unwrap()
+				.parse()
+				.unwrap();
+			let mut request = vec![0; length];
+			stream.read_exact(&mut request).await.unwrap();
+			let response = format!(
+				"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+				body.len()
+			);
+			let _ = stream.write_all(response.as_bytes()).await;
+			let _ = stream.write_all(&body).await;
+			requests.push((head, request));
+		}
+		requests
+	});
+	(client, task)
+}
+
+const MYTS_ID: [u8; 33] = [4; 33];
+
+fn session_body(method: &str) -> Vec<u8> {
+	let mut body = vec![method.len() as u8];
+	body.extend_from_slice(method.as_bytes());
+	body.extend_from_slice(b"\x0a\x0esession-secret");
+	body
+}
+
+/// The account's own avatar from the avatar service: the request as the
+/// official client builds it, the entry for the account's myTS ID with
+/// its certificate, as it came.
+#[tokio::test]
+async fn the_own_avatar_comes_from_the_avatar_service() {
+	use schema_api::api::user;
+	let token = SessionToken::new("session-secret").unwrap();
+	let avatar = |mytsid: &[u8], cert: &[u8]| api::AvatarData {
+		info: Some(api::AvatarInfo {
+			map: vec![api::avatar_info::AvatarMap {
+				state: api::AvatarState::Online as i32,
+				name: "https://avatars.example.test/o.png".into(),
+			}],
+		}),
+		timestamp: 42,
+		sign: vec![1; 64],
+		optional: Some(wire::pack_any(&api::OptionalAvatarDataContactInfo {
+			mytsid: mytsid.to_vec(),
+			user_cert: cert.to_vec(),
+		})),
+	};
+	let map =
+		|avatar: &api::AvatarData| user::request_contacts_avatar_info_response::AvatarInfoMap {
+			id: None,
+			info: Some(avatar.clone()),
+		};
+	let (other, own) = (avatar(&[5; 33], &[8; 112]), avatar(&MYTS_ID, &[9; 112]));
+	let response = user::RequestContactsAvatarInfoResponse {
+		data: vec![map(&other), map(&own)],
+		error_code: 0,
+	};
+	let (client, server) = mock_each(vec![wire::encode(&response)]).await;
+	let fetched = client.own_avatar(&token, &MYTS_ID).await.unwrap().unwrap();
+	assert_eq!(fetched.certificate, [9; 112]);
+	assert_eq!(fetched.avatar, wire::encode(&own), "as it came");
+	let (head, body) = server.await.unwrap().remove(0);
+	assert!(head.starts_with("POST /user HTTP/1.1"), "{head}");
+	let type_url =
+		b"type.googleapis.com/com.teamspeak.myteamspeak.proto.user.AvatarRequestID.MYTSKey";
+	assert_eq!(type_url.len(), 0x50);
+	let mut expected = session_body("requestContactsAvatar");
+	expected.extend_from_slice(&[0x12, 0x79, 0x0a, 0x77, 0x0a, 0x50]);
+	expected.extend_from_slice(type_url);
+	expected.extend_from_slice(&[0x12, 0x23, 0x0a, 0x21]);
+	expected.extend_from_slice(&MYTS_ID);
+	assert_eq!(body, expected);
+	// What the live service answers an unknown session (and an account
+	// without an avatar): nothing, so nothing learned.
+	let (client, _server) = mock_each(vec![Vec::new()]).await;
+	assert_eq!(client.own_avatar(&token, &MYTS_ID).await.unwrap(), None);
+	// Another account's entry, or one without a certificate: nothing.
+	for entry in [avatar(&[5; 33], &[9; 112]), avatar(&MYTS_ID, &[]), api::AvatarData::default()] {
+		let response =
+			user::RequestContactsAvatarInfoResponse { data: vec![map(&entry)], error_code: 0 };
+		let (client, _server) = mock_each(vec![wire::encode(&response)]).await;
+		assert_eq!(client.own_avatar(&token, &MYTS_ID).await.unwrap(), None);
+	}
+	let expired = user::RequestContactsAvatarInfoResponse { data: vec![], error_code: 109 };
+	let (client, _server) = mock_each(vec![wire::encode(&expired)]).await;
+	assert!(client.own_avatar(&token, &MYTS_ID).await.unwrap_err().is_invalid_session());
+}
+
+#[tokio::test]
+async fn signed_badges_keep_their_bytes() {
+	use schema_api::api::user;
+	let token = SessionToken::new("session-secret").unwrap();
+	let badge = |uuid: &str, name: &str| user::SignedUserBadge {
+		badge: Some(user::UserBadge { uuid: uuid.into(), name: name.into(), ..Default::default() }),
+		sign: vec![3; 64],
+		sign_timestamp: 9,
+	};
+	let mut odd = wire::encode(&badge("b", "B"));
+	odd.extend_from_slice(&[0x78, 0x01]);
+	let mut list = wire::encode(&user::UserBadgesSignedList { badges: vec![badge("a", "A")] });
+	list.push(0x0a);
+	list.push(odd.len() as u8);
+	list.extend_from_slice(&odd);
+	assert!((0x80..0x4000).contains(&list.len()));
+	let mut response = vec![0x0a, 0x80 | (list.len() as u8 & 0x7f), (list.len() >> 7) as u8];
+	response.extend_from_slice(&list);
+	let (client, server) = mock_each(vec![response]).await;
+	let badges = client.signed_badges(&token).await.unwrap().unwrap();
+	assert_eq!(
+		badges.iter().map(|b| (b.uuid.as_str(), b.name.as_str())).collect::<Vec<_>>(),
+		[("a", "A"), ("b", "B")]
+	);
+	assert_eq!(badges[1].raw(), odd);
+	assert_eq!(badge_list(&badges), list, "the list as it came");
+	let (head, body) = server.await.unwrap().remove(0);
+	assert!(head.starts_with("POST /user HTTP/1.1"), "{head}");
+	assert_eq!(body, session_body("getSignedBadges"));
+	assert_eq!(&body[..16], b"\x0fgetSignedBadges");
+	// No list: nothing learned. An empty one: no badges.
+	let (client, _server) = mock_each(vec![Vec::new()]).await;
+	assert_eq!(client.signed_badges(&token).await.unwrap(), None);
+	let (client, _server) = mock_each(vec![vec![0x0a, 0x00]]).await;
+	assert_eq!(client.signed_badges(&token).await.unwrap(), Some(Vec::new()));
+	// What the live service answers an unknown session.
+	let (client, _server) = mock_each(vec![vec![0x10, 0x6d]]).await;
+	assert!(client.signed_badges(&token).await.unwrap_err().is_invalid_session());
+}
+
+/// The User Tag comes from the chat service with the session alone.
+#[tokio::test]
+async fn the_user_tag_and_its_token_come_from_the_chat_service() {
+	use schema_api::api::{tschat, user};
+	let token = SessionToken::new("session-secret").unwrap();
+	let list = tschat::TschatIdentifierList {
+		ts_chat_identifier_mapping: vec![tschat::TschatIdentifierMapping {
+			ts_chat_identifier: "alex@myteamspeak.com".into(),
+			matrix_id: "@x:tschat".into(),
+			primary: true,
+		}],
+		error_handling: Some(tschat::ErrorHandling { return_code: 1, ..Default::default() }),
+	};
+	let (client, server) = mock_each(vec![wire::encode(&list)]).await;
+	assert_eq!(client.user_tag(&token).await.unwrap().as_deref(), Some("alex@myteamspeak.com"));
+	let (head, body) = server.await.unwrap().remove(0);
+	assert!(head.starts_with("POST /tschat HTTP/1.1"), "{head}");
+	assert_eq!(body, session_body("getActiveIdentifierList"));
+	assert_eq!(body[0], 0x17);
+	// No primary one: the account data's active identifiers.
+	let data = user::UserAccountData {
+		ts_chat_identifier_list_active: Some(list.clone()),
+		..Default::default()
+	};
+	let none = tschat::TschatIdentifierList::default();
+	let (client, server) = mock_each(vec![wire::encode(&none), wire::encode(&data)]).await;
+	assert_eq!(client.user_tag(&token).await.unwrap().as_deref(), Some("alex@myteamspeak.com"));
+	let requests = server.await.unwrap();
+	assert!(requests[1].0.starts_with("POST /user HTTP/1.1"));
+	assert!(requests[1].1.starts_with(b"\x0egetAccountData"));
+	let request: user::AccountDataRequest = wire::decode(&requests[1].1[15..]).unwrap();
+	assert_eq!(request.selector, [user::UserAccountDataSelector::TsChat as i32]);
+	// An expired session is the account service's expired session.
+	let expired = tschat::TschatIdentifierList {
+		error_handling: Some(tschat::ErrorHandling { return_code: 5, ..Default::default() }),
+		..Default::default()
+	};
+	let (client, _server) = mock_each(vec![wire::encode(&expired)]).await;
+	assert!(client.user_tag(&token).await.unwrap_err().is_invalid_session());
+	// The token, exactly as it came.
+	let mut raw = wire::encode(&tschat::MatrixIdentifierToken {
+		signature: vec![1; 64],
+		sign_certificate: vec![2; 112],
+		timestamp: 5,
+		tags: Some(tschat::TschatIdentifierTagList { tag: vec!["alex@myteamspeak.com".into()] }),
+	});
+	raw.extend_from_slice(&[0x78, 0x01]);
+	assert!((0x80..0x4000).contains(&raw.len()));
+	let mut answer = vec![0x0a, 0x80 | (raw.len() as u8 & 0x7f), (raw.len() >> 7) as u8];
+	answer.extend_from_slice(&raw);
+	answer.extend_from_slice(&wire::encode(&tschat::SignedAllowedIdentifier {
+		token: None,
+		error: Some(tschat::ErrorHandling { return_code: 1, ..Default::default() }),
+	}));
+	let (client, server) = mock_each(vec![answer]).await;
+	assert_eq!(client.user_tag_token(&token).await.unwrap(), raw);
+	let (head, body) = server.await.unwrap().remove(0);
+	assert!(head.starts_with("POST /tschat HTTP/1.1"), "{head}");
+	assert_eq!(body, session_body("requestSignedAllowedIdentifierList"));
+	assert_eq!(body[0], 0x22);
+	// The live answer to an unknown session: SESSION_EXPIRED (5).
+	let mut live = vec![0x12, 0x44, 0x08, 0x05, 0x12, 0x40];
+	live.extend_from_slice(b"Could not resolve session '00000000-0000-0000-0000-000000000000'");
+	assert_eq!(live.len(), 6 + 0x40);
+	let (client, _server) = mock_each(vec![live]).await;
+	assert!(client.user_tag_token(&token).await.unwrap_err().is_invalid_session());
 }

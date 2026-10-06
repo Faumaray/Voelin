@@ -40,6 +40,12 @@ fn main() -> Result<()> {
 		),
 		Err(error) => tracing::warn!(%error, "no log file this time"),
 	}
+	// Banners go through the proxy the desktop's settings name (GNOME, KDE),
+	// as a browser's requests do; Windows and macOS settings are read anyway.
+	#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+	voelin_core::set_proxy_resolver(
+		|url| async move { voelin_platform::proxy::proxy_for(&url).await },
+	);
 	let options = voelin_ui::RunOptions {
 		setting_overrides: setting_overrides(std::env::args().skip(1)),
 		..Default::default()

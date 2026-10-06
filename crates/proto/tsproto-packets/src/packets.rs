@@ -968,6 +968,10 @@ impl io::Write for EscapedWriter<'_> {
 		self.0.reserve(buf.len());
 		for c in buf {
 			match c {
+				// Voelin patch: \a and \b as TeamSpeak escapes them (binary
+				// values, e.g. `updatemytsdata`).
+				b'\x07' => self.0.extend_from_slice(b"\\a"),
+				b'\x08' => self.0.extend_from_slice(b"\\b"),
 				b'\x0b' => self.0.extend_from_slice(b"\\v"),
 				b'\x0c' => self.0.extend_from_slice(b"\\f"),
 				b'\\' => self.0.extend_from_slice(b"\\\\"),

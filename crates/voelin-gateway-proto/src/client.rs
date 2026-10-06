@@ -20,10 +20,14 @@
 //! ```
 
 use std::collections::HashMap;
+use std::fmt;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
+use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::{self, Message};
 use tsproto_types::crypto::EccKeyPrivP256;
@@ -197,14 +201,162 @@ pub async fn connect(
 	url: &str,
 	login: Login,
 ) -> Result<(GatewayClient, mpsc::UnboundedReceiver<Push>), ClientError> {
+	connect_watched(url, login, &Progress::default()).await
+}
+
+/// [`connect`], telling `progress` each step as it is reached, so a
+/// timeout around it can say which step hung, and how long each took.
+pub async fn connect_watched(
+	url: &str,
+	login: Login,
+	progress: &Progress,
+) -> Result<(GatewayClient, mpsc::UnboundedReceiver<Push>), ClientError> {
 	use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+	use tokio_tungstenite::tungstenite::error::UrlError;
 	let mut request = url.into_client_request()?;
 	request.headers_mut().insert(
 		"Sec-WebSocket-Protocol",
 		tungstenite::http::HeaderValue::from_static(crate::SUBPROTOCOL),
 	);
-	let (ws, _) = tokio_tungstenite::connect_async(request).await?;
-	GatewayClient::start(ws, login).await
+	// As tokio-tungstenite's connect_async, a step at a time.
+	let uri = request.uri();
+	let host = uri.host().ok_or(tungstenite::Error::Url(UrlError::NoHostName))?;
+	let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+	let port = uri
+		.port_u16()
+		.or_else(|| match uri.scheme_str() {
+			Some("wss") => Some(443),
+			Some("ws") => Some(80),
+			_ => None,
+		})
+		.ok_or(tungstenite::Error::Url(UrlError::UnsupportedUrlScheme))?;
+	let tcp = open(host, port, progress).await?;
+	progress.enter(Stage::WebSocket);
+	let (ws, _) = tokio_tungstenite::client_async_tls_with_config(request, tcp, None, None).await?;
+	GatewayClient::login(ws, login, progress).await
+}
+
+/// The TCP connection to `host`: each of its addresses in turn.
+async fn open(host: &str, port: u16, progress: &Progress) -> Result<TcpStream, ClientError> {
+	let io = |e| ClientError::WebSocket(tungstenite::Error::Io(e));
+	progress.enter(Stage::Dns);
+	let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await.map_err(io)?.collect();
+	progress.enter(Stage::Tcp);
+	let mut error = None;
+	for addr in addrs {
+		progress.peer(addr);
+		match TcpStream::connect(addr).await {
+			Ok(tcp) => {
+				// Small frames, each answered: no waiting to fill packets.
+				let _ = tcp.set_nodelay(true);
+				return Ok(tcp);
+			}
+			Err(e) => error = Some(e),
+		}
+	}
+	Err(io(error.unwrap_or_else(|| {
+		std::io::Error::new(std::io::ErrorKind::NotFound, format!("no address for {host}"))
+	})))
+}
+
+/// A step of logging in to a gateway ([`connect_watched`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Stage {
+	/// Looking up the host's addresses.
+	#[default]
+	Dns,
+	/// The TCP connection.
+	Tcp,
+	/// TLS (`wss://`) and the WebSocket upgrade.
+	WebSocket,
+	/// Waiting for the gateway's `hello`.
+	Hello,
+	/// Waiting for the answer to the login.
+	Auth,
+	/// Logged in.
+	Done,
+}
+
+impl Stage {
+	pub fn name(self) -> &'static str {
+		match self {
+			Stage::Dns => "dns",
+			Stage::Tcp => "tcp",
+			Stage::WebSocket => "websocket",
+			Stage::Hello => "hello",
+			Stage::Auth => "auth",
+			Stage::Done => "done",
+		}
+	}
+}
+
+impl fmt::Display for Stage {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.write_str(self.name())
+	}
+}
+
+/// How far a login ([`connect_watched`]) got and how long each step took;
+/// clones share it. Shown as e.g. `dns 2 ms, tcp 31 ms, websocket 64 ms,
+/// hello 1 ms, auth 134 ms`, a step still under way as `hello for 19900 ms`.
+#[derive(Clone, Debug, Default)]
+pub struct Progress(Arc<Mutex<Steps>>);
+
+#[derive(Debug, Default)]
+struct Steps {
+	/// The step under way, since when.
+	stage: Stage,
+	since: Option<Instant>,
+	/// The steps done, with how long they took.
+	done: Vec<(Stage, Duration)>,
+	/// The address connected to (or being tried).
+	peer: Option<SocketAddr>,
+}
+
+impl Progress {
+	/// The step under way (the one that hung, after a timeout), or
+	/// [`Stage::Done`].
+	pub fn stage(&self) -> Stage {
+		self.0.lock().unwrap().stage
+	}
+
+	/// The gateway's address, once the TCP connection is being made.
+	pub fn peer_addr(&self) -> Option<SocketAddr> {
+		self.0.lock().unwrap().peer
+	}
+
+	fn enter(&self, stage: Stage) {
+		let mut steps = self.0.lock().unwrap();
+		let now = Instant::now();
+		if let Some(since) = steps.since {
+			let step = steps.stage;
+			steps.done.push((step, now - since));
+		}
+		steps.stage = stage;
+		steps.since = (stage != Stage::Done).then_some(now);
+	}
+
+	fn peer(&self, addr: SocketAddr) {
+		self.0.lock().unwrap().peer = Some(addr);
+	}
+}
+
+impl fmt::Display for Progress {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		let steps = self.0.lock().unwrap();
+		let mut parts: Vec<String> = steps
+			.done
+			.iter()
+			.map(|(stage, took)| format!("{stage} {} ms", took.as_millis()))
+			.collect();
+		if let Some(since) = steps.since {
+			parts.push(format!("{} for {} ms", steps.stage, since.elapsed().as_millis()));
+		}
+		if parts.is_empty() {
+			return f.write_str("not started");
+		}
+		f.write_str(&parts.join(", "))
+	}
 }
 
 fn now_secs() -> i64 {
@@ -241,7 +393,7 @@ impl GatewayClient {
 	/// Log in over an open WebSocket (subprotocol [`crate::SUBPROTOCOL`]) and
 	/// start the connection task.
 	pub async fn start<S>(
-		mut ws: S,
+		ws: S,
 		login: Login,
 	) -> Result<(Self, mpsc::UnboundedReceiver<Push>), ClientError>
 	where
@@ -251,12 +403,29 @@ impl GatewayClient {
 			+ Send
 			+ 'static,
 	{
+		Self::login(ws, login, &Progress::default()).await
+	}
+
+	async fn login<S>(
+		mut ws: S,
+		login: Login,
+		progress: &Progress,
+	) -> Result<(Self, mpsc::UnboundedReceiver<Push>), ClientError>
+	where
+		S: Stream<Item = Result<Message, tungstenite::Error>>
+			+ Sink<Message, Error = tungstenite::Error>
+			+ Unpin
+			+ Send
+			+ 'static,
+	{
+		progress.enter(Stage::Hello);
 		let (gateway_id, server_uid, server_name, nonce) = match recv(&mut ws).await?.msg {
 			ServerMsg::Hello { gateway_id, server_uid, server_name, nonce, .. } => {
 				(gateway_id, server_uid, server_name, nonce)
 			}
 			other => return Err(ClientError::unexpected(other)),
 		};
+		progress.enter(Stage::Auth);
 		let msg = match login {
 			Login::Identity { key, key_offset } => {
 				let ts = now_secs();
@@ -280,6 +449,7 @@ impl GatewayClient {
 			}
 			other => return Err(ClientError::unexpected(other)),
 		};
+		progress.enter(Stage::Done);
 		let info = Arc::new(SessionInfo {
 			gateway_id,
 			server_uid,
@@ -731,4 +901,105 @@ async fn run<S>(
 		}
 	};
 	let _ = pushes.send(Push::Disconnected(reason));
+}
+
+#[cfg(test)]
+mod tests {
+	use tokio::net::TcpListener;
+	use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+	use super::*;
+
+	/// Wait (without a clock: tokio's `time` is not enabled here) until the
+	/// login in progress reaches `stage`.
+	async fn reaches(progress: &Progress, stage: Stage) {
+		for _ in 0..100_000 {
+			if progress.stage() == stage {
+				return;
+			}
+			tokio::task::yield_now().await;
+		}
+		panic!("at {} instead of {stage}", progress.stage());
+	}
+
+	#[tokio::test]
+	async fn a_closed_port_fails_at_the_tcp_step() {
+		let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+		let progress = Progress::default();
+		assert_eq!(progress.to_string(), "not started");
+		let login = Login::Token("t".into());
+		let result = connect_watched(&format!("ws://127.0.0.1:{port}/v1"), login, &progress).await;
+		assert!(matches!(result, Err(ClientError::WebSocket(_))));
+		assert_eq!(progress.stage(), Stage::Tcp);
+		assert_eq!(progress.peer_addr(), Some(([127, 0, 0, 1], port).into()));
+		assert!(progress.to_string().starts_with("dns "), "{progress}");
+	}
+
+	/// A gateway that takes each step only when told: the login waits at
+	/// each, and tells which.
+	#[tokio::test]
+	async fn each_step_is_told_until_logged_in() {
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let url = format!("ws://{}/v1", listener.local_addr().unwrap());
+		let (go, mut steps) = mpsc::unbounded_channel::<()>();
+		let server = tokio::spawn(async move {
+			let (tcp, _) = listener.accept().await.unwrap();
+			steps.recv().await;
+			#[allow(clippy::result_large_err)] // tungstenite's callback type
+			let callback = |_: &Request, mut response: Response| {
+				response
+					.headers_mut()
+					.insert("Sec-WebSocket-Protocol", crate::SUBPROTOCOL.parse().unwrap());
+				Ok(response)
+			};
+			let mut ws = tokio_tungstenite::accept_hdr_async(tcp, callback).await.unwrap();
+			steps.recv().await;
+			let hello = ServerMsg::Hello {
+				gateway_id: "gw".into(),
+				server_uid: "server".into(),
+				server_name: "Server".into(),
+				nonce: "n".into(),
+				capabilities: Vec::new(),
+			};
+			let text = serde_json::to_string(&Envelope::new(hello)).unwrap();
+			ws.send(Message::Text(text.into())).await.unwrap();
+			let Some(Ok(Message::Text(auth))) = ws.next().await else { panic!("no login") };
+			let auth: Envelope<ClientMsg> = serde_json::from_str(auth.as_str()).unwrap();
+			assert!(matches!(auth.msg, ClientMsg::Resume { .. }));
+			steps.recv().await;
+			let ok = ServerMsg::AuthOk {
+				uid: "me".into(),
+				token: "t".into(),
+				token_expires: 0,
+				capabilities: Vec::new(),
+			};
+			let text = serde_json::to_string(&Envelope::with_id(auth.id.unwrap(), ok)).unwrap();
+			ws.send(Message::Text(text.into())).await.unwrap();
+			// Open until the client is done.
+			while let Some(Ok(_)) = ws.next().await {}
+		});
+		let progress = Progress::default();
+		let login = {
+			let progress = progress.clone();
+			tokio::spawn(async move {
+				connect_watched(&url, Login::Token("t".into()), &progress).await.map(|(c, _)| c)
+			})
+		};
+		reaches(&progress, Stage::WebSocket).await;
+		go.send(()).unwrap();
+		reaches(&progress, Stage::Hello).await;
+		go.send(()).unwrap();
+		reaches(&progress, Stage::Auth).await;
+		assert!(progress.to_string().contains(", auth for "), "{progress}");
+		go.send(()).unwrap();
+		let client = login.await.unwrap().expect("logged in");
+		assert_eq!(client.uid(), "me");
+		assert_eq!(progress.stage(), Stage::Done);
+		let shown = progress.to_string();
+		let names: Vec<&str> =
+			shown.split(", ").map(|step| step.split(' ').next().unwrap()).collect();
+		assert_eq!(names, ["dns", "tcp", "websocket", "hello", "auth"], "{shown}");
+		drop(client);
+		server.await.unwrap();
+	}
 }

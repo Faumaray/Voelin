@@ -6,12 +6,16 @@
 use std::fmt;
 
 use base64::prelude::*;
+use curve25519_dalek::edwards::{CompressedEdwardsY, EdwardsPoint};
 use curve25519_dalek::{constants::ED25519_BASEPOINT_TABLE, scalar::Scalar};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use thiserror::Error;
 use tsproto_packets::packets::OutCommand;
+use tsproto_types::crypto::EccKeyPubEd25519;
 use zeroize::Zeroize;
+
+use crate::license::{self, LicenseBlockType, Licenses};
 
 /// An account identity; distinct from the account UUID and server identity.
 #[derive(Clone, Serialize)]
@@ -94,6 +98,13 @@ impl Identity {
 
 	pub fn id(&self) -> String { BASE64_STANDARD.encode(&self.myts_id) }
 
+	/// The myTS ID's 33 bytes: what myTeamSpeak signs the account's avatar,
+	/// badges and identifier token for.
+	pub fn id_bytes(&self) -> &[u8] { &self.myts_id }
+
+	/// The certificate of the myTS ID's signature (`pubSignCert`): public.
+	pub fn public_signature_certificate(&self) -> &[u8] { &self.public_signature[64..] }
+
 	/// Sign this connection's challenge with the original raw private scalar.
 	/// This is not Ed25519's seed expansion: the account already stores a scalar.
 	pub fn proof(&self, shared_iv: &[u8; 64]) -> Proof {
@@ -129,6 +140,91 @@ impl Identity {
 			public_signature_certificate: BASE64_STANDARD.encode(&self.public_signature[64..]),
 		}
 	}
+}
+
+/// A myTeamSpeak certificate: a TeamSpeak license chain whose last block's
+/// key signs what myTeamSpeak hands out for an account (its avatar, badges
+/// and identifier token). Checked as a TeamSpeak 6 server and the official
+/// client check it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Certificate {
+	block_type: Option<LicenseBlockType>,
+	/// Unix seconds.
+	not_valid_before: i64,
+	not_valid_after: i64,
+	/// The leaf's key, derived along the chain from the root.
+	key: [u8; 32],
+}
+
+#[derive(Debug, Error)]
+pub enum CertificateError {
+	#[error("myTeamSpeak certificate must start with version 1")]
+	Version,
+	#[error("myTeamSpeak certificate holds no key")]
+	Empty,
+	#[error("myTeamSpeak certificate does not parse: {0}")]
+	License(#[from] license::Error),
+}
+
+impl Certificate {
+	/// Parse a certificate whose chain starts at `root` (the TeamSpeak root
+	/// key, [`crate::ROOT_KEY`]). Nested validity windows are checked here,
+	/// the leaf's against a time by [`Self::valid_at`].
+	pub fn parse(data: &[u8], root: &[u8; 32]) -> Result<Self, CertificateError> {
+		if data.first() != Some(&1) {
+			return Err(CertificateError::Version);
+		}
+		let licenses = Licenses::parse_ignore_expired(data.to_vec())?;
+		let leaf = licenses.blocks.last().ok_or(CertificateError::Empty)?;
+		let leaf_data = &data[data.len() - leaf.len..];
+		let key = licenses.derive_public_key(EccKeyPubEd25519::from_bytes(*root))?;
+		Ok(Self {
+			block_type: leaf.get_type(leaf_data).ok(),
+			not_valid_before: leaf.get_not_valid_before(leaf_data)?.unix_timestamp(),
+			not_valid_after: leaf.get_not_valid_after(leaf_data)?.unix_timestamp(),
+			key: key.compress().to_bytes(),
+		})
+	}
+
+	/// Whether the leaf is a key that signs for myTS IDs (`MYTSID_SIGN`):
+	/// a TeamSpeak 6 server takes no other for an avatar or badges.
+	pub fn signs_myts_data(&self) -> bool { self.block_type == Some(LicenseBlockType::MytsIdSign) }
+
+	/// Whether the leaf is valid at `unix` seconds.
+	pub fn valid_at(&self, unix: i64) -> bool {
+		self.not_valid_before <= unix && unix < self.not_valid_after
+	}
+
+	/// Until when the leaf is valid, Unix seconds.
+	pub fn not_valid_after(&self) -> i64 { self.not_valid_after }
+
+	/// Whether the leaf's key signed `message` (Ed25519, as TeamSpeak checks
+	/// it: SHA-512 over R, the key and the message, without the cofactor;
+	/// a signature whose S is not reduced is refused).
+	pub fn verifies(&self, message: &[u8], signature: &[u8]) -> bool {
+		verify_ed25519(&self.key, message, signature)
+	}
+}
+
+fn verify_ed25519(key: &[u8; 32], message: &[u8], signature: &[u8]) -> bool {
+	if signature.len() != 64 {
+		return false;
+	}
+	let Some(public) = CompressedEdwardsY(*key).decompress() else {
+		return false;
+	};
+	let mut s = [0; 32];
+	s.copy_from_slice(&signature[32..]);
+	let Some(s) = Option::<Scalar>::from(Scalar::from_canonical_bytes(s)) else {
+		return false;
+	};
+	let mut hash = Sha512::new();
+	hash.update(&signature[..32]);
+	hash.update(key);
+	hash.update(message);
+	let k = Scalar::from_bytes_mod_order_wide(&hash.finalize().into());
+	let r = EdwardsPoint::vartime_double_scalar_mul_basepoint(&k, &-public, &s);
+	r.compress().as_bytes() == &signature[..32]
 }
 
 /// Public, connection-bound authentication values. Never contains private keys.
@@ -243,5 +339,137 @@ mod tests {
 			"pubSignCert"
 		]);
 		assert!(!wire.contains("private"));
+	}
+
+	/// A chain from a synthetic root (secret `root`): an intermediate block
+	/// when `outer` is set, then a leaf of `kind` with the key `leaf`·B, valid
+	/// from `from` to `to` (Unix seconds). Also the leaf's derived secret.
+	fn chain(
+		root: Scalar, outer: Option<(i64, i64)>, leaf: Scalar, kind: u8, from: i64, to: i64,
+	) -> (Vec<u8>, Scalar) {
+		fn block(key: &Scalar, kind: u8, from: i64, to: i64, extra: &[u8]) -> (Vec<u8>, Scalar) {
+			let mut block = vec![0];
+			block.extend_from_slice((ED25519_BASEPOINT_TABLE * key).compress().as_bytes());
+			block.push(kind);
+			for time in [from, to] {
+				block.extend_from_slice(&((time - license::TIMESTAMP_OFFSET) as u32).to_be_bytes());
+			}
+			block.extend_from_slice(extra);
+			let mut hash: [u8; 64] = Sha512::digest(&block[1..]).into();
+			hash[0] &= 248;
+			hash[31] &= 63;
+			hash[31] |= 64;
+			let mut low = [0; 32];
+			low.copy_from_slice(&hash[..32]);
+			(block, Scalar::from_bytes_mod_order(low))
+		}
+		let mut data = vec![1];
+		let mut secret = root;
+		if let Some((from, to)) = outer {
+			let key = Scalar::from_bytes_mod_order([3; 32]);
+			let (outer, hash) = block(&key, 0, from, to, b"\0\0\0\0Synthetic\0");
+			data.extend_from_slice(&outer);
+			secret += key * hash;
+		}
+		let (leaf_block, hash) = block(&leaf, kind, from, to, &[]);
+		data.extend_from_slice(&leaf_block);
+		(data, secret + leaf * hash)
+	}
+
+	fn sign(secret: &Scalar, message: &[u8]) -> Vec<u8> {
+		let public = (ED25519_BASEPOINT_TABLE * secret).compress().to_bytes();
+		let nonce = Scalar::from_bytes_mod_order_wide(
+			&Sha512::new().chain_update(secret.as_bytes()).chain_update(message).finalize().into(),
+		);
+		let r = (ED25519_BASEPOINT_TABLE * &nonce).compress().to_bytes();
+		let k = Scalar::from_bytes_mod_order_wide(
+			&Sha512::new().chain_update(r).chain_update(public).chain_update(message).finalize().into(),
+		);
+		let mut signature = r.to_vec();
+		signature.extend_from_slice((k * secret + nonce).as_bytes());
+		signature
+	}
+
+	const NOW: i64 = 1_790_000_000;
+
+	#[test]
+	fn certificate_key_signs_along_the_chain() {
+		let root = Scalar::from_bytes_mod_order([5; 32]);
+		let root_key = (ED25519_BASEPOINT_TABLE * &root).compress().to_bytes();
+		let leaf = Scalar::from_bytes_mod_order([7; 32]);
+		for outer in [None, Some((NOW - 1000, NOW + 1000))] {
+			let (data, secret) = chain(root, outer, leaf, 6, NOW - 10, NOW + 10);
+			let certificate = Certificate::parse(&data, &root_key).unwrap();
+			assert!(certificate.signs_myts_data());
+			assert!(certificate.valid_at(NOW - 10) && certificate.valid_at(NOW + 9));
+			assert!(!certificate.valid_at(NOW - 11) && !certificate.valid_at(NOW + 10));
+			assert_eq!(certificate.not_valid_after(), NOW + 10);
+			let signature = sign(&secret, b"message");
+			assert!(certificate.verifies(b"message", &signature));
+			assert!(!certificate.verifies(b"messagE", &signature));
+			assert!(!certificate.verifies(b"message", &signature[..63]));
+			let mut flipped = signature.clone();
+			flipped[5] ^= 1;
+			assert!(!certificate.verifies(b"message", &flipped));
+			// The same S plus the group order: refused, though it is the same
+			// point (S must be reduced).
+			let mut s = [0u8; 32];
+			s.copy_from_slice(&signature[32..]);
+			let order: [u8; 32] = [
+				0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9,
+				0xde, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+			];
+			let mut carry = 0u16;
+			for (s, l) in s.iter_mut().zip(order) {
+				let sum = u16::from(*s) + u16::from(l) + carry;
+				*s = sum as u8;
+				carry = sum >> 8;
+			}
+			let mut unreduced = signature.clone();
+			unreduced[32..].copy_from_slice(&s);
+			assert!(!certificate.verifies(b"message", &unreduced));
+			// Another root: another key.
+			let other = Certificate::parse(&data, &crate::ROOT_KEY).unwrap();
+			assert!(!other.verifies(b"message", &signature));
+		}
+	}
+
+	#[test]
+	fn ed25519_matches_rfc_8032() {
+		// RFC 8032, 7.1, tests 1 and 2.
+		let key = hex::<32>("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+		let signature = hex::<64>(
+			"e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+		);
+		assert!(verify_ed25519(&key, b"", &signature));
+		assert!(!verify_ed25519(&key, b"\x72", &signature));
+		let key = hex::<32>("3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c");
+		let signature = hex::<64>(
+			"92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+		);
+		assert!(verify_ed25519(&key, b"\x72", &signature));
+		assert!(!verify_ed25519(&key, b"\x73", &signature));
+	}
+
+	#[test]
+	fn certificate_kinds_windows_and_format() {
+		let root = Scalar::from_bytes_mod_order([5; 32]);
+		let root_key = (ED25519_BASEPOINT_TABLE * &root).compress().to_bytes();
+		let leaf = Scalar::from_bytes_mod_order([7; 32]);
+		for kind in [4, 5, 7, 32] {
+			let (data, _) = chain(root, None, leaf, kind, NOW - 10, NOW + 10);
+			assert!(!Certificate::parse(&data, &root_key).unwrap().signs_myts_data(), "{}", kind);
+		}
+		// A leaf valid longer than the block above it.
+		let (data, _) = chain(root, Some((NOW - 5, NOW + 5)), leaf, 6, NOW - 10, NOW + 10);
+		assert!(Certificate::parse(&data, &root_key).is_err());
+		let (mut data, _) = chain(root, None, leaf, 6, NOW - 10, NOW + 10);
+		data[0] = 0;
+		assert!(matches!(Certificate::parse(&data, &root_key), Err(CertificateError::Version)));
+		assert!(matches!(Certificate::parse(&[1], &root_key), Err(CertificateError::Empty)));
+		assert!(Certificate::parse(&[], &root_key).is_err());
+		data[0] = 1;
+		data[34] = 9;
+		assert!(Certificate::parse(&data, &root_key).is_err());
 	}
 }

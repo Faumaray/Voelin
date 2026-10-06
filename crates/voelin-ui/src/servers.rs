@@ -1,8 +1,10 @@
 //! Servers: bookmarks, connecting and observing, the rail, the sidebar's
 //! server card and the channel tree.
 
+use std::time::Instant;
+
 use slint::{ComponentHandle, SharedString};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use voelin_core::identity::LaunchImport;
 use voelin_core::{Command, ObserveState, Source, VoiceOptions, VoiceState};
 use voelin_store::{Bookmark, QueryTransport};
@@ -49,6 +51,7 @@ fn bookmark_from_form(
 	if old.is_some_and(|old| old.address != bookmark.address) {
 		bookmark.cached_server_icon = None;
 		bookmark.gateway_url = None;
+		bookmark.gateway_urls.clear();
 		bookmark.query = None;
 	}
 	bookmark.name = match form.name.trim() {
@@ -78,6 +81,21 @@ fn apply_server_icon(
 	let before = bookmark.cached_server_icon.clone();
 	bookmark.remember_server_icon(icon);
 	bookmark.cached_server_icon != before
+}
+
+/// Whether observing goes on as it is when discovery changed the gateways
+/// kept from `previous` to `found`: the same ones (an older version kept
+/// only the one in use), or logged in through `in_use`, still published.
+/// What was found is kept for the next start, without a new login now.
+fn observing_stays(
+	previous: &[String],
+	found: &[String],
+	in_use: Option<&str>,
+	observe: ObserveState,
+) -> bool {
+	found == previous
+		|| (observe == ObserveState::Observing
+			&& in_use.is_some_and(|url| found.iter().any(|u| u == url)))
 }
 
 impl App {
@@ -135,10 +153,10 @@ impl App {
 	}
 
 	/// Look up the gateway of a server ([`voelin_core::discover`]), once a
-	/// run: one found is kept as if typed, and takes the place of a stored
-	/// one that is no longer what the server publishes (a gateway that
-	/// moved, or one typed into an older version, which showed the field).
-	/// Nothing found keeps what is stored.
+	/// run: every one the server publishes is kept, best first, and tried in
+	/// turn; they take the place of a stored one that is no longer published
+	/// (a gateway that moved, or one typed into an older version, which
+	/// showed the field). Nothing found keeps what is stored.
 	pub(crate) fn discover_gateway(&mut self, id: i64) {
 		if self.demo_ui || !self.gateways_looked_up.insert(id) {
 			return;
@@ -146,31 +164,47 @@ impl App {
 		let Some(b) = self.bookmark(id) else { return };
 		let address = b.address.clone();
 		self.engine.runtime().spawn(async move {
-			if let Some(url) = voelin_core::discover::gateway(&address).await {
-				later(move |app| app.gateway_found(id, &address, url));
+			let started = Instant::now();
+			let urls = voelin_core::discover::gateways(&address).await;
+			let elapsed_ms = started.elapsed().as_millis() as u64;
+			if urls.is_empty() {
+				info!(server = %address, elapsed_ms, "no gateway published");
+			} else {
+				later(move |app| app.gateway_found(id, &address, urls, elapsed_ms));
 			}
 		});
 	}
 
-	/// A gateway was found for the server at `address`; it is kept unless
-	/// the server changed meanwhile, and the server is observed through it
-	/// if it is the one shown. Users never hear of it (logged only).
-	fn gateway_found(&mut self, id: i64, address: &str, url: String) {
+	/// Gateways were found for the server at `address` (best first); they
+	/// are kept unless the server changed meanwhile, and the server is
+	/// observed through them if it is the one shown. Users never hear of
+	/// them (logged only).
+	fn gateway_found(&mut self, id: i64, address: &str, urls: Vec<String>, elapsed_ms: u64) {
 		let Some(b) = self.bookmarks.iter_mut().find(|b| b.id == id && b.address == address) else {
 			return;
 		};
-		if b.gateway_url.as_deref() == Some(url.as_str()) {
+		let previous = b.gateways();
+		let in_use = b.gateway_url.clone();
+		if !b.set_gateways(urls) {
+			debug!(server = %b.address, urls = ?b.gateway_urls, elapsed_ms, "gateway found, as kept");
 			return;
 		}
-		let previous = b.gateway_url.replace(url.clone());
 		if let Err(e) = self.store.update_bookmark(b) {
 			warn!(%e, "could not keep the gateway found");
 			return;
 		}
-		info!(server = %b.address, %url, ?previous, "gateway found");
+		let observe = self.sessions.get(&id).map(|v| v.state.observe).unwrap_or_default();
+		let kept = observing_stays(&previous, &b.gateways(), in_use.as_deref(), observe);
+		info!(server = %b.address, urls = ?b.gateway_urls, ?previous, kept, elapsed_ms, "gateway found");
 		self.refresh_toolbar();
-		// Observed through the old one: through this one now.
-		if previous.is_some() {
+		if kept {
+			if self.current == Some(id) && observe == ObserveState::Off {
+				self.observe(id);
+			}
+			return;
+		}
+		// Observed through the old ones: through these now.
+		if !previous.is_empty() {
 			self.engine.send(Command::StopObserving { session: id as u64 });
 			if let Some(view) = self.sessions.get_mut(&id) {
 				view.state.observe = ObserveState::Off;
@@ -179,6 +213,19 @@ impl App {
 		if self.current == Some(id) {
 			self.observe(id);
 		}
+	}
+
+	/// The gateway logged in at `url`: it is the one in use from now on.
+	pub(crate) fn gateway_in_use(&mut self, id: i64, url: &str) {
+		let Some(b) = self.bookmarks.iter_mut().find(|b| b.id == id) else { return };
+		if !b.gateway_in_use(url) {
+			return;
+		}
+		if let Err(e) = self.store.update_bookmark(b) {
+			warn!(%e, "could not keep the gateway in use");
+			return;
+		}
+		info!(server = %b.address, %url, "gateway in use");
 	}
 
 	/// The server told its name: a server still named by its address takes
@@ -201,22 +248,38 @@ impl App {
 	/// Observe the server invisibly, unless it is already: through its
 	/// gateway, else its own query login. Without either the gateway is
 	/// looked up first, and observing starts when it is found
-	/// (`gateway_found`).
+	/// (`gateway_found`). Asked while still connecting, the engine tries
+	/// the gateway again sooner.
 	pub(crate) fn observe(&mut self, id: i64) {
 		let Some(b) = self.bookmark(id).cloned() else { return };
 		if self.demo_ui {
 			return;
 		}
 		let session = b.id as u64;
-		let observing =
-			self.sessions.get(&b.id).is_some_and(|v| v.state.observe != ObserveState::Off);
-		if observing {
-			return;
+		let state = self.sessions.get(&b.id).map(|v| v.state.observe).unwrap_or_default();
+		let urls = b.gateways();
+		match state {
+			ObserveState::Observing => return,
+			// The engine decides: the same gateways are not started over,
+			// at most tried again now.
+			ObserveState::Connecting => {
+				if !urls.is_empty() {
+					debug!(server = %b.address, "still connecting to the gateway: try now");
+					self.engine.send(Command::ObserveGateway {
+						session,
+						urls,
+						identity: Box::new(self.identity_for(Some(b.id))),
+					});
+				}
+				return;
+			}
+			ObserveState::Off => {}
 		}
-		if let Some(url) = &b.gateway_url {
+		if !urls.is_empty() {
+			info!(server = %b.address, ?urls, "observing through the gateway");
 			self.engine.send(Command::ObserveGateway {
 				session,
-				url: url.clone(),
+				urls,
 				identity: Box::new(self.identity_for(Some(b.id))),
 			});
 			// Still the one the server publishes?
@@ -608,6 +671,7 @@ mod tests {
 			identity: Some(2),
 			default_channel: Some("Lobby/Sub".into()),
 			gateway_url: Some("ws://gw.example.test:7788/v1".into()),
+			gateway_urls: vec!["ws://gw.example.test:7788/v1".into()],
 			query: Some(QueryConfig { server_port: Some(9988), ..Default::default() }),
 			client_version: Some("linux".into()),
 			cached_server_icon: Some(voelin_store::CachedServerIcon {
@@ -636,6 +700,7 @@ mod tests {
 		assert_eq!((b.identity, b.default_channel), (Some(2), Some("Lobby/Sub".into())));
 		assert_eq!(b.client_version.as_deref(), Some("linux"));
 		assert_eq!((b.gateway_url, b.query), (None, None));
+		assert!(b.gateway_urls.is_empty());
 	}
 
 	#[test]
@@ -665,5 +730,24 @@ mod tests {
 			imported_status(&report(&[], Some("Main"), true)).unwrap(),
 			"You now use your TeamSpeak identity \u{201c}Main\u{201d}; your previous one is kept"
 		);
+	}
+
+	#[test]
+	fn a_gateway_found_again_is_not_logged_in_again() {
+		let (tls, plain) = ("wss://gw.example.test/v1", "ws://ts.example.test:7788/v1");
+		let urls = |list: &[&str]| list.iter().map(|u| u.to_string()).collect::<Vec<_>>();
+		let stays = |previous: &[&str], found: &[&str], observe| {
+			observing_stays(&urls(previous), &urls(found), Some(plain), observe)
+		};
+		// The same ones (an older version kept only the one in use).
+		assert!(stays(&[plain], &[plain], ObserveState::Connecting));
+		assert!(stays(&[plain], &[plain], ObserveState::Observing));
+		// Logged in through one still published.
+		assert!(stays(&[plain], &[tls, plain], ObserveState::Observing));
+		// Not logged in yet: through the new ones.
+		assert!(!stays(&[plain], &[tls, plain], ObserveState::Connecting));
+		// The one in use is no longer published.
+		assert!(!stays(&[plain], &[tls], ObserveState::Observing));
+		assert!(!observing_stays(&[], &urls(&[tls]), None, ObserveState::Off));
 	}
 }

@@ -980,6 +980,9 @@ impl App {
 				self.history_batch(session as i64, &target, messages, source, complete);
 			}
 			Event::Gateway { session, update } => {
+				if let voelin_core::gateway::GatewayUpdate::Connected { url, .. } = &update {
+					self.gateway_in_use(session as i64, url);
+				}
 				self.gateway_extra(session as i64, &update);
 				self.gateway_update(session as i64, update);
 			}
@@ -1001,8 +1004,8 @@ impl App {
 			// Pictures can arrive after the rows were built: draw them again.
 			Event::AvatarReady { session, client_uid, path, .. } => {
 				let view = self.sessions.entry(session as i64).or_default();
-				// A file that arrives again is decoded again.
-				crate::images::forget(&path);
+				// A file that arrives again is decoded again if it changed.
+				crate::images::reloaded(&path);
 				view.avatars.insert(client_uid, path);
 				if self.current == Some(session as i64) {
 					self.refresh_tree();
@@ -1014,7 +1017,7 @@ impl App {
 			}
 			Event::IconReady { session, icon, path } => {
 				let view = self.sessions.entry(session as i64).or_default();
-				crate::images::forget(&path);
+				crate::images::reloaded(&path);
 				view.icons.insert(icon, path);
 				self.refresh_servers();
 				if self.current == Some(session as i64) {
@@ -1025,7 +1028,7 @@ impl App {
 			Event::PictureReady { session, url, path } => {
 				let view = self.sessions.entry(session as i64).or_default();
 				// The host banner reloads into the same file.
-				crate::images::forget(&path);
+				crate::images::reloaded(&path);
 				view.pictures.insert(url, path);
 				if self.current == Some(session as i64) {
 					self.refresh_toolbar();

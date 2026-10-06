@@ -76,12 +76,9 @@ impl App {
 		}
 		self.social.dm.bookmark_of.clear();
 		for b in &self.bookmarks {
-			for alias in [
-				Some(format!("voice:{}", b.address)),
-				b.gateway_url.as_ref().map(|u| format!("gateway:{u}")),
-			]
-			.into_iter()
-			.flatten()
+			let gateways = b.gateways().into_iter().chain(b.gateway_url.clone());
+			for alias in std::iter::once(format!("voice:{}", b.address))
+				.chain(gateways.map(|url| format!("gateway:{url}")))
 			{
 				if let Ok(Some(uid)) = self.store.server_alias(&alias) {
 					self.social.dm.bookmark_of.insert(uid, b.id);

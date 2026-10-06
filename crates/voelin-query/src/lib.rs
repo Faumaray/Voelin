@@ -17,13 +17,14 @@ mod codec;
 mod http;
 mod line;
 mod ssh;
+mod tcp;
 
-pub use client::{Connect, QueryClient, Transport};
+pub use client::{Connect, QueryClient, Transport, attempt_worth_a_warning};
 pub use codec::{
 	Command, Line, Notification, QueryError, Row, escape, parse_line, parse_rows, unescape,
 };
 pub use http::HttpClient;
-pub use line::{LineClient, LineOptions};
+pub use line::{FloodGuard, LineClient, LineOptions};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

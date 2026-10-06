@@ -408,6 +408,7 @@ fn demo_ui(app: &mut App) {
 		identity: None,
 		default_channel: None,
 		gateway_url: None,
+		gateway_urls: Vec::new(),
 		query: None,
 		client_version: None,
 		cached_server_icon: None,
@@ -539,6 +540,7 @@ fn demo_ui(app: &mut App) {
 		Event::Gateway {
 			session,
 			update: GatewayUpdate::Connected {
+				url: "wss://gw.nightfall.example/v1".into(),
 				gateway_id: "demo".into(),
 				server_uid: "demo-server".into(),
 				server_name: "Nightfall Guild".into(),
