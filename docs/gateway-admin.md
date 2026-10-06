@@ -76,9 +76,30 @@ Every login, post and settings change is written to the audit table.
    `permoverview`, `banlist`, `clientmove`, `sendtextmessage`,
    `servergroupsbyclientid` and `channelgroupclientlist`, e.g. a dedicated
    login in the Server Admin group.
-3. Put the gateway's IP into `query_ip_allowlist.txt` and set
-   `query.allowlisted = true`. Otherwise the server's flood protection
-   (10 commands / 3 s) applies and bans the gateway under load.
+3. Put the address the server sees for the gateway into the server's
+   `query_ip_allowlist.txt` and set `query.allowlisted = true`. The server's
+   flood protection counts the query commands of each address, all of
+   tsgw's connections together and the SSH login included: it refuses the
+   10th command within 3 seconds and asks to wait, and two more commands
+   during the wait get the address banned for 600 seconds. tsgw logs the
+   address when it starts ("the TeamSpeak server sees the gateway's queries
+   coming from this address"):
+   - tsgw on the server's machine: `127.0.0.1`, which the file lists by
+     default.
+   - tsgw in a Docker container with bridge networking: the container's
+     or the bridge's address (e.g. `172.17.0.2`), not `127.0.0.1`. Add
+     that address, or run the container with `--network host`.
+
+   The server reads the file again within seconds, without a restart; that
+   also lifts a 600 s ban. Do not set `allowlisted = true` without the
+   entry in the file: tsgw then sends at full speed until the server
+   refuses a command, and an older tsgw got the address banned that way.
+   Now it stops at the first refusal and logs "the server limits this
+   address although it was taken to be on its query allowlist". Without
+   the allowlist tsgw stays under the limit itself (9 commands per 3 s
+   over all its connections) and, after a refusal (other query tools on
+   the same address count too), sends nothing on any connection for at
+   least 3 s, so logins are slower when many happen at once.
 4. Each relayed channel is one more query connection. Keep
    `relay.max_channel_relays` below the server's per-IP connection limit.
    Relays count toward a channel's max clients unless their group has
@@ -105,8 +126,13 @@ changes: what is published takes the place of what was found before (a
 lookup that finds nothing keeps it). Every gateway found is kept and
 tried in turn, best first, each for up to 20 seconds; the first that logs
 in is used, and the log file names those it passed over (URL and error).
-Only when all of them fail does it wait (2, 5, 15, 30, then every 60
-seconds) and start over; users see nothing of it.
+Only when all of them fail does it wait (1, 2, 5, 10, 20, then every 30
+seconds, give or take 30 %; at once when voice connects) and start over;
+users see nothing of it. Only a refused login ends it (bad signature,
+security level too low, banned, not allowed); a gateway that cannot do the
+login yet (for example an identity the server has not seen) is tried again.
+Once connected, the client pings the gateway every 30 seconds and connects
+again after 60 seconds without an answer.
 
 **DNS records** (preferred). An SRV record names the gateway's host and
 port, the service name says whether it speaks TLS:
@@ -150,9 +176,10 @@ gateway's host (`gw.example.org`) with one upstream, tsgw's plain address
 (`<tsgw host>:7788`), "Proxy Target require TLS Connection" off,
 WebSockets on, and a certificate for the host (ACME). If the rule also
 has an uptime monitor, point it at `/health` (tsgw's `/` answers 404).
-Check from outside: `curl https://gw.example.org/health` prints `ok`;
-Zoraxy's own `404 page not found` there means no rule matched the host or
-the request went to another upstream. Then set `listen.public_url =
+Check from outside: `curl https://gw.example.org/health` prints `ok` (or
+what is missing while tsgw is not logged in to the TeamSpeak server, see
+[Logs](#logs)); Zoraxy's own `404 page not found` there means no rule
+matched the host or the request went to another upstream. Then set `listen.public_url =
 "wss://gw.example.org/v1"` in tsgw.toml, so its own answer points at the
 proxy.
 
@@ -214,10 +241,73 @@ the unit to `/etc/systemd/system/`.
 
 ```sh
 docker load -i tsgw-image.tar.gz        # or: docker build -f crates/voelin-gateway/Dockerfile -t tsgw .
-docker run -v $PWD/tsgw.toml:/etc/tsgw/tsgw.toml -e TSGW_QUERY_PASSWORD=… -p 7788:7788 tsgw
+docker run -d --name tsgw --init --restart unless-stopped \
+  -v $PWD/tsgw.toml:/etc/tsgw/tsgw.toml:ro -v tsgw-data:/var/lib/tsgw \
+  -e TSGW_QUERY_PASSWORD=… -p 7788:7788 tsgw
+docker logs -f tsgw
 ```
 
+The volume keeps the database (`/var/lib/tsgw/tsgw.db`: login tokens,
+history, settings changed at runtime) when the container is replaced.
+`--init` passes `docker stop` on to tsgw and cleans up after it;
+`--restart unless-stopped` brings it back after a crash or a reboot. With
+bridge networking (the default) see step 3 of [Setup](#setup) about the
+address the TeamSpeak server sees.
+
 **From source:** `cargo run --release -p voelin-gateway -- --config tsgw.toml`.
+
+## Logs
+
+tsgw logs to standard output: `journalctl -u tsgw -f` under systemd,
+`docker logs -f tsgw` in a container (colours only on a terminal; `NO_COLOR`
+turns them off there too). At the default level it logs:
+
+- at start: the version and settings in use (whether a query password is
+  set, never the password itself), the query login and how long it took,
+  the address the TeamSpeak server sees for the gateway (with a hint when
+  `query.allowlisted` is off), "listening" with the URL apps are given;
+- each app connection: its address, `X-Forwarded-For` and `User-Agent`,
+  then logins (unique id, nickname, signature or token, how long it took),
+  refused logins with the reason, requests slower than 1 s and the close
+  (reason, how long it was open). Every line of a connection carries its
+  number and address (`ws{id=12 peer=…}`);
+- ServerQuery: failed commands (by name), each wait the server's flood
+  protection asks for, relays opened and closed, the watcher connecting
+  and losing its connection (with the attempt and the next wait), the
+  lookup connection lost and restored.
+
+More detail with `log.level` (`TSGW_LOG_LEVEL`; without it `RUST_LOG`):
+
+| Setting | Shows |
+|---|---|
+| `TSGW_LOG_LEVEL=debug` | also every request and its time, ServerQuery connections opening and closing |
+| `TSGW_LOG_LEVEL=info,voelin_query=trace` | every query command sent and answered, with its time and the connection it went over (`lookup`, `observer`, `relay <channel>`) |
+| `TSGW_LOG_LEVEL=warn` | only problems |
+
+Libraries that log every packet (`russh`, `hyper`, `h2`, `tower`,
+`tungstenite`) stay at warnings unless the setting names them
+(`debug,russh=debug`). Under systemd put the variable into
+`/etc/tsgw/tsgw.env`, in a container pass `-e TSGW_LOG_LEVEL=…`.
+
+`log.file` (`TSGW_LOG_FILE`) writes the log to a file as well. tsgw appends
+to it, also across restarts; at 20 MB it moves to `tsgw.1.log` (older ones
+one further along, 5 files in all) and a new one starts. A relative path is
+relative to the working directory, `/var/lib/tsgw` under systemd and in the
+container (`TSGW_LOG_FILE=logs/tsgw.log` with the volume above). The systemd
+unit can also write `/var/log/tsgw`. If the file cannot be opened, tsgw
+says so and logs to standard output only.
+
+While the TeamSpeak server cannot be reached (not started yet, restarting),
+tsgw listens anyway and logs in as soon as it can, waiting 1, 2, 3, 5, 10,
+then 30 seconds between attempts (longer if the server's flood protection
+asks for it). Apps that connect meanwhile wait up to 10 seconds, then are
+told to try again. A query connection the server drops is opened again the
+same way, and relays that someone still reads or that are pinned come back.
+Opening a query connection (connecting, logging in, selecting the server)
+gives up after 10 seconds, so a server that does not answer holds up
+nothing for long. `/health` answers
+`ok` while the gateway is logged in and watching the server, otherwise 503
+and what is missing (`starting: …`, `query: down, observer: up`).
 
 ## Visibility
 
@@ -234,7 +324,8 @@ query clients sees that it came from a query session.
 
 - **Bootstrap** keys are needed before the database opens: `gateway_id`,
   `server.voice_port`, `query.*` (transport, address, login, password,
-  `allowlisted`), `listen.bind`, `listen.public_url` and `history.path`.
+  `allowlisted`), `listen.bind`, `listen.public_url`, `history.path` and
+  `log.level`, `log.file` ([Logs](#logs)).
   They come from the file, the environment or the command line and apply
   at start; changing them needs a restart.
 - Everything else (history, relays, features, permission rules, quotas,

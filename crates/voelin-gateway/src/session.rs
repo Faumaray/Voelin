@@ -1,15 +1,17 @@
 //! One WebSocket client.
 
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::ws::{Message, WebSocket};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, close_code};
 use base64::prelude::*;
 use rand::RngExt;
 use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
-use tracing::{debug, info};
+use tokio::sync::watch;
+use tracing::{Instrument, Level, debug, info, info_span, warn};
 use voelin_gateway_proto::{ClientMsg, Envelope, ErrorCode, EventInfo, ServerMsg, feature};
 use voelin_model::{ChatTarget, Presence};
 use voelin_observer::ObserverEvent;
@@ -53,13 +55,50 @@ struct Session {
 	actions: RateLimit,
 }
 
-/// Enough of an envelope to answer one that did not parse.
+/// Enough of an envelope to answer one that did not parse, and to name it
+/// in the log.
 #[derive(Deserialize)]
 struct RawEnvelope {
 	id: Option<u64>,
+	/// Any JSON value: a `type` that is no string must not cost the `id`.
+	#[serde(rename = "type")]
+	kind: Option<serde_json::Value>,
 }
 
-pub async fn run(hub: Arc<Hub>, mut socket: WebSocket) {
+/// Requests that take longer are logged.
+const SLOW: Duration = Duration::from_secs(1);
+
+/// Where a connection comes from, for the log.
+#[derive(Debug)]
+pub struct Peer {
+	/// Counts connections since the start.
+	pub id: u64,
+	/// The address the connection came from (a proxy's, behind one).
+	pub addr: Option<SocketAddr>,
+	pub forwarded_for: Option<String>,
+	pub user_agent: Option<String>,
+}
+
+impl Peer {
+	/// [`Peer::addr`] for the log.
+	pub fn address(&self) -> String {
+		self.addr.map_or_else(|| "unknown".to_string(), |a| a.to_string())
+	}
+}
+
+/// Serve one connection until it closes or `stop` turns true.
+pub async fn run(hub: Arc<Hub>, socket: WebSocket, peer: Peer, stop: watch::Receiver<bool>) {
+	let span = info_span!("ws", id = peer.id, peer = %peer.address());
+	serve(hub, socket, peer, stop).instrument(span).await;
+}
+
+async fn serve(hub: Arc<Hub>, mut socket: WebSocket, peer: Peer, mut stop: watch::Receiver<bool>) {
+	let connected = Instant::now();
+	info!(
+		forwarded_for = peer.forwarded_for.as_deref(),
+		user_agent = peer.user_agent.as_deref(),
+		"websocket connected"
+	);
 	let nonce_bytes: [u8; 24] = rand::rng().random();
 	let mut session = Session {
 		nonce: BASE64_URL_SAFE_NO_PAD.encode(nonce_bytes),
@@ -83,22 +122,29 @@ pub async fn run(hub: Arc<Hub>, mut socket: WebSocket) {
 		capabilities: hub.capabilities(),
 	};
 	if send(&mut socket, None, hello).await.is_err() {
+		info!(reason = "could not send", "websocket closed");
 		return;
 	}
 	let mut observer = hub.observer.subscribe();
 	let mut events = hub.subscribe();
 
-	'outer: loop {
+	let reason = 'outer: loop {
 		tokio::select! {
 			msg = socket.recv() => {
-				let Some(Ok(msg)) = msg else { break };
 				let text = match msg {
-					Message::Text(t) => t,
-					Message::Close(_) => break,
-					_ => continue,
+					Some(Ok(Message::Text(t))) => t,
+					Some(Ok(Message::Close(_))) => break "closed by the app".to_string(),
+					Some(Ok(_)) => continue,
+					Some(Err(e)) => break format!("connection failed: {e}"),
+					None => break "connection ended".to_string(),
 				};
 				let replies = match serde_json::from_str::<Envelope<ClientMsg>>(text.as_str()) {
-					Ok(env) => session.handle(env.msg).await.into_iter().map(|m| (env.id, m)).collect(),
+					Ok(env) => {
+						let started = Instant::now();
+						let replies = session.handle(env.msg).await;
+						log_request(text.as_str(), started.elapsed(), &replies);
+						replies.into_iter().map(|m| (env.id, m)).collect()
+					}
 					Err(e) => {
 						let id = serde_json::from_str::<RawEnvelope>(text.as_str()).ok().and_then(|r| r.id);
 						let code = if e.to_string().starts_with("unknown variant") {
@@ -111,18 +157,18 @@ pub async fn run(hub: Arc<Hub>, mut socket: WebSocket) {
 				};
 				for (id, reply) in replies {
 					if send(&mut socket, id, reply).await.is_err() {
-						break 'outer;
+						break 'outer "could not send".to_string();
 					}
 				}
 			}
 			event = observer.recv(), if session.presence.is_some() => {
 				let resync = matches!(event, Err(RecvError::Lagged(_)) | Ok(ObserverEvent::Snapshot(_)));
 				if let Err(RecvError::Closed) = event {
-					break;
+					break "the gateway stopped".to_string();
 				}
 				for msg in session.presence_update(resync) {
 					if send(&mut socket, None, msg).await.is_err() {
-						break 'outer;
+						break 'outer "could not send".to_string();
 					}
 				}
 			}
@@ -130,17 +176,57 @@ pub async fn run(hub: Arc<Hub>, mut socket: WebSocket) {
 				let event = match event {
 					Ok(event) => event,
 					Err(RecvError::Lagged(_)) => continue,
-					Err(RecvError::Closed) => break,
+					Err(RecvError::Closed) => break "the gateway stopped".to_string(),
 				};
 				for msg in session.push(&event).await {
 					if send(&mut socket, None, msg).await.is_err() {
-						break 'outer;
+						break 'outer "could not send".to_string();
 					}
 				}
 			}
+			// Turns true once, at shutdown.
+			_ = stop.changed() => {
+				// Apps connect again at once instead of finding out later.
+				let frame = CloseFrame { code: close_code::AWAY, reason: "the gateway is restarting".into() };
+				let _ = socket.send(Message::Close(Some(frame))).await;
+				break "the gateway is shutting down".to_string();
+			}
 		}
-	}
+	};
+	info!(
+		uid = session.user.as_ref().map(|u| u.uid.as_str()),
+		connected_s = connected.elapsed().as_secs(),
+		%reason,
+		open_chats = session.open_chats.len(),
+		"websocket closed"
+	);
 	session.close();
+}
+
+/// Log a request that failed on the gateway's side or took long, and every
+/// request at debug level.
+fn log_request(text: &str, elapsed: Duration, replies: &[ServerMsg]) {
+	let failure = replies.iter().find_map(|m| match m {
+		ServerMsg::Error {
+			code: code @ (ErrorCode::Unavailable | ErrorCode::Internal),
+			message,
+		} => Some((code, message.as_str())),
+		_ => None,
+	});
+	let slow = elapsed >= SLOW;
+	if !slow && failure.is_none() && !tracing::enabled!(Level::DEBUG) {
+		return;
+	}
+	let kind = serde_json::from_str::<RawEnvelope>(text).ok().and_then(|r| r.kind);
+	let request = kind.as_ref().and_then(serde_json::Value::as_str).unwrap_or("unknown");
+	let elapsed_ms = elapsed.as_millis() as u64;
+	match failure {
+		// Logged as a refused login.
+		Some(_) if matches!(request, "auth" | "resume") => {}
+		Some((code, error)) => warn!(request, ?code, error, elapsed_ms, "request failed"),
+		None if slow => warn!(request, elapsed_ms, "slow request"),
+		None => debug!(request, elapsed_ms, "request"),
+	}
 }
 
 async fn send(socket: &mut WebSocket, id: Option<u64>, msg: ServerMsg) -> Result<(), axum::Error> {
@@ -175,9 +261,21 @@ fn is_action(msg: &ClientMsg) -> bool {
 
 impl Session {
 	async fn handle(&mut self, msg: ClientMsg) -> Vec<ServerMsg> {
+		let login = match &msg {
+			ClientMsg::Auth { .. } => Some("signature"),
+			ClientMsg::Resume { .. } => Some("token"),
+			_ => None,
+		};
+		let started = Instant::now();
 		match self.handle_inner(msg).await {
 			Ok(msgs) => msgs,
-			Err(Denied(code, message)) => vec![error(code, &message)],
+			Err(Denied(code, message)) => {
+				if let Some(via) = login {
+					let elapsed_ms = started.elapsed().as_millis() as u64;
+					warn!(?code, %message, via, elapsed_ms, "login refused");
+				}
+				vec![error(code, &message)]
+			}
 		}
 	}
 
@@ -203,14 +301,15 @@ impl Session {
 		match msg {
 			ClientMsg::Ping => Ok(vec![ServerMsg::Pong]),
 			ClientMsg::Auth { omega, key_offset, ts, signature, .. } => {
+				let started = Instant::now();
 				let (user, token, token_expires) =
 					hub.authenticate(&omega, key_offset, ts, &signature, &self.nonce).await?;
-				info!(uid = %user.uid, nickname = %user.nickname, "user logged in");
-				self.logged_in(user, token, token_expires).await
+				self.logged_in(user, token, token_expires, "signature", started).await
 			}
 			ClientMsg::Resume { token, .. } => {
+				let started = Instant::now();
 				let (user, token, token_expires) = hub.resume(&token).await?;
-				self.logged_in(user, token, token_expires).await
+				self.logged_in(user, token, token_expires, "token", started).await
 			}
 			ClientMsg::SubscribePresence => {
 				self.user()?;
@@ -437,9 +536,13 @@ impl Session {
 		user: User,
 		token: String,
 		token_expires: i64,
+		via: &str,
+		started: Instant,
 	) -> Result<Vec<ServerMsg>, Denied> {
 		let capabilities = self.hub.user_capabilities(&user).await;
 		let uid = user.uid.clone();
+		let elapsed_ms = started.elapsed().as_millis() as u64;
+		info!(uid = %user.uid, nickname = %user.nickname, via, elapsed_ms, "user logged in");
 		self.user = Some(user);
 		Ok(vec![ServerMsg::AuthOk { uid, token, token_expires, capabilities }])
 	}
@@ -569,5 +672,18 @@ impl Session {
 			}
 		}
 		self.hub.session_streams_closed(&self.own_streams);
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn a_bad_request_keeps_its_id() {
+		let raw = |text: &str| serde_json::from_str::<RawEnvelope>(text).unwrap();
+		assert_eq!(raw(r#"{"id":7,"type":5}"#).id, Some(7));
+		assert_eq!(raw(r#"{"id":8,"type":"ping","extra":[]}"#).id, Some(8));
+		assert_eq!(raw(r#"{"type":"ping"}"#).id, None);
 	}
 }

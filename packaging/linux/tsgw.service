@@ -3,6 +3,8 @@
 # Write /etc/tsgw/tsgw.toml (example in /usr/share/doc/tsgw/examples), put the
 # query password in /etc/tsgw/tsgw.env as TSGW_QUERY_PASSWORD=… (mode 600),
 # then: systemctl enable --now tsgw. State (tsgw.db) is kept in /var/lib/tsgw.
+# Logs: journalctl -u tsgw -f; more detail with TSGW_LOG_LEVEL=debug in tsgw.env,
+# a log file as well with TSGW_LOG_FILE (under /var/lib/tsgw or /var/log/tsgw).
 [Unit]
 Description=tsgw, the Voelin gateway for TeamSpeak servers
 Documentation=https://github.com/Faumaray/Voelin/blob/main/docs/gateway-admin.md
@@ -18,6 +20,7 @@ ExecReload=/bin/kill -HUP $MAINPID
 EnvironmentFile=-/etc/tsgw/tsgw.env
 DynamicUser=yes
 StateDirectory=tsgw
+LogsDirectory=tsgw
 WorkingDirectory=/var/lib/tsgw
 Restart=on-failure
 RestartSec=5

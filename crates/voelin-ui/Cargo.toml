@@ -67,5 +67,9 @@ voelin-core = { path = "../voelin-core", default-features = false, features = ["
 [build-dependencies]
 slint-build = "1.18"
 
+[dev-dependencies]
+# Certificates and signatures from a synthetic root for the account tests.
+voelin-myts = { path = "../voelin-myts", features = ["testing"] }
+
 [lints]
 workspace = true

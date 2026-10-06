@@ -23,7 +23,7 @@ use voelin_model::{ChatMessage, ChatTarget, GroupInfo, Presence, ServerDetails};
 use voelin_stream::ClientState;
 
 use crate::audio::{self, AudioEvent, AudioHandle, AudioIn};
-use crate::cache::{self, Fetch, SharedCache, Waiter};
+use crate::cache::{self, Fetch, FetchError, RetryHint, SharedCache, Waiter};
 use crate::contacts::{Contacts, Relation};
 use crate::files::{self, DownloadTo, Report, RequestId, Sink, TransferId, TransferState};
 use crate::gateway::{
@@ -121,7 +121,7 @@ enum SourceEvent {
 	/// Time to fetch the host banner again (`banner_gfx_interval_s`).
 	ReloadBanner(String),
 	/// Image completion is checked against the current connection and presence.
-	ImageFinished(bool, u64, ImageRequest, Result<PathBuf, String>),
+	ImageFinished(bool, u64, ImageRequest, Result<PathBuf, FetchError>),
 }
 
 /// Identity of a wanted image, independent of its transport.
@@ -156,6 +156,7 @@ struct ImageDownload {
 impl ImageDownload {
 	fn finish(&self, result: Result<(), String>) {
 		if !self.done.swap(true, Ordering::AcqRel) {
+			let result = result.map_err(FetchError::from);
 			self.cache.finish(&self.key, &self.temp, result, max_cache_bytes(&self.settings));
 		}
 	}
@@ -169,40 +170,89 @@ impl Drop for ImageDownload {
 
 /// Retries per image version ([`retry_delay`]). Keeping exhausted entries
 /// prevents presence traffic from causing a retry storm.
+#[derive(Default)]
 struct ImageRetry {
 	failures: u8,
 	due: Option<Instant>,
+	/// Its host asked to wait until `due` (`Retry-After`): the host
+	/// banner's reloads wait too.
+	busy: bool,
+	/// Its address was found wrong or gone (HTTP 400, 404, 410).
+	gone: bool,
 }
 
-/// When to try an image again after its `failures`-th failed download:
-/// a banner after 1, 4, 16, 60, 300 and 900 seconds, then every 15 minutes
-/// while it is shown (its host may be away for a while); avatars and icons
-/// after 1, 4 and 16 seconds, then no more.
-fn retry_delay(request: &ImageRequest, failures: u8) -> Option<Duration> {
+/// When to try an image again after its `failures`-th failed download,
+/// which ended as `hint` says (`gone`: its address was found wrong or gone
+/// before). A banner after 1, 4, 16, 60, 300 and 900 seconds, then every
+/// 15 minutes while it is shown (its host may be away for a while); one
+/// whose address is wrong or gone after 15 minutes, then every hour; one
+/// whose host is busy when it says. Avatars and icons after 1, 4 and 16
+/// seconds, then no more.
+fn retry_delay(
+	request: &ImageRequest,
+	failures: u8,
+	hint: RetryHint,
+	gone: bool,
+) -> Option<Duration> {
 	const BANNERS: [u64; 6] = [1, 4, 16, 60, 300, 900];
 	let failures = usize::from(failures.max(1));
-	match request {
-		ImageRequest::Picture(_) => Some(Duration::from_secs(BANNERS[(failures - 1).min(5)])),
+	match (request, hint) {
+		(ImageRequest::Picture(_), RetryHint::Permanent) => {
+			Some(Duration::from_secs(if gone { 3600 } else { 900 }))
+		}
+		(ImageRequest::Picture(_), RetryHint::After(wait)) => Some(wait),
+		(ImageRequest::Picture(_), RetryHint::Default) => {
+			Some(Duration::from_secs(BANNERS[(failures - 1).min(5)]))
+		}
 		_ if failures <= 3 => Some(Duration::from_secs(1 << (2 * (failures - 1)))),
 		_ => None,
 	}
 }
 
-/// A failed image download in the log, with what it was and why (the
-/// host, never the whole address): banners at once, avatars and icons in
-/// the server's files when they give up (their files unreachable, a
-/// closed file transfer port).
+/// A failed image download in the log, with what it was and why: banners
+/// at once, with the address the first time (its host, port and path: a
+/// query may be a signed link's secret) and the host after, and once when
+/// their address is found wrong or gone (`newly_gone`; `reload_s`: the
+/// host banner's reload interval); avatars and icons in the server's files
+/// when they give up (their files unreachable, a closed file transfer
+/// port).
 fn log_image_failure(
 	request: &ImageRequest,
 	failures: u8,
 	retry_in: Option<Duration>,
-	error: &str,
+	error: &FetchError,
+	newly_gone: bool,
+	reload_s: Option<u64>,
 ) {
 	let retry_in_s = retry_in.map(|d| d.as_secs());
 	match request {
-		ImageRequest::Picture(url) if failures <= 6 => {
+		ImageRequest::Picture(url)
+			if newly_gone || (failures <= 6 && error.retry != RetryHint::Permanent) =>
+		{
 			let host = web::host_of(url);
-			info!(%host, failures, ?retry_in_s, %error, "banner not downloaded");
+			let url = (failures == 1).then(|| web::loggable(url));
+			let what = match (newly_gone, reload_s) {
+				(false, _) => "banner not downloaded",
+				(true, None) => {
+					"banner not downloaded: its address is wrong or gone, so it is tried again only \
+					 after 15 minutes, then hourly"
+				}
+				(true, Some(_)) => {
+					"host banner not downloaded: its address is wrong or gone, so it is tried again \
+					 only at the server's reload interval, or hourly"
+				}
+			};
+			match url {
+				Some(url) => {
+					info!(%host, %url, failures, ?retry_in_s, ?reload_s, %error, "{what}");
+				}
+				None => info!(%host, failures, ?retry_in_s, ?reload_s, %error, "{what}"),
+			}
+		}
+		// Not the address: a query may be a signed link's secret.
+		ImageRequest::Picture(url) => {
+			let host = web::host_of(url);
+			debug!(%host, failures, ?retry_in_s, %error, "banner not downloaded");
 		}
 		ImageRequest::MytsAvatar { url, .. } if retry_in.is_none() => {
 			let host = web::host_of(url);
@@ -246,6 +296,9 @@ struct Session {
 	gateway_presence: Option<Presence>,
 	/// The logged-in gateway, for requests.
 	gateway_client: Option<GatewayClient>,
+	/// What the running `gateway` observes with: asking again for the same
+	/// does not start it over.
+	gateway_observed: Option<gateway::Observed>,
 	query: Option<(u64, mpsc::UnboundedSender<QueryCmd>)>,
 	query_presence: Option<Presence>,
 	audio: Option<AudioHandle>,
@@ -354,6 +407,7 @@ impl Session {
 			gateway: None,
 			gateway_presence: None,
 			gateway_client: None,
+			gateway_observed: None,
 			query: None,
 			query_presence: None,
 			audio: None,
@@ -480,6 +534,17 @@ impl Session {
 				}
 			}
 			Command::ObserveGateway { urls, identity, .. } => {
+				// Asked again for the same (the server selected again): not
+				// started over; while still connecting, it tries again now
+				// (not every time: a struggling gateway is not hammered).
+				if let (Some((_, tx)), Some(observed)) = (&self.gateway, &mut self.gateway_observed)
+					&& observed.same(&urls, &identity)
+				{
+					if self.state.observe == ObserveState::Connecting && observed.nudge() {
+						let _ = tx.send(GatewayCmd::RetryNow);
+					}
+					return;
+				}
 				self.stop_observing();
 				if urls.is_empty() {
 					return;
@@ -492,6 +557,7 @@ impl Session {
 				}
 				let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 				let (ev_tx, ev_rx) = mpsc::unbounded_channel();
+				self.gateway_observed = Some(gateway::Observed::new(&urls, &identity));
 				tokio::spawn(gateway::run(urls, *identity, cmd_rx, ev_tx));
 				self.forward(ev_rx, move |e| SourceEvent::Gateway(generation, e));
 				self.gateway = Some((generation, cmd_tx));
@@ -1027,7 +1093,7 @@ impl Session {
 		requested: bool,
 		epoch: u64,
 		request: ImageRequest,
-		result: Result<PathBuf, String>,
+		result: Result<PathBuf, FetchError>,
 	) {
 		let wanted = if requested {
 			match &request {
@@ -1091,14 +1157,23 @@ impl Session {
 					ImageRequest::Avatar { uid, hash } => Some((uid.clone(), hash.clone())),
 					_ => None,
 				};
-				let retry = self
-					.image_retries
-					.entry(request.clone())
-					.or_insert(ImageRetry { failures: 0, due: None });
+				// The host banner is asked for again at its reload interval too.
+				let reload_s = match (&request, &self.banner_reload) {
+					(ImageRequest::Picture(url), Some((reloaded, every_s, _)))
+						if url == reloaded =>
+					{
+						Some((*every_s).max(web::MIN_RELOAD.as_secs()))
+					}
+					_ => None,
+				};
+				let retry = self.image_retries.entry(request.clone()).or_default();
 				retry.failures = retry.failures.saturating_add(1);
-				let delay = retry_delay(&request, retry.failures);
+				let delay = retry_delay(&request, retry.failures, error.retry, retry.gone);
 				retry.due = delay.map(|delay| Instant::now() + delay);
-				log_image_failure(&request, retry.failures, delay, &error);
+				retry.busy = matches!(error.retry, RetryHint::After(_));
+				let newly_gone = error.retry == RetryHint::Permanent && !retry.gone;
+				retry.gone |= newly_gone;
+				log_image_failure(&request, retry.failures, delay, &error, newly_gone, reload_s);
 				// The server's avatar gave up (its files unreachable): the
 				// myTeamSpeak one, if the client has one.
 				if let (None, Some((uid, hash))) = (retry.due, avatar_of)
@@ -1222,6 +1297,13 @@ impl Session {
 				self.fetch_picture(url, false);
 			}
 		}
+	}
+
+	/// Whether the host of the picture at `url` asked to wait
+	/// (`Retry-After`) and the wait is not over.
+	fn picture_host_busy(&self, url: &str) -> bool {
+		let retry = self.image_retries.get(&ImageRequest::Picture(url.into()));
+		retry.is_some_and(|r| r.busy && r.due.is_some_and(|due| due > Instant::now()))
 	}
 
 	/// Get the picture at `url` into the cache (again with `fresh`): from
@@ -1647,6 +1729,7 @@ impl Session {
 		if let Some((_, tx)) = self.gateway.take() {
 			let _ = tx.send(GatewayCmd::Stop);
 		}
+		self.gateway_observed = None;
 		if let Some((_, tx)) = self.query.take() {
 			let _ = tx.send(QueryCmd::Stop);
 		}
@@ -1759,6 +1842,7 @@ impl Session {
 				if let Some((url, ..)) = &self.banner_reload
 					&& *url == address
 					&& self.settings.current().get(&CACHE_FETCH_IMAGES)
+					&& !self.picture_host_busy(url)
 				{
 					self.fetch_picture(url, true);
 				}
@@ -1777,6 +1861,13 @@ impl Session {
 				}
 				self.learn_server_uid(server_uid, Source::Voice);
 				self.emit_state();
+				// The server knows our identity now: a gateway that could not
+				// log us in before (on a server we never joined) tries at once.
+				if self.state.observe == ObserveState::Connecting
+					&& let Some((_, tx)) = &self.gateway
+				{
+					let _ = tx.send(GatewayCmd::RetryNow);
+				}
 				let capabilities = flavor.capabilities();
 				if capabilities.streams
 					&& let Some((generation, voice)) = &self.voice
@@ -1925,6 +2016,7 @@ impl Session {
 			}
 			GatewayEvent::Disconnected(reason) => {
 				self.gateway = None;
+				self.gateway_observed = None;
 				self.gateway_gone(reason.clone());
 				self.gateway_presence = None;
 				self.state.observe = ObserveState::Off;
@@ -2315,11 +2407,134 @@ mod banner_tests {
 	#[test]
 	fn banners_keep_trying_avatars_and_icons_give_up() {
 		let banner = ImageRequest::Picture("https://example.com/b.png".into());
-		let delays: Vec<_> = (1..=8).map(|f| retry_delay(&banner, f).unwrap().as_secs()).collect();
+		let delay = |f, hint, gone| retry_delay(&banner, f, hint, gone).map(|d| d.as_secs());
+		let delays: Vec<_> =
+			(1..=8).map(|f| delay(f, RetryHint::Default, false).unwrap()).collect();
 		assert_eq!(delays, [1, 4, 16, 60, 300, 900, 900, 900]);
+		// An address wrong or gone: after 15 minutes, then every hour.
+		assert_eq!(delay(1, RetryHint::Permanent, false), Some(900));
+		assert_eq!(delay(2, RetryHint::Permanent, true), Some(3600));
+		// A busy host: when it says.
+		assert_eq!(delay(1, RetryHint::After(Duration::from_secs(120)), false), Some(120));
 		let icon = ImageRequest::Icon(1234);
-		let delays: Vec<_> = (1..=4).map(|f| retry_delay(&icon, f).map(|d| d.as_secs())).collect();
+		let delays: Vec<_> = (1..=4)
+			.map(|f| retry_delay(&icon, f, RetryHint::Default, false).map(|d| d.as_secs()))
+			.collect();
 		assert_eq!(delays, [Some(1), Some(4), Some(16), None]);
+	}
+
+	/// A banner whose address is wrong or gone is tried again after 15
+	/// minutes, then every hour, until the connection is made again; a
+	/// busy host's banner waits as long as it asks, and so do its reloads.
+	#[tokio::test]
+	async fn banners_wait_as_their_hosts_say() {
+		let (mut session, _events) = session("hints");
+		let url = "https://example.com/gone.png";
+		let request = ImageRequest::Picture(url.into());
+		let wait = |session: &Session, request: &ImageRequest| {
+			let due = session.image_retries[request].due.unwrap();
+			due.saturating_duration_since(Instant::now()).as_secs_f64().round() as u64
+		};
+		let gone = || Err(FetchError::new("HTTP 404 Not Found", RetryHint::Permanent));
+		session.pictures.insert(url.into());
+		session.image_finished(false, session.image_epoch, request.clone(), gone());
+		assert_eq!(wait(&session, &request), 900);
+		assert!(session.image_retries[&request].gone);
+		session.image_finished(false, session.image_epoch, request.clone(), gone());
+		assert_eq!(wait(&session, &request), 3600);
+		// Something else in between: the usual schedule.
+		let failed = Err("timed out".into());
+		session.image_finished(false, session.image_epoch, request.clone(), failed);
+		assert_eq!(wait(&session, &request), 16);
+		// Connected again: from the start.
+		session.forget_images();
+		session.pictures.insert(url.into());
+		session.image_finished(false, session.image_epoch, request.clone(), gone());
+		assert_eq!(wait(&session, &request), 900);
+
+		// The host banner of a busy host: its reloads wait too.
+		let banner = "https://example.com/busy.png";
+		let request = ImageRequest::Picture(banner.into());
+		session.pictures.insert(banner.into());
+		let timer = tokio::spawn(async {}).abort_handle();
+		session.banner_reload = Some((banner.into(), 60, timer));
+		let busy = FetchError::new("HTTP 429", RetryHint::After(Duration::from_secs(600)));
+		session.image_finished(false, session.image_epoch, request.clone(), Err(busy));
+		assert_eq!(wait(&session, &request), 600);
+		let cache = session.cache.current();
+		let key = cache::picture_key(banner).unwrap();
+		// Downloaded here, so a fetch by the session waits for this one.
+		let reload = |session: &mut Session| {
+			let Fetch::Download(temp) = cache.fetch(&key, true, Box::new(|_| {})) else {
+				panic!("own download");
+			};
+			session.source_event(SourceEvent::ReloadBanner(banner.into()));
+			std::fs::create_dir_all(temp.parent().unwrap()).unwrap();
+			std::fs::write(&temp, b"picture").unwrap();
+			cache.finish(&key, &temp, Ok(()), 0);
+			session.sources_rx.as_mut().unwrap().try_recv().is_ok()
+		};
+		assert!(!reload(&mut session), "reloaded while its host is busy");
+		session.image_retries.get_mut(&request).unwrap().due = Some(Instant::now());
+		assert!(reload(&mut session), "not reloaded once the wait was over");
+		std::fs::remove_dir_all(cache.dir()).unwrap();
+	}
+
+	/// What a failed download of `request` logs at info.
+	fn failure_lines(
+		session: &mut Session,
+		request: &ImageRequest,
+		result: Result<PathBuf, FetchError>,
+	) -> Vec<String> {
+		let epoch = session.image_epoch;
+		let finish = || session.image_finished(false, epoch, request.clone(), result);
+		web::tests::info_lines(finish).1
+	}
+
+	/// A failing banner's address is logged on its first failure, without
+	/// its query; that it is wrong or gone, once.
+	#[tokio::test]
+	async fn a_failing_banner_is_logged_once_with_its_address() {
+		let (mut session, _events) = session("log-once");
+		let url = "https://example.com/gone.png?sig=secret";
+		let request = ImageRequest::Picture(url.into());
+		session.pictures.insert(url.into());
+		let gone = || Err(FetchError::new("HTTP 404 Not Found", RetryHint::Permanent));
+		let lines = failure_lines(&mut session, &request, gone());
+		assert_eq!(lines.len(), 1, "{lines:?}");
+		assert!(
+			lines[0].starts_with(
+				"banner not downloaded: its address is wrong or gone, so it is tried again only \
+				 after 15 minutes, then hourly host=example.com url=https://example.com/gone.png \
+				 failures=1 retry_in_s=Some(900)"
+			),
+			"{lines:?}"
+		);
+		assert!(!lines[0].contains("secret"), "{lines:?}");
+		assert_eq!(failure_lines(&mut session, &request, gone()), Vec::<String>::new());
+		// Something else meanwhile: by its host only.
+		let lines = failure_lines(&mut session, &request, Err("timed out".into()));
+		assert_eq!(lines.len(), 1, "{lines:?}");
+		assert!(lines[0].starts_with("banner not downloaded host=example.com failures=3"));
+		assert!(!lines[0].contains("url="), "{lines:?}");
+
+		// The host banner is asked for at the server's reload interval too.
+		let banner = "https://example.com/host.png";
+		let request = ImageRequest::Picture(banner.into());
+		session.pictures.insert(banner.into());
+		let timer = tokio::spawn(async {}).abort_handle();
+		session.banner_reload = Some((banner.into(), 30, timer));
+		let lines = failure_lines(&mut session, &request, gone());
+		assert_eq!(lines.len(), 1, "{lines:?}");
+		assert!(
+			lines[0].starts_with(
+				"host banner not downloaded: its address is wrong or gone, so it is tried again \
+				 only at the server's reload interval, or hourly"
+			),
+			"{lines:?}"
+		);
+		assert!(lines[0].contains(" reload_s=Some(60) "), "{lines:?}");
+		let _ = std::fs::remove_dir_all(session.cache.current().dir());
 	}
 
 	#[tokio::test]
@@ -2548,5 +2763,27 @@ mod banner_tests {
 		assert!(session.banner_reload.is_none());
 		tokio::task::yield_now().await;
 		assert!(timer.is_finished());
+	}
+
+	#[tokio::test]
+	async fn voice_connected_wakes_a_gateway_still_connecting() {
+		let (mut session, _events) = session("gateway-wake");
+		let (tx, mut rx) = mpsc::unbounded_channel();
+		session.gateway = Some((session.next_generation(), tx));
+		let connected = || VoiceEvent::Connected {
+			name: "test".into(),
+			flavor: voelin_model::ServerFlavor::Unknown(String::new()),
+			own_client: 1,
+			server_uid: "server=".into(),
+			own_uid: None,
+		};
+		session.state.observe = ObserveState::Connecting;
+		session.voice_event(connected());
+		assert!(matches!(rx.try_recv(), Ok(GatewayCmd::RetryNow)));
+		assert!(rx.try_recv().is_err());
+		// Logged in already: nothing to hurry.
+		session.state.observe = ObserveState::Observing;
+		session.voice_event(connected());
+		assert!(rx.try_recv().is_err());
 	}
 }

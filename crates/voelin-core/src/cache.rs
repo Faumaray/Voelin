@@ -14,16 +14,113 @@
 //! Downloads are deduplicated: [`Cache::fetch`] tells the first asker to
 //! download (into a temporary path), later askers wait for the same
 //! download ([`Cache::finish`] answers them all).
+//!
+//! A picture from the web keeps its host's validators (`ETag`,
+//! `Last-Modified`) next to it, in `validators/pictures/<md5>`: asked for
+//! again, it is downloaded only if it changed ([`Cache::validators`],
+//! [`Arrived::Unchanged`]).
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use tracing::debug;
 
 /// Called with the cached file's path, or why it could not be fetched.
-pub(crate) type Waiter = Box<dyn FnOnce(Result<PathBuf, String>) + Send>;
+pub(crate) type Waiter = Box<dyn FnOnce(Result<PathBuf, FetchError>) + Send>;
+
+/// Why a fetch failed (for the log), and when it may be tried again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FetchError {
+	pub text: String,
+	pub retry: RetryHint,
+}
+
+/// When a failed fetch may be tried again, as its host told.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RetryHint {
+	/// Whenever the asker's own schedule says.
+	#[default]
+	Default,
+	/// Not before this long (the host's `Retry-After`).
+	After(Duration),
+	/// The address is wrong or gone (HTTP 400, 404, 410): not soon.
+	Permanent,
+}
+
+impl FetchError {
+	pub fn new(text: impl Into<String>, retry: RetryHint) -> Self {
+		Self { text: text.into(), retry }
+	}
+}
+
+impl From<String> for FetchError {
+	fn from(text: String) -> Self {
+		Self::new(text, RetryHint::Default)
+	}
+}
+
+impl From<&str> for FetchError {
+	fn from(text: &str) -> Self {
+		Self::new(text, RetryHint::Default)
+	}
+}
+
+impl fmt::Display for FetchError {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.write_str(&self.text)
+	}
+}
+
+/// What a host said identifies the version of a picture it sent, to ask
+/// later whether it changed (`If-None-Match`, `If-Modified-Since`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Validators {
+	pub etag: Option<String>,
+	pub last_modified: Option<String>,
+}
+
+impl Validators {
+	pub fn is_empty(&self) -> bool {
+		self.etag.is_none() && self.last_modified.is_none()
+	}
+
+	/// As kept: a `name: value` line each.
+	fn to_text(&self) -> String {
+		let mut text = String::new();
+		for (name, value) in [("etag", &self.etag), ("last-modified", &self.last_modified)] {
+			if let Some(value) = value {
+				text.push_str(&format!("{name}: {value}\n"));
+			}
+		}
+		text
+	}
+
+	fn from_text(text: &str) -> Self {
+		let mut validators = Self::default();
+		for line in text.lines() {
+			match line.split_once(": ") {
+				Some(("etag", value)) => validators.etag = Some(value.to_owned()),
+				Some(("last-modified", value)) => validators.last_modified = Some(value.to_owned()),
+				_ => {}
+			}
+		}
+		validators
+	}
+}
+
+/// How a download ended well.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Arrived {
+	/// In the temporary path, with what identifies its version (when the
+	/// host said).
+	File(Validators),
+	/// The host said the cached copy is still what it has (HTTP 304): the
+	/// copy stays, nothing was downloaded.
+	Unchanged,
+}
 
 /// What [`Cache::fetch`] decided.
 pub(crate) enum Fetch {
@@ -199,14 +296,65 @@ impl Cache {
 		&self,
 		key: &str,
 		temp: &Path,
-		result: Result<(), String>,
+		result: Result<(), FetchError>,
 		max_bytes: u64,
 	) {
-		let result = result.and_then(|()| self.insert_file(key, temp, max_bytes));
+		let arrived = result.map(|()| Arrived::File(Validators::default()));
+		self.finish_with(key, temp, arrived, max_bytes);
+	}
+
+	/// [`finish`](Self::finish) a download from the web: a new file with
+	/// its validators, or the cached copy confirmed (kept, and marked as
+	/// used).
+	pub(crate) fn finish_with(
+		&self,
+		key: &str,
+		temp: &Path,
+		result: Result<Arrived, FetchError>,
+		max_bytes: u64,
+	) {
+		let result = result.and_then(|arrived| match arrived {
+			Arrived::File(validators) => {
+				let path = self.insert_file(key, temp, max_bytes)?;
+				self.keep_validators(key, &validators);
+				Ok(path)
+			}
+			Arrived::Unchanged => {
+				let mut index = self.lock();
+				self.touch(&mut index, key)
+					.ok_or_else(|| FetchError::from("cache: the copy was removed meanwhile"))
+			}
+		});
 		let _ = std::fs::remove_file(temp);
 		let waiters = self.lock().in_flight.remove(key).unwrap_or_default();
 		for waiter in waiters {
 			waiter(result.clone());
+		}
+	}
+
+	/// What identifies the cached version of `key` (a picture from the
+	/// web), if it is cached and its host said.
+	pub(crate) fn validators(&self, key: &str) -> Option<Validators> {
+		if !self.lock().entries.contains_key(key) || !self.dir.join(key).is_file() {
+			return None;
+		}
+		let text = std::fs::read_to_string(validators_path(&self.dir, key)).ok()?;
+		Some(Validators::from_text(&text)).filter(|v| !v.is_empty())
+	}
+
+	/// Keep `validators` with `key`'s new file (none: the old ones go).
+	fn keep_validators(&self, key: &str, validators: &Validators) {
+		let path = validators_path(&self.dir, key);
+		if validators.is_empty() {
+			let _ = std::fs::remove_file(&path);
+			return;
+		}
+		let written = path
+			.parent()
+			.map_or(Ok(()), std::fs::create_dir_all)
+			.and_then(|()| std::fs::write(&path, validators.to_text()));
+		if let Err(e) = written {
+			debug!("cache: cannot keep the validators of {key}: {e}");
 		}
 	}
 
@@ -264,6 +412,7 @@ impl Cache {
 			if let Err(e) = std::fs::remove_file(self.dir.join(&key)) {
 				debug!("cache: cannot remove {key}: {e}");
 			}
+			let _ = std::fs::remove_file(validators_path(&self.dir, &key));
 		}
 	}
 
@@ -297,6 +446,22 @@ fn scan(dir: &Path, index: &mut Index) {
 		index.lru.insert(tick, key.clone());
 		index.entries.insert(key, Entry { size, tick });
 	}
+	// Validators of pictures no longer here.
+	let Ok(kept) = std::fs::read_dir(dir.join(VALIDATORS).join("pictures")) else { return };
+	for entry in kept.flatten() {
+		let key = format!("pictures/{}", entry.file_name().to_string_lossy());
+		if !index.entries.contains_key(&key) {
+			let _ = std::fs::remove_file(entry.path());
+		}
+	}
+}
+
+/// The directory of the pictures' validators.
+const VALIDATORS: &str = "validators";
+
+/// Where the validators of `key` are kept.
+fn validators_path(dir: &Path, key: &str) -> PathBuf {
+	dir.join(VALIDATORS).join(key)
 }
 
 /// The engine's cache: one [`Cache`] that [`crate::Command::AttachCache`]
@@ -463,6 +628,103 @@ mod tests {
 		{
 			assert!(picture_key(not_web).is_none(), "{not_web}");
 		}
+	}
+
+	/// A picture keeps its host's validators; confirmed unchanged, the copy
+	/// stays and is used; replaced without validators or evicted, they go.
+	#[test]
+	fn validators_go_with_their_picture() {
+		let dir = temp_dir("validators");
+		let cache = Cache::new(&dir);
+		let key = picture_key("https://example.com/v.png").unwrap();
+		let validators = Validators {
+			etag: Some("W/\"v1\"".into()),
+			last_modified: Some("Tue, 06 Oct 2026 10:00:00 GMT".into()),
+		};
+		assert_eq!(cache.validators(&key), None);
+		let (tx, rx) = mpsc::channel();
+		let waiter = |tx: &mpsc::Sender<_>| -> Waiter {
+			let tx = tx.clone();
+			Box::new(move |r| tx.send(r).unwrap())
+		};
+		let Fetch::Download(temp) = cache.fetch(&key, false, waiter(&tx)) else { panic!() };
+		std::fs::create_dir_all(temp.parent().unwrap()).unwrap();
+		std::fs::write(&temp, b"v1").unwrap();
+		cache.finish_with(&key, &temp, Ok(Arrived::File(validators.clone())), 0);
+		let path = rx.recv().unwrap().unwrap();
+		assert_eq!(cache.validators(&key), Some(validators.clone()));
+		// Asked again: unchanged, the same file answers both askers.
+		let Fetch::Download(temp) = cache.fetch(&key, true, waiter(&tx)) else { panic!() };
+		assert!(matches!(cache.fetch(&key, true, waiter(&tx)), Fetch::Waiting));
+		cache.finish_with(&key, &temp, Ok(Arrived::Unchanged), 0);
+		assert_eq!(rx.recv().unwrap(), Ok(path.clone()));
+		assert_eq!(rx.recv().unwrap(), Ok(path.clone()));
+		assert_eq!(std::fs::read(&path).unwrap(), b"v1");
+		// They survive a restart, with their picture.
+		assert_eq!(Cache::new(&dir).validators(&key), Some(validators.clone()));
+		// A new version without validators: the old ones are not sent again.
+		let Fetch::Download(temp) = cache.fetch(&key, true, waiter(&tx)) else { panic!() };
+		// (The restart above cleared the temporary files' directory.)
+		std::fs::create_dir_all(temp.parent().unwrap()).unwrap();
+		std::fs::write(&temp, b"new").unwrap();
+		cache.finish(&key, &temp, Ok(()), 0);
+		rx.recv().unwrap().unwrap();
+		assert_eq!(cache.validators(&key), None);
+		// Evicted with the picture.
+		let Fetch::Download(temp) = cache.fetch(&key, true, waiter(&tx)) else { panic!() };
+		std::fs::write(&temp, b"v2").unwrap();
+		cache.finish_with(&key, &temp, Ok(Arrived::File(validators.clone())), 0);
+		rx.recv().unwrap().unwrap();
+		assert!(validators_path(&dir, &key).is_file());
+		put(&cache, "icons/1", 10, 10);
+		assert!(!path.exists());
+		assert!(!validators_path(&dir, &key).exists());
+		// Unchanged, but the copy went meanwhile: a failure, retried in full.
+		let Fetch::Download(temp) = cache.fetch(&key, true, waiter(&tx)) else { panic!() };
+		cache.finish_with(&key, &temp, Ok(Arrived::Unchanged), 0);
+		assert!(rx.recv().unwrap().is_err());
+		std::fs::remove_dir_all(dir).unwrap();
+	}
+
+	/// A picture confirmed unchanged counts as used: others go first.
+	#[test]
+	fn an_unchanged_picture_counts_as_used() {
+		let dir = temp_dir("unchanged-used");
+		let cache = Cache::new(&dir);
+		let key = picture_key("https://example.com/u.png").unwrap();
+		let picture = put(&cache, &key, 400, 1000);
+		let icon = put(&cache, "icons/1", 400, 1000);
+		let Fetch::Download(temp) = cache.fetch(&key, true, Box::new(|_| {})) else { panic!() };
+		cache.finish_with(&key, &temp, Ok(Arrived::Unchanged), 1000);
+		put(&cache, "icons/2", 400, 1000);
+		assert!(picture.exists(), "the picture confirmed unchanged stays");
+		assert!(!icon.exists(), "the least recently used file goes");
+		std::fs::remove_dir_all(dir).unwrap();
+	}
+
+	/// Validators whose picture is gone go at the next start.
+	#[test]
+	fn orphaned_validators_are_removed() {
+		let dir = temp_dir("orphans");
+		let key = picture_key("https://example.com/o.png").unwrap();
+		let orphan = validators_path(&dir, &key);
+		std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+		std::fs::write(&orphan, "etag: \"x\"\n").unwrap();
+		let cache = Cache::new(&dir);
+		assert_eq!(cache.size(), 0);
+		assert!(!orphan.exists());
+		std::fs::remove_dir_all(dir).unwrap();
+	}
+
+	#[test]
+	fn fetch_errors_carry_their_retry_hint() {
+		let error = FetchError::from("HTTP 503 Service Unavailable");
+		assert_eq!(error.retry, RetryHint::Default);
+		assert_eq!(error.to_string(), "HTTP 503 Service Unavailable");
+		let gone = FetchError::new("HTTP 404 Not Found", RetryHint::Permanent);
+		assert_ne!(gone, FetchError::from("HTTP 404 Not Found"));
+		let text = Validators { etag: Some("\"a: b\"".into()), last_modified: None }.to_text();
+		assert_eq!(Validators::from_text(&text).etag.as_deref(), Some("\"a: b\""));
 	}
 
 	/// Pictures are cached files like the others (counted after a restart).

@@ -253,6 +253,7 @@ impl Db {
 		self.0.lock().unwrap_or_else(|e| e.into_inner())
 	}
 
+	#[cfg(test)]
 	pub fn schema_version(&self) -> rusqlite::Result<i64> {
 		self.lock().conn.pragma_query_value(None, "user_version", |r| r.get(0))
 	}

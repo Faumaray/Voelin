@@ -44,6 +44,13 @@ impl std::fmt::Debug for Presentation {
 /// of a protobuf message, as they are; `None` without one or for a message
 /// that does not parse.
 pub(crate) fn raw_field(message: &[u8], number: u32) -> Option<&[u8]> {
+	raw_fields(message, number)?.pop()
+}
+
+/// The bytes of every length-delimited field `number` at the top level of
+/// a protobuf message (a repeated field), as they are; `None` for a message
+/// that does not parse.
+pub(crate) fn raw_fields(message: &[u8], number: u32) -> Option<Vec<&[u8]>> {
 	fn varint(data: &[u8], at: &mut usize) -> Option<u64> {
 		let mut value = 0u64;
 		for shift in (0..64).step_by(7) {
@@ -57,7 +64,7 @@ pub(crate) fn raw_field(message: &[u8], number: u32) -> Option<&[u8]> {
 		None
 	}
 	let mut at = 0;
-	let mut found = None;
+	let mut found = Vec::new();
 	while at < message.len() {
 		let key = varint(message, &mut at)?;
 		let skip = match key & 7 {
@@ -73,11 +80,11 @@ pub(crate) fn raw_field(message: &[u8], number: u32) -> Option<&[u8]> {
 		};
 		let end = at.checked_add(skip).filter(|end| *end <= message.len())?;
 		if key & 7 == 2 && key >> 3 == u64::from(number) {
-			found = Some(&message[at..end]);
+			found.push(&message[at..end]);
 		}
 		at = end;
 	}
-	found
+	Some(found)
 }
 
 /// `ERROR_SESSION_EXPIRED` of the `/user` service.
@@ -187,7 +194,7 @@ pub(crate) fn avatar_link(name: &str) -> Result<&str, Error> {
 
 /// A refusal: `success` unset with an error code. (A reply without a return
 /// code is taken as it is: the service sets one when it refuses.)
-fn check(code: Option<&user::ReturnCode>) -> Result<(), Error> {
+pub(crate) fn check(code: Option<&user::ReturnCode>) -> Result<(), Error> {
 	match code {
 		Some(code) if !code.success && code.error_code != 0 => Err(Error::Refused(code.error_code)),
 		_ => Ok(()),

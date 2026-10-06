@@ -98,6 +98,8 @@ use voelin_stream::{
 pub use voice::VoiceOptions;
 /// Banners are downloaded and shown by the same rule.
 pub use web::is_svg;
+/// Pictures from the web go through the desktop's proxy (set at startup).
+pub use web::set_proxy_resolver;
 
 pub type SessionId = u64;
 
@@ -106,9 +108,10 @@ pub type SessionId = u64;
 pub enum Command {
 	/// Main account proof for every current and future voice connection.
 	SetMytsIdentity(Option<Arc<tsproto::myts::Identity>>),
-	/// What voice servers are shown of the main account (its certificate
-	/// and avatar, TeamSpeak 6): sent to every connection that presents the
-	/// account, once connected and when it changes.
+	/// What voice servers are shown of the main account (its avatar and
+	/// badges with their certificates, its User Tag; TeamSpeak 6): sent to
+	/// every connection that presents the account's myTS ID, once connected
+	/// and when it changes; cleared on a sign-out.
 	SetMytsData(Option<Arc<tsclientlib::MytsData>>),
 	ConnectVoice {
 		session: SessionId,
@@ -119,7 +122,9 @@ pub enum Command {
 	},
 	/// Invisible presence and relay chat through a `tsgw` gateway: the first
 	/// of `urls` (best first, [`discover::gateways`]) that logs in, tried in
-	/// turn again whenever it is lost.
+	/// turn again whenever it is lost. Sent again with the same `urls` and
+	/// identity while it runs, it is not started over; while still
+	/// connecting, it tries again at once (at most every 5 s).
 	ObserveGateway {
 		session: SessionId,
 		urls: Vec<String>,

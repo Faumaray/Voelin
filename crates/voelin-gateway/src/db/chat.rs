@@ -367,6 +367,7 @@ impl Db {
 	}
 
 	/// Whether `uid` reacted with `emoji`.
+	#[cfg(test)]
 	pub fn has_reaction(&self, message_id: i64, emoji: &str, uid: &str) -> rusqlite::Result<bool> {
 		self.lock()
 			.conn

@@ -139,6 +139,12 @@ impl QueryError {
 		self.id == 1281
 	}
 
+	/// The server's flood protection refused the command; `extra_msg` says
+	/// how long to wait (`please wait 1 seconds`).
+	pub fn is_flood(&self) -> bool {
+		self.id == 524
+	}
+
 	pub(crate) fn from_row(row: &Row) -> Self {
 		QueryError {
 			id: row.parse("id").unwrap_or(u32::MAX),

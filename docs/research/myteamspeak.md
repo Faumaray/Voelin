@@ -111,25 +111,73 @@ URL.
 ### Presenting the account's avatar, and other clients' avatars (TeamSpeak 6)
 
 Voice servers show the account's avatar (and the blurred banner behind it
-in the client-info view) from what the client sends once connected, not
-from `clientinit` (the official 6.0.0-beta4.1 client never sets
-`client_myteamspeak_avatar` or `client_signed_badges` itself):
+in the client-info view) and badges from what the client sends once
+connected, not from `clientinit` (the official 6.0.0-beta4.1 client never
+sets `client_myteamspeak_avatar` or `client_signed_badges` itself):
 
     updatemytsdata myts_certificate=<cert> [myts_signed_badge=<list>] [myts_avatar=<AvatarData>]
 
-built at 0x1f38520: `myts_certificate` is `LoginSession.mytsid_user_cert.cert`,
-`myts_avatar` the serialized `LoginSession.user_avatar` (`AvatarData` with its
-timestamp and myTeamSpeak's signature, which covers `AvatarInfo`, the myTS
-id and the timestamp), `myts_signed_badge` a `UserBadgesSignedList` from
-`getSignedBadges`. The values are the raw bytes with TeamSpeak's escaping
-only (`\a` and `\b` included), no base64. It is sent once the connection is
-established, after a sign-in (after `updatemytsid`), after an avatar upload
-and after a badge change. Voelin sends the certificate and the avatar: both
-come only from a password sign-in (`LoginSession`, fields 10 and 11), the
-avatar sliced out of the response as it came (encoding it again would drop
-fields this version does not know and break the signature). They are kept
-in `<data>/account/presentation.json` (public data) and sent to every
-connection that presents the account; a refusal is only logged.
+built at 0x1f38520: `myts_certificate` is the inner `MyTSUserCertificate.cert`
+bytes, `myts_avatar` a serialized `AvatarData` (its `AvatarInfo`, a timestamp
+and myTeamSpeak's signature), `myts_signed_badge` a `UserBadgesSignedList`
+of the badges the user chose (at most three, in the chosen order; none
+until chosen). The values are the raw bytes with TeamSpeak's escaping only
+(`\a` and `\b` included), no base64. The official client sends it once
+connected, after a sign-in (after `updatemytsid`), after an avatar upload
+and after a badge change.
+
+What the TeamSpeak 6 server (6.0.0-beta13.1) does with it: it parses the
+certificate as a TeamSpeak license chain, requires the leaf to be valid now,
+of block type 6 (`MYTSID_SIGN`; types 4 to 7 carry nothing after the 42-byte
+header), the chain to lead to TeamSpeak's root and the key not to be on
+myTeamSpeak's revocation list, and takes the leaf's derived Ed25519 key. It
+verifies the avatar's signature over `SerializeAsString(AvatarInfo) ||
+myTS ID (33 bytes) || timestamp (u64, big-endian)` and each badge's over
+`uuid (16 bytes) || sign_timestamp (u64, big-endian) || myTS ID`, the myTS
+ID being the one it holds for the client at that moment. What does not
+verify is silently emptied (`client_myteamspeak_avatar` /
+`client_signed_badges` become empty, answer `error id=0`); only an unusable
+certificate with a non-empty value is refused, with 1538 (also when the
+server could not load the revocation list). The server echoes both
+properties for the client before its answer. A bare parameter clears it
+without a certificate; an absent one is left alone. `updatemytsid` does
+not check them again, so they are sent again after it.
+
+Voelin does the same checks locally (`tsproto::myts::Certificate`,
+`voelin_myts::choose_avatar`, `choose_badges_certificate`) to choose, for
+the avatar and for the chosen badges, a certificate that verifies them,
+from those at hand: the last password sign-in's (`LoginSession` fields 10
+and 11, the avatar as it came), the one myTeamSpeak's avatar service hands
+out with the avatar, and the myTS ID's `pubSignCert` when its leaf is of
+type 6. Since a server verifies with the one certificate of each command,
+the avatar and the badges go in separate commands when they need different
+certificates (one command, certificate, badges, avatar, when one verifies
+both). A badge id must be in the 36-character form with hyphens: the server
+reads it with Boost's `uuid` parser, which throws on anything else, so such
+a badge is never sent. After sending, Voelin logs whether the server shows
+them, or why not, and names the badges it dropped (`client_signed_badges`
+lists the ids that verified). Each connection sends only what changed, all
+of it again after `updatemytsid` or a reconnect, and clears with bare
+parameters what it showed and should no longer show: on a sign-out or an
+account change, `updatemytsdata myts_certificate myts_signed_badge
+myts_avatar` (or only the parts it showed; both answer 0).
+
+Without a password: `requestContactsAvatar` at `/user` with the account's own
+raw myTS ID (`RequestContactsAvatarInfoRequest{session, id:
+[AvatarRequestID{key: Any(…AvatarRequestID.MYTSKey{id})}]}`) answers the
+account's `AvatarData` as it came, whose `optional` field holds
+`OptionalAvatarDataContactInfo{mytsid, user_cert}`; `user_cert` is checked
+by the official client with the same function as the login certificate. An
+unknown session gets an empty answer, like an account without an avatar, so
+an empty answer means "nothing learned" and never clears what is kept.
+`getSignedBadges(Session)` at `/user` answers `UserBadgesSignedResponse{list,
+error_code}` (109 for an unknown session); each `SignedUserBadge` is kept as
+it came. Voelin asks both after a password sign-in, after a checked saved
+session and then daily, and keeps the answers in
+`<data>/account/presentation.json` (public data); the chosen badges are kept
+per account in `<data>/account/badges.json`, across sign-outs. A chosen
+badge myTeamSpeak no longer lists takes none of the three places, and is
+dropped from the choice the next time the user changes it.
 
 Other clients' avatars arrive as `client_myteamspeak_avatar`, plain text
 `<state>,<url>;<state>,<url>…` with myTeamSpeak's `AvatarState` numbers
@@ -139,11 +187,6 @@ the whole value; the online picture is shown, else away, do not disturb,
 offline; the server's own avatar (`client_flag_avatar`) wins when it loads.
 Voelin downloads it (HTTPS, 4 MiB) where the server's is not shown: none
 set, no voice connection (observing), or its download gave up.
-
-`client_user_tag` (the "User Tag", a TeamSpeak chat alias) is set by the
-client as JSON `{"myts_token":…,"tag":…,"updated":<ms>}` with a token from
-`requestSignedAllowedIdentifierList` at `/tschat`; receivers show it only
-after verifying the token. Voelin does not set it yet.
 
 `requestAvatarSignedUrl` is not a download call: it signs *upload* links.
 In the TS6 6.0.0-beta4.1 Linux client, `Account_Manager_Impl::
@@ -163,6 +206,37 @@ Sign-out returns to login, clears local account material and attempts remote
 session deletion; storage or remote errors are reported. A late completion
 cannot sign a canceled operation back in. Server identities and bookmark
 nicknames remain independent of the primary app profile.
+
+### The User Tag (TeamSpeak 6)
+
+`client_user_tag` is the account's primary TeamSpeak chat identifier
+(`name@myteamspeak.com`): the entry with `primary` set in
+`getActiveIdentifierList` at `/tschat` (Voelin falls back to
+`getAccountData`'s active identifiers). The token that proves it comes from
+`requestSignedAllowedIdentifierList` at `/tschat`; both take
+`AuthenticatedUser{session}` only (no chat account, `matrix_id` never set)
+and answer an `ErrorHandling` whose `return_code` must be 1 (5: the session
+expired). The token is a `MatrixIdentifierToken{signature, sign_certificate,
+timestamp, tags}`, kept as it came. Viewers (the official client's
+`verifyIdentifierToken`) parse `sign_certificate` as a license chain from
+TeamSpeak's root, require its leaf to be valid now (any block type), verify
+the Ed25519 signature over `SerializeAsString(tags) || timestamp (u64,
+big-endian) || myTS ID` with the myTS ID the client shows the server
+(`client_myteamspeak_id`), and require the tag to be one of the tags. They
+verify once per change of the property, and only if they have a TeamSpeak
+chat connection themselves. The value is compact JSON in this key order:
+
+    {"myts_token":"<standard padded base64 of the token>","tag":"<tag>","updated":<ms since 1970>}
+
+sent as `clientupdate client_user_tag=<value>` (TeamSpeak escaping, so `/`
+goes as `\/`), once connected and after every `updatemytsid`, on servers
+that know the property (protocol 8, TeamSpeak 6; on protocol 7 the official
+client mirrors the JSON into `client_meta_data`, which Voelin leaves to its
+own identification). A bare `clientupdate client_user_tag` clears it, on
+sign-out or account change. The server stores and relays the value without
+checks (about 8 KB at most). Voelin checks the token itself before using it,
+asks for a new one when it would not hold three days later, and shows the
+tag in Settings → My Account.
 
 ### Authenticated account identity on voice servers
 

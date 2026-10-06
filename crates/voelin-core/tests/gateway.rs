@@ -1,7 +1,7 @@
 //! Chat history and gateway features through the engine, against a fake
 //! gateway (a WebSocket server speaking the tsgw protocol from memory).
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -43,6 +43,10 @@ struct State {
 	requests: Vec<String>,
 	/// Close connections at once (the gateway is down).
 	refuse: bool,
+	/// Answers to the next logins, in turn, instead of logging in.
+	login_errors: VecDeque<ErrorCode>,
+	/// Logins asked for.
+	logins: usize,
 }
 
 impl State {
@@ -151,6 +155,10 @@ impl FakeGateway {
 	fn requests(&self) -> Vec<String> {
 		self.state.lock().unwrap().requests.clone()
 	}
+
+	fn logins(&self) -> usize {
+		self.state.lock().unwrap().logins
+	}
 }
 
 fn caps() -> Vec<String> {
@@ -236,6 +244,10 @@ fn answer(
 ) -> ServerMsg {
 	match msg {
 		ClientMsg::Auth { .. } => {
+			st.logins += 1;
+			if let Some(code) = st.login_errors.pop_front() {
+				return ServerMsg::Error { code, message: "not now".into() };
+			}
 			*logged_in = true;
 			st.sessions.push((push.clone(), open.clone()));
 			ServerMsg::AuthOk {
@@ -368,7 +380,8 @@ fn answer(
 			st.topics.push(topic.clone());
 			ServerMsg::Topic { topic }
 		}
-		ClientMsg::SubscribeEvents | ClientMsg::Ping => ServerMsg::Ok,
+		ClientMsg::Ping => ServerMsg::Pong,
+		ClientMsg::SubscribeEvents => ServerMsg::Ok,
 		_ => ServerMsg::Error { code: ErrorCode::UnknownType, message: "not in the fake".into() },
 	}
 }
@@ -550,7 +563,9 @@ async fn live_messages_and_gateway_requests() {
 	};
 	assert_eq!((server_uid.as_str(), uid.as_str()), ("fake-server", ME));
 	assert!(capabilities.iter().any(|c| c == feature::PINS));
-	// In sync (the chat is empty).
+	// In sync (the chat is empty): the latest page, then what changed since
+	// (else our message may come back with the sync instead of live).
+	batch(&mut rx, HistorySource::Gateway).await;
 	batch(&mut rx, HistorySource::Gateway).await;
 
 	// Our message: stored at once, then merged with the gateway's copy.
@@ -729,8 +744,8 @@ async fn an_unreachable_gateway_is_tried_again_quietly() {
 		urls: vec![format!("ws://127.0.0.1:{port}/v1")],
 		identity: Box::new(tsclientlib::Identity::create()),
 	});
-	// The first attempt fails (the next one is 2 s later): still connecting,
-	// and the user is told nothing.
+	// The first attempts fail (the next ones about 1 s, then 2 s later):
+	// still connecting, and the user is told nothing.
 	let mut connecting = false;
 	let quiet = timeout(Duration::from_millis(1500), async {
 		loop {
@@ -806,8 +821,9 @@ async fn the_next_published_gateway_is_used_when_one_fails() {
 		urls: vec![proxy, format!("ws://127.0.0.1:{closed}/v1"), gw.url.clone()],
 		identity: Box::new(tsclientlib::Identity::create()),
 	});
-	// Within one round: sooner than the first wait (2 s) after a failed round.
-	let url = timeout(Duration::from_millis(1800), async {
+	// Within one round: sooner than the shortest wait after a failed round
+	// (1 s, less 30 %).
+	let url = timeout(Duration::from_millis(650), async {
 		loop {
 			match rx.recv().await {
 				Ok(Event::Error { message, .. }) => panic!("the user was told: {message}"),
@@ -830,4 +846,113 @@ async fn the_next_published_gateway_is_used_when_one_fails() {
 	.await;
 	drop(engine);
 	let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+/// Events until `until` matches one, within `within`: never an error for
+/// the user, never observing `session` off once it started.
+async fn quietly_until(
+	rx: &mut Receiver<Event>,
+	session: u64,
+	within: Duration,
+	what: &str,
+	mut until: impl FnMut(&Event) -> bool,
+) {
+	let mut started = false;
+	timeout(within, async {
+		loop {
+			let e = match rx.recv().await {
+				Ok(e) => e,
+				Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+				Err(e) => panic!("{e}"),
+			};
+			if let Event::Error { message, .. } = &e {
+				panic!("the user was told: {message}");
+			}
+			if let Event::State { session: s, state } = &e
+				&& *s == session
+			{
+				// (Off before observing starts.)
+				assert!(!started || state.observe != ObserveState::Off, "gave up");
+				started |= state.observe != ObserveState::Off;
+			}
+			if until(&e) {
+				return;
+			}
+		}
+	})
+	.await
+	.unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+}
+
+fn observing(session: u64) -> impl FnMut(&Event) -> bool {
+	move |e| {
+		matches!(e, Event::State { session: s, state }
+			if *s == session && state.observe == ObserveState::Observing)
+	}
+}
+
+/// A gateway that cannot log us in yet (its TeamSpeak server is away; the
+/// server does not know the identity before voice connected once) is tried
+/// again, quietly, and observed through once it can.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_login_the_gateway_cannot_do_yet_is_tried_again() {
+	for (session, code) in [(5, ErrorCode::Unavailable), (6, ErrorCode::UnknownIdentity)] {
+		let gw = FakeGateway::start().await;
+		gw.state.lock().unwrap().login_errors.push_back(code);
+		let engine = Engine::start();
+		let mut rx = engine.subscribe();
+		engine.send(Command::ObserveGateway {
+			session,
+			urls: vec![gw.url.clone()],
+			identity: Box::new(tsclientlib::Identity::create()),
+		});
+		// After the first wait: about 1 s.
+		quietly_until(&mut rx, session, Duration::from_secs(3), "observing", observing(session))
+			.await;
+		assert_eq!(gw.logins(), 2, "{code:?}");
+	}
+}
+
+/// A login the gateway refuses (banned, not allowed, a bad signature or
+/// security level) is not tried again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_login_ends_observing() {
+	let gw = FakeGateway::start().await;
+	gw.state.lock().unwrap().login_errors.push_back(ErrorCode::Banned);
+	let engine = Engine::start();
+	let mut rx = engine.subscribe();
+	observe(&engine, 8, &gw);
+	wait(&mut rx, "observing off", |e| match e {
+		Event::Error { message, .. } => panic!("the user was told: {message}"),
+		Event::State { session: 8, state } if state.observe == ObserveState::Off => Some(()),
+		_ => None,
+	})
+	.await;
+	tokio::time::sleep(Duration::from_millis(1500)).await;
+	assert_eq!(gw.logins(), 1);
+}
+
+/// Selecting the server again while its gateway is still connecting does
+/// not start it over, and ends the wait for the next attempt.
+#[tokio::test(flavor = "multi_thread")]
+async fn asking_again_while_connecting_tries_at_once() {
+	let gw = FakeGateway::start().await;
+	gw.state.lock().unwrap().login_errors.extend([ErrorCode::UnknownIdentity; 3]);
+	let engine = Engine::start();
+	let mut rx = engine.subscribe();
+	let identity = tsclientlib::Identity::create();
+	let ask = || Command::ObserveGateway {
+		session: 9,
+		urls: vec![gw.url.clone()],
+		identity: Box::new(identity.clone()),
+	};
+	engine.send(ask());
+	// Three logins fail (waits of about 1 and 2 s); the next wait is about 5 s.
+	quietly_until(&mut rx, 9, Duration::from_secs(6), "three logins", |_| gw.logins() >= 3).await;
+	tokio::time::sleep(Duration::from_millis(200)).await;
+	assert_eq!(gw.logins(), 3);
+	engine.send(ask());
+	// Sooner than the shortest such wait (3.5 s), without starting over.
+	quietly_until(&mut rx, 9, Duration::from_secs(2), "observing", observing(9)).await;
+	assert_eq!(gw.logins(), 4);
 }

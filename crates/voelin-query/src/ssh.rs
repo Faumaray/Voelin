@@ -6,6 +6,7 @@ use std::time::Duration;
 use russh::client;
 use russh::keys::PublicKeyOrCertificate;
 
+use crate::tcp::QuickAck;
 use crate::{Error, Result};
 
 /// Accepts any host key. ServerQuery hosts generate their key on first start
@@ -38,16 +39,24 @@ pub(crate) struct Shell {
 	pub fingerprint: Option<String>,
 }
 
-/// Open an SSH session and start the query shell.
-pub(crate) async fn connect(addr: &str, user: &str, password: &str) -> Result<Shell> {
+/// Open an SSH session and start the query shell, giving up on the TCP
+/// connection after `timeout`.
+pub(crate) async fn connect(
+	addr: &str,
+	user: &str,
+	password: &str,
+	timeout: Duration,
+) -> Result<Shell> {
 	let config = Arc::new(client::Config {
 		inactivity_timeout: None,
 		keepalive_interval: Some(Duration::from_secs(60)),
+		nodelay: true,
 		..Default::default()
 	});
 	let fingerprint = Arc::new(std::sync::Mutex::new(None));
 	let handler = AcceptAny { fingerprint: fingerprint.clone() };
-	let mut session = client::connect(config, addr, handler).await?;
+	let stream = QuickAck::connect(addr, timeout).await?;
+	let mut session = client::connect_stream(config, stream, handler).await?;
 	let auth = session.authenticate_password(user, password).await?;
 	if !auth.success() {
 		return Err(Error::SshAuth);

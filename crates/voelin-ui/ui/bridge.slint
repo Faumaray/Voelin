@@ -760,6 +760,15 @@ export struct AdvancedForm {
     crash-dir: string,
 }
 
+// A badge of the account, as servers can be shown it: its place among the
+// shown ones (1 to 3; 0: not shown), and whether that can change now (at
+// most three are shown).
+export struct MytsBadge {
+    name: string,
+    shown: int,
+    can-change: bool,
+}
+
 // Who we are (My Account page).
 export struct MytsForm {
     prompt: bool,
@@ -781,6 +790,9 @@ export struct MytsForm {
     member-since: string,
     last-login: string,
     badges: [string],
+    // The badges signed for servers, to choose from; the primary User Tag.
+    badge-choice: [MytsBadge],
+    user-tag: string,
     devices: [string],
     status: int,
     persistence-status: int,
@@ -1119,6 +1131,8 @@ export global Bridge {
     callback myts-dismiss();
     callback myts-retry();
     callback myts-portal(int);
+    // Show the badge at this index (of `myts.badge-choice`) on servers, or not.
+    callback myts-badge(int, bool);
     callback myts-login(string, string, string);
     callback myts-logout();
     in property <[IdentityItem]> identities;

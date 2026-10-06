@@ -3,11 +3,22 @@
 //! Requests use the official client's method envelope and password derivation.
 //! No requests or credentials are logged.
 mod identity;
+mod presentation;
 mod profile;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 mod transport;
+mod user_tag;
 pub use identity::IdentityError;
+pub use presentation::{
+	OwnAvatar, SignedBadge, avatar_has_pictures, badge_list, choose_avatar, choose_avatar_from,
+	choose_badges_certificate, choose_badges_certificate_from,
+};
 pub use profile::{Badge, Device, Presentation, Profile};
+/// The key myTeamSpeak's certificates lead to (TeamSpeak's root).
+pub use tsproto::ROOT_KEY;
 pub use tsproto::myts::Identity as ServerIdentity;
+pub use user_tag::{UserTagError, check_user_tag, check_user_tag_from};
 use zeroize::{Zeroize, Zeroizing};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -77,6 +88,10 @@ pub enum Error {
 	MissingRenewalCredentials,
 	#[error("account service refused the request (code {0})")]
 	Refused(i32),
+	#[error("chat service refused the request (code {0})")]
+	ChatRefused(i32),
+	#[error("the chat service sent no token")]
+	NoToken,
 	#[error("the account's avatar is not an HTTPS link")]
 	AvatarUrl,
 	#[error("avatar download returned HTTP {0}")]
@@ -237,6 +252,76 @@ impl Client {
 	pub async fn avatar(&self, file_name: &str) -> Result<Vec<u8>, Error> {
 		let url = profile::avatar_link(file_name)?;
 		self.transport.download(url, profile::MAX_AVATAR_BYTES).await
+	}
+
+	/// The account's avatar as myTeamSpeak's avatar service hands it out
+	/// for the account's own myTS ID (`requestContactsAvatar` at `/user`),
+	/// with the certificate that came with it: what servers are shown,
+	/// without a password sign-in. `None` tells nothing: the service
+	/// answers an unknown session as it answers "nothing to show".
+	pub async fn own_avatar(
+		&self,
+		token: &SessionToken,
+		myts_id: &[u8],
+	) -> Result<Option<OwnAvatar>, Error> {
+		transport::check_input_size(&[token.as_str()])?;
+		let request = presentation::own_avatar_request(token, myts_id);
+		let bytes =
+			self.transport.call("user", "requestContactsAvatar", &wire::encode(&request)).await?;
+		presentation::own_avatar(&bytes, myts_id)
+	}
+
+	/// The account's badges, signed for its myTS ID (`getSignedBadges` at
+	/// `/user`). `None`: the answer has no list (nothing learned).
+	pub async fn signed_badges(
+		&self,
+		token: &SessionToken,
+	) -> Result<Option<Vec<SignedBadge>>, Error> {
+		transport::check_input_size(&[token.as_str()])?;
+		let request = api::user::Session { session: token.as_str().into() };
+		let bytes = self.transport.call("user", "getSignedBadges", &wire::encode(&request)).await?;
+		presentation::signed_badges(&bytes)
+	}
+
+	/// The account's primary User Tag, its primary chat identifier
+	/// (`getActiveIdentifierList` at `/tschat`; the account data's active
+	/// identifiers when that names none). `None`: the account has none.
+	pub async fn user_tag(&self, token: &SessionToken) -> Result<Option<String>, Error> {
+		transport::check_input_size(&[token.as_str()])?;
+		let request = wire::encode(&user_tag::request(token));
+		let listed = async {
+			let bytes = self.transport.call("tschat", "getActiveIdentifierList", &request).await?;
+			user_tag::primary(wire::decode(bytes)?)
+		}
+		.await;
+		match listed {
+			Ok(Some(tag)) => return Ok(Some(tag)),
+			Err(error) if error.is_invalid_session() => return Err(error),
+			_ => {}
+		}
+		let request = wire::encode(&user_tag::account_request(token));
+		let bytes = self.transport.call("user", "getAccountData", &request).await;
+		let data = bytes.and_then(|bytes| {
+			let data: api::user::UserAccountData = wire::decode(bytes)?;
+			profile::check(data.return_code.as_ref())?;
+			Ok(data)
+		});
+		match data {
+			Ok(data) => Ok(user_tag::account_primary(&data)),
+			// The chat service's answer tells more.
+			Err(error) => listed.and(Err(error)),
+		}
+	}
+
+	/// The token that proves the account's User Tags
+	/// (`requestSignedAllowedIdentifierList` at `/tschat`), exactly as it
+	/// came; check it with [`check_user_tag`].
+	pub async fn user_tag_token(&self, token: &SessionToken) -> Result<Vec<u8>, Error> {
+		transport::check_input_size(&[token.as_str()])?;
+		let request = wire::encode(&user_tag::request(token));
+		let bytes =
+			self.transport.call("tschat", "requestSignedAllowedIdentifierList", &request).await?;
+		user_tag::token(&bytes)
 	}
 
 	pub async fn validate_session(&self, token: &SessionToken) -> Result<(), Error> {
