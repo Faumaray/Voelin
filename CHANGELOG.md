@@ -54,6 +54,8 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
 - zbus's warnings about desktop portal requests are left out of the logs.
 - Pop-ups, menus and tooltips have a clearer edge, and the member card, the
   emoji picker and the notifications panel dim the window behind them.
+- Double-clicking a channel of a server without voice connects into it
+  (it said "not connected with voice").
 
 ### Fixed
 
@@ -66,6 +68,13 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
   are drawn as TeamSpeak draws them, like `[cspacer]` was, and chats, search
   results, notifications and the other screens show a spacer's text instead
   of its raw name.
+- Locked channels ask for their password (kept until voice disconnects, and
+  asked again when it is wrong), and joining a full channel or one the
+  server refuses says why; joining did nothing before.
+- Pokes can carry a message (up to 100 characters); they were always sent
+  empty.
+- Joining a friend in a subchannel of a server without voice connects into
+  that subchannel; it connected into the default channel.
 
 ## [0.0.1-alpha] - 2026-10-04
 

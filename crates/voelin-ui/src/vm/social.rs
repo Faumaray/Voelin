@@ -1,6 +1,6 @@
 //! Texts of the home, friends, messages, bell and events screens: times
 //! ("12m ago", "Yesterday"), message previews without BBCode, mentions,
-//! event dates; pure, so they are tested here.
+//! event dates, a poke's message; pure, so they are tested here.
 
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 
@@ -120,6 +120,13 @@ pub fn matches(query: &str, fields: &[&str]) -> bool {
 	q.is_empty() || fields.iter().any(|f| f.to_lowercase().contains(&q))
 }
 
+/// A poke's message as it is sent: trimmed, and cut to the
+/// [`voelin_core::POKE_MESSAGE_MAX`] characters servers take.
+pub fn poke_message(text: &str) -> String {
+	let cut: String = text.trim().chars().take(voelin_core::POKE_MESSAGE_MAX).collect();
+	cut.trim_end().to_owned()
+}
+
 /// The channels the search (Ctrl+K) finds for `query`, with their titles:
 /// a spacer by its text, never a line or an empty spacer.
 pub fn found_channels<'a>(
@@ -235,6 +242,20 @@ mod tests {
 		assert!(matches("kai", &["Kairo", "x"]));
 		assert!(matches("", &[]));
 		assert!(!matches("zz", &["Kairo"]));
+	}
+
+	#[test]
+	fn poke_messages() {
+		assert_eq!(poke_message("  Raid in 5?  "), "Raid in 5?");
+		assert_eq!(poke_message(""), "");
+		assert_eq!(poke_message(" \n "), "");
+		let exact = "x".repeat(100);
+		assert_eq!(poke_message(&exact), exact);
+		// Characters, not bytes: two bytes each.
+		assert_eq!(poke_message(&"ä".repeat(150)), "ä".repeat(100));
+		assert_eq!(poke_message(&format!("{}€!", "ü".repeat(99))), format!("{}€", "ü".repeat(99)));
+		// A cut that ends in a space leaves it out.
+		assert_eq!(poke_message(&format!("{} more", "a".repeat(99))), "a".repeat(99));
 	}
 
 	/// The search shows spacers by their text and leaves out lines.

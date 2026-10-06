@@ -21,7 +21,11 @@
 //!   notification), `shared:<text>` (text shared to the app on Android),
 //!   `pins`, `topics` (the drawers),
 //!   `topic:<id>` (a topic's messages), `member` (the member card of the
-//!   first other client), `watch` (the first stream; with sample data the
+//!   first other client), `poke` (the poke dialog: for the contact shown
+//!   after `friends`, else for the first other client, its card open),
+//!   `channel-password` (the password dialog of the first locked channel,
+//!   the sample's Officers; `channel-password:wrong` as after a refused
+//!   one), `watch` (the first stream; with sample data the
 //!   local test pattern in its place), `popout` (the same, popped out),
 //!   `tab:<home|servers|chat|activity|you>` (phone layout); `friends[:<uid>]`,
 //!   `messages[:<uid>]` (a private chat), `inbox` (offline messages),
@@ -49,8 +53,8 @@ use slint::{ComponentHandle, Rgba8Pixel, SharedPixelBuffer};
 use voelin_core::gateway::Pin;
 use voelin_core::stream::{StreamInfo, StreamKind};
 use voelin_core::{
-	Contact, Event, GatewayUpdate, HistoryMessage, HistorySource, ObserveState, OfflineMessageInfo,
-	Relation, SessionState, Source, VoiceState,
+	Contact, Event, GatewayUpdate, HistoryMessage, HistorySource, JoinFailure, ObserveState,
+	OfflineMessageInfo, Relation, SessionState, Source, VoiceState,
 };
 use voelin_gateway_proto::{
 	Action, Attendee, ConfigEntry, ConfigSource, EventInfo, EventKind, EventSpec, PermRule,
@@ -255,6 +259,23 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 			"member" => {
 				with_app(|app| app.open_first_member());
 			}
+			// After `friends` the contact path (Kairo without a contact
+			// chosen), else the member card's.
+			"poke" => {
+				let friends = nav.get_page() == Page::Friends;
+				with_app(|app| {
+					if friends {
+						let uid = app.social.selected.clone().unwrap_or_else(|| "demo-3".into());
+						app.contact_action(&uid, "poke");
+					} else {
+						app.open_first_member();
+						app.member_action("poke");
+					}
+				});
+			}
+			"channel-password" => {
+				with_app(|app| open_channel_password(app, arg == "wrong"));
+			}
 			"watch" | "popout" => {
 				with_app(|app| {
 					if switches.demo_ui { app.demo_watch() } else { app.watch_first_stream() }
@@ -380,6 +401,25 @@ fn save_png(image: &SharedPixelBuffer<Rgba8Pixel>, path: &std::path::Path) -> Re
 	encoder.set_depth(png::BitDepth::Eight);
 	encoder.write_header()?.write_image_data(image.as_bytes())?;
 	Ok(())
+}
+
+/// `VOELIN_OPEN=channel-password`: join the current server's first locked
+/// channel, which asks for its password; `wrong` as if the server had
+/// refused one.
+fn open_channel_password(app: &mut App, wrong: bool) {
+	let Some(session) = app.current else { return };
+	let locked = app
+		.view()
+		.and_then(|v| v.presence.channels.values().filter(|c| c.has_password).map(|c| c.id).min());
+	let Some(channel) = locked else { return };
+	if wrong {
+		if let Some(view) = app.view_mut() {
+			view.channel_passwords.insert(channel, "guess".into());
+		}
+		app.join_failed(session, channel, JoinFailure::Password);
+	} else {
+		app.join_channel(session, channel);
+	}
 }
 
 const DEMO: i64 = 9001;

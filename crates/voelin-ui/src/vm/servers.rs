@@ -1,6 +1,7 @@
-//! The server rail.
+//! The server rail, and joining a channel.
 
 use voelin_core::{ObserveState, SessionState, VoiceState};
+use voelin_model::{ChannelId, ChannelInfo};
 use voelin_store::Bookmark;
 
 use crate::app::ServerItem;
@@ -96,6 +97,50 @@ pub fn invite_link(address: &str, path: &[&str]) -> String {
 	link
 }
 
+/// What joining a channel takes ([`join_password`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JoinStep {
+	/// Move there, with this password.
+	Send(Option<String>),
+	/// Ask for the channel's password first.
+	Ask,
+}
+
+/// How to join `channel`, given the password remembered for it this
+/// connection: a locked channel asks for one unless it was given before,
+/// as TeamSpeak does. A password given before goes along even when the
+/// channel shows no lock: one locked since then still lets us in.
+pub fn join_password(channel: &ChannelInfo, remembered: Option<&str>) -> JoinStep {
+	match remembered.filter(|p| !p.is_empty()) {
+		Some(password) => JoinStep::Send(Some(password.to_owned())),
+		None if channel.has_password => JoinStep::Ask,
+		None => JoinStep::Send(None),
+	}
+}
+
+/// Where a voice connection asked into a channel stands ([`after_connect`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AfterConnect {
+	/// Not known yet.
+	Wait,
+	/// In it.
+	Joined,
+	/// Put elsewhere without a word (a wrong password, for one): joining
+	/// it again says why.
+	JoinAgain,
+}
+
+/// A connection asked into `asked`, connected with voice: `own` is our
+/// channel once known, `known` whether `asked` shows in the presence yet
+/// (it can come after our own channel).
+pub fn after_connect(own: Option<ChannelId>, asked: ChannelId, known: bool) -> AfterConnect {
+	match own {
+		Some(own) if own == asked => AfterConnect::Joined,
+		Some(_) if known => AfterConnect::JoinAgain,
+		_ => AfterConnect::Wait,
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -148,6 +193,26 @@ mod tests {
 		// A bare IPv6 address has no port.
 		assert_eq!(invite_link("2001:db8::1", &[]), "ts3server://2001:db8::1");
 		assert_eq!(invite_link("h:x", &["Ä/b"]), "ts3server://h:x?channel=%C3%84%2Fb");
+	}
+
+	#[test]
+	fn locked_channels_ask_for_their_password_once() {
+		let open = ChannelInfo { id: 1, name: "Lobby".into(), ..Default::default() };
+		let locked = ChannelInfo { has_password: true, ..open.clone() };
+		assert_eq!(join_password(&open, None), JoinStep::Send(None));
+		assert_eq!(join_password(&locked, None), JoinStep::Ask);
+		assert_eq!(join_password(&locked, Some("")), JoinStep::Ask);
+		assert_eq!(join_password(&locked, Some("pw")), JoinStep::Send(Some("pw".into())));
+		assert_eq!(join_password(&open, Some("pw")), JoinStep::Send(Some("pw".into())));
+	}
+
+	#[test]
+	fn connecting_into_a_channel() {
+		assert_eq!(after_connect(None, 4, true), AfterConnect::Wait);
+		assert_eq!(after_connect(Some(4), 4, false), AfterConnect::Joined);
+		// Put into the default channel: once the channel is known, again.
+		assert_eq!(after_connect(Some(1), 4, false), AfterConnect::Wait);
+		assert_eq!(after_connect(Some(1), 4, true), AfterConnect::JoinAgain);
 	}
 
 	#[test]

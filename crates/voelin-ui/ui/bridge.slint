@@ -957,7 +957,10 @@ export global Bridge {
     callback search(string);
     callback connect-voice();
     callback disconnect-voice();
+    // A double-click on a channel: Rust moves there, or asks for its
+    // password first (Nav.channel-password-open); the dialog's Join.
     callback join-channel(int);
+    callback join-with-password(string);
     callback open-channel-chat(int);
     callback toggle-collapse(int);
     callback select-tab(int);
@@ -983,6 +986,9 @@ export global Bridge {
     // The member card: open it for a client (-1 closes it).
     callback open-member(int);
     callback member-action(string);
+    // The poke dialog's Send (Nav.poke-open, opened by Rust for the member
+    // card and contacts), with its message.
+    callback send-poke(string);
     callback member-volume(float);
     callback set-input-muted(bool);
     callback set-output-muted(bool);

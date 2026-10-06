@@ -1,4 +1,5 @@
-// Dialogs: add/edit a server, share the screen, a client's volume, About.
+// Dialogs: add/edit a server, share the screen, a client's volume, a
+// channel's password, a poke, About.
 
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
@@ -526,6 +527,125 @@ export component ClientAudioDialog inherits Modal {
             kind: ButtonKind.primary;
             text: @tr("Close");
             clicked => { done(); }
+        }
+    }
+}
+
+// A locked channel's password, asked for before joining it and again when
+// the server refused it. Rust opens it and keeps the channel
+// (`App::join_channel`).
+export component ChannelPasswordDialog inherits Modal {
+    callback done();
+    title: @tr("Join {}", Nav.channel-password-name);
+    subtitle: @tr("This channel has a password.");
+    icon: Icons.lock;
+    card-width: 440px;
+    card-height: Nav.channel-password-error ? 224px : 208px;
+    dismissed => { done(); }
+
+    function join() {
+        if field.text != "" {
+            Bridge.join-with-password(field.text);
+            done();
+        }
+    }
+
+    VerticalLayout {
+        spacing: Theme.space-2;
+        field := TextField {
+            input-type: InputType.password;
+            placeholder: @tr("Password");
+            label: @tr("Channel password");
+            icon: Icons.lock;
+            init => { self.focus(); }
+            accepted => { root.join(); }
+            // The field has the keys, so Escape is handled here.
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.done();
+                    return accept;
+                }
+                reject
+            }
+        }
+        if Nav.channel-password-error: Text {
+            text: @tr("Wrong password");
+            color: Theme.danger;
+            font-size: Theme.font-sm;
+        }
+    }
+    Rectangle { vertical-stretch: 1; }
+    Footer {
+        Button {
+            text: @tr("Cancel");
+            clicked => { done(); }
+        }
+        Button {
+            kind: ButtonKind.primary;
+            icon: Icons.log-in;
+            text: @tr("Join");
+            enabled: field.text != "";
+            clicked => { root.join(); }
+        }
+    }
+}
+
+// A poke, with an optional message of up to 100 characters (what servers
+// take; Rust cuts longer ones). Rust opens it and keeps who is poked.
+export component PokeDialog inherits Modal {
+    callback done();
+    // As Slint counts characters (grapheme clusters); Rust counts code
+    // points, so a long run of combined emoji may still be cut there.
+    property <int> count: field.text.character-count;
+    property <bool> too-long: count > 100;
+    title: @tr("Poke {}", Nav.poke-name);
+    subtitle: @tr("They get a notice right away.");
+    icon: Icons.hand;
+    card-width: 460px;
+    card-height: 224px;
+    dismissed => { done(); }
+
+    function send() {
+        if !root.too-long {
+            Bridge.send-poke(field.text);
+            done();
+        }
+    }
+
+    VerticalLayout {
+        spacing: Theme.space-2;
+        field := TextField {
+            placeholder: @tr("Message (optional)");
+            label: @tr("Message");
+            init => { self.focus(); }
+            accepted => { root.send(); }
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.done();
+                    return accept;
+                }
+                reject
+            }
+        }
+        Text {
+            text: @tr("{}/100", root.count);
+            horizontal-alignment: right;
+            font-size: Theme.font-xs;
+            color: root.too-long ? Theme.danger : Theme.text-muted;
+        }
+    }
+    Rectangle { vertical-stretch: 1; }
+    Footer {
+        Button {
+            text: @tr("Cancel");
+            clicked => { done(); }
+        }
+        Button {
+            kind: ButtonKind.primary;
+            icon: Icons.hand;
+            text: @tr("Send");
+            enabled: !root.too-long;
+            clicked => { root.send(); }
         }
     }
 }

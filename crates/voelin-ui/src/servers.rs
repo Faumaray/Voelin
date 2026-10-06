@@ -4,11 +4,13 @@
 use slint::{ComponentHandle, SharedString};
 use tracing::{info, warn};
 use voelin_core::identity::LaunchImport;
-use voelin_core::{Command, ObserveState, Source, VoiceOptions, VoiceState};
+use voelin_core::{Command, JoinFailure, ObserveState, Source, VoiceOptions, VoiceState};
+use voelin_model::ChannelId;
 use voelin_store::{Bookmark, QueryTransport};
 
-use crate::app::{App, BookmarkForm, Bridge, SessionView, later};
+use crate::app::{App, BookmarkForm, Bridge, Nav, SessionView, later};
 use crate::vm;
+use crate::vm::servers::{AfterConnect, JoinStep};
 
 /// The name of the identity the app creates when it has none.
 pub(crate) const CREATED_IDENTITY: &str = "Default";
@@ -84,15 +86,19 @@ impl App {
 	pub(crate) fn connect_voice(&mut self) {
 		let channel =
 			self.current.and_then(|id| self.bookmark(id)).and_then(|b| b.default_channel.clone());
-		self.connect_voice_to(channel);
+		self.connect_voice_to(channel, None);
 	}
 
-	/// Connect the current server with voice, into `channel` (a name or
-	/// path) if given.
-	pub(crate) fn connect_voice_to(&mut self, channel: Option<String>) {
-		let Some(b) = self.current.and_then(|id| self.bookmark(id)).cloned() else { return };
+	/// Connect the current server with voice, into `channel` (a path, or
+	/// `/<id>`, with its password) if given; whether it was asked for.
+	pub(crate) fn connect_voice_to(
+		&mut self,
+		channel: Option<String>,
+		channel_password: Option<String>,
+	) -> bool {
+		let Some(b) = self.current.and_then(|id| self.bookmark(id)).cloned() else { return false };
 		if self.demo_ui {
-			return;
+			return false;
 		}
 		let mut options = VoiceOptions::new(&b.address, &b.nickname);
 		if let Some(spec) = &b.client_version {
@@ -100,13 +106,14 @@ impl App {
 				Ok(version) => options.client_version = version,
 				Err(error) => {
 					self.set_status(format!("Invalid client compatibility version: {error}"));
-					return;
+					return false;
 				}
 			}
 		}
 		options.identity = Some(self.identity_for(Some(b.id)));
 		options.server_password = self.secrets.get(&b.server_password_key()).ok().flatten();
 		options.channel = channel;
+		options.channel_password = channel_password;
 		options.audio = true;
 		options.stream_peer = self.video.peer_config(options.stream_peer);
 		self.engine
@@ -114,6 +121,7 @@ impl App {
 		self.set_status(format!("Connecting to {}…", b.address));
 		// The admin may have published the gateway since it was added.
 		self.discover_gateway(b.id);
+		true
 	}
 
 	/// The nickname a new server gets: the default identity's (one imported
@@ -531,6 +539,115 @@ impl App {
 		let link = vm::servers::invite_link(&address, &path);
 		self.copy_note = Some(format!("Copied an invite to {title}: {link}"));
 		link
+	}
+
+	/// Join a channel of a session (a double-click in the tree, joining a
+	/// friend): move there with voice, or connect into it. A locked channel
+	/// asks for its password first, unless it was given this connection.
+	pub(crate) fn join_channel(&mut self, session: i64, channel: ChannelId) {
+		let Some(view) = self.sessions.get(&session) else { return };
+		let Some(info) = view.presence.channels.get(&channel) else { return };
+		let remembered = view.channel_passwords.get(&channel).map(String::as_str);
+		match vm::servers::join_password(info, remembered) {
+			JoinStep::Send(password) => self.enter_channel(session, channel, password),
+			JoinStep::Ask => self.ask_channel_password(session, channel, false),
+		}
+	}
+
+	/// The password dialog's Join.
+	pub(crate) fn join_with_password(&mut self, password: String) {
+		let Some((session, channel)) = self.join_target.take() else { return };
+		if password.is_empty() {
+			return;
+		}
+		if let Some(view) = self.sessions.get_mut(&session) {
+			view.channel_passwords.insert(channel, password.clone());
+		}
+		self.enter_channel(session, channel, Some(password));
+	}
+
+	/// Move into a channel; without voice on its server, connect into it.
+	fn enter_channel(&mut self, session: i64, channel: ChannelId, password: Option<String>) {
+		let Some(view) = self.sessions.get_mut(&session) else { return };
+		if view.state.voice != VoiceState::Disconnected {
+			// Chosen while connecting: no longer the one to join after.
+			view.join_after_connect = None;
+			if !self.demo_ui {
+				self.engine.send(Command::MoveToChannel {
+					session: session as u64,
+					channel,
+					password,
+				});
+			}
+			return;
+		}
+		if self.current != Some(session) {
+			self.select_server(session);
+		}
+		// By id: by its name the server finds only a top-level channel (a
+		// subchannel's name connects into the default channel).
+		if self.connect_voice_to(Some(format!("/{channel}")), password)
+			&& let Some(view) = self.sessions.get_mut(&session)
+		{
+			view.join_after_connect = Some(channel);
+		}
+	}
+
+	/// Connected into another channel than the one asked for
+	/// (`SessionView::join_after_connect`): the server says nothing when,
+	/// for one, the password was wrong, so it is joined again, and that
+	/// move says why. Once the channel shows in the voice
+	/// connection's presence, which can come after the own channel.
+	pub(crate) fn join_after_connect(&mut self, session: i64) {
+		let Some(view) = self.sessions.get_mut(&session) else { return };
+		let (VoiceState::Connected, Some(asked)) = (view.state.voice, view.join_after_connect)
+		else {
+			return;
+		};
+		let known = view.presence.channels.contains_key(&asked);
+		match vm::servers::after_connect(view.state.own_channel, asked, known) {
+			AfterConnect::Wait => {}
+			AfterConnect::Joined => view.join_after_connect = None,
+			AfterConnect::JoinAgain => {
+				view.join_after_connect = None;
+				self.join_channel(session, asked);
+			}
+		}
+	}
+
+	/// Open the password dialog for a locked channel; `wrong`: the one
+	/// given was refused.
+	fn ask_channel_password(&mut self, session: i64, channel: ChannelId, wrong: bool) {
+		let Some(info) =
+			self.sessions.get(&session).and_then(|v| v.presence.channels.get(&channel))
+		else {
+			return;
+		};
+		let name = vm::tree::channel_title(info).0.to_owned();
+		self.join_target = Some((session, channel));
+		let Some(ui) = self.ui.upgrade() else { return };
+		let nav = ui.global::<Nav>();
+		nav.set_channel_password_name(name.into());
+		nav.set_channel_password_error(wrong);
+		nav.set_channel_password_open(true);
+	}
+
+	/// The server refused a move ([`voelin_core::Event::JoinFailed`]): a
+	/// password asks again (the one given is forgotten), the rest is a
+	/// toast.
+	pub(crate) fn join_failed(&mut self, session: i64, channel: ChannelId, reason: JoinFailure) {
+		match reason {
+			JoinFailure::Password => {
+				let given = self
+					.sessions
+					.get_mut(&session)
+					.and_then(|v| v.channel_passwords.remove(&channel))
+					.is_some();
+				self.ask_channel_password(session, channel, given);
+			}
+			JoinFailure::Full => self.set_status("The channel is full"),
+			JoinFailure::Other(text) => self.set_status(text),
+		}
 	}
 
 	pub(crate) fn toggle_collapse(&mut self, channel: u64) {

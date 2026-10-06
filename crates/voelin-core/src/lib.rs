@@ -99,6 +99,10 @@ pub use voice::VoiceOptions;
 
 pub type SessionId = u64;
 
+/// The longest poke message servers take, in characters; a longer one is
+/// cut ([`Command::Poke`]).
+pub const POKE_MESSAGE_MAX: usize = 100;
+
 /// What the UI asks for.
 #[derive(Clone, Debug)]
 pub enum Command {
@@ -274,7 +278,8 @@ pub enum Command {
 		volume: f32,
 	},
 	/// Poke a client (voice): the server shows it a notification with
-	/// `message`. Failures come as [`Event::Error`].
+	/// `message`, cut to [`POKE_MESSAGE_MAX`] characters. Failures come as
+	/// [`Event::Error`].
 	Poke {
 		session: SessionId,
 		client: u16,

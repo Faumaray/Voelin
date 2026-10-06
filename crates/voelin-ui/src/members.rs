@@ -6,7 +6,7 @@ use slint::ComponentHandle;
 use voelin_core::{Command, Contact, Relation};
 use voelin_model::ChatTarget;
 
-use crate::app::{App, Bridge, MemberCard};
+use crate::app::{App, Bridge, MemberCard, Nav};
 use crate::settings::ClientPlayback;
 use crate::vm;
 
@@ -96,14 +96,7 @@ impl App {
 				self.open_member(-1);
 				self.watch_client(client_id);
 			}
-			"poke" => {
-				self.command(|session| Command::Poke {
-					session,
-					client: client_id,
-					message: String::new(),
-				});
-				self.set_status(format!("Poked {nickname}"));
-			}
+			"poke" => self.ask_poke(id, client_id),
 			"friend" | "blocked" => {
 				let Some(uid) = uid else { return };
 				let wanted = if action == "friend" { Relation::Friend } else { Relation::Blocked };
@@ -124,6 +117,30 @@ impl App {
 			}
 			_ => {}
 		}
+	}
+
+	/// Open the poke dialog for a client (the member card, a contact).
+	pub(crate) fn ask_poke(&mut self, session: i64, client: u16) {
+		let Some(view) = self.sessions.get(&session) else { return };
+		let name = view.nickname(client);
+		self.poke_target = Some((session, client, name.clone()));
+		let Some(ui) = self.ui.upgrade() else { return };
+		let nav = ui.global::<Nav>();
+		nav.set_poke_name(name.into());
+		nav.set_poke_open(true);
+	}
+
+	/// The poke dialog's Send, with its message (may be empty).
+	pub(crate) fn send_poke(&mut self, text: &str) {
+		let Some((session, client, name)) = self.poke_target.take() else { return };
+		if !self.demo_ui {
+			self.engine.send(Command::Poke {
+				session: session as u64,
+				client,
+				message: vm::social::poke_message(text),
+			});
+		}
+		self.set_status(format!("Poked {name}"));
 	}
 
 	/// The card's volume slider, in percent.

@@ -82,6 +82,13 @@ export global Nav {
     in-out property <string> draft;
     in-out property <BookmarkForm> bookmark-form;
     in-out property <ShareForm> share-form;
+    // Rust opens these two: a locked channel's password (its name, and
+    // whether the last one given was refused) and a poke's message.
+    in-out property <bool> channel-password-open;
+    in-out property <string> channel-password-name;
+    in-out property <bool> channel-password-error;
+    in-out property <bool> poke-open;
+    in-out property <string> poke-name;
 
     // The bell's panel, the search (Ctrl+K) and its selected result, a
     // picture opened from the chat, the event and offline message forms,

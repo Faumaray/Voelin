@@ -33,7 +33,7 @@ use crate::cache;
 use crate::files::{self, FileEntry, Report, RequestId, Sink, TransferId, TransferState};
 use crate::offline::{OfflineMessage, OfflineMessageInfo};
 use crate::settings::{FILES_PROGRESS_MS, SharedSettings};
-use crate::{Event, JoinFailure, SessionId};
+use crate::{Event, JoinFailure, POKE_MESSAGE_MAX, SessionId};
 
 #[derive(Clone, Debug)]
 pub struct VoiceOptions {
@@ -43,7 +43,7 @@ pub struct VoiceOptions {
 	/// Signed compatibility version; `None` selects the native platform's tuple.
 	pub client_version: Option<Version>,
 	pub server_password: Option<String>,
-	/// Channel path to join, e.g. `Lobby/Sub`.
+	/// Channel path to join, e.g. `Lobby/Sub`, or `/<id>`.
 	pub channel: Option<String>,
 	/// The password of `channel`.
 	pub channel_password: Option<String>,
@@ -889,7 +889,7 @@ impl Voice {
 				let cmd = c2s::OutClientPokeRequestMessage::new(&mut std::iter::once(
 					c2s::OutClientPokeRequestPart {
 						client_id: tsclientlib::ClientId(client),
-						message: message.as_str().into(),
+						message: poke_message(&message).into(),
 					},
 				));
 				self.send(cmd, Pending::Report("poke"))?;
@@ -1098,6 +1098,15 @@ fn join_failure(error: TsError) -> Option<JoinFailure> {
 	Some(JoinFailure::Other(text))
 }
 
+/// A poke's message as servers take it: its first [`POKE_MESSAGE_MAX`]
+/// characters (not bytes, so a letter is never cut in half).
+fn poke_message(message: &str) -> &str {
+	match message.char_indices().nth(POKE_MESSAGE_MAX) {
+		Some((end, _)) => &message[..end],
+		None => message,
+	}
+}
+
 /// A TeamSpeak error's name in lowercase words:
 /// `ChannelIsPrivateChannel` is "channel is private channel".
 fn error_words(error: TsError) -> String {
@@ -1142,6 +1151,23 @@ mod join_tests {
 			join_failure(TsError::ChannelIsPrivateChannel),
 			other("The server refused to move you: channel is private channel.")
 		);
+	}
+}
+
+#[cfg(test)]
+mod poke_tests {
+	use super::*;
+
+	#[test]
+	fn long_pokes_are_cut_by_characters() {
+		assert_eq!(poke_message("hi"), "hi");
+		assert_eq!(poke_message(""), "");
+		let exact = "x".repeat(POKE_MESSAGE_MAX);
+		assert_eq!(poke_message(&exact), exact);
+		// Two bytes each: cut after 100 letters, not 100 bytes.
+		let long = "ä".repeat(150);
+		assert_eq!(poke_message(&long), "ä".repeat(POKE_MESSAGE_MAX));
+		assert_eq!(poke_message(&"🙂".repeat(101)).chars().count(), POKE_MESSAGE_MAX);
 	}
 }
 

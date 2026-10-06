@@ -32,7 +32,7 @@ import { ServerLinks, EventsPage, EventDialog } from "screens/events.slint";
 import { NotificationsPanel, SearchPalette, Lightbox } from "screens/overlays.slint";
 import { MobileServers, ActivityPage, YouPage, PhoneSheet } from "screens/mobile.slint";
 import { MobileVoice } from "screens/mobile-voice.slint";
-import { BookmarkDialog, ShareDialog, ClientAudioDialog, AboutDialog } from "screens/dialogs.slint";
+import { BookmarkDialog, ShareDialog, ClientAudioDialog, ChannelPasswordDialog, PokeDialog, AboutDialog } from "screens/dialogs.slint";
 import { StudioBridge } from "studio-bridge.slint";
 import { StudioPage, MobileStudio } from "screens/studio.slint";
 
@@ -401,6 +401,14 @@ export component MainWindow inherits Window {
 
     if !Bridge.myts.prompt && (Nav.client-open): ClientAudioDialog {
         done => { Nav.client-open = false; }
+    }
+
+    if !Bridge.myts.prompt && (Nav.channel-password-open): ChannelPasswordDialog {
+        done => { Nav.channel-password-open = false; }
+    }
+
+    if !Bridge.myts.prompt && (Nav.poke-open): PokeDialog {
+        done => { Nav.poke-open = false; }
     }
 
     if !Bridge.myts.prompt && (Nav.about-open): AboutDialog {

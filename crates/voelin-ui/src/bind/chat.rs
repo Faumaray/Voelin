@@ -61,6 +61,9 @@ pub(super) fn wire(ui: &MainWindow) {
 	bridge.on_member_action(|action| {
 		with_app(|app| app.member_action(&action));
 	});
+	bridge.on_send_poke(|text| {
+		with_app(|app| app.send_poke(&text));
+	});
 	bridge.on_member_volume(|percent| {
 		with_app(|app| app.member_volume(percent));
 	});

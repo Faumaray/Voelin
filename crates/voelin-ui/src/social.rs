@@ -130,8 +130,6 @@ pub(crate) struct Spot {
 	pub server: String,
 	pub client: u16,
 	pub channel: u64,
-	/// The channel's name as the server has it (to join it by name).
-	pub channel_name: String,
 	/// The channel's name as shown (a spacer's text).
 	pub channel_title: String,
 	pub away: Option<String>,
@@ -284,7 +282,6 @@ impl App {
 				server: self.server_name(id),
 				client: c.id,
 				channel: c.channel,
-				channel_name: channel.map(|ch| ch.name.clone()).unwrap_or_default(),
 				channel_title: channel
 					.map(|ch| vm::tree::channel_title(ch).0.to_owned())
 					.unwrap_or_default(),
@@ -492,15 +489,7 @@ impl App {
 					self.set_status("Connect with voice to a server they are on to poke them.");
 					return;
 				};
-				if !self.demo_ui {
-					self.engine.send(Command::Poke {
-						session: s.session as u64,
-						client: s.client,
-						message: String::new(),
-					});
-				}
-				let name = self.sessions[&s.session].nickname(s.client);
-				self.set_status(format!("Poked {name}"));
+				self.ask_poke(s.session, s.client);
 			}
 			"join" => self.join_person(&spots),
 			"watch" => self.watch_person(&spots),
@@ -532,24 +521,14 @@ impl App {
 	}
 
 	/// Go to someone's channel: move there with voice, or connect to that
-	/// server into it.
+	/// server into it (`join_channel`, which asks for a password first).
 	fn join_person(&mut self, spots: &[Spot]) {
 		let Some(s) = spots.iter().find(|s| s.voice).or(spots.first()).cloned() else {
 			self.set_status("They are not on any of your servers right now.");
 			return;
 		};
 		self.show_server(s.session);
-		if s.voice {
-			if !self.demo_ui {
-				self.engine.send(Command::MoveToChannel {
-					session: s.session as u64,
-					channel: s.channel,
-					password: None,
-				});
-			}
-		} else {
-			self.connect_voice_to(Some(s.channel_name.clone()));
-		}
+		self.join_channel(s.session, s.channel);
 	}
 
 	/// Watch someone's stream: from any channel of a server we are on with

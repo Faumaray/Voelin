@@ -25,12 +25,13 @@ pub(super) fn wire(ui: &MainWindow) {
 	});
 	bridge.on_join_channel(|cid| {
 		with_app(|app| {
-			app.command(|session| Command::MoveToChannel {
-				session,
-				channel: cid as ChannelId,
-				password: None,
-			})
+			if let Some(session) = app.current {
+				app.join_channel(session, cid as ChannelId);
+			}
 		});
+	});
+	bridge.on_join_with_password(|password| {
+		with_app(|app| app.join_with_password(password.to_string()));
 	});
 	bridge.on_toggle_collapse(|cid| {
 		with_app(|app| app.toggle_collapse(cid as ChannelId));

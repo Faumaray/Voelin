@@ -234,6 +234,11 @@ pub(crate) struct SessionView {
 	pub gateway_caps: Vec<String>,
 	/// The client whose member card is open.
 	pub member_card: Option<u16>,
+	/// Passwords given for locked channels, until voice disconnects.
+	pub channel_passwords: HashMap<ChannelId, String>,
+	/// The channel a voice connection was asked into, until it is joined
+	/// or joined again (`App::join_after_connect`).
+	pub join_after_connect: Option<ChannelId>,
 	/// Viewers of the streams in the gateway's directory, by stream id.
 	pub stream_viewers: HashMap<String, u32>,
 	/// Downloads started from chat, by transfer id.
@@ -266,6 +271,8 @@ impl Default for SessionView {
 			channel_groups: Vec::new(),
 			gateway_caps: Vec::new(),
 			member_card: None,
+			channel_passwords: HashMap::new(),
+			join_after_connect: None,
 			stream_viewers: HashMap::new(),
 			downloads: HashMap::new(),
 			next_transfer: 1,
@@ -454,6 +461,10 @@ pub(crate) struct App {
 	pub contacts: HashMap<String, voelin_core::Contact>,
 	/// The client in the volume dialog: session, client id, unique id.
 	pub playback_dialog: Option<(i64, u16, Option<String>)>,
+	/// The locked channel the password dialog is for: session, channel.
+	pub join_target: Option<(i64, ChannelId)>,
+	/// Who the poke dialog pokes: session, client, nickname.
+	pub poke_target: Option<(i64, u16, String)>,
 	pub mic_test: bool,
 	pub ptt: GlobalPtt,
 	pub video: Video,
@@ -695,6 +706,8 @@ pub fn run(options: RunOptions) -> Result<()> {
 		playback,
 		contacts: HashMap::new(),
 		playback_dialog: None,
+		join_target: None,
+		poke_target: None,
 		mic_test: false,
 		ptt,
 		video,
@@ -902,6 +915,11 @@ impl App {
 				if state.voice != VoiceState::Connected {
 					view.focused_own_channel = false;
 				}
+				if state.voice == VoiceState::Disconnected && was_voice != VoiceState::Disconnected
+				{
+					view.channel_passwords.clear();
+					view.join_after_connect = None;
+				}
 				if state.voice == VoiceState::Connected && was_voice != VoiceState::Connected {
 					// A new connection: volumes are sent again.
 					view.applied_playback.clear();
@@ -926,6 +944,7 @@ impl App {
 				if self.open_client_pending && self.current == Some(id) {
 					self.open_first_client();
 				}
+				self.join_after_connect(id);
 			}
 			Event::ServerInfo { session, name, flavor, capabilities } => {
 				self.sessions.entry(session as i64).or_default().capabilities = capabilities;
@@ -944,6 +963,7 @@ impl App {
 			Event::Presence { session, presence } => {
 				self.sessions.entry(session as i64).or_default().presence = presence;
 				self.apply_client_playback(session as i64);
+				self.join_after_connect(session as i64);
 				if self.current == Some(session as i64) {
 					self.refresh_toolbar();
 					self.refresh_tree();
@@ -1056,8 +1076,9 @@ impl App {
 			// The sample sessions of VOELIN_DEMO_UI are unknown to the engine.
 			Event::Error { .. } if self.demo_ui => {}
 			Event::Error { message, .. } => self.set_status(message),
-			// Not shown yet: the channel password dialog will handle it.
-			Event::JoinFailed { .. } => {}
+			Event::JoinFailed { session, channel, reason } => {
+				self.join_failed(session as i64, channel, reason);
+			}
 			Event::SettingChanged { key } => self.setting_changed(&key),
 			Event::SettingRejected { key, message } => {
 				self.set_status(format!("Setting {key}: {message}"));

@@ -195,8 +195,9 @@ announces its hash (`clientupdate client_flag_avatar`), or removes it.
 
 ## Pokes, private and offline messages
 
-`Command::Poke` sends `clientpoke`; incoming pokes are `Event::Poke` (they
-used to be stored as private messages). Private messages to any client on
+`Command::Poke` sends `clientpoke`, its message cut to 100 characters
+(`POKE_MESSAGE_MAX`); incoming pokes are `Event::Poke` (they used to be
+stored as private messages). Private messages to any client on
 the server are a `ChatTarget::Private(unique id)` chat over the voice
 connection, stored in the chat history under the peer's unique id, so the
 conversation survives reconnects and new client ids. Gateways and query
