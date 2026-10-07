@@ -174,12 +174,19 @@ export component MemberRow inherits Rectangle {
             tint: Theme.danger;
             y: (parent.height - self.height) / 2;
         }
-        if member.talk-power > 0: Text {
-            text: member.talk-power;
-            color: Theme.text-disabled;
-            font-size: Theme.font-xs;
-            vertical-alignment: center;
-            accessible-label: @tr("talk power {}", member.talk-power);
+        // A hand, as TeamSpeak asks for talk power; the card has the number.
+        if member.cannot-talk: Tooltip {
+            text: @tr("Needs talk power to speak");
+            width: hand.width;
+            height: hand.height;
+            y: (parent.height - self.height) / 2;
+            hand := Icon {
+                source: Icons.hand;
+                size: 16px;
+                tint: Theme.text-muted;
+                accessible-role: AccessibleRole.image;
+                accessible-label: @tr("Needs talk power to speak");
+            }
         }
     }
 }

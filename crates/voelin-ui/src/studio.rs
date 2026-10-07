@@ -936,7 +936,7 @@ impl App {
 					.map(|c| vm::tree::channel_title(c).0.to_owned())
 					.unwrap_or_default();
 				if !view.tabs.iter().any(|t| t.target == target) {
-					let tab = view.new_tab(target.clone(), format!("#{name}"));
+					let tab = view.new_tab(target.clone(), name.clone());
 					view.tabs.push(tab);
 					if !demo {
 						self.engine.send(Command::OpenChat { session: id as u64, target });

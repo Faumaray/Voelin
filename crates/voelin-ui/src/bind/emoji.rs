@@ -1,4 +1,5 @@
-//! Emoji: images for the `Images` global, and the picker's rows.
+//! Emoji: images for the `Images` global (and an avatar's one letter), and
+//! the picker's rows.
 
 use std::rc::Rc;
 
@@ -7,6 +8,7 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use crate::app::{Emoji, EmojiCell, EmojiRow, Images, MainWindow};
 use crate::emoji::{self, PickerEmoji};
 use crate::images;
+use crate::vm::avatar;
 
 /// Rows of `columns` cells.
 fn rows(emoji: Vec<PickerEmoji>, columns: usize) -> Vec<EmojiRow> {
@@ -38,6 +40,7 @@ pub(super) fn wire(ui: &MainWindow) {
 	let images_global = ui.global::<Images>();
 	images_global.on_emoji(|key| images::emoji(&key));
 	images_global.on_emoji_text(|key| emoji::text_of(&key).into());
+	images_global.on_first_letter(|initials| avatar::first_letter(&initials).into());
 	let global = ui.global::<Emoji>();
 	let weak = ui.as_weak();
 	global.on_load(move || {

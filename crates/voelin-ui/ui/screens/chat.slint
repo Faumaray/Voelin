@@ -10,7 +10,7 @@ import { Icon, IconButton, Avatar, Chip, TabItem, TextField, MessageText, Banner
 
 // A compact title and actions over the optional channel background.
 export component PageHeader inherits Rectangle {
-    in property <image> icon: Icons.hash;
+    in property <image> icon: Icons.channel;
     in property <image> banner;
     in property <string> title;
     in property <string> description;
@@ -834,7 +834,7 @@ export component ChatView inherits VerticalLayout {
 
     if root.header: PageHeader {
         banner: root.tab-banner;
-        icon: root.tab-kind == 1 ? Icons.hash : root.tab-kind == 2 ? Icons.at-sign : Icons.message-square;
+        icon: root.tab-kind == 1 ? Icons.channel : root.tab-kind == 2 ? Icons.at-sign : Icons.message-square;
         title: root.tab-name;
         description: root.tab-topic != "" ? root.tab-topic : Bridge.server-title;
         // Only when the chat does not come through our voice connection
@@ -861,7 +861,7 @@ export component ChatView inherits VerticalLayout {
         }
         // The voice channel we are in, with the people and the streams.
         if Bridge.voice-connected: IconButton {
-            icon: Icons.volume-2;
+            icon: Icons.channel;
             label: @tr("Voice channel");
             y: (parent.height - self.height) / 2;
             clicked => { Nav.show-voice(true); }

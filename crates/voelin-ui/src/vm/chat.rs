@@ -11,7 +11,7 @@ use std::rc::Rc;
 use slint::{Color, Image, ModelRc, VecModel};
 use unicode_segmentation::UnicodeSegmentation;
 use voelin_core::HistoryMessage;
-use voelin_model::{ChatMessage, ChatTarget, FileRef};
+use voelin_model::{ChatMessage, ChatTarget, FileRef, Presence};
 
 use crate::app::{ChatLine, FileItem, ReactionItem, TextBlock, TextRun};
 use crate::emoji;
@@ -411,6 +411,28 @@ fn picture_name(url: &str) -> &str {
 	path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(url)
 }
 
+/// A chat tab's title: a channel's name (a spacer's text), a private chat's
+/// "@peer", or "Server".
+pub fn tab_title(presence: &Presence, target: &ChatTarget, peer: &str) -> String {
+	match target {
+		ChatTarget::Channel(cid) => presence.channels.get(cid).map_or_else(
+			|| format!("Channel {cid}"),
+			|c| crate::vm::tree::channel_title(c).0.to_owned(),
+		),
+		ChatTarget::Private(_) => format!("@{peer}"),
+		ChatTarget::Server => "Server".into(),
+	}
+}
+
+/// A chat tab's name for its header: the title without a private chat's
+/// "@" (a channel may start with one).
+pub fn tab_name<'a>(title: &'a str, target: &ChatTarget) -> &'a str {
+	match target {
+		ChatTarget::Private(_) => title.strip_prefix('@').unwrap_or(title),
+		_ => title,
+	}
+}
+
 /// A chat's last message for a list of chats, on one line ("Mira: the
 /// banner I promised: guild-banner.png"), and when it came.
 pub fn preview(message: &ChatMessage) -> (String, String) {
@@ -793,6 +815,26 @@ mod tests {
 		// A line's text is plain (BBCode read), a quote in it quoted again.
 		let line = line(&message("Kairo", "[quote=Nova]bring [b]elixirs[/b][/quote]\nok", 0), None);
 		assert_eq!(quote(&line.author, &line.text), "> Kairo: > Nova: bring elixirs\n> ok\n");
+	}
+
+	#[test]
+	fn tab_titles_name_channels_without_a_hash() {
+		let mut presence = Presence::default();
+		for (id, name) in [(1, "Lobby"), (2, "[cspacer0]Gaming"), (3, "#general")] {
+			let channel = voelin_model::ChannelInfo { id, name: name.into(), ..Default::default() };
+			presence.channels.insert(id, channel);
+		}
+		let title = |target: &ChatTarget| tab_title(&presence, target, "Nova");
+		assert_eq!(title(&ChatTarget::Channel(1)), "Lobby");
+		assert_eq!(title(&ChatTarget::Channel(2)), "Gaming");
+		assert_eq!(title(&ChatTarget::Channel(9)), "Channel 9");
+		assert_eq!(title(&ChatTarget::Server), "Server");
+		let private = ChatTarget::Private("uid".into());
+		assert_eq!(title(&private), "@Nova");
+		// The header's name: only a private chat loses its "@".
+		assert_eq!(tab_name("@Nova", &private), "Nova");
+		assert_eq!(tab_name(&title(&ChatTarget::Channel(3)), &ChatTarget::Channel(3)), "#general");
+		assert_eq!(tab_name("@home", &ChatTarget::Channel(4)), "@home");
 	}
 
 	/// A run does not wrap: long words (addresses) and long inline code

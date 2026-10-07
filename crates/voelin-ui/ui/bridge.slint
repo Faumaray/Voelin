@@ -106,8 +106,9 @@ export struct MemberItem {
     priority: bool,
     commander: bool,
     recording: bool,
-    // `client_talk_power`; shown when the channel needs it.
-    talk-power: int,
+    // Its channel needs more talk power than it has (and it is no
+    // talker): it cannot speak.
+    cannot-talk: bool,
     // myTeamSpeak badges, as in `TreeItem`.
     badge: image,
     badge-2: image,
@@ -151,7 +152,7 @@ export struct MemberCard {
 }
 
 export struct ChatTab {
-    // "#Lobby", "@alice", "Server"
+    // "Lobby", "@alice", "Server"
     title: string,
     // The name alone ("Lobby").
     name: string,
@@ -429,7 +430,7 @@ export struct ContactItem {
     muted: bool,
     // "Contact since 14 Jan 2022".
     since: string,
-    // Every session that sees them: "Nightfall Guild · #Chill Zone".
+    // Every session that sees them: "Nightfall Guild · Chill Zone".
     spots: [string],
     // A voice connection sees them: they can be messaged, poked, joined.
     reachable: bool,
@@ -550,7 +551,7 @@ export struct EventItem {
     month: string,
     // "Sat 26 Apr, 19:00 – 21:00"
     when: string,
-    // "#Raid Night" or "Server-wide".
+    // "Raid Night" or "Server-wide".
     place: string,
     // A scheduled stream: "Exploring the Lands Between · Elden Ring".
     stream: string,
@@ -605,7 +606,7 @@ export struct DmPeer {
     tint: color,
     avatar: image,
     online: bool,
-    // "Online · Nightfall Guild · #Chill Zone", "Offline · last seen 2 h ago".
+    // "Online · Nightfall Guild · Chill Zone", "Offline · last seen 2 h ago".
     status: string,
     description: string,
     groups: [string],
@@ -1330,6 +1331,9 @@ export global Images {
     pure callback emoji(string) -> image;
     // The characters of a Twemoji key, to react with or to insert.
     pure callback emoji-text(string) -> string;
+    // The first letter of initials, for small avatars (Slint cannot cut
+    // strings).
+    pure callback first-letter(string) -> string;
 }
 
 // One emoji of the picker. `text` is what picking it inserts.

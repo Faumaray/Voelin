@@ -88,6 +88,14 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
   click) and your unread mentions; the welcome banner shows only before the
   first server. Friends show once, the quick actions are gone, and the
   sidebar lists your recent private chats.
+- Each server has a colour of its own (two often shared a blue), and small
+  server icons are drawn sharp at twice their size instead of stretched.
+  Small avatars, as in the channel tree, show one letter.
+- Channels have one icon everywhere, the speaker, and are named without a
+  `#` in tabs and elsewhere.
+- The members panel shows a hand on those who need talk power to speak,
+  instead of everyone's talk power as a bare number (the member card still
+  has it).
 
 ### Fixed
 

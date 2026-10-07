@@ -108,7 +108,7 @@ puts them on an inner `face`).
 | `Slider` | slider.slint | `value`, `minimum`, `maximum`, `step`, `label`; `changed(float)` while dragging, `released(float)` |
 | `SegmentedTabs` | tabs.slint | `model`, `current-index`, `label`; `selected(int)` |
 | `TabItem` | tabs.slint | underlined tab: `text`, `selected`, `badge`, `closable`; `clicked`, `close` |
-| `Avatar` | avatar.slint | `image` or `initials` + `tint`, `size`, `status` (`Status.online/idle/dnd/offline/info`), `speaking` (green ring), `crown`, `square` (server icons) |
+| `Avatar` | avatar.slint | `image` or `initials` + `tint` (one letter under 28 px, through `Images.first-letter`), `size`, `status` (`Status.online/idle/dnd/offline/info`), `speaking` (green ring), `crown`, `square` (server icons); a server icon at most half as wide (TeamSpeak's 16 px ones) is drawn at twice its size, sharp, on the tint (a person's picture always fills it) |
 | `CountBadge` | badge.slint | count bubble: `count`, `fill` (red), `ink` (the number) |
 | `LiveBadge` | badge.slint | `text` (LIVE), `large` |
 | `Chip` | badge.slint | tag: `text`, `icon`, `picture` (in its own colours, a badge's), `tint`, `fill`, `outlined` |
@@ -136,7 +136,9 @@ puts them on an inner `face`).
 
 Shell pieces (ui/shells/): `DesktopShell` (rail + top bar + panels as
 @children), `Sidebar` (page navigation above the voice card and user card),
-`Panel`, `ServerRail` (Home, the servers, Add a server, the settings),
+`Panel`, `ServerRail` (Home, the servers, Add a server, the settings; each
+server shows its icon or its initials, on a colour no other server has while
+there are at most ten, kept when a server is added),
 `TopBar` (the search, starting over the main panel, opens the search like
 Ctrl+K; the bell at the right), `MobileShell` (top bar, page, bottom
 navigation), `VoiceCard`, `VoiceButtons` (mute, deafen, share; `gear` adds
@@ -152,7 +154,7 @@ comes from the engine's events; what a gateway adds is hidden without it.
 | Part | `VOELIN_OPEN` | What it shows | Engine data |
 |---|---|---|---|
 | Chat | `server` (`server:chat`: the server chat), `actions`, `link-confirm[:<url>]`, `unread[:end]` | Header with Pinned Messages, Topics, the voice channel and the members button; chat tabs; messages grouped by author ("Today at 10:14"), avatars, BBCode formatting (see Formatting below), emoji, reactions with an add button, pin and topic marks, file cards with download; composer with attach, emoji and send. A link opens in the browser; one whose text is not its address (a masked link) first shows where it goes in `LinkDialog` (the host, the whole address; Open, Copy link, Cancel); a TeamSpeak link opens in Voelin (Adding a server: Links, below); a right-click on a link offers Open link and Copy link. Every message has actions on hover (`MessageActions`; `actions` shows the last one's): Quote (`> Author: …` lines at the start of the composer, which takes the focus to write below them and grows to show up to about eight lines) and Copy text, and with a gateway quick reactions, pin and Start a topic; a right-click on a message shows Copy text, Copy link (its first web address), Quote, and with a gateway React… and Pin. The server chat starts with the server's welcome message (and its host message when the server puts it in the chat log). Opens at the newest message and follows new ones while at the end. Scrolling up to within a screen of the top loads the page before, above the rows on screen, which stay in place (a spinner above the oldest message while it loads). The Older messages button there is for a chat too short to scroll, and for after a page that brought nothing (scrolling loads again once the list was a screen away). The voice view, the phone's voice screen and private chats load the same way. Messages count as read while their chat is on screen in the focused window; the chat tabs and the server rail count the others (not our own). A chat that comes on screen with new messages, or that is on screen when messages that came while away arrive (a stored or gateway page), shows a red line with New above the first (`NewDivider`) until the chat is left; while that line is above the view, a bar over the list says how many are new and since when (`UnreadBar`: "5 new messages since 10:14", Jump, and × to mark them read). Where each chat was read is kept on this device (the store's `chat_reads`), so the counts survive a restart: messages that came while away (a gateway's history) count as new | `ChatHistory` (and `Chat` for servers without history), `Presence` (welcome and host message), `AvatarReady`, `Transfer`, `Gateway` (pins; reactions arrive as stored messages); `Command::LoadOlderHistory`, `DownloadChatFile`, `UploadFile`, `GatewayRequest::React`, `Unreact`, `Pin`, `Unpin` |
-| Members panel | `server` (`panel`, `no-panel`) | "Members — N" and a search; those streaming first (the people in our channel while the voice channel or a stream is shown), then each server group in the server's order with its icon, then those without a group. Rows: avatar with status, name, crown (admin groups), priority speaker, channel commander, recording, up to three myTeamSpeak badges, moderator role, talk power, what they do or the channel they are in. Resizable: the width is `ui.members_width` | `Presence`, `Groups`, `Talking`, `IconReady`, `PictureReady` |
+| Members panel | `server` (`panel`, `no-panel`) | "Members — N" and a search; those streaming first (the people in our channel while the voice channel or a stream is shown), then each server group in the server's order with its icon, then those without a group. Rows: avatar with status, name, crown (admin groups), priority speaker, channel commander, recording, up to three myTeamSpeak badges, moderator role, a hand when their channel needs more talk power than they have ("Needs talk power to speak"; the member card has the number), what they do or the channel they are in. Resizable: the width is `ui.members_width` | `Presence`, `Groups`, `Talking`, `IconReady`, `PictureReady` |
 | Member card | `member` | Description, groups, badges (up to three chips in the client's order, what each is for on hover; "Badge" for one the app does not know), talk power, country; private message, poke, friend, block; volume and mute for us | `ContactsChanged`, `PictureReady` (badges); `Command::SetContact`, `SetClientVolume`, `SetClientMuted`, `Poke` |
 | Poke | `poke` (the first other member's, card open; after `friends` a contact's) | `PokeDialog`, from the member card, a friend's row and the direct message header: an optional message with a "12/100" count, Send off above 100 characters, Enter sends, Escape cancels | `Command::Poke` (trimmed, cut to 100 characters; the engine cuts too) |
 | Channel password | `channel-password`, `channel-password:wrong` | Joining a channel (a double-click in the tree, joining a friend) moves there with voice, or connects into it (by its id) without; when the server puts us elsewhere on connecting, as it does for a wrong password, it is joined again, which says why. A locked channel first asks for its password in `ChannelPasswordDialog`, unless one was given since voice connected; a refused one asks again under "Wrong password". A full channel or another refusal is a toast | `Presence` (`has_password`), `JoinFailed`; `Command::MoveToChannel`, `ConnectVoice` (`channel_password`) |
@@ -578,6 +580,13 @@ the event form leave out lines and empty spacers. A theme-aware surface
 gradient (74% to 66% opacity) keeps primary text above 4.5:1 contrast even on
 all-white or all-black artwork, while leaving the image visible. Missing
 pictures retain the normal background.
+
+A channel has one icon everywhere, a speaker (`Icons.channel`, a lock for a
+locked one in the tree), and chat tabs, notifications and search results name
+it without a `#` (private chats keep their `@`). A server icon at most half
+as wide as its avatar (TeamSpeak's are often 16 pixels) is drawn at twice its
+size, sharp, on the server's colour instead of stretched. Avatars under 28
+pixels, as the tree's clients, show one letter.
 
 Bookmarks remember the server icon ID and the address that supplied it. The
 server list, search results and server header load its cached bytes before

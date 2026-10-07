@@ -1,6 +1,6 @@
 //! The server rail, the server dialog, and joining a channel.
 
-use slint::SharedString;
+use slint::{Color, SharedString};
 use voelin_core::{ObserveState, SessionState, VoiceState};
 use voelin_model::{ChannelId, ChannelInfo, Presence, ServerLink};
 use voelin_store::Bookmark;
@@ -12,6 +12,43 @@ use crate::vm::avatar;
 /// cache file falls back to initials; the bookmark stores no filesystem path.
 pub fn cached_icon(bookmark: &Bookmark, cache: &voelin_core::Cache) -> slint::Image {
 	avatar::image(bookmark.server_icon_id().and_then(|id| cache.icon(id)).as_ref())
+}
+
+/// Server colours: hues around the wheel, each far from the one before it
+/// (where a server goes when its own is taken). White initials read on all.
+const SERVER_TINTS: [u32; 10] = [
+	0x2d6bff, // blue
+	0xc2379a, // magenta
+	0xc08400, // gold
+	0x0c8fb0, // teal
+	0x9c3fd1, // purple
+	0xe0652a, // orange
+	0x1f9d55, // green
+	0x7c4dff, // violet
+	0xd63a3a, // red
+	0x6e8f1c, // olive
+];
+
+/// A colour for each server, in `bookmarks` order: its name picks one, and
+/// when an earlier server has it, it takes the next free one. So no two
+/// share a colour until there are more servers than colours (then they
+/// start over), and adding a server leaves the others' colours.
+pub fn tints(bookmarks: &[Bookmark]) -> Vec<Color> {
+	let n = SERVER_TINTS.len();
+	let mut taken = [false; SERVER_TINTS.len()];
+	bookmarks
+		.iter()
+		.enumerate()
+		.map(|(i, bookmark)| {
+			if i % n == 0 {
+				taken = [false; SERVER_TINTS.len()];
+			}
+			let start = avatar::name_hash(&bookmark.name) as usize % n;
+			let slot = (0..n).map(|k| (start + k) % n).find(|&s| !taken[s]).unwrap_or(start);
+			taken[slot] = true;
+			avatar::rgb(SERVER_TINTS[slot])
+		})
+		.collect()
 }
 
 /// "offline", "connecting", "observing" or "connected". "connecting" is
@@ -29,7 +66,9 @@ pub fn status(state: &SessionState) -> &'static str {
 /// A server of the rail and the home page. `unread`: messages in its
 /// chats; `live`: streams on it; `detail`: who is there ("9 online · 7
 /// channels"), empty for its address; `flavor`: "TeamSpeak 6" once
-/// reached; `icon`: the server's icon (empty: its initials).
+/// reached; `icon`: the server's icon (empty: its initials) on `tint`
+/// ([`tints`]).
+#[allow(clippy::too_many_arguments)]
 pub fn item(
 	bookmark: &Bookmark,
 	state: &SessionState,
@@ -38,6 +77,7 @@ pub fn item(
 	detail: String,
 	flavor: String,
 	icon: slint::Image,
+	tint: Color,
 ) -> ServerItem {
 	ServerItem {
 		id: bookmark.id as i32,
@@ -45,7 +85,7 @@ pub fn item(
 		address: bookmark.address.clone().into(),
 		status: status(state).into(),
 		initials: avatar::initials(&bookmark.name).into(),
-		tint: avatar::tint(&bookmark.name),
+		tint,
 		icon,
 		unread,
 		live,
@@ -262,6 +302,7 @@ mod tests {
 			String::new(),
 			String::new(),
 			cached_icon(&bookmark, &cache),
+			Color::default(),
 		);
 		assert_eq!(server.status.as_str(), "offline");
 		assert_eq!(server.icon.size().width, 4);
@@ -271,6 +312,44 @@ mod tests {
 		std::fs::remove_file(path).unwrap();
 		assert_eq!(cached_icon(&bookmark, &cache).size().width, 0);
 		std::fs::remove_dir_all(dir).unwrap();
+	}
+
+	fn named(names: &[&str]) -> Vec<Bookmark> {
+		names.iter().map(|n| Bookmark { name: (*n).into(), ..Default::default() }).collect()
+	}
+
+	/// The colour a name picks.
+	fn own_tint(name: &str, step: usize) -> Color {
+		let n = SERVER_TINTS.len();
+		avatar::rgb(SERVER_TINTS[(avatar::name_hash(name) as usize + step) % n])
+	}
+
+	#[test]
+	fn tints_are_distinct_up_to_the_palette_size() {
+		let names: Vec<String> = (0..SERVER_TINTS.len()).map(|i| format!("Server {i}")).collect();
+		let mut bookmarks = named(&names.iter().map(String::as_str).collect::<Vec<_>>());
+		let distinct: std::collections::HashSet<_> =
+			tints(&bookmarks).iter().map(|t| t.as_argb_encoded()).collect();
+		assert_eq!(distinct.len(), SERVER_TINTS.len());
+		// One more starts over with its name's colour.
+		bookmarks.extend(named(&["One more"]));
+		assert_eq!(tints(&bookmarks)[SERVER_TINTS.len()], own_tint("One more", 0));
+		// The sample servers, two of which shared a blue.
+		let sample = tints(&named(&["Nightfall Guild", "Pixel Lounge", "Dev TS3"]));
+		assert!(sample[0] != sample[1] && sample[1] != sample[2] && sample[0] != sample[2]);
+	}
+
+	#[test]
+	fn tints_follow_the_name_and_stay_when_a_server_is_added() {
+		let names = ["Nightfall Guild", "Pixel Lounge", "Dev TS3", "Home", "Raid"];
+		let before = tints(&named(&names));
+		let mut more = named(&names);
+		more.extend(named(&["New one"]));
+		assert_eq!(tints(&more)[..names.len()], before[..]);
+		// Alone, a server has its name's colour, in any case.
+		assert_eq!(tints(&named(&["pixel lounge"])), [own_tint("Pixel Lounge", 0)]);
+		// A second server with the name takes the next colour.
+		assert_eq!(tints(&named(&["Raid", "Raid"])), [own_tint("Raid", 0), own_tint("Raid", 1)]);
 	}
 
 	#[test]

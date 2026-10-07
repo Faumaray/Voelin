@@ -103,19 +103,12 @@ fn ago(ts_ms: i64) -> String {
 impl App {
 	pub(crate) fn open_chat(&mut self, target: ChatTarget, focus: bool) {
 		let Some(id) = self.current else { return };
-		let title = match &target {
-			ChatTarget::Channel(cid) => {
-				let name = self
-					.sessions
-					.get(&id)
-					.and_then(|v| v.presence.channels.get(cid))
-					.map(|c| vm::tree::channel_title(c).0.to_owned());
-				format!("#{}", name.unwrap_or_else(|| cid.to_string()))
-			}
-			ChatTarget::Server => "Server".into(),
-			ChatTarget::Private(uid) => format!("@{}", self.peer_name(uid, None)),
+		let peer = match &target {
+			ChatTarget::Private(uid) => self.peer_name(uid, None),
+			_ => String::new(),
 		};
 		let view = self.sessions.entry(id).or_default();
+		let title = vm::chat::tab_title(&view.presence, &target, &peer);
 		let index = match view.tabs.iter().position(|t| t.target == target) {
 			Some(i) => i,
 			None => {
@@ -189,21 +182,6 @@ impl App {
 		}
 	}
 
-	fn tab_title(view: &SessionView, target: &ChatTarget, author: &str) -> String {
-		match target {
-			ChatTarget::Channel(cid) => format!(
-				"#{}",
-				view.presence
-					.channels
-					.get(cid)
-					.map(|c| vm::tree::channel_title(c).0.to_owned())
-					.unwrap_or_else(|| cid.to_string())
-			),
-			ChatTarget::Private(_) => format!("@{author}"),
-			ChatTarget::Server => "Server".into(),
-		}
-	}
-
 	/// A live message of a session without stored history: appended as it
 	/// comes, without an id.
 	pub(crate) fn add_message(&mut self, id: i64, message: ChatMessage) {
@@ -211,7 +189,7 @@ impl App {
 		let reading = self.reads_now(id);
 		let new = !self.is_own(id, &message);
 		let view = self.sessions.entry(id).or_default();
-		let title = Self::tab_title(view, &message.target, &message.author_name);
+		let title = vm::chat::tab_title(&view.presence, &message.target, &message.author_name);
 		let index = Self::tab_for(view, &message.target, || title);
 		let seen = reading && view.current_tab == index;
 		let tab = &mut view.tabs[index];
@@ -255,7 +233,7 @@ impl App {
 		};
 		let view = self.sessions.entry(id).or_default();
 		let author = messages.first().map_or("", |m| m.message.author_name.as_str());
-		let title = peer.unwrap_or_else(|| Self::tab_title(view, target, author));
+		let title = peer.unwrap_or_else(|| vm::chat::tab_title(&view.presence, target, author));
 		let index = Self::tab_for(view, target, || title);
 		let seen = reading && view.current_tab == index;
 		let own_client = view.state.own_client;
@@ -506,7 +484,7 @@ impl App {
 					last: last.into(),
 					time: time.into(),
 					title: t.title.clone().into(),
-					name: t.title.trim_start_matches(['#', '@']).into(),
+					name: vm::chat::tab_name(&t.title, &t.target).into(),
 					kind: match t.target {
 						ChatTarget::Server => 0,
 						ChatTarget::Channel(_) => 1,

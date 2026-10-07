@@ -559,6 +559,8 @@ fn demo_ui(app: &mut App) {
 	let mut raid = channel(4, 3, 0, "Raid Night");
 	raid.banner_gfx_url = Some(DEMO_RAID_BANNER.into());
 	raid.banner_mode = BannerMode::KeepAspect;
+	// Only the raid leads speak there: Zeph cannot (the members panel's hand).
+	raid.needed_talk_power = 50;
 	let mut music = channel(5, 0, 3, "Music");
 	music.icon = DEMO_MUSIC_ICON;
 	music.banner_gfx_url = Some(DEMO_MUSIC_BANNER.into());
@@ -1117,7 +1119,7 @@ fn demo_social(app: &mut App) {
 	app.notify(
 		NoticeKind::Mention,
 		"Talon mentioned you".into(),
-		"Nova, can you open the raid at 20:00? — #Chill Zone · Nightfall Guild".into(),
+		"Nova, can you open the raid at 20:00? — Chill Zone · Nightfall Guild".into(),
 		NoticeTarget::Chat(DEMO, ChatTarget::Channel(2)),
 		"Talon".into(),
 		Some("demo-6".into()),
@@ -1125,7 +1127,7 @@ fn demo_social(app: &mut App) {
 	app.notify(
 		NoticeKind::Mention,
 		"Zeph mentioned you".into(),
-		"Nova, are you healing tonight? — #Raid Night · Nightfall Guild".into(),
+		"Nova, are you healing tonight? — Raid Night · Nightfall Guild".into(),
 		NoticeTarget::Chat(DEMO, ChatTarget::Channel(4)),
 		"Zeph".into(),
 		Some("demo-7".into()),
@@ -1141,7 +1143,7 @@ fn demo_social(app: &mut App) {
 	app.notify(
 		NoticeKind::Friend,
 		"Ivy is online".into(),
-		"on Pixel Lounge · #Art Corner".into(),
+		"on Pixel Lounge · Art Corner".into(),
 		NoticeTarget::Contact("demo-ivy".into()),
 		"Ivy".into(),
 		Some("demo-ivy".into()),

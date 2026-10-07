@@ -135,7 +135,7 @@ impl App {
 				view.presence
 					.channels
 					.values()
-					.filter_map(|c| Some((Some(c.id), format!("#{}", vm::tree::listed_title(c)?)))),
+					.filter_map(|c| Some((Some(c.id), vm::tree::listed_title(c)?.to_owned()))),
 			);
 		}
 		out

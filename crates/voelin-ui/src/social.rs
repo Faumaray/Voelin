@@ -375,7 +375,7 @@ impl App {
 				if s.channel_title.is_empty() {
 					s.server.clone().into()
 				} else {
-					format!("{} · #{}", s.server, s.channel_title).into()
+					format!("{} · {}", s.server, s.channel_title).into()
 				}
 			})
 			.collect();
@@ -743,7 +743,7 @@ impl App {
 						.sessions
 						.get(&session)
 						.and_then(|v| v.presence.channels.get(cid))
-						.map(|c| format!("#{} · {server}", vm::tree::channel_title(c).0))
+						.map(|c| format!("{} · {server}", vm::tree::channel_title(c).0))
 						.unwrap_or(server),
 					_ => server,
 				};
@@ -915,7 +915,7 @@ impl App {
 				let place = if channel.is_empty() {
 					format!("on {}", self.server_name(s.session as i64))
 				} else {
-					format!("on {} · #{channel}", self.server_name(s.session as i64))
+					format!("on {} · {channel}", self.server_name(s.session as i64))
 				};
 				self.notify(
 					NoticeKind::Friend,
@@ -955,15 +955,16 @@ impl App {
 			let servers = self
 				.bookmarks
 				.iter()
-				.filter(|b| matches(&query, &[&b.name, &b.address]))
-				.map(|b| {
+				.zip(vm::servers::tints(&self.bookmarks))
+				.filter(|(b, _)| matches(&query, &[&b.name, &b.address]))
+				.map(|(b, tint)| {
 					(
 						SearchItem {
 							kind: "server".into(),
 							title: b.name.clone().into(),
 							subtitle: b.address.clone().into(),
 							initials: vm::avatar::initials(&b.name).into(),
-							tint: vm::avatar::tint(&b.name),
+							tint,
 							avatar: self.server_list_icon(b),
 							..Default::default()
 						},
@@ -1017,7 +1018,7 @@ impl App {
 						SearchItem {
 							kind: "person".into(),
 							title: c.nickname.clone().into(),
-							subtitle: format!("{} · #{channel}", b.name).into(),
+							subtitle: format!("{} · {channel}", b.name).into(),
 							initials: vm::avatar::initials(&c.nickname).into(),
 							tint: vm::avatar::tint(&c.nickname),
 							avatar: vm::avatar::image(view.avatar(c.id)),

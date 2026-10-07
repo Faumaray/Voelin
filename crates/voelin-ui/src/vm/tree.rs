@@ -318,6 +318,14 @@ fn is_moderator_group(name: &str) -> bool {
 	name.to_lowercase().contains("mod")
 }
 
+/// Whether a client cannot speak in its channel: the channel needs more
+/// talk power than it has, and it was not made a talker.
+pub fn cannot_talk(channel: Option<&ChannelInfo>, client: &ClientInfo) -> bool {
+	channel.is_some_and(|c| {
+		c.needed_talk_power > 0 && client.talk_power < c.needed_talk_power && !client.talker
+	})
+}
+
 impl TreeInput<'_> {
 	/// The position of a client's group in display order (no group last).
 	fn group_rank(&self, client: &ClientInfo) -> usize {
@@ -335,7 +343,8 @@ impl TreeInput<'_> {
 			&& !talking
 			&& c.streaming != Some(true)
 			&& c.away.is_none();
-		let status = match self.presence.channels.get(&c.channel) {
+		let channel = self.presence.channels.get(&c.channel);
+		let status = match channel {
 			Some(channel) if elsewhere => format!("In {}", channel_title(channel).0),
 			_ => status_of(c, talking),
 		};
@@ -363,7 +372,7 @@ impl TreeInput<'_> {
 			priority: c.priority_speaker,
 			commander: c.channel_commander,
 			recording: c.recording,
-			talk_power: c.talk_power,
+			cannot_talk: cannot_talk(channel, c),
 			badge,
 			badge_2,
 			badge_3,
@@ -784,6 +793,43 @@ mod tests {
 			members.iter().map(|m| (m.name.as_str(), m.group.as_str(), m.first_in_group)).collect();
 		assert_eq!(rows, [("Carol", "Server Admin", true), ("bob", "Guest", true)]);
 		assert!(members[0].admin && !members[1].admin);
+	}
+
+	#[test]
+	fn members_who_cannot_talk() {
+		let channel = |needed| ChannelInfo { needed_talk_power: needed, ..Default::default() };
+		let client = |talk_power, talker| ClientInfo { talk_power, talker, ..Default::default() };
+		for (needed, power, talker, cannot) in [
+			(50, 75, false, false),
+			(50, 50, false, false),
+			(50, 0, false, true),
+			(50, 49, false, true),
+			// A talker speaks without talk power.
+			(50, 0, true, false),
+			// The channel needs none.
+			(0, 0, false, false),
+		] {
+			let case = format!("needed {needed}, power {power}, talker {talker}");
+			assert_eq!(
+				cannot_talk(Some(&channel(needed)), &client(power, talker)),
+				cannot,
+				"{case}"
+			);
+		}
+		assert!(!cannot_talk(None, &client(0, false)));
+		// In the members panel: bob (talk power 75) speaks in Games, which
+		// needs 50; Carol (none) cannot.
+		let mut p = presence();
+		p.channels.get_mut(&2).unwrap().needed_talk_power = 50;
+		p.clients.get_mut(&11).unwrap().talk_power = 75;
+		p.clients.get_mut(&12).unwrap().channel = 2;
+		let (t, c, pb) = (HashSet::new(), HashSet::new(), ClientPlaybackMap::new());
+		let e = Extras::default();
+		let rows: Vec<_> = members(&input(&p, &t, &c, &pb, "", &e))
+			.iter()
+			.map(|m| (m.name.to_string(), m.cannot_talk))
+			.collect();
+		assert_eq!(rows, [("bob".to_owned(), false), ("Carol".to_owned(), true)]);
 	}
 
 	#[test]

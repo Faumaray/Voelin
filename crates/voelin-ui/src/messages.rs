@@ -196,8 +196,8 @@ impl App {
 					.and_then(|s| self.sessions.get(&s))
 					.and_then(|v| v.presence.channels.get(cid))
 					.map_or_else(
-						|| format!("#channel {cid}"),
-						|c| format!("#{}", vm::tree::channel_title(c).0),
+						|| format!("Channel {cid}"),
+						|c| vm::tree::channel_title(c).0.to_owned(),
 					);
 				(name, slint::Image::default(), false, 1)
 			}
@@ -226,7 +226,11 @@ impl App {
 			ago: ago(ts).into(),
 			unread: chat.unread,
 			initials: vm::avatar::initials(&title).into(),
-			tint: vm::avatar::tint(&title),
+			// A server's chat in the server's colour.
+			tint: match (kind, session) {
+				(0, Some(s)) => self.server_tint(s),
+				_ => vm::avatar::tint(&title),
+			},
 			avatar,
 			online,
 			selected: open.is_some_and(|o| {
@@ -477,7 +481,7 @@ impl App {
 				Some(m) if !m.is_empty() => format!("Away: {m} · {}", s.server),
 				Some(_) => format!("Away · {}", s.server),
 				None if s.channel_title.is_empty() => format!("Online · {}", s.server),
-				None => format!("Online · {} · #{}", s.server, s.channel_title),
+				None => format!("Online · {} · {}", s.server, s.channel_title),
 			},
 			None => match contact.filter(|c| c.last_seen_ms > 0) {
 				Some(c) => format!("Offline · last seen {}", ago(c.last_seen_ms)),
@@ -510,7 +514,7 @@ impl App {
 					if s.channel_title.is_empty() {
 						s.server.clone().into()
 					} else {
-						format!("{} · #{}", s.server, s.channel_title).into()
+						format!("{} · {}", s.server, s.channel_title).into()
 					}
 				})
 				.collect()

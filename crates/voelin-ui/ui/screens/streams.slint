@@ -455,7 +455,7 @@ export component StreamViewer inherits Rectangle {
     if !root.alone: VerticalLayout {
         PageHeader {
             banner: Bridge.own-channel-banner;
-            icon: Icons.volume-2;
+            icon: Icons.channel;
             title: Bridge.own-channel != "" ? Bridge.own-channel : Bridge.viewer-title;
             description: Bridge.own-channel-topic;
             if Bridge.members.length > 0: Button {

@@ -186,7 +186,7 @@ component TreeRow inherits Rectangle {
             source: item.icon;
         }
         if item.spacer == 0 && item.icon.width == 0: Icon {
-            source: item.locked ? Icons.lock : Icons.volume-2;
+            source: item.locked ? Icons.lock : Icons.channel;
             size: 18px;
             tint: item.banner.width > 0 || item.own ? Theme.text : Theme.icon;
             y: (parent.height - self.height) / 2;
@@ -353,7 +353,7 @@ export component ChannelTree inherits VerticalLayout {
     spacing: Theme.space-2;
     SectionHeader {
         text: @tr("Channels");
-        icon: Icons.volume-2;
+        icon: Icons.channel;
         small: true;
     }
     if Bridge.tree.length == 0: Text {

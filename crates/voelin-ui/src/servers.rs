@@ -375,14 +375,22 @@ impl App {
 		}
 	}
 
+	/// A server's colour, as the rail shows it ([`vm::servers::tints`]).
+	pub(crate) fn server_tint(&self, id: i64) -> slint::Color {
+		let tints = vm::servers::tints(&self.bookmarks);
+		self.bookmarks.iter().position(|b| b.id == id).map(|i| tints[i]).unwrap_or_default()
+	}
+
 	/// The rail: servers with their state, unread count and streams.
 	pub(crate) fn refresh_servers(&self) {
 		let Some(ui) = self.ui.upgrade() else { return };
 		let bridge = ui.global::<Bridge>();
+		let tints = vm::servers::tints(&self.bookmarks);
 		let items: Vec<_> = self
 			.bookmarks
 			.iter()
-			.map(|b| {
+			.zip(tints)
+			.map(|(b, tint)| {
 				let view = self.sessions.get(&b.id);
 				let state = view.map(|v| v.state.clone()).unwrap_or_default();
 				let unread = view.map_or(0, |v| v.unread());
@@ -393,7 +401,7 @@ impl App {
 					.unwrap_or_default();
 				let flavor = view.map(|v| v.extra.flavor.clone()).unwrap_or_default();
 				let icon = self.server_list_icon(b);
-				vm::servers::item(b, &state, unread, live, detail, flavor, icon)
+				vm::servers::item(b, &state, unread, live, detail, flavor, icon, tint)
 			})
 			.collect();
 		vm::list::sync(&self.models.servers, &items);
