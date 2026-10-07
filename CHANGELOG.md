@@ -65,6 +65,9 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
   emoji picker and the notifications panel dim the window behind them.
 - Double-clicking a channel of a server without voice connects into it
   (it said "not connected with voice").
+- Older chat messages load when scrolling up, above the messages on screen,
+  which stay in place; the Older messages button remains for a chat that
+  fits on the screen.
 
 ### Fixed
 

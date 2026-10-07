@@ -7,8 +7,9 @@
 //!   `VOELIN_SCREENSHOT_DELAY` seconds (default 4) and exit.
 //! - `VOELIN_WINDOW_SIZE=<w>x<h>`: the window's size (e.g. `390x844` for the
 //!   phone layout).
-//! - `VOELIN_DEMO_UI=1`: sample servers, channels, chat and streams, no
-//!   server needed (nothing is stored).
+//! - `VOELIN_DEMO_UI=1`: sample servers, channels, chat (two pages of older
+//!   messages answer scrolling up) and streams, no server needed (nothing is
+//!   stored).
 //! - `VOELIN_DEMO_STREAM=1`: a local test stream in the viewer.
 //! - `VOELIN_OPEN=<what>[,<what>...]`: open screens on start: `home`,
 //!   `server` (`server:chat`: its server chat), `settings[:<section>]`
@@ -1721,4 +1722,123 @@ fn demo_topic(app: &mut App) {
 			has_more: false,
 		},
 	});
+}
+
+/// The sample messages before the sample chats' first ones: how many, how
+/// many a page, and their ids (the sample chats use ids below 500).
+const OLDER: i64 = 30;
+const OLDER_PAGE: i64 = 15;
+const OLDER_ID: i64 = 500;
+
+/// The page before `oldest` of a sample chat, as the engine answers
+/// `Command::LoadOlderHistory`: older small talk, a page at a time, the last
+/// one `complete`. The first page goes back from `oldest` (from `now_ms` in
+/// an empty chat), the next ones from the sample message before.
+pub(crate) fn demo_older(
+	target: &ChatTarget,
+	oldest: Option<&HistoryMessage>,
+	now_ms: i64,
+) -> (Vec<HistoryMessage>, bool) {
+	const PEOPLE: [(&str, u16); 6] =
+		[("Nova", 1), ("Kairo", 3), ("Mira", 4), ("dex", 5), ("Talon", 6), ("Lumen", 2)];
+	const TEXTS: [&str; 10] = [
+		"Anyone still around?",
+		"Patch notes are up, the healer changes look good.",
+		"Who has the key for the vault run?",
+		"I can do Thursday, not Friday.",
+		"Lag spike on my side, back in a sec.",
+		"gg everyone, that was close 😅",
+		"Is the new map in the rotation yet?",
+		"Uploading the clip from last night.",
+		"Coffee first, then raids ☕",
+		"Same time next week?",
+	];
+	let (first, from_ms) = match oldest {
+		Some(m) if m.id >= OLDER_ID => (m.id - OLDER_ID + 1, m.message.ts_ms),
+		Some(m) => (0, m.message.ts_ms),
+		None => (0, now_ms),
+	};
+	let last = (first + OLDER_PAGE).min(OLDER);
+	let messages = (first..last)
+		.map(|n| {
+			// Two in a row by each person.
+			let (author, client) = PEOPLE[(n / 2 % 6) as usize];
+			HistoryMessage {
+				id: OLDER_ID + n,
+				message: ChatMessage {
+					target: target.clone(),
+					author_name: author.into(),
+					author_uid: Some(format!("demo-{client}")),
+					author_id: Some(client),
+					text: TEXTS[(n % 10) as usize].into(),
+					ts_ms: from_ms - (n - first + 1) * 23 * 60_000,
+					via_relay: false,
+					blocked: false,
+				},
+				source: MessageSource::Voice,
+				remote_id: Some(OLDER_ID + n),
+				topic_id: None,
+				reactions: Vec::new(),
+				pinned: false,
+				rev: 1,
+			}
+		})
+		.collect();
+	(messages, last >= OLDER)
+}
+
+/// Answer [`App::load_older`] in demo mode (no engine runs) with
+/// [`demo_older`], a moment later as a server would.
+pub(crate) fn answer_older(session: i64, target: ChatTarget, oldest: Option<HistoryMessage>) {
+	slint::Timer::single_shot(Duration::from_millis(600), move || {
+		let now = chrono::Utc::now().timestamp_millis();
+		let (messages, complete) = demo_older(&target, oldest.as_ref(), now);
+		with_app(|app| {
+			app.handle_event(Event::ChatHistory {
+				session: session as u64,
+				target,
+				messages,
+				source: HistorySource::Gateway,
+				complete,
+			});
+		});
+	});
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Two pages back from the sample chat's first message, each older than
+	/// the one before, the second one the last.
+	#[test]
+	fn demo_older_pages_in_order_and_completes() {
+		let target = ChatTarget::Channel(2);
+		let (first, complete) = demo_older(&target, None, 1_000_000_000);
+		assert_eq!(first.len(), OLDER_PAGE as usize);
+		assert!(!complete, "a second page follows");
+		let ids: Vec<i64> = first.iter().map(|m| m.id).collect();
+		assert_eq!(ids, (OLDER_ID..OLDER_ID + OLDER_PAGE).collect::<Vec<_>>());
+		assert!(first.windows(2).all(|w| w[1].message.ts_ms < w[0].message.ts_ms));
+		assert!(
+			first.iter().all(|m| m.message.target == target && m.message.ts_ms < 1_000_000_000)
+		);
+
+		let oldest = first.last().unwrap();
+		let (second, complete) = demo_older(&target, Some(oldest), 0);
+		assert!(complete);
+		assert_eq!(second.len(), (OLDER - OLDER_PAGE) as usize);
+		assert_eq!(second[0].id, oldest.id + 1);
+		assert!(second.iter().all(|m| m.message.ts_ms < oldest.message.ts_ms));
+
+		// A sample chat's own message: back from it.
+		let sample = HistoryMessage { id: 3, ..oldest.clone() };
+		let (again, _) = demo_older(&target, Some(&sample), 0);
+		assert_eq!(again[0].id, OLDER_ID);
+		assert!(again[0].message.ts_ms < sample.message.ts_ms);
+
+		// Nothing after the last page.
+		let (rest, complete) = demo_older(&target, second.last(), 0);
+		assert!(rest.is_empty() && complete);
+	}
 }

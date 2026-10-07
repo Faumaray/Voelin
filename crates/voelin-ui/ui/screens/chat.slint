@@ -467,33 +467,131 @@ export component MessageRow inherits Rectangle {
     }
 }
 
+// The top of a chat with older messages: the button that loads them, or a
+// spinner while they load.
+component OlderRow inherits HorizontalLayout {
+    callback load();
+    height: 40px;
+    alignment: center;
+    if Bridge.loading-history: Spinner {
+        y: (parent.height - self.height) / 2;
+    }
+    if !Bridge.loading-history: Button {
+        small: true;
+        icon: Icons.chevron-up;
+        text: @tr("Older messages");
+        y: (parent.height - self.height) / 2;
+        clicked => { root.load(); }
+    }
+}
+
 // The messages of the current chat (or of an open topic). The list starts
 // at the newest message and follows new ones while it is at the end;
-// scrolling up stops that until the end is reached again.
+// scrolling up stops that until the end is reached again. With `older`,
+// scrolling to within a screen of the top loads the page before, and the
+// rows on screen stay where they are while it comes in above them. The
+// button above the oldest message is for a chat too short to scroll, and
+// for after a page that brought nothing.
 export component MessageList inherits VerticalLayout {
     in property <[ChatLine]> model;
     in property <bool> older;
     property <bool> follow: true;
     property <length> end: min(0px, list.visible-height - list.content-height);
     property <length> scrolled: list.content-y;
+    // While a page of older messages loads: how many rows there are from
+    // the top of the view to the end (rows, not pixels: the list places
+    // rows by their average height), and the row count then (-1: no page
+    // to make room for).
+    property <float> keep;
+    property <int> kept-rows: -1;
+    // The page came in and the view went back to `keep` (`restored`). The
+    // list then places the rows by their real heights, a little off: the
+    // view goes back up to twice more (`settle`), until it stays put.
+    property <int> settle;
+    property <length> restored;
+    // A page brought nothing (the gateway may be away): no more loading by
+    // scrolling until the list is a screen away from where that was.
+    property <bool> paused;
+    property <length> paused-at;
+    function rows-to-end() -> float {
+        return list.content-height > 0 ? root.model.length * (list.content-y + list.content-height) / list.content-height : 0;
+    }
+    function restore() {
+        root.restored = max(root.end, min(0px, list.content-height * (root.keep / root.model.length - 1)));
+        list.content-y = root.restored;
+    }
+    function load() {
+        root.keep = root.rows-to-end();
+        root.kept-rows = root.follow ? -1 : root.model.length;
+        Bridge.load-older();
+    }
+    // Scrolled up to within a screen of the top, and no page on its way or
+    // still to be placed.
+    function load-near-top() {
+        if root.older && Bridge.more-history && !Bridge.loading-history && !root.paused && !root.follow && root.kept-rows < 0 && list.content-y > -list.visible-height {
+            root.load();
+        }
+    }
     changed end => {
         if root.follow {
             list.content-y = root.end;
+        } else if root.kept-rows >= 0 && root.model.length != root.kept-rows && root.model.length > 0 {
+            // Older rows came in above: back to the rows that were shown.
+            root.restore();
+            root.settle = 2;
+            root.kept-rows = Bridge.loading-history ? root.model.length : -1;
+            root.load-near-top();
         }
     }
-    changed scrolled => { root.follow = root.scrolled <= root.end + 2px; }
-    // Another chat: start at its end.
-    property <int> tab: Bridge.current-tab;
-    changed tab => {
+    changed scrolled => {
+        // After a longer chat the list can leave a short one's first rows
+        // above the view (it places rows by their estimated heights).
+        if root.scrolled < root.end - 1px {
+            list.content-y = root.end;
+        }
+        root.follow = root.scrolled <= root.end + 2px;
+        if root.settle > 0 && root.scrolled != root.restored {
+            root.settle -= 1;
+            root.restore();
+        } else if root.follow {
+            root.kept-rows = -1;
+        } else if root.kept-rows >= 0 && root.model.length == root.kept-rows {
+            // Scrolled while the page loads: keep this place instead.
+            root.keep = root.rows-to-end();
+        }
+        if root.paused && abs(root.scrolled - root.paused-at) > list.visible-height {
+            root.paused = false;
+        }
+        root.load-near-top();
+    }
+    property <bool> loading: Bridge.loading-history;
+    changed loading => {
+        if !root.loading && root.kept-rows >= 0 && root.model.length == root.kept-rows {
+            root.paused = true;
+            root.paused-at = list.content-y;
+            root.kept-rows = -1;
+        }
+    }
+    // Another chat (another tab, or another server's tab at the same
+    // place): start at its end, with nothing of the last one's loading.
+    function reset() {
         root.follow = true;
+        root.kept-rows = -1;
+        root.settle = 0;
+        root.paused = false;
         list.content-y = root.end;
     }
+    property <int> tab: Bridge.current-tab;
+    changed tab => { root.reset(); }
+    property <int> server: Bridge.current-server;
+    changed server => { root.reset(); }
     // A pinned message was jumped to: scroll to where its row is. Rows
     // differ in height, so this is the place of an average row (as the
     // standard list estimates it); the row itself is highlighted.
     property <int> jumps: Bridge.jump-requests;
     changed jumps => {
         if root.older && root.model.length > 0 {
+            root.settle = 0;
             list.content-y = max(root.end, min(0px, list.visible-height / 3 - Bridge.jump-index * list.content-height / root.model.length));
         }
     }
@@ -517,29 +615,26 @@ export component MessageList inherits VerticalLayout {
             }
         }
     }
-    if root.older && Bridge.more-history: Rectangle {
-        height: 40px;
-        HorizontalLayout {
-            alignment: center;
-            Button {
-                small: true;
-                icon: Icons.chevron-up;
-                text: Bridge.loading-history ? @tr("Loading…") : @tr("Older messages");
-                enabled: !Bridge.loading-history;
-                y: (parent.height - self.height) / 2;
-                clicked => { Bridge.load-older(); }
-            }
-        }
+    // An empty chat: the button on its own.
+    if root.older && Bridge.more-history && root.model.length == 0: OlderRow {
+        load => { root.load(); }
     }
     list := ListView {
         vertical-stretch: 1;
         // A long chat must not make the window taller: the list scrolls.
         preferred-height: 0px;
         accessible-label: @tr("Messages");
-        for line[i] in root.model: MessageRow {
-            line: line;
-            show-actions: Nav.show-actions && i == root.model.length - 1;
-            first: i == 0;
+        // Scrolled by hand: the view is where the user put it.
+        scrolled => { root.settle = 0; }
+        for line[i] in root.model: VerticalLayout {
+            if i == 0 && root.older && Bridge.more-history: OlderRow {
+                load => { root.load(); }
+            }
+            MessageRow {
+                line: line;
+                show-actions: Nav.show-actions && i == root.model.length - 1;
+                first: i == 0;
+            }
         }
     }
 }

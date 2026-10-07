@@ -277,8 +277,14 @@ impl App {
 		}
 		tab.loading = true;
 		let target = tab.target.clone();
-		let before = tab.messages.first().map(|m| m.message.id);
-		self.engine.send(Command::LoadOlderHistory { session: id as u64, target, before });
+		let oldest = tab.messages.first().map(|m| &m.message);
+		if self.demo_ui {
+			// No engine answers in demo mode.
+			crate::dev::answer_older(id, target, oldest.cloned());
+		} else {
+			let before = oldest.map(|m| m.id);
+			self.engine.send(Command::LoadOlderHistory { session: id as u64, target, before });
+		}
 		self.refresh_chat();
 	}
 
