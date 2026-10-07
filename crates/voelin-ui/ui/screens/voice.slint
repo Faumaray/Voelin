@@ -251,6 +251,13 @@ export component VoiceView inherits VerticalLayout {
                         clicked => { Nav.copy(Bridge.invite()); }
                     }
                     IconButton {
+                        icon: Icons.users;
+                        label: @tr("Members");
+                        checked: Nav.right-panel-open && !Nav.pins-open && !Nav.topics-open;
+                        y: (parent.height - self.height) / 2;
+                        clicked => { Nav.toggle-members(); }
+                    }
+                    IconButton {
                         icon: Icons.message-square;
                         label: @tr("Chat only");
                         y: (parent.height - self.height) / 2;

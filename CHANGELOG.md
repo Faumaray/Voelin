@@ -75,6 +75,11 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
 - One dialog adds a server, with Save and Connect (Enter connects); Home's
   Join a Server opens it too. Connect connects only a server it saved (Join
   connected the server shown before when saving failed).
+- A slimmer top bar on desktop: only the search and the bell. The bell's
+  panel opens under the bell and is as tall as its notices; the members
+  button is in the voice channel's header (as in the chat's), About in
+  Settings. The user card has no settings gear (the rail's stays); its
+  avatar and name open your account.
 
 ### Fixed
 

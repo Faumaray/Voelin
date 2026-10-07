@@ -163,46 +163,24 @@ export component ServerRail inherits Rectangle {
     }
 }
 
-// The bar at the top: the app name and page, search, notifications.
+// The bar at the top: the search over the main panel, the bell at the
+// right.
 export component TopBar inherits Rectangle {
-    in property <string> context;
     height: Theme.topbar-height;
     accessible-role: AccessibleRole.banner;
     HorizontalLayout {
-        padding-left: Theme.space-4;
+        // Where the main panel starts: the panels below have a space-3
+        // margin and gap around the sidebar.
+        padding-left: Theme.sidebar-width + 2 * Theme.space-3;
         padding-right: Theme.space-4;
         spacing: Theme.space-4;
-        HorizontalLayout {
-            width: Theme.sidebar-width - Theme.space-4;
-            spacing: Theme.space-3;
-            Image {
-                width: 30px;
-                height: 30px;
-                y: (parent.height - self.height) / 2;
-                source: Icons.logo;
-            }
-            Text {
-                text: Bridge.app-name;
-                color: Theme.text;
-                font-size: Theme.font-xl;
-                font-weight: Theme.weight-semibold;
-                vertical-alignment: center;
-            }
-            if root.context != "": Text {
-                text: root.context;
-                color: Theme.accent-text;
-                font-size: Theme.font-md;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-        }
         HorizontalLayout {
             horizontal-stretch: 1;
             alignment: center;
             // Opens the search (Ctrl+K does too).
             Rectangle {
                 max-width: 680px;
-                height: 40px;
+                height: Theme.control-height;
                 y: (parent.height - self.height) / 2;
                 SearchBox {
                     read-only: true;
@@ -222,28 +200,6 @@ export component TopBar inherits Rectangle {
             checked: Nav.notifications-open;
             y: (parent.height - self.height) / 2;
             clicked => { Nav.notifications-open = !Nav.notifications-open; }
-        }
-        IconButton {
-            icon: Icons.users;
-            label: @tr("Members");
-            checked: Nav.right-panel-open && !Nav.pins-open && !Nav.topics-open && Nav.page == Page.server;
-            y: (parent.height - self.height) / 2;
-            clicked => {
-                Nav.show(Page.server);
-                Nav.toggle-members();
-            }
-        }
-        Rectangle {
-            width: 1px;
-            height: 24px;
-            y: (parent.height - self.height) / 2;
-            background: Theme.border-strong;
-        }
-        IconButton {
-            icon: Icons.help;
-            label: @tr("About {}", Bridge.app-name);
-            y: (parent.height - self.height) / 2;
-            clicked => { Nav.open-about(); }
         }
     }
 }
@@ -268,14 +224,11 @@ export component Sidebar inherits Panel {
 
 // The frame: rail | (top bar / panels).
 export component DesktopShell inherits Rectangle {
-    in property <string> context;
     background: Theme.backdrop;
     HorizontalLayout {
         ServerRail { }
         VerticalLayout {
-            TopBar {
-                context: root.context;
-            }
+            TopBar { }
             HorizontalLayout {
                 padding-left: Theme.space-3;
                 padding-right: Theme.space-3;

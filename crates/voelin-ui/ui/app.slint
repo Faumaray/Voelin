@@ -135,7 +135,6 @@ export component MainWindow inherits Window {
             if !Bridge.myts.prompt && !root.chrome: StreamViewer { }
 
             if !Bridge.myts.prompt && !Nav.narrow && root.chrome: DesktopShell {
-                context: Nav.page == Page.settings ? @tr("Settings") : Nav.page == Page.studio ? @tr("Stream Studio") : "";
                 if Nav.page == Page.home: Sidebar {
                     HomeNav { }
                 }
@@ -331,17 +330,18 @@ export component MainWindow inherits Window {
         }
     }
 
-    // The bell's panel, under the bell (the phone: the whole width).
+    // The bell's panel, under the bell (the phone: the whole width), as
+    // tall as its notices up to 560 px.
     if !Bridge.myts.prompt && (Nav.notifications-open): Rectangle {
         background: Theme.scrim-light;
         TouchArea {
             clicked => { Nav.notifications-open = false; }
         }
         NotificationsPanel {
-            x: Nav.narrow ? 8px : parent.width - self.width - 100px;
+            x: Nav.narrow ? 8px : parent.width - self.width - Theme.space-4;
             y: Nav.narrow ? 64px : Theme.topbar-height;
             width: Nav.narrow ? parent.width - 16px : 400px;
-            height: min(parent.height - self.y - 16px, 560px);
+            height: min(parent.height - self.y - 16px, 560px, self.preferred-height);
         }
     }
 
