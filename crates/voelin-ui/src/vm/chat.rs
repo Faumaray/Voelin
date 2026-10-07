@@ -204,8 +204,15 @@ fn inks(color: Option<[u8; 3]>) -> (Color, Color) {
 	}
 }
 
-/// A run of `text` (or the emoji `emoji`) in `style`.
-fn run(text: &str, emoji: Option<String>, style: &Style, inks: (Color, Color)) -> TextRun {
+/// A run of `text` (or the emoji `emoji`) in `style`; `masked`: its link's
+/// text shows something else ([`bbcode::is_masked`]).
+fn run(
+	text: &str,
+	emoji: Option<String>,
+	style: &Style,
+	masked: bool,
+	inks: (Color, Color),
+) -> TextRun {
 	TextRun {
 		text: text.into(),
 		emoji: emoji.unwrap_or_default().into(),
@@ -217,6 +224,7 @@ fn run(text: &str, emoji: Option<String>, style: &Style, inks: (Color, Color)) -
 		ink_dark: inks.0,
 		ink_light: inks.1,
 		link: style.link.clone().unwrap_or_default().into(),
+		masked,
 	}
 }
 
@@ -247,6 +255,7 @@ fn runs_of(spans: &[Span]) -> (Vec<TextRun>, bool) {
 		match span {
 			Span::Text { text, style } => {
 				let inks = inks(style.color);
+				let masked = style.link.as_deref().is_some_and(|l| bbcode::is_masked(text, l));
 				let words = if style.code && text.graphemes(true).count() <= LONG_WORD {
 					vec![emoji::Run { text: text.clone(), emoji: None }]
 				} else {
@@ -255,9 +264,11 @@ fn runs_of(spans: &[Span]) -> (Vec<TextRun>, bool) {
 				for word in words {
 					any_emoji |= word.emoji.is_some();
 					match word.emoji {
-						Some(key) => runs.push(run(&word.text, Some(key), style, inks)),
+						Some(key) => runs.push(run(&word.text, Some(key), style, masked, inks)),
 						None => runs.extend(
-							pieces(&word.text).into_iter().map(|p| run(p, None, style, inks)),
+							pieces(&word.text)
+								.into_iter()
+								.map(|p| run(p, None, style, masked, inks)),
 						),
 					}
 				}
@@ -265,7 +276,9 @@ fn runs_of(spans: &[Span]) -> (Vec<TextRun>, bool) {
 			// A picture that is not shown: its address, as a link.
 			Span::Image { url } => {
 				let style = Style { link: Some(url.clone()), ..Style::default() };
-				runs.extend(pieces(url).into_iter().map(|p| run(p, None, &style, inks(None))));
+				runs.extend(
+					pieces(url).into_iter().map(|p| run(p, None, &style, false, inks(None))),
+				);
 			}
 		}
 	}
@@ -376,6 +389,21 @@ pub fn preview(message: &ChatMessage) -> (String, String) {
 	(format!("{}: {text}", message.author_name), time_of(message.ts_ms))
 }
 
+/// `text` by `author` as a quote to answer below: each line after `> `,
+/// the first with who said it ("> Nova: see you at 8\n> bring elixirs\n");
+/// "" for no text. TeamSpeak clients show `[quote]` as it is, so a quote
+/// is plain lines.
+pub fn quote(author: &str, text: &str) -> String {
+	let mut out = String::new();
+	for (i, line) in text.trim().lines().enumerate() {
+		match i {
+			0 if !author.is_empty() => out.push_str(&format!("> {author}: {line}\n")),
+			_ => out.push_str(&format!("> {line}\n")),
+		}
+	}
+	out
+}
+
 /// The line of a stored message; `previous` is the line before it.
 pub fn history_line(
 	message: &HistoryMessage,
@@ -422,8 +450,8 @@ pub fn server_message(server: &str, text: &str) -> ChatMessage {
 }
 
 /// A message of the server ([`server_message`]) as a line of the server
-/// chat: by the server, without a time or actions. `id` keeps what it was
-/// built from in the cache, apart from the messages'.
+/// chat: by the server, without a time, reactions or pins. `id` keeps what
+/// it was built from in the cache, apart from the messages'.
 pub fn server_line(server: &str, text: &str, id: i64, continued: bool, ctx: &LineCtx) -> ChatLine {
 	let message = server_message(server, text);
 	let previous = continued.then(|| Previous::of(&message));
@@ -636,6 +664,7 @@ mod tests {
 			(address.text.as_str(), address.link.as_str()),
 			("https://x.org/raid", "https://x.org/raid")
 		);
+		assert!(!address.masked, "its own address");
 		assert!(runs(&line, 3)[0].underline);
 		assert!(runs(&line, 4).is_empty(), "a rule has no runs");
 		// Code: a block per line, empty ones kept.
@@ -648,6 +677,35 @@ mod tests {
 		// Not formatting: plain.
 		let relayed = super::line(&message("A", "[Nova] hi [1]", 0), None);
 		assert!(!relayed.rich && relayed.text == "[Nova] hi [1]" && relayed.link.is_empty());
+	}
+
+	/// A link whose text is not its address asks before it opens: each of
+	/// its runs says so.
+	#[test]
+	fn masked_link_runs() {
+		let text = "on the [url=https://x.org/raids]raid board[/url], or www.x.org";
+		let line = line(&message("A", text, 0), None);
+		let links: Vec<(String, bool)> = runs(&line, 0)
+			.iter()
+			.filter(|r| !r.link.is_empty())
+			.map(|r| (r.text.trim().to_owned(), r.masked))
+			.collect();
+		let masked = |t: &str| (t.to_owned(), true);
+		assert_eq!(links, [masked("raid"), masked("board"), ("www.x.org".into(), false)]);
+	}
+
+	#[test]
+	fn quotes() {
+		assert_eq!(quote("Nova", "see you at 8"), "> Nova: see you at 8\n");
+		assert_eq!(
+			quote("Nova", "see you at 8\r\nbring elixirs\n\nok"),
+			"> Nova: see you at 8\n> bring elixirs\n> \n> ok\n"
+		);
+		assert_eq!(quote("Nova", "  \n "), "");
+		assert_eq!(quote("", "hi"), "> hi\n");
+		// A line's text is plain (BBCode read), a quote in it quoted again.
+		let line = line(&message("Kairo", "[quote=Nova]bring [b]elixirs[/b][/quote]\nok", 0), None);
+		assert_eq!(quote(&line.author, &line.text), "> Kairo: > Nova: bring elixirs\n> ok\n");
 	}
 
 	/// A run does not wrap: long words (addresses) and long inline code

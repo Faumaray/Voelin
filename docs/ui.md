@@ -97,7 +97,7 @@ puts them on an inner `face`).
 | `IconButton` | button.slint | `icon`, `label` (screen readers), `tooltip` (default `label`, "" for none; on hover, also while disabled, desktop only), `checked`, `danger`, `round`, `filled`, `size`, `icon-size`, `tint`, `dot`, `count` (a neutral number at the top right, hidden at 0 or less); `clicked` |
 | `ActionButton` | button.slint | round button with a caption (Mute, Deafen, Go Live), no tooltip: `icon`, `text`, `checked`, `danger` |
 | `FocusRing` | button.slint | the accent ring of focused controls |
-| `TextField` | text-field.slint | `text`, `placeholder`, `input-type`, `icon`, `label`, `bare`, `read-only`; `accepted`, `edited`, `key-pressed`; `clear()`, `select-all()` |
+| `TextField` | text-field.slint | `text`, `placeholder`, `input-type`, `icon`, `label`, `bare`, `read-only`; out `has-focus`, `text-height` (the height of its lines); `accepted`, `edited`, `key-pressed`; `clear()`, `select-all()`, `focus-end()` (the cursor after the text) |
 | `SearchBox` | text-field.slint | a TextField with a magnifier and the Ctrl K hint (`show-shortcut`) |
 | `Kbd` | text-field.slint | a key cap |
 | `Field` | text-field.slint | `label` above a control (@children), `hint` below |
@@ -129,7 +129,7 @@ puts them on an inner `face`).
 | `Modal` | overlay.slint | dialog with backdrop: `title`, `subtitle`, `icon`, `card-width`, `card-height`; `dismissed` (backdrop, Escape, ×) |
 | `Toast` | overlay.slint | `text`, `icon`, `timeout`, `shown` |
 | `ResizeHandle` | overlay.slint | drag to resize a side panel: `size` (two-way), `minimum`, `maximum`, `left` |
-| `RichText` | emoji.slint | text with formatting and inline emoji: `blocks` ([TextBlock]) of lines, quotes (a bar and the author), code (on a background), list items and rules; a block's `runs` ([TextRun]: bold, italic, underline, strike, code, the author's colour per theme, links in the accent colour) flow and wrap in a FlexboxLayout |
+| `RichText` | emoji.slint | text with formatting and inline emoji: `blocks` ([TextBlock]) of lines, quotes (a bar and the author), code (on a background), list items and rules; a block's `runs` ([TextRun]: bold, italic, underline, strike, code, the author's colour per theme, links underlined in the accent colour) flow and wrap in a FlexboxLayout; a click on a link opens it (`Nav.open-link`), a right-click shows Open link and Copy link |
 | `MessageText` | emoji.slint | a message's text (`line`: ChatLine): one `Text` when it has neither formatting nor emoji, else a `RichText`; a note for a blocked contact's. The chat, the pins drawer and the studio's chat use it |
 | `EmojiPicker` | emoji.slint | search, categories, virtualised grid; `picked(EmojiCell)`, `close` |
 | `ListView`, `ScrollView` | std-widgets | re-exported (virtualised lists) |
@@ -146,7 +146,7 @@ comes from the engine's events; what a gateway adds is hidden without it.
 
 | Part | `VOELIN_OPEN` | What it shows | Engine data |
 |---|---|---|---|
-| Chat | `server` (`server:chat`: the server chat) | Header with Pinned Messages, Topics, the voice channel and the members button; chat tabs; messages grouped by author ("Today at 10:14"), avatars, BBCode formatting (see Formatting below), emoji, reactions with an add button, pin and topic marks, file cards with download; composer with attach, emoji and send. The server chat starts with the server's welcome message (and its host message when the server puts it in the chat log). Opens at the newest message and follows new ones while at the end | `ChatHistory` (and `Chat` for servers without history), `Presence` (welcome and host message), `AvatarReady`, `Transfer`, `Gateway` (pins; reactions arrive as stored messages); `Command::LoadOlderHistory`, `DownloadChatFile`, `UploadFile`, `GatewayRequest::React`, `Unreact`, `Pin`, `Unpin` |
+| Chat | `server` (`server:chat`: the server chat), `actions`, `link-confirm[:<url>]` | Header with Pinned Messages, Topics, the voice channel and the members button; chat tabs; messages grouped by author ("Today at 10:14"), avatars, BBCode formatting (see Formatting below), emoji, reactions with an add button, pin and topic marks, file cards with download; composer with attach, emoji and send. A link opens in the browser; one whose text is not its address (a masked link) first shows where it goes in `LinkDialog` (the host, the whole address; Open, Copy link, Cancel); a TeamSpeak link is copied for now; a right-click on a link offers Open link and Copy link. Every message has actions on hover (`MessageActions`; `actions` shows the last one's): Quote (`> Author: …` lines at the start of the composer, which takes the focus to write below them and grows to show up to about eight lines) and Copy text, and with a gateway quick reactions, pin and Start a topic; a right-click on a message shows Copy text, Copy link (its first web address), Quote, and with a gateway React… and Pin. The server chat starts with the server's welcome message (and its host message when the server puts it in the chat log). Opens at the newest message and follows new ones while at the end | `ChatHistory` (and `Chat` for servers without history), `Presence` (welcome and host message), `AvatarReady`, `Transfer`, `Gateway` (pins; reactions arrive as stored messages); `Command::LoadOlderHistory`, `DownloadChatFile`, `UploadFile`, `GatewayRequest::React`, `Unreact`, `Pin`, `Unpin` |
 | Members panel | `server` (`panel`, `no-panel`) | "Members — N" and a search; those streaming first (the people in our channel while the voice channel or a stream is shown), then each server group in the server's order with its icon, then those without a group. Rows: avatar with status, name, crown (admin groups), priority speaker, channel commander, recording, up to three myTeamSpeak badges, moderator role, talk power, what they do or the channel they are in. Resizable: the width is `ui.members_width` | `Presence`, `Groups`, `Talking`, `IconReady`, `PictureReady` |
 | Member card | `member` | Description, groups, badges (up to three chips in the client's order, what each is for on hover; "Badge" for one the app does not know), talk power, country; private message, poke, friend, block; volume and mute for us | `ContactsChanged`, `PictureReady` (badges); `Command::SetContact`, `SetClientVolume`, `SetClientMuted`, `Poke` |
 | Poke | `poke` (the first other member's, card open; after `friends` a contact's) | `PokeDialog`, from the member card, a friend's row and the direct message header: an optional message with a "12/100" count, Send off above 100 characters, Enter sends, Escape cancels | `Command::Poke` (trimmed, cut to 100 characters; the engine cuts too) |
@@ -401,6 +401,12 @@ a second parser making the same Doc.
 - A line break starts a block. Bare `http(s)://` and `www.` addresses are
   links, without the punctuation after them. Links go only to the web,
   TeamSpeak servers and channel files: `[url=javascript:…]` is no link.
+  `classify_link` says which (`LinkKind`: `Web`, `Server` for
+  `ts3server://`, `teamspeak://` and `tmspk.gg` invites, `File`, `Refused`
+  for other schemes, backslashes, spaces, control characters and a leading
+  `-`); only those reach `TextRun.link`. A link whose text is not its own
+  address (`[url=…]raid board[/url]`, another address) is masked
+  (`is_masked`, `TextRun.masked`): it asks before it opens.
 - Colours are honoured, made readable on each theme (a contrast of 4.5:1 to
   the chat's background, keeping the hue).
 - Past 16 tags open at once or 1500 spans (or runs), a message is plain
@@ -424,7 +430,9 @@ Environment variables (see `src/dev.rs`):
 - `VOELIN_OPEN=<what>[,<what>...]`: `home`, `server` (`server:chat`: the server chat), `settings[:voice|keybinds|streaming|privacy|appearance|profiles]` (`identities` is the same as `profiles`),
   `about`, `share[:live]`, `bookmark[:edit]`, `emoji`, `client`, `panel`, `no-panel`,
   `voice`, `pins`, `topics`, `topic:<id>`, `member`, `poke`,
-  `channel-password[:wrong]`, `watch`, `popout`
+  `channel-password[:wrong]`, `actions` (the last message's actions, as if
+  hovered: a screenshot cannot hover), `link-confirm[:<url>]` (the question
+  before a masked link opens, by default the sample's), `watch`, `popout`
   (the server page, above), `tab:<home|servers|chat|activity|you>` (phone
   layout); `friends[:<uid>]`, `messages[:<uid>]`, `inbox`, `offline`,
   `library`, `events`, `event-form`, `search[:<text>]`, `notifications`,

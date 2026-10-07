@@ -55,6 +55,10 @@ pub(super) fn wire(ui: &MainWindow) {
 	bridge.on_create_topic(|key, title| {
 		with_app(|app| app.create_topic(key, title.to_string()));
 	});
+	bridge.on_open_link(|link, masked| {
+		with_app(|app| app.open_link_text(&link, masked)).unwrap_or_default().into()
+	});
+	bridge.on_quote_text(|author, text| crate::vm::chat::quote(&author, &text).into());
 	bridge.on_open_member(|id| {
 		with_app(|app| app.open_member(id));
 	});

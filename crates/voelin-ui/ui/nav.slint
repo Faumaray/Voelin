@@ -80,6 +80,9 @@ export global Nav {
     // The emoji picker over the composer, and the composer's text.
     in-out property <bool> emoji-open;
     in-out property <string> draft;
+    // Counts requests for the composer to take the focus, its cursor at the
+    // end (after a quote): the composer shown takes it.
+    in-out property <int> compose-requests;
     in-out property <BookmarkForm> bookmark-form;
     in-out property <ShareForm> share-form;
     // Rust opens these two: a locked channel's password (its name, and
@@ -89,6 +92,13 @@ export global Nav {
     in-out property <bool> channel-password-error;
     in-out property <bool> poke-open;
     in-out property <string> poke-name;
+    // Rust asks before a masked link opens: its address and host.
+    in-out property <bool> link-open;
+    in-out property <string> link-url;
+    in-out property <string> link-host;
+    // The last message shows its actions as if hovered (VOELIN_OPEN=actions:
+    // a screenshot cannot hover).
+    in-out property <bool> show-actions;
 
     // The bell's panel, the search (Ctrl+K) and its selected result, a
     // picture opened from the chat, the event and offline message forms,
@@ -326,5 +336,16 @@ export global Nav {
             clip-text = text;
             clip-requests += 1;
         }
+    }
+
+    // A link in a message: Rust opens it, asks first, or has it copied.
+    public function open-link(link: string, masked: bool) {
+        copy(Bridge.open-link(link, masked));
+    }
+
+    // Quote a message at the start of the composer, then write after it.
+    public function quote(author: string, text: string) {
+        draft = Bridge.quote-text(author, text) + draft;
+        compose-requests += 1;
     }
 }

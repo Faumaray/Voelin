@@ -16,6 +16,8 @@ export component TextField inherits Rectangle {
     // Drawn without its own background and border (inside a composer).
     in property <bool> bare;
     out property <bool> has-focus: input.has-focus;
+    // How tall its text is: a quoted or pasted text can have several lines.
+    out property <length> text-height: input.preferred-height;
     callback accepted(string);
     callback edited(string);
     callback key-pressed(KeyEvent) -> EventResult;
@@ -26,6 +28,13 @@ export component TextField inherits Rectangle {
 
     public function select-all() {
         input.select-all();
+    }
+
+    // The focus, with the cursor after the text (to write below a quote).
+    public function focus-end() {
+        input.focus();
+        input.select-all();
+        input.clear-selection();
     }
 
     property <length> margin: Theme.space-2;

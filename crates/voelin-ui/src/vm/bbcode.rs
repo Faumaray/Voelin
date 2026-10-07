@@ -21,7 +21,7 @@
 //! - Bare addresses (`https://…`, `www.…`) are links, without the
 //!   punctuation after them.
 //! - Links only go to the web, to TeamSpeak servers and to channel files
-//!   ([`link_target`]): `[url=javascript:…]` is no link.
+//!   ([`classify_link`]): `[url=javascript:…]` is no link.
 //! - Past [`MAX_DEPTH`] tags open at once or [`MAX_RUNS`] spans, a message
 //!   is plain text.
 
@@ -264,35 +264,114 @@ fn trim_lines(blocks: &mut Vec<Block>) {
 	blocks.drain(..start);
 }
 
-/// Schemes a link may have: the web, TeamSpeak servers, channel files.
-const SCHEMES: [&str; 8] = [
-	"https://",
-	"http://",
-	"ts3server://",
-	"teamspeak://",
-	"ts3file://",
-	"tsfile://",
-	"ts5file://",
-	"ts6file://",
-];
+/// What a link is, and so what a click on it does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkKind {
+	/// A page on the web, opened in the browser: the address with its scheme
+	/// in lower case (`www.…` as `https://www.…`).
+	Web(String),
+	/// A TeamSpeak server: `ts3server://`, `teamspeak://` or an invite on
+	/// `tmspk.gg`.
+	Server(String),
+	/// A channel's file (`ts3file://` and the like): the chat shows it as a
+	/// card.
+	File,
+	/// No link: any other scheme (`javascript:`, `file:`, `data:`, `smb:`),
+	/// a backslash (a Windows share, `\\host`, gets the user's credentials,
+	/// and browsers read `\` as `/`, so the host would not be the one
+	/// shown), spaces or control characters, or a leading `-` (an opener
+	/// would read it as an option).
+	Refused,
+}
 
-/// Where a link may go: the web (`www.…` as `https://www.…`), TeamSpeak
-/// servers (`ts3server`, `teamspeak`) and channel files (`ts3file` and the
-/// like, which the chat shows as cards). Anything else (`javascript:`,
-/// `file:`, `data:`, an address with spaces) is no link.
-pub fn link_target(address: &str) -> Option<String> {
+const WEB: [&str; 2] = ["https://", "http://"];
+const SERVERS: [&str; 2] = ["ts3server://", "teamspeak://"];
+const FILES: [&str; 4] = ["ts3file://", "tsfile://", "ts5file://", "ts6file://"];
+
+/// Hosts of TeamSpeak's invite links, which open a server.
+const INVITE_HOSTS: [&str; 2] = ["tmspk.gg", "www.tmspk.gg"];
+
+/// What `address` links to. Only the web, TeamSpeak servers and channel
+/// files are links, so nothing else reaches the desktop's opener.
+pub fn classify_link(address: &str) -> LinkKind {
 	let address = address.trim();
-	if address.chars().any(|c| c.is_whitespace() || c.is_control()) {
-		return None;
+	if address.starts_with('-')
+		|| address.contains('\\')
+		|| address.chars().any(|c| c.is_whitespace() || c.is_control())
+	{
+		return LinkKind::Refused;
 	}
+	// The same length in bytes: an index of one is one of the other.
 	let lower = address.to_ascii_lowercase();
-	if lower.starts_with("www.") && address.len() > 4 {
-		return Some(format!("https://{address}"));
+	let (scheme, rest) = if lower.starts_with("www.") && lower.len() > 4 {
+		("https://", address)
+	} else if let Some(at) = lower.find("://") {
+		(&lower[..at + 3], &address[at + 3..])
+	} else {
+		return LinkKind::Refused;
+	};
+	if host_of(rest).is_empty() {
+		return LinkKind::Refused;
 	}
-	SCHEMES
-		.iter()
-		.any(|s| lower.starts_with(s) && address.len() > s.len())
-		.then(|| address.to_owned())
+	if WEB.contains(&scheme) {
+		let url = format!("{scheme}{rest}");
+		if INVITE_HOSTS.contains(&host_of(rest).to_ascii_lowercase().as_str()) {
+			LinkKind::Server(url)
+		} else {
+			LinkKind::Web(url)
+		}
+	} else if SERVERS.contains(&scheme) {
+		LinkKind::Server(format!("{scheme}{rest}"))
+	} else if FILES.contains(&scheme) {
+		LinkKind::File
+	} else {
+		LinkKind::Refused
+	}
+}
+
+/// The host of an address after its scheme: without the user before an
+/// `@`, the port and the path (`me@Example.org:8080/a` → `Example.org`).
+fn host_of(rest: &str) -> &str {
+	let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+	let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+	match host.strip_prefix('[') {
+		// An IPv6 address, in brackets.
+		Some(v6) => v6.split(']').next().unwrap_or_default(),
+		None => host.split(':').next().unwrap_or_default(),
+	}
+}
+
+/// The host a link goes to, in lower case (`https://me@Example.org:8080/a`
+/// → `example.org`): what a masked link's question shows.
+pub fn link_host(address: &str) -> String {
+	let address = address.trim();
+	let rest = address.find("://").map_or(address, |at| &address[at + 3..]);
+	host_of(rest).to_lowercase()
+}
+
+/// Whether a link's text shows something else than where it goes: a page's
+/// name (`[url=…]raid board[/url]`) or another address. Its own address
+/// (`[url]…[/url]`, a bare address, `www.…` for `https://www.…`) in any case
+/// and with or without a `/` at the end is not.
+pub fn is_masked(text: &str, link: &str) -> bool {
+	fn bare(address: &str) -> String {
+		let lower = address.trim().to_lowercase();
+		let rest = WEB.iter().find_map(|s| lower.strip_prefix(s)).unwrap_or(&lower);
+		rest.trim_end_matches('/').to_owned()
+	}
+	bare(text) != bare(link)
+}
+
+/// Where a link may go ([`classify_link`]): the web (`www.…` as
+/// `https://www.…`), TeamSpeak servers and channel files (which the chat
+/// shows as cards). Anything else (`javascript:`, `file:`, `data:`, an
+/// address with spaces) is no link.
+pub fn link_target(address: &str) -> Option<String> {
+	match classify_link(address) {
+		LinkKind::Web(url) | LinkKind::Server(url) => Some(url),
+		LinkKind::File => Some(address.trim().to_owned()),
+		LinkKind::Refused => None,
+	}
 }
 
 /// An address on the web (`http`, `https`).
@@ -969,6 +1048,104 @@ mod tests {
 			spans("[code]https://x.org[/code]")[0],
 			styled("https://x.org", Style { code: true, ..Default::default() })
 		);
+	}
+
+	#[test]
+	fn link_kinds() {
+		let web = |u: &str| LinkKind::Web(u.into());
+		let server = |u: &str| LinkKind::Server(u.into());
+		for (address, kind) in [
+			("https://x.org/a?b=1#c", web("https://x.org/a?b=1#c")),
+			("http://x.org", web("http://x.org")),
+			("HTTPS://X.org/A", web("https://X.org/A")),
+			("  https://x.org  ", web("https://x.org")),
+			("www.x.org/a", web("https://www.x.org/a")),
+			("WWW.x.org", web("https://WWW.x.org")),
+			("www.x.org/?to=https://y.org", web("https://www.x.org/?to=https://y.org")),
+			("https://me@x.org:8443/", web("https://me@x.org:8443/")),
+			("ts3server://ts.example?port=9987", server("ts3server://ts.example?port=9987")),
+			("TeamSpeak://invite=abc", server("teamspeak://invite=abc")),
+			("https://tmspk.gg/s/ts.example", server("https://tmspk.gg/s/ts.example")),
+			("https://www.TMSPK.gg/abc", server("https://www.TMSPK.gg/abc")),
+			("ts3file://a.png?serverUID=x&channel=1", LinkKind::File),
+			("ts6file://a.png", LinkKind::File),
+		] {
+			assert_eq!(classify_link(address), kind, "{address}");
+		}
+		for address in [
+			"",
+			"www.",
+			"https://",
+			"https:///path",
+			"https://?q",
+			"javascript:alert(1)",
+			"JavaScript://x.org/%0aalert(1)",
+			"file:///etc/passwd",
+			"data:text/html,<b>x</b>",
+			"smb://host/share",
+			"mailto:a@x.org",
+			"\\\\host\\share",
+			"https://x.org\\@y.org",
+			"-https://x.org",
+			"--help",
+			"https://x.org/a b",
+			"https://x.org/\u{7}",
+			"https://x.org/\na",
+			"x.org",
+		] {
+			assert_eq!(classify_link(address), LinkKind::Refused, "{address:?}");
+		}
+		// What a message links to is classified.
+		assert_eq!(link_target("WWW.x.org").as_deref(), Some("https://WWW.x.org"));
+		assert_eq!(link_target("ts3file://a.png").as_deref(), Some("ts3file://a.png"));
+		assert_eq!(link_target("smb://host/share"), None);
+	}
+
+	#[test]
+	fn link_hosts() {
+		assert_eq!(link_host("https://me@Example.org:8443/a?b#c"), "example.org");
+		assert_eq!(link_host("https://good.example@evil.example/"), "evil.example");
+		assert_eq!(link_host("http://[::1]:80/"), "::1");
+		assert_eq!(link_host("https://x.org"), "x.org");
+	}
+
+	#[test]
+	fn masked_links() {
+		// Its own address is not masked, as the parser links it.
+		for (text, link) in [
+			("https://x.org", "https://x.org"),
+			("www.x.org", "https://www.x.org"),
+			("HTTPS://X.ORG/", "https://x.org"),
+			("x.org/a", "https://x.org/a/"),
+		] {
+			assert!(!is_masked(text, link), "{text} → {link}");
+		}
+		for (text, link) in [
+			("raid board", "https://x.org/raids"),
+			("https://bank.example", "https://evil.example"),
+			("bank.example", "https://bank.example.evil.example"),
+			("", "https://x.org"),
+		] {
+			assert!(is_masked(text, link), "{text} → {link}");
+		}
+		// Spans as the parser makes them.
+		let masked = |source: &str| {
+			let doc = parse(source);
+			doc.blocks[0]
+				.spans
+				.iter()
+				.filter_map(|s| match s {
+					Span::Text { text, style: Style { link: Some(link), .. } } => {
+						Some(is_masked(text, link))
+					}
+					_ => None,
+				})
+				.collect::<Vec<_>>()
+		};
+		assert_eq!(masked("see https://x.org and www.y.org"), [false, false]);
+		assert_eq!(masked("[url]https://x.org[/url]"), [false]);
+		assert_eq!(masked("[url=https://x.org]the page[/url]"), [true]);
+		assert_eq!(masked("[url=https://evil.example]https://x.org[/url]"), [true]);
 	}
 
 	#[test]

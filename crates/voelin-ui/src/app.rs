@@ -865,6 +865,13 @@ impl App {
 		}
 	}
 
+	/// Open a page on the web in the browser. Pages open through here, so
+	/// a platform without a desktop opener (Android) can open them its own
+	/// way.
+	pub(crate) fn open_url(&self, url: &str) -> std::io::Result<()> {
+		open_target(std::ffi::OsStr::new(url))
+	}
+
 	/// Nav.copy put text on the clipboard: one toast says so.
 	pub fn copied(&mut self) {
 		let text = self.copy_note.take().unwrap_or_else(|| "Copied".to_owned());

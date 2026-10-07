@@ -4,12 +4,15 @@
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Images, Emoji, TextRun, TextBlock, ChatLine, EmojiCell } from "../bridge.slint";
+import { Nav } from "../nav.slint";
 import { Icon } from "icon.slint";
+import { PopupMenu } from "overlay.slint";
 import { SearchBox } from "text-field.slint";
 import { ListView } from "std-widgets.slint";
 
 // A word in its style, or an emoji. A Text draws no lines, so underline
-// (links too) and strike-through are 1 px rectangles over it.
+// (links too) and strike-through are 1 px rectangles over it. A click on a
+// link opens it (Nav.open-link); a right-click opens or copies it.
 component Run inherits Rectangle {
     in property <TextRun> run;
     in property <length> font-size;
@@ -55,6 +58,30 @@ component Run inherits Rectangle {
         width: label.width;
         height: 1px;
         background: root.ink;
+    }
+    if run.link != "": TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { Nav.open-link(run.link, run.masked); }
+        pointer-event(e) => {
+            if e.button == PointerEventButton.right && e.kind == PointerEventKind.up {
+                menu.show(self.mouse-x, self.mouse-y);
+            }
+        }
+        menu := PopupMenu {
+            x: 0;
+            y: 0;
+            entries: [
+                { text: @tr("Open link"), icon: Icons.external-link, enabled: true },
+                { text: @tr("Copy link"), icon: Icons.copy, enabled: true },
+            ];
+            activated(i) => {
+                if i == 0 {
+                    Nav.open-link(run.link, run.masked);
+                } else {
+                    Nav.copy(run.link);
+                }
+            }
+        }
     }
 }
 

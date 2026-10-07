@@ -28,6 +28,12 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
 - Other people's myTeamSpeak badges: up to three pictures after their name
   in the channel tree and the members panel, and their names on the member
   card (what each is for on hover).
+- Links in chat open in the browser; one whose text is not its address
+  first shows where it goes. A right-click on a link opens or copies it;
+  TeamSpeak links are copied for now.
+- Every message can be quoted into the composer (`> ` lines) and its text
+  copied, from the actions on hover or a right-click menu, also on servers
+  without a gateway.
 
 ### Changed
 

@@ -1,5 +1,5 @@
 // Dialogs: add/edit a server, share the screen, a client's volume, a
-// channel's password, a poke, About.
+// channel's password, a poke, a masked link, About.
 
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
@@ -646,6 +646,72 @@ export component PokeDialog inherits Modal {
             text: @tr("Send");
             enabled: !root.too-long;
             clicked => { root.send(); }
+        }
+    }
+}
+
+// Before a link opens whose text shows something else than its address:
+// where it really goes, its host first. Rust opens it (Nav.link-open).
+export component LinkDialog inherits Modal {
+    callback done();
+    title: @tr("Open this link?");
+    subtitle: @tr("Its text does not show where it goes.");
+    icon: Icons.external-link;
+    card-width: 480px;
+    card-height: 272px;
+    dismissed => { done(); }
+
+    VerticalLayout {
+        spacing: Theme.space-2;
+        Text {
+            text: Nav.link-host;
+            font-size: Theme.font-lg;
+            font-weight: Theme.weight-semibold;
+            color: Theme.text;
+            overflow: elide;
+        }
+        // The whole address, a long one cut after a few lines.
+        Rectangle {
+            max-height: 72px;
+            border-radius: Theme.radius-md;
+            background: Theme.surface-2;
+            border-width: 1px;
+            border-color: Theme.border;
+            clip: true;
+            VerticalLayout {
+                padding: Theme.space-3;
+                Text {
+                    text: Nav.link-url;
+                    font-size: Theme.font-sm;
+                    color: Theme.text-secondary;
+                    wrap: word-wrap;
+                    overflow: elide;
+                }
+            }
+        }
+    }
+    Rectangle { vertical-stretch: 1; }
+    Footer {
+        Button {
+            text: @tr("Cancel");
+            clicked => { done(); }
+        }
+        Button {
+            icon: Icons.copy;
+            text: @tr("Copy link");
+            clicked => {
+                Nav.copy(Nav.link-url);
+                done();
+            }
+        }
+        Button {
+            kind: ButtonKind.primary;
+            icon: Icons.external-link;
+            text: @tr("Open");
+            clicked => {
+                Nav.open-link(Nav.link-url, false);
+                done();
+            }
         }
     }
 }

@@ -26,8 +26,11 @@
 //!   after `friends`, else for the first other client, its card open),
 //!   `channel-password` (the password dialog of the first locked channel,
 //!   the sample's Officers; `channel-password:wrong` as after a refused
-//!   one), `watch` (the first stream; with sample data the
-//!   local test pattern in its place), `popout` (the same, popped out),
+//!   one), `actions` (the last message's actions, as if hovered),
+//!   `link-confirm[:<url>]` (the question before a masked link opens, by
+//!   default the sample's raid board), `watch` (the first stream; with
+//!   sample data the local test pattern in its place), `popout` (the same,
+//!   popped out),
 //!   `tab:<home|servers|chat|activity|you>` (phone layout); `friends[:<uid>]`,
 //!   `messages[:<uid>]` (a private chat), `inbox` (offline messages),
 //!   `library`, `events`, `event-form`, `search[:<text>]`,
@@ -282,6 +285,12 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 			}
 			"channel-password" => {
 				with_app(|app| open_channel_password(app, arg == "wrong"));
+			}
+			// A screenshot cannot hover.
+			"actions" => nav.set_show_actions(true),
+			"link-confirm" => {
+				let url = if arg.is_empty() { DEMO_RAID_BOARD } else { arg };
+				with_app(|app| app.open_link_text(url, true));
 			}
 			"watch" | "popout" => {
 				with_app(|app| {
@@ -1103,6 +1112,8 @@ const DEMO_MUSIC_BANNER: &str = "https://nightfall.example/music.png";
 const DEMO_RAID_BANNER: &str = "https://nightfall.example/raid.png";
 /// A picture a message shows (`[img]`).
 const DEMO_LOOT_PICTURE: &str = "https://nightfall.example/loot.png";
+/// The sample's masked link (`VOELIN_OPEN=link-confirm`).
+const DEMO_RAID_BOARD: &str = "https://nightfall.example/raids";
 const DEMO_SERVER_ICON: u32 = 3_120_211_001;
 const DEMO_ADMIN_ICON: u32 = 3_120_211_002;
 const DEMO_MOD_ICON: u32 = 3_120_211_003;
@@ -1454,9 +1465,10 @@ fn demo_chat(app: &mut App, session: u64) {
 			DEMO,
 			"Nova",
 			1,
-			"[b]Raid night[/b] moves from [s]20:00[/s] to [color=#ff8a3d]20:30[/color], sign up \
-			 on the [url=https://nightfall.example/raids]raid board[/url]."
-				.into(),
+			format!(
+				"[b]Raid night[/b] moves from [s]20:00[/s] to [color=#ff8a3d]20:30[/color], \
+				 sign up on the [url={DEMO_RAID_BOARD}]raid board[/url]."
+			),
 			9,
 			false,
 			vec![react("👍", 4, true)],

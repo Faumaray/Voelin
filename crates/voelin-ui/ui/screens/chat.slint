@@ -6,7 +6,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, ChatLine, ReactionItem, FileItem, Images } from "../bridge.slint";
 import { Nav } from "../nav.slint";
-import { Icon, IconButton, Avatar, Chip, TabItem, TextField, MessageText, Banner, Button, ButtonKind, Spinner, Tooltip, ListView, BannerPicture } from "../components/index.slint";
+import { Icon, IconButton, Avatar, Chip, TabItem, TextField, MessageText, Banner, Button, ButtonKind, Spinner, Tooltip, ListView, BannerPicture, PopupMenu, MenuEntry } from "../components/index.slint";
 
 // A compact title and actions over the optional channel background.
 export component PageHeader inherits Rectangle {
@@ -237,62 +237,84 @@ component ImageCard inherits Rectangle {
     }
 }
 
-// Quick reactions, pin and "start a topic" on a hovered message.
+// What can be done with a hovered message: with a gateway quick reactions,
+// pin and "start a topic"; quote it into the composer and copy its text.
+// Every row has one, its buttons made only while `shown`. It reaches above
+// its row, where the row's own hover ends: `hovered` keeps it shown there.
 component MessageActions inherits Rectangle {
-    in property <int> key;
-    in property <bool> pinned;
+    in property <ChatLine> line;
+    in property <bool> shown;
+    out property <bool> hovered: area.has-hover;
+    visible: shown;
     width: row.preferred-width;
     height: 30px;
     border-radius: Theme.radius-md;
     background: Theme.surface-3;
     border-width: 1px;
     border-color: Theme.border-strong;
-    row := HorizontalLayout {
-        padding-left: 2px;
-        padding-right: 2px;
-        spacing: 0px;
-        if Bridge.has-reactions: HorizontalLayout {
+    // An ancestor of the buttons, so it stays hovered over them.
+    area := TouchArea {
+        row := HorizontalLayout {
+            padding-left: 2px;
+            padding-right: 2px;
             spacing: 0px;
-            for quick in ["1f44d", "2764", "1f389", "1f602", "1f440"]: Rectangle {
-                width: 26px;
-                accessible-role: AccessibleRole.button;
-                accessible-label: @tr("React");
-                accessible-action-default => { Bridge.react(root.key, Images.emoji-text(quick)); }
-                Image {
-                    width: 16px;
-                    height: 16px;
-                    source: Images.emoji(quick);
-                }
-                TouchArea {
-                    mouse-cursor: MouseCursor.pointer;
-                    clicked => { Bridge.react(root.key, Images.emoji-text(quick)); }
+            if root.shown && root.line.remote && Bridge.has-reactions: HorizontalLayout {
+                spacing: 0px;
+                for quick in ["1f44d", "2764", "1f389", "1f602", "1f440"]: Rectangle {
+                    width: 26px;
+                    accessible-role: AccessibleRole.button;
+                    accessible-label: @tr("React");
+                    accessible-action-default => { Bridge.react(root.line.key, Images.emoji-text(quick)); }
+                    Image {
+                        width: 16px;
+                        height: 16px;
+                        source: Images.emoji(quick);
+                    }
+                    TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => { Bridge.react(root.line.key, Images.emoji-text(quick)); }
+                    }
                 }
             }
-        }
-        if Bridge.has-reactions: IconButton {
-            icon: Icons.smile-plus;
-            label: @tr("More emoji");
-            size: 26px;
-            icon-size: Theme.icon-sm;
-            clicked => {
-                Nav.react-key = root.key;
-                Nav.emoji-open = true;
+            if root.shown && root.line.remote && Bridge.has-reactions: IconButton {
+                icon: Icons.smile-plus;
+                label: @tr("More emoji");
+                size: 26px;
+                icon-size: Theme.icon-sm;
+                clicked => {
+                    Nav.react-key = root.line.key;
+                    Nav.emoji-open = true;
+                }
             }
-        }
-        if Bridge.has-pins: IconButton {
-            icon: Icons.pin;
-            label: root.pinned ? @tr("Unpin") : @tr("Pin");
-            checked: root.pinned;
-            size: 26px;
-            icon-size: Theme.icon-sm;
-            clicked => { Bridge.pin(root.key, !root.pinned); }
-        }
-        if Bridge.has-topics: IconButton {
-            icon: Icons.messages-square;
-            label: @tr("Start a topic");
-            size: 26px;
-            icon-size: Theme.icon-sm;
-            clicked => { Nav.start-topic(root.key); }
+            if root.shown && root.line.remote && Bridge.has-pins: IconButton {
+                icon: Icons.pin;
+                label: root.line.pinned ? @tr("Unpin") : @tr("Pin");
+                checked: root.line.pinned;
+                size: 26px;
+                icon-size: Theme.icon-sm;
+                clicked => { Bridge.pin(root.line.key, !root.line.pinned); }
+            }
+            if root.shown && root.line.remote && Bridge.has-topics: IconButton {
+                icon: Icons.messages-square;
+                label: @tr("Start a topic");
+                size: 26px;
+                icon-size: Theme.icon-sm;
+                clicked => { Nav.start-topic(root.line.key); }
+            }
+            if root.shown && root.line.text != "": IconButton {
+                icon: Icons.quote;
+                label: @tr("Quote");
+                size: 26px;
+                icon-size: Theme.icon-sm;
+                clicked => { Nav.quote(root.line.author, root.line.text); }
+            }
+            if root.shown && root.line.text != "": IconButton {
+                icon: Icons.copy;
+                label: @tr("Copy text");
+                size: 26px;
+                icon-size: Theme.icon-sm;
+                clicked => { Nav.copy(root.line.text); }
+            }
         }
     }
 }
@@ -302,101 +324,146 @@ export component MessageRow inherits Rectangle {
     in property <ChatLine> line;
     // The pins and topic lists show messages without their actions.
     in property <bool> actions: true;
+    // The actions as if hovered (VOELIN_OPEN=actions).
+    in property <bool> show-actions;
+    // The list's first row: its actions go inside it, not above, where the
+    // list ends.
+    in property <bool> first;
     property <length> avatar: 44px;
+    // Something to do: text to copy and quote, or what a gateway adds.
+    property <bool> can-act: root.actions && !line.blocked && (line.text != "" || line.remote);
+    // The pointer on the message or on its actions (above its top).
+    property <bool> active: hover.has-hover || bar.hovered;
     min-height: body.preferred-height;
-    background: line.marked ? Theme.accent-soft : hover.has-hover ? Theme.surface-2.transparentize(0.6) : transparent;
+    background: line.marked ? Theme.accent-soft : root.active ? Theme.surface-2.transparentize(0.6) : transparent;
     accessible-role: AccessibleRole.list-item;
     accessible-label: line.author + ": " + line.text;
     accessible-description: line.time;
+    // The message's own buttons (links, reactions, files) are inside it,
+    // so it stays hovered over them and the actions stay shown.
     hover := TouchArea {
-        // Let clicks through to the buttons inside.
         mouse-cursor: MouseCursor.default;
-    }
-    body := HorizontalLayout {
-        padding-left: Theme.space-6;
-        padding-right: Theme.space-6;
-        padding-top: line.continued ? 2px : Theme.space-5;
-        padding-bottom: 2px;
-        spacing: Theme.space-4;
-        VerticalLayout {
-            width: root.avatar;
-            alignment: start;
-            if !line.continued: Avatar {
-                size: root.avatar;
-                initials: line.initials;
-                tint: line.tint;
-                image: line.avatar;
-                label: line.author;
+        // A right-click: the message's menu.
+        pointer-event(e) => {
+            if root.can-act && e.button == PointerEventButton.right && e.kind == PointerEventKind.up {
+                menu.show(self.mouse-x, self.mouse-y);
             }
         }
-        VerticalLayout {
-            horizontal-stretch: 1;
-            spacing: 2px;
-            if !line.continued: HorizontalLayout {
-                spacing: Theme.space-3;
+        body := HorizontalLayout {
+            padding-left: Theme.space-6;
+            padding-right: Theme.space-6;
+            padding-top: line.continued ? 2px : Theme.space-5;
+            padding-bottom: 2px;
+            spacing: Theme.space-4;
+            VerticalLayout {
+                width: root.avatar;
                 alignment: start;
-                Text {
-                    text: line.author;
-                    color: Theme.name-text;
-                    font-size: Theme.font-lg;
-                    font-weight: Theme.weight-medium;
-                    vertical-alignment: center;
-                }
-                Text {
-                    text: line.time;
-                    color: Theme.text-muted;
-                    font-size: Theme.font-sm;
-                    vertical-alignment: center;
-                }
-                if line.pinned: Chip {
-                    text: @tr("pinned");
-                    icon: Icons.pin;
-                    tint: Theme.warning;
-                    y: (parent.height - self.height) / 2;
-                }
-                if line.topic != "": Chip {
-                    text: line.topic;
-                    icon: Icons.messages-square;
-                    tint: Theme.accent-text;
-                    y: (parent.height - self.height) / 2;
+                if !line.continued: Avatar {
+                    size: root.avatar;
+                    initials: line.initials;
+                    tint: line.tint;
+                    image: line.avatar;
+                    label: line.author;
                 }
             }
-            MessageText {
-                line: line;
-                font-size: Theme.font-md;
-            }
-            if line.files.length > 0 && !line.blocked: VerticalLayout {
-                padding-top: Theme.space-2;
-                padding-bottom: Theme.space-1;
-                spacing: Theme.space-2;
-                for file in line.files: HorizontalLayout {
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 2px;
+                if !line.continued: HorizontalLayout {
+                    spacing: Theme.space-3;
                     alignment: start;
-                    if file.preview.width > 0: ImageCard {
-                        key: line.key;
-                        file: file;
+                    Text {
+                        text: line.author;
+                        color: Theme.name-text;
+                        font-size: Theme.font-lg;
+                        font-weight: Theme.weight-medium;
+                        vertical-alignment: center;
                     }
-                    if file.preview.width == 0: FileCard {
-                        key: line.key;
-                        file: file;
-                        max-width: 440px;
+                    Text {
+                        text: line.time;
+                        color: Theme.text-muted;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                    }
+                    if line.pinned: Chip {
+                        text: @tr("pinned");
+                        icon: Icons.pin;
+                        tint: Theme.warning;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    if line.topic != "": Chip {
+                        text: line.topic;
+                        icon: Icons.messages-square;
+                        tint: Theme.accent-text;
+                        y: (parent.height - self.height) / 2;
                     }
                 }
-            }
-            if line.reactions.length > 0: VerticalLayout {
-                padding-top: Theme.space-2;
-                padding-bottom: Theme.space-1;
-                Reactions {
-                    key: line.key;
-                    model: line.reactions;
+                MessageText {
+                    line: line;
+                    font-size: Theme.font-md;
+                }
+                if line.files.length > 0 && !line.blocked: VerticalLayout {
+                    padding-top: Theme.space-2;
+                    padding-bottom: Theme.space-1;
+                    spacing: Theme.space-2;
+                    for file in line.files: HorizontalLayout {
+                        alignment: start;
+                        if file.preview.width > 0: ImageCard {
+                            key: line.key;
+                            file: file;
+                        }
+                        if file.preview.width == 0: FileCard {
+                            key: line.key;
+                            file: file;
+                            max-width: 440px;
+                        }
+                    }
+                }
+                if line.reactions.length > 0: VerticalLayout {
+                    padding-top: Theme.space-2;
+                    padding-bottom: Theme.space-1;
+                    Reactions {
+                        key: line.key;
+                        model: line.reactions;
+                    }
                 }
             }
         }
     }
-    if root.actions && line.remote && hover.has-hover: MessageActions {
+    bar := MessageActions {
         x: parent.width - self.width - Theme.space-6;
-        y: -12px;
-        key: line.key;
-        pinned: line.pinned;
+        y: root.first ? 2px : -12px;
+        line: line;
+        shown: root.can-act && (root.active || root.show-actions);
+    }
+    // The menu's entries: Copy link only with a link, react and pin only
+    // with a gateway (`activated` counts as if all were there).
+    property <MenuEntry> copy-entry: { text: @tr("Copy text"), icon: Icons.copy, enabled: line.text != "" };
+    property <MenuEntry> link-entry: { text: @tr("Copy link"), icon: Icons.link, enabled: true };
+    property <MenuEntry> quote-entry: { text: @tr("Quote"), icon: Icons.quote, enabled: line.text != "" };
+    property <MenuEntry> react-entry: { text: @tr("React…"), icon: Icons.smile-plus, enabled: Bridge.has-reactions, separator: true };
+    property <MenuEntry> pin-entry: { text: line.pinned ? @tr("Unpin") : @tr("Pin"), icon: Icons.pin, enabled: Bridge.has-pins };
+    menu := PopupMenu {
+        x: 0;
+        y: 0;
+        entries: line.remote
+            ? (line.link != "" ? [root.copy-entry, root.link-entry, root.quote-entry, root.react-entry, root.pin-entry] : [root.copy-entry, root.quote-entry, root.react-entry, root.pin-entry])
+            : (line.link != "" ? [root.copy-entry, root.link-entry, root.quote-entry] : [root.copy-entry, root.quote-entry]);
+        activated(i) => {
+            let entry = i >= 1 && line.link == "" ? i + 1 : i;
+            if entry == 0 {
+                Nav.copy(line.text);
+            } else if entry == 1 {
+                Nav.copy(line.link);
+            } else if entry == 2 {
+                Nav.quote(line.author, line.text);
+            } else if entry == 3 {
+                Nav.react-key = line.key;
+                Nav.emoji-open = true;
+            } else {
+                Bridge.pin(line.key, !line.pinned);
+            }
+        }
     }
 }
 
@@ -469,8 +536,10 @@ export component MessageList inherits VerticalLayout {
         // A long chat must not make the window taller: the list scrolls.
         preferred-height: 0px;
         accessible-label: @tr("Messages");
-        for line in root.model: MessageRow {
+        for line[i] in root.model: MessageRow {
             line: line;
+            show-actions: Nav.show-actions && i == root.model.length - 1;
+            first: i == 0;
         }
     }
 }
@@ -487,6 +556,9 @@ export component Composer inherits HorizontalLayout {
     padding-left: Theme.space-5;
     padding-right: Theme.space-5;
     spacing: Theme.space-3;
+    // A message was quoted (Nav.quote): write the answer below it.
+    property <int> requests: Nav.compose-requests;
+    changed requests => { input.focus-end(); }
     // Files go to the channel's file browser and a link into the chat.
     if !root.topic && root.attach: IconButton {
         icon: Icons.plus;
@@ -499,7 +571,8 @@ export component Composer inherits HorizontalLayout {
     }
     Rectangle {
         horizontal-stretch: 1;
-        min-height: 48px;
+        // A quote's lines all show, up to about eight.
+        min-height: max(48px, min(input.text-height + Theme.space-5, 160px));
         border-radius: Theme.radius-lg;
         background: Theme.surface-2;
         border-width: 1px;

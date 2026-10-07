@@ -21,9 +21,10 @@ use voelin_core::{
 use voelin_gateway_proto::{ErrorCode, TopicInfo, feature};
 use voelin_model::{ChatMessage, ChatTarget, HostMessageMode, ServerDetails};
 
-use crate::app::{App, Bridge, ChatLine, ChatTab, FileItem, Msg, PinItem, SessionView, Tab};
+use crate::app::{App, Bridge, ChatLine, ChatTab, FileItem, Msg, Nav, PinItem, SessionView, Tab};
 use crate::settings::UI_IMAGE_PREVIEW_KB;
 use crate::vm;
+use crate::vm::bbcode::LinkKind;
 use crate::vm::chat::{LineCache, LineCtx, Previous};
 
 /// Where the server's welcome and host message keep what their lines were
@@ -350,7 +351,8 @@ impl App {
 	}
 
 	/// What the server says to everyone who connects ([`server_texts`]) as
-	/// the first lines of the server chat: by the server, without actions.
+	/// the first lines of the server chat: by the server, without reactions
+	/// or pins.
 	fn server_lines(
 		view: &SessionView,
 		pictures: Option<&HashMap<String, PathBuf>>,
@@ -543,6 +545,37 @@ impl App {
 				.into(),
 		);
 		vm::list::sync(&self.models.topic_messages, &self.lines_of(view, tab, false));
+	}
+
+	/// A link in a message was clicked (`masked`: its text shows something
+	/// else, [`vm::bbcode::is_masked`]). A page on the web opens in the
+	/// browser, a masked one once the user saw where it goes (Nav.link-open);
+	/// a TeamSpeak link is copied until Voelin opens them. Returns what to
+	/// copy ("": nothing).
+	pub(crate) fn open_link_text(&mut self, link: &str, masked: bool) -> String {
+		match vm::bbcode::classify_link(link) {
+			LinkKind::Web(url) if masked => {
+				if let Some(ui) = self.ui.upgrade() {
+					let nav = ui.global::<Nav>();
+					nav.set_link_host(vm::bbcode::link_host(&url).into());
+					nav.set_link_url(url.into());
+					nav.set_link_open(true);
+				}
+				String::new()
+			}
+			LinkKind::Web(url) => {
+				if let Err(e) = self.open_url(&url) {
+					self.set_status(format!("Cannot open the link: {e}"));
+				}
+				String::new()
+			}
+			LinkKind::Server(url) => {
+				self.copy_note = Some("TeamSpeak links open in Voelin soon; copied".to_owned());
+				url
+			}
+			// A file opens from its card.
+			LinkKind::File | LinkKind::Refused => String::new(),
+		}
 	}
 
 	// Gateway features of a chat.

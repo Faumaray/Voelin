@@ -185,8 +185,10 @@ export struct TextRun {
     // text's own.
     ink-dark: color,
     ink-light: color,
-    // Where it links to ("": nowhere).
+    // Where it links to ("": nowhere), and whether its text shows something
+    // else (a page's name, another address): asked about before it opens.
     link: string,
+    masked: bool,
 }
 
 // A block of a chat line (`vm::bbcode`): its runs, and what it is.
@@ -1087,6 +1089,13 @@ export global Bridge {
     // A link to our voice channel (`ts3server://`) to hand to others; the
     // caller copies it (Nav.copy).
     callback invite() -> string;
+    // A link in a message was clicked (`TextRun.link` and `masked`): Rust
+    // opens a page on the web (a masked one after asking: Nav.link-open),
+    // or gives back what the caller copies (a TeamSpeak link, for now).
+    callback open-link(string, bool) -> string;
+    // A message's text (`ChatLine.text`) by its author as a quote for the
+    // composer: "> Author: line" and "> line" for the next ones.
+    callback quote-text(string, string) -> string;
     // Nav.copy put text on the clipboard: Rust says so in the toast.
     callback copied();
 
