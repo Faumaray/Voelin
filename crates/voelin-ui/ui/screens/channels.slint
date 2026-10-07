@@ -83,7 +83,7 @@ export component ServerHeader inherits Rectangle {
     menu := PopupMenu {
         entries: [
             { text: @tr("Edit server"), icon: Icons.pencil, enabled: Bridge.current-server >= 0 },
-            { text: @tr("Add server"), icon: Icons.plus, enabled: true, separator: true },
+            { text: @tr("Add a server"), icon: Icons.plus, enabled: true, separator: true },
         ];
         activated(i) => {
             if i == 0 {

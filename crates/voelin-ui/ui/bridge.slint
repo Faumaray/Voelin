@@ -287,12 +287,21 @@ export struct TopicItem {
     archived: bool,
 }
 
+// The server dialog: a bookmark (id -1: a new one) and, from a link, where
+// Connect goes.
 export struct BookmarkForm {
     id: int,
     name: string,
     address: string,
     nickname: string,
     server-password: string,
+    // The server has voice: no Connect.
+    connected: bool,
+    // From a link, not stored with the server: the channel to join (a
+    // path, or /<id>), its password and a privilege key.
+    channel: string,
+    channel-password: string,
+    token: string,
 }
 
 // A stream on the server, ours first: a stream can be watched from any
@@ -1058,6 +1067,10 @@ export global Bridge {
     callback push-to-talk(bool);
     callback edit-bookmark(int) -> BookmarkForm;
     callback save-bookmark(BookmarkForm);
+    // The server dialog's Connect: save, then connect with voice (into the
+    // form's channel, if any); false when saving failed, and nothing
+    // connects.
+    callback save-and-connect(BookmarkForm) -> bool;
     callback delete-bookmark(int);
 
     callback open-share() -> ShareForm;

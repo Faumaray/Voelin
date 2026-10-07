@@ -394,7 +394,6 @@ export component MainWindow inherits Window {
 
     if !Bridge.myts.prompt && (Nav.bookmark-open): BookmarkDialog {
         form <=> Nav.bookmark-form;
-        join: Nav.join-open;
         done => { Nav.bookmark-open = false; }
     }
 

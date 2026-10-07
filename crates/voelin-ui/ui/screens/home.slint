@@ -168,7 +168,7 @@ export component HomeNav inherits VerticalLayout {
     QuickNav {
         icon: Icons.log-in;
         text: @tr("Join a Server");
-        clicked => { Nav.join-server(); }
+        clicked => { Nav.add-server(); }
     }
     QuickNav {
         icon: Icons.user-plus;
@@ -1279,7 +1279,7 @@ export component HomeAside inherits Rectangle {
                 icon: Icons.log-in;
                 title: @tr("Join a Server");
                 subtitle: @tr("Enter an address");
-                clicked => { Nav.join-server(); }
+                clicked => { Nav.add-server(); }
             }
             QuickAction {
                 icon: Icons.bookmark;

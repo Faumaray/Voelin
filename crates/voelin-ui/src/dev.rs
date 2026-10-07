@@ -14,7 +14,7 @@
 //! - `VOELIN_OPEN=<what>[,<what>...]`: open screens on start: `home`,
 //!   `server` (`server:chat`: its server chat), `settings[:<section>]`
 //!   (voice, keybinds, streaming, privacy, appearance, or 0-4), `about`,
-//!   `share`, `bookmark` (add a server;
+//!   `share`, `bookmark` (add a server, also `join`;
 //!   `bookmark:edit` the current one, Advanced open),
 //!   `emoji` (the picker), `client` (the volume dialog of the first other
 //!   client once connected), `panel` / `no-panel` (the members panel),
@@ -38,9 +38,9 @@
 //!   `tab:<home|servers|chat|activity|you>` (phone layout); `friends[:<uid>]`,
 //!   `messages[:<uid>]` (a private chat), `inbox` (offline messages),
 //!   `library`, `events`, `event-form`, `search[:<text>]`,
-//!   `notifications` (the bell), `join` (join by address), `offline` (an
-//!   offline message), `picture` (a chat picture opened large), `camera`
-//!   (the settings' camera preview); settings sections also `account`,
+//!   `notifications` (the bell), `offline` (an offline message), `picture`
+//!   (a chat picture opened large), `camera` (the settings' camera
+//!   preview); settings sections also `account`,
 //!   `profiles` (also `identities`), `devices`, `notifications`,
 //!   `integrations`, `advanced` (5-10);
 //!   `studio[:<what>]`: the Stream Studio (with `VOELIN_DEMO_UI` a demo
@@ -245,7 +245,8 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 					nav.invoke_edit_server(id as i32);
 				}
 			}
-			"bookmark" => nav.invoke_add_server(),
+			// `join`: the same dialog (Join a server was one of its own).
+			"bookmark" | "join" => nav.invoke_add_server(),
 			"emoji" => nav.set_emoji_open(true),
 			"panel" => nav.set_right_panel_open(true),
 			"no-panel" => nav.set_right_panel_open(false),
@@ -327,7 +328,6 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 			"event-form" => nav.invoke_create_event(),
 			"search" => nav.invoke_open_search(arg.into()),
 			"notifications" => nav.set_notifications_open(true),
-			"join" => nav.invoke_join_server(),
 			"offline" => nav.invoke_write_offline("demo-ari".into(), "Ari".into()),
 			"picture" => {
 				let picture = demo_picture(1280, 720, 16);

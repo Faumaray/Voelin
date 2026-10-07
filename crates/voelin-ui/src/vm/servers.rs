@@ -1,10 +1,11 @@
-//! The server rail, and joining a channel.
+//! The server rail, the server dialog, and joining a channel.
 
+use slint::SharedString;
 use voelin_core::{ObserveState, SessionState, VoiceState};
 use voelin_model::{ChannelId, ChannelInfo};
 use voelin_store::Bookmark;
 
-use crate::app::ServerItem;
+use crate::app::{BookmarkForm, ServerItem};
 use crate::vm::avatar;
 
 /// Restore a known server icon before any session exists. A missing/evicted
@@ -52,6 +53,54 @@ pub fn item(
 		flavor: flavor.into(),
 		gateway: bookmark.gateway_url.is_some() || bookmark.query.is_some(),
 	}
+}
+
+/// The server dialog's form for `bookmark`, with its stored password:
+/// `connected` while `state` has voice, which hides Connect. A server still
+/// named by its address shows no name, so a new address names it again.
+pub fn form(
+	bookmark: &Bookmark,
+	state: Option<&SessionState>,
+	server_password: &str,
+) -> BookmarkForm {
+	BookmarkForm {
+		id: bookmark.id as i32,
+		name: if bookmark.name == bookmark.address {
+			SharedString::new()
+		} else {
+			bookmark.name.clone().into()
+		},
+		address: bookmark.address.clone().into(),
+		nickname: bookmark.nickname.clone().into(),
+		server_password: server_password.into(),
+		connected: state.is_some_and(|s| s.voice == VoiceState::Connected),
+		..Default::default()
+	}
+}
+
+/// Where the server dialog's Connect goes ([`connect_to`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConnectTo {
+	/// A channel path, or `/<id>`.
+	pub channel: Option<String>,
+	pub channel_password: Option<String>,
+	/// A privilege key.
+	pub token: Option<String>,
+}
+
+/// What the server dialog's Connect connects with, once the form was saved
+/// as `saved` (none: saving failed, and nothing connects): the form's
+/// channel (a link's) with its password, else the server's default
+/// channel; and the link's privilege key.
+pub fn connect_to(form: &BookmarkForm, saved: Option<&Bookmark>) -> Option<ConnectTo> {
+	let saved = saved?;
+	let given = |text: &SharedString| Some(text.to_string()).filter(|t| !t.is_empty());
+	let channel = given(&form.channel);
+	Some(ConnectTo {
+		channel_password: channel.as_ref().and_then(|_| given(&form.channel_password)),
+		channel: channel.or_else(|| saved.default_channel.clone()),
+		token: given(&form.token),
+	})
 }
 
 /// A `ts3server://` link that joins the channel at `path` (its names from
@@ -177,6 +226,75 @@ mod tests {
 		std::fs::remove_file(path).unwrap();
 		assert_eq!(cached_icon(&bookmark, &cache).size().width, 0);
 		std::fs::remove_dir_all(dir).unwrap();
+	}
+
+	#[test]
+	fn connect_shows_only_without_voice() {
+		let b = Bookmark {
+			id: 3,
+			name: "ts.example.test".into(),
+			address: "ts.example.test".into(),
+			nickname: "Nova".into(),
+			..Default::default()
+		};
+		let mut state = SessionState::default();
+		let f = form(&b, None, "pw");
+		assert_eq!((f.id, f.name.as_str(), f.address.as_str()), (3, "", "ts.example.test"));
+		assert_eq!((f.nickname.as_str(), f.server_password.as_str()), ("Nova", "pw"));
+		assert!(!f.connected);
+		for (voice, connected) in [
+			(VoiceState::Disconnected, false),
+			// Connect again with another address.
+			(VoiceState::Connecting, false),
+			(VoiceState::Connected, true),
+		] {
+			state.voice = voice;
+			assert_eq!(form(&b, Some(&state), "").connected, connected, "{voice:?}");
+		}
+		// Observing is not voice.
+		state.voice = VoiceState::Disconnected;
+		state.observe = ObserveState::Observing;
+		assert!(!form(&b, Some(&state), "").connected);
+		let named = Bookmark { name: "Nightfall".into(), ..b };
+		assert_eq!(form(&named, None, "").name.as_str(), "Nightfall");
+	}
+
+	#[test]
+	fn connect_only_what_was_saved() {
+		let saved = Bookmark { id: 3, default_channel: Some("Lobby".into()), ..Default::default() };
+		let plain = BookmarkForm { address: "ts.example.test".into(), ..Default::default() };
+		// Saving failed: nothing connects (not the server shown before).
+		assert_eq!(connect_to(&plain, None), None);
+		assert_eq!(
+			connect_to(&plain, Some(&saved)),
+			Some(ConnectTo { channel: Some("Lobby".into()), ..Default::default() })
+		);
+		// A link's channel, its password and privilege key.
+		let link = BookmarkForm {
+			channel: "Gaming/Raid Night".into(),
+			channel_password: "raid".into(),
+			token: "key".into(),
+			..plain.clone()
+		};
+		assert_eq!(connect_to(&link, None), None);
+		assert_eq!(
+			connect_to(&link, Some(&saved)),
+			Some(ConnectTo {
+				channel: Some("Gaming/Raid Night".into()),
+				channel_password: Some("raid".into()),
+				token: Some("key".into()),
+			})
+		);
+		// A password goes only with the link's channel.
+		let token = BookmarkForm { channel_password: "raid".into(), token: "key".into(), ..plain };
+		assert_eq!(
+			connect_to(&token, Some(&saved)),
+			Some(ConnectTo {
+				channel: Some("Lobby".into()),
+				channel_password: None,
+				token: Some("key".into()),
+			})
+		);
 	}
 
 	#[test]

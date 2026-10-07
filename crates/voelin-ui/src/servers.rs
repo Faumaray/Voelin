@@ -1,7 +1,7 @@
 //! Servers: bookmarks, connecting and observing, the rail, the sidebar's
 //! server card and the channel tree.
 
-use slint::{ComponentHandle, SharedString};
+use slint::ComponentHandle;
 use tracing::{info, warn};
 use voelin_core::identity::LaunchImport;
 use voelin_core::{Command, JoinFailure, ObserveState, Source, VoiceOptions, VoiceState};
@@ -86,15 +86,17 @@ impl App {
 	pub(crate) fn connect_voice(&mut self) {
 		let channel =
 			self.current.and_then(|id| self.bookmark(id)).and_then(|b| b.default_channel.clone());
-		self.connect_voice_to(channel, None);
+		self.connect_voice_to(channel, None, None);
 	}
 
 	/// Connect the current server with voice, into `channel` (a path, or
-	/// `/<id>`, with its password) if given; whether it was asked for.
+	/// `/<id>`, with its password) if given, with a privilege key if given;
+	/// whether it was asked for.
 	pub(crate) fn connect_voice_to(
 		&mut self,
 		channel: Option<String>,
 		channel_password: Option<String>,
+		token: Option<String>,
 	) -> bool {
 		let Some(b) = self.current.and_then(|id| self.bookmark(id)).cloned() else { return false };
 		if self.demo_ui {
@@ -114,6 +116,7 @@ impl App {
 		options.server_password = self.secrets.get(&b.server_password_key()).ok().flatten();
 		options.channel = channel;
 		options.channel_password = channel_password;
+		options.token = token;
 		options.audio = true;
 		options.stream_peer = self.video.peer_config(options.stream_peer);
 		self.engine
@@ -269,22 +272,16 @@ impl App {
 				..Default::default()
 			};
 		};
-		let secret = |key: String| -> SharedString {
-			self.secrets.get(&key).ok().flatten().unwrap_or_default().into()
-		};
-		BookmarkForm {
-			id: b.id as i32,
-			// Named by its address: empty, so a new address names it again.
-			name: if b.name == b.address { SharedString::new() } else { b.name.clone().into() },
-			address: b.address.clone().into(),
-			nickname: b.nickname.clone().into(),
-			server_password: secret(b.server_password_key()),
-		}
+		let password = self.secrets.get(&b.server_password_key()).ok().flatten();
+		let state = self.sessions.get(&b.id).map(|view| &view.state);
+		vm::servers::form(b, state, password.as_deref().unwrap_or_default())
 	}
 
-	pub(crate) fn save_bookmark(&mut self, form: BookmarkForm) {
+	/// Save the server dialog's server, and show it; its id, none when it
+	/// could not be saved (the toast says why).
+	pub(crate) fn save_bookmark(&mut self, form: &BookmarkForm) -> Option<i64> {
 		let old = self.bookmark(form.id as i64).cloned();
-		let mut bookmark = bookmark_from_form(old.as_ref(), &form, || self.default_nickname());
+		let mut bookmark = bookmark_from_form(old.as_ref(), form, || self.default_nickname());
 		let result = if bookmark.id < 0 {
 			self.store.add_bookmark(&bookmark).map(|id| bookmark.id = id)
 		} else {
@@ -292,7 +289,7 @@ impl App {
 		};
 		if let Err(e) = result {
 			self.set_status(format!("Could not save: {e}"));
-			return;
+			return None;
 		}
 		let key = bookmark.server_password_key();
 		let result = if form.server_password.is_empty() {
@@ -317,6 +314,21 @@ impl App {
 		}
 		self.bookmarks = self.store.bookmarks().unwrap_or_default();
 		self.select_server(bookmark.id);
+		Some(bookmark.id)
+	}
+
+	/// The server dialog's Connect: save the server, then connect it with
+	/// voice, into the channel of the link that filled the form if one did
+	/// ([`vm::servers::connect_to`]). Only once saved: connecting what is
+	/// shown after a failed save would connect the server shown before.
+	/// Whether it was saved.
+	pub(crate) fn save_and_connect(&mut self, form: &BookmarkForm) -> bool {
+		let saved = self.save_bookmark(form);
+		let Some(to) = vm::servers::connect_to(form, saved.and_then(|id| self.bookmark(id))) else {
+			return false;
+		};
+		self.connect_voice_to(to.channel, to.channel_password, to.token);
+		true
 	}
 
 	pub(crate) fn delete_bookmark(&mut self, id: i64) {
@@ -589,7 +601,7 @@ impl App {
 		}
 		// By id: by its name the server finds only a top-level channel (a
 		// subchannel's name connects into the default channel).
-		if self.connect_voice_to(Some(format!("/{channel}")), password)
+		if self.connect_voice_to(Some(format!("/{channel}")), password, None)
 			&& let Some(view) = self.sessions.get_mut(&session)
 		{
 			view.join_after_connect = Some(channel);

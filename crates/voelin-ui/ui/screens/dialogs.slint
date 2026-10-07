@@ -17,24 +17,53 @@ component Footer inherits HorizontalLayout {
 }
 
 // Add or edit a server: its address and, if it has one, its password; the
-// rest under Advanced (name, nickname, gateway, ServerQuery), which Voelin
-// fills in itself when left empty.
+// rest under Advanced (name, nickname), which Voelin fills in itself when
+// left empty. Save keeps it; Connect keeps it and connects, into the channel
+// of the link that opened the dialog if one did.
 export component BookmarkDialog inherits Modal {
     in-out property <BookmarkForm> form;
-    // Join by address: connect once saved.
-    in property <bool> join;
     callback done();
     // The fields beyond address and password: shown when editing.
     property <bool> advanced: form.id >= 0;
-    title: join ? @tr("Join a server") : form.id < 0 ? @tr("Add server") : @tr("Edit server");
+    title: form.id < 0 ? @tr("Add a server") : @tr("Edit server");
     // The rest includes the gateway (presence and chat without joining),
     // found from the address: DNS SRV records, else its well-known URL.
     subtitle: @tr("Only the address is needed; Voelin finds the rest.");
     icon: Icons.server;
     card-width: 560px;
-    // Fits the address and password (two lines more on a phone).
-    card-height: advanced ? 500px : Nav.narrow ? 360px : 330px;
+    // Fits the address and password (two lines more on a phone), and a
+    // link's channel and privilege key.
+    card-height: (advanced ? 500px : Nav.narrow ? 360px : 330px)
+        + (form.channel != "" ? 48px : 0px) + (form.token != "" ? 48px : 0px);
     dismissed => { done(); }
+
+    function save() {
+        if form.address != "" {
+            Bridge.save-bookmark(form);
+            done();
+        }
+    }
+
+    // Nothing connects unless the server was saved (a failure is told in
+    // the toast once the dialog is gone).
+    function connect() {
+        if form.address != "" {
+            if Bridge.save-and-connect(form) {
+                Nav.show(Page.server);
+            }
+            done();
+        }
+    }
+
+    // Enter: Connect, or Save while the server has voice.
+    function submit() {
+        if form.connected {
+            save();
+        } else {
+            connect();
+        }
+    }
+
     ScrollView {
         vertical-stretch: 1;
         VerticalLayout {
@@ -44,11 +73,34 @@ export component BookmarkDialog inherits Modal {
             Field {
                 label: @tr("Address");
                 hint: @tr("Host name, IP address or server nickname; a port only if the server needs one.");
-                TextField { text <=> form.address; placeholder: "ts.example.org"; label: @tr("Address"); icon: Icons.globe; }
+                TextField {
+                    text <=> form.address;
+                    placeholder: "ts.example.org";
+                    label: @tr("Address");
+                    icon: Icons.globe;
+                    accepted => { root.submit(); }
+                }
             }
             Field {
                 label: @tr("Server password (optional)");
-                TextField { text <=> form.server-password; input-type: InputType.password; label: @tr("Server password"); icon: Icons.lock; }
+                TextField {
+                    text <=> form.server-password;
+                    input-type: InputType.password;
+                    label: @tr("Server password");
+                    icon: Icons.lock;
+                    accepted => { root.submit(); }
+                }
+            }
+            // A link's: where Connect goes, and what it brings.
+            if form.channel != "": Banner {
+                icon: Icons.channel;
+                tone: Theme.info;
+                text: @tr("Joins {}", form.channel);
+            }
+            if form.token != "": Banner {
+                icon: Icons.key-round;
+                tone: Theme.info;
+                text: @tr("This link grants a server group");
             }
             HorizontalLayout {
                 spacing: Theme.space-3;
@@ -83,11 +135,16 @@ export component BookmarkDialog inherits Modal {
             }
         }
     }
-    Footer {
+    // Not a Footer: its `alignment: end` gives the spacer no width, which
+    // put Delete right next to Cancel.
+    HorizontalLayout {
+        spacing: Theme.space-3;
         if form.id >= 0: Button {
             kind: ButtonKind.danger;
             icon: Icons.trash-2;
-            text: @tr("Delete");
+            // Only the icon on a phone, where four buttons do not fit.
+            text: Nav.narrow ? "" : @tr("Delete");
+            accessible-label: @tr("Delete");
             clicked => {
                 Bridge.delete-bookmark(form.id);
                 done();
@@ -98,18 +155,18 @@ export component BookmarkDialog inherits Modal {
             text: @tr("Cancel");
             clicked => { done(); }
         }
+        // The main action while the server has voice (no Connect then).
         Button {
-            kind: ButtonKind.primary;
-            text: root.join ? @tr("Join") : form.id < 0 ? @tr("Add") : @tr("Save");
+            kind: form.connected ? ButtonKind.primary : ButtonKind.secondary;
+            text: @tr("Save");
             enabled: form.address != "";
-            clicked => {
-                Bridge.save-bookmark(form);
-                if root.join {
-                    Bridge.connect-voice();
-                    Nav.show(Page.server);
-                }
-                done();
-            }
+            clicked => { root.save(); }
+        }
+        if !form.connected: Button {
+            kind: ButtonKind.primary;
+            text: @tr("Connect");
+            enabled: form.address != "";
+            clicked => { root.connect(); }
         }
     }
 }

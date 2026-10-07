@@ -102,8 +102,7 @@ export global Nav {
 
     // The bell's panel, the search (Ctrl+K) and its selected result, a
     // picture opened from the chat, the event and offline message forms,
-    // the friends page's tab, the direct messages' tab, the add-server
-    // dialog in "join" mode (connect once saved).
+    // the friends page's tab, the direct messages' tab.
     in-out property <bool> notifications-open;
     in-out property <bool> search-open;
     in-out property <string> search-text;
@@ -117,7 +116,6 @@ export global Nav {
     in-out property <OfflineForm> offline-form;
     in-out property <int> friends-tab;
     in-out property <int> dm-tab;
-    in-out property <bool> join-open;
 
     // Text for the clipboard, and a counter that changes with every copy:
     // MainWindow copies it through a hidden text field (`copy` below).
@@ -232,12 +230,6 @@ export global Nav {
         offline-form-open = true;
     }
 
-    public function join-server() {
-        bookmark-form = Bridge.edit-bookmark(-1);
-        join-open = true;
-        bookmark-open = true;
-    }
-
     // The members panel of the current server.
     public function show-members() {
         show(Page.server);
@@ -262,13 +254,11 @@ export global Nav {
 
     public function add-server() {
         bookmark-form = Bridge.edit-bookmark(-1);
-        join-open = false;
         bookmark-open = true;
     }
 
     public function edit-server(id: int) {
         bookmark-form = Bridge.edit-bookmark(id);
-        join-open = false;
         bookmark-open = true;
     }
 

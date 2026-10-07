@@ -47,8 +47,9 @@ pub(super) fn wire(ui: &MainWindow) {
 	});
 	bridge.on_edit_bookmark(|id| with_app(|app| app.bookmark_form(id as i64)).unwrap_or_default());
 	bridge.on_save_bookmark(|form| {
-		with_app(|app| app.save_bookmark(form));
+		with_app(|app| app.save_bookmark(&form));
 	});
+	bridge.on_save_and_connect(|form| with_app(|app| app.save_and_connect(&form)).unwrap_or(false));
 	bridge.on_delete_bookmark(|id| {
 		with_app(|app| app.delete_bookmark(id as i64));
 	});

@@ -174,7 +174,7 @@ where a server has it.
 
 | Part | `VOELIN_OPEN` | What it shows | Engine data |
 |---|---|---|---|
-| Home | `home` | A banner with Voelin and a slide per server (connect, open); friends online (as many whole bubbles as fit, Find Friends after them); live streams on our servers (any channel, the gateways' directories, clients flagged streaming) with viewers, server, channel and kind; our servers with who is there and Join or Open; the latest chats of every server. At the right what friends do, quick actions (find friends, join by address, add a server) and what is happening (gateway events and scheduled streams, soonest first, then server news). The phone has the messages, servers, live streams and recent activity in one column | `FriendPresence`, `ContactsChanged`, `StreamsChanged`, `Gateway` (stream directory, events), `Presence` (the servers' welcome and host messages), `History::recent_chats` |
+| Home | `home` | A banner with Voelin and a slide per server (connect, open); friends online (as many whole bubbles as fit, Find Friends after them); live streams on our servers (any channel, the gateways' directories, clients flagged streaming) with viewers, server, channel and kind; our servers with who is there and Join or Open; the latest chats of every server. At the right what friends do, quick actions (find friends, and join or add a server: both open the add-server dialog) and what is happening (gateway events and scheduled streams, soonest first, then server news). The phone has the messages, servers, live streams and recent activity in one column | `FriendPresence`, `ContactsChanged`, `StreamsChanged`, `Gateway` (stream directory, events), `Presence` (the servers' welcome and host messages), `History::recent_chats` |
 | Library | `library` | The Stream Studio's recordings and clips (the files in `studio.recording_dir`, newest first) with Play and Open Folder | the folder |
 | Friends | `friends[:<uid>]` | Online, All and Blocked tabs, a search; each contact with where they are (server, channel, away, live), message, poke, join, watch. The selected one at the right: relation, where, a note, our volume and mute for them, friend, block, forget | `ContactsChanged`, `FriendPresence`; `Command::SetContact`, `RemoveContact`, `Poke`, `MoveToChannel` |
 | Direct messages | `messages[:<uid>]`, `inbox`, `offline` | The private chats of every server and of the store (peers by unique id) with the last message and unread counts, All, Unread and Inbox (offline messages); the conversation with the chat's message list, pokes among the messages, pictures and files, a composer, and a clear state when the peer cannot be reached (an offline message instead, where the server keeps them); the peer at the right: relation, note, the servers they are on, shared pictures and files, our volume for them | `ChatHistory` (`ChatTarget::Private` by unique id), `Command::LoadOlderHistory`, `Poke`, offline messages (`ListOfflineMessages`, `GetOfflineMessage`, `SendOfflineMessage`, `DeleteOfflineMessage`, `SetOfflineMessageRead`) |
@@ -182,7 +182,7 @@ where a server has it.
 | Search | `search[:<text>]` | Ctrl+K: servers, channels of every server, people (on the servers and the contacts) and the settings pages; arrows choose, Enter opens | the sessions, contacts, bookmarks |
 | Events | `events`, `event-form` | Above the channel tree (gateway `events`): a server's events with date, time, channel, scheduled stream, Going, Maybe and Not going with counts, who answered, reminders, Watch while live; create, edit and delete. Members (above the tree too) opens the members panel | `Gateway` events; `GatewayRequest::Events`, `CreateEvent`, `UpdateEvent`, `DeleteEvent`, `Rsvp` |
 | Pictures in chat | `picture` | A linked png, jpg, gif or webp up to `ui.image_preview_kb` is downloaded into memory, decoded once into the image cache and shown as a card in the message; a click opens it larger. A picture on the web a message shows (`[img]`) comes into the engine's picture cache like banners, up to the same size and only with `cache.fetch_images`; until then, or without it, the message shows its address as a link | `Command::DownloadChatFile` with `DownloadTo::Memory`, `Transfer`; `Command::FetchPicture`, `PictureReady` |
-| Join by address | `join` | The add-server dialog that connects once saved | `Command::ConnectVoice` |
+| Join by address | `join` (the same as `bookmark`) | The add-server dialog (Adding a server, below): Connect saves the server, then connects | `Command::ConnectVoice` |
 
 Settings sections (`settings:<section>`):
 
@@ -305,8 +305,19 @@ There are no gateway or ServerQuery fields: the gateway is looked up from
 the address (DNS SRV records, else the gateway's `/.well-known/tsgw`) when
 the server is saved, selected or connected
 ([gateway-admin.md](gateway-admin.md#letting-voelin-find-the-gateway)), one
-found is stored, and a new address looks again. `bookmark` and
+found is stored, and a new address looks again. `bookmark` (or `join`) and
 `bookmark:edit` open it (below).
+
+Its footer has Delete at the left (when editing; only the icon on a phone),
+then Cancel, Save and Connect. Save keeps the server. Connect, also Enter in
+the address or password field, keeps it, connects it with voice and shows it
+(`Bridge.save-and-connect`, `App::save_and_connect`): nothing connects when
+saving failed. While the server has voice, Connect is hidden and Save is the
+main button. Home's Join a Server and Add a Server both open this dialog. The
+form also carries a channel, its password and a privilege key for TeamSpeak
+links, which are not stored with the server: with a channel the dialog shows
+"Joins <channel>" and Connect connects into it; with a key it shows "This
+link grants a server group".
 
 Selecting a server observes it invisibly through its gateway (or a query
 login an older version stored), so its channels, members and chats show
@@ -440,8 +451,9 @@ Environment variables (see `src/dev.rs`):
   (the server page, above), `tab:<home|servers|chat|activity|you>` (phone
   layout); `friends[:<uid>]`, `messages[:<uid>]`, `inbox`, `offline`,
   `library`, `events`, `event-form`, `search[:<text>]`, `notifications`,
-  `join`, `picture`, `camera` (the settings' camera preview, the test
-  pattern) and the settings sections `account`, `profiles`, `devices`,
+  `join` (the same as `bookmark`), `picture`, `camera` (the settings'
+  camera preview, the test pattern) and the settings sections `account`,
+  `profiles`, `devices`,
   `notifications`, `integrations`, `advanced` (above). With sample data, `watch` plays the local test pattern in the
   sample stream's place. `studio[:window|live|record|source|audio|camera|scene|settings]`
   opens the Stream Studio (above) in that state; with its window open a

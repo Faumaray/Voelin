@@ -72,6 +72,9 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
 - Older chat messages load when scrolling up, above the messages on screen,
   which stay in place; the Older messages button remains for a chat that
   fits on the screen.
+- One dialog adds a server, with Save and Connect (Enter connects); Home's
+  Join a Server opens it too. Connect connects only a server it saved (Join
+  connected the server shown before when saving failed).
 
 ### Fixed
 
