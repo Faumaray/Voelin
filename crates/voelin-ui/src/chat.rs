@@ -122,6 +122,7 @@ impl App {
 		};
 		if focus {
 			view.current_tab = index;
+			self.prefetch_counts();
 			self.track_reading();
 		}
 		self.refresh_chat();
@@ -138,6 +139,7 @@ impl App {
 		if let Some(id) = self.current {
 			self.fetch_previews(id);
 		}
+		self.prefetch_counts();
 		self.track_reading();
 		self.refresh_chat();
 		self.refresh_servers();
@@ -154,6 +156,7 @@ impl App {
 		let tab = view.tabs.remove(index);
 		view.current_tab = view.current_tab.min(view.tabs.len() - 1);
 		self.engine.send(Command::CloseChat { session: id as u64, target: tab.target });
+		self.prefetch_counts();
 		self.track_reading();
 		self.refresh_chat();
 		self.refresh_servers();
@@ -546,6 +549,8 @@ impl App {
 		bridge.set_has_topics(view.gateway_has(feature::TOPICS));
 		bridge.set_pins_loading(!tab.pins_loaded && view.gateway_has(feature::PINS));
 		bridge.set_topics_loading(!tab.topics_loaded && view.gateway_has(feature::TOPICS));
+		bridge.set_pins_count(vm::chat::known_count(tab.pins_loaded, tab.pins.len()));
+		bridge.set_topics_count(vm::chat::known_count(tab.topics_loaded, tab.topics.len()));
 		let pins: Vec<PinItem> = tab
 			.pins
 			.iter()
@@ -778,7 +783,12 @@ impl App {
 		let view = self.sessions.entry(id).or_default();
 		match update {
 			GatewayUpdate::Connected { capabilities, .. }
-			| GatewayUpdate::Capabilities { capabilities } => view.gateway_caps = capabilities,
+			| GatewayUpdate::Capabilities { capabilities } => {
+				view.gateway_caps = capabilities;
+				if current {
+					self.prefetch_counts();
+				}
+			}
 			GatewayUpdate::Disconnected { .. } => {
 				view.gateway_caps.clear();
 				for tab in &mut view.tabs {
@@ -786,9 +796,11 @@ impl App {
 					tab.topics_loaded = false;
 				}
 			}
+			// Answers to our requests: a chat closed while they were on
+			// their way (prefetch_counts asks on every change of chat) stays
+			// closed.
 			GatewayUpdate::Pins { target, pins } => {
-				let index = Self::tab_for(view, &target, || "Server".into());
-				let tab = &mut view.tabs[index];
+				let Some(tab) = view.tabs.iter_mut().find(|t| t.target == target) else { return };
 				tab.pins_loaded = true;
 				tab.pins = pins.into_iter().map(|p| pin_row(tab.take_key(), p)).collect();
 				tab.pins.sort_by_key(|p| -p.ts_ms);
@@ -805,9 +817,9 @@ impl App {
 				view.tabs[index].pins.retain(|p| p.message.remote_id != Some(message_id));
 			}
 			GatewayUpdate::Topics { target, topics } => {
-				let index = Self::tab_for(view, &target, || "Server".into());
-				view.tabs[index].topics = topics;
-				view.tabs[index].topics_loaded = true;
+				let Some(tab) = view.tabs.iter_mut().find(|t| t.target == target) else { return };
+				tab.topics = topics;
+				tab.topics_loaded = true;
 			}
 			GatewayUpdate::Topic { topic } => {
 				let index = Self::tab_for(view, &topic.target.clone(), || "Server".into());
@@ -895,6 +907,20 @@ impl App {
 		} else {
 			GatewayRequest::Unpin { message_id }
 		});
+	}
+
+	/// Ask the gateway for the current chat's pins and topics until it sent
+	/// them, so the header counts them before their drawers are opened.
+	pub(crate) fn prefetch_counts(&self) {
+		let Some(view) = self.view() else { return };
+		let Some(tab) = view.tabs.get(view.current_tab) else { return };
+		if !tab.pins_loaded && view.gateway_has(feature::PINS) {
+			self.gateway(GatewayRequest::Pins { target: tab.target.clone() });
+		}
+		if !tab.topics_loaded && view.gateway_has(feature::TOPICS) {
+			let target = tab.target.clone();
+			self.gateway(GatewayRequest::Topics { target, include_archived: false });
+		}
 	}
 
 	/// Open the pins of the current chat (loading them once).

@@ -433,6 +433,12 @@ pub fn tab_name<'a>(title: &'a str, target: &ChatTarget) -> &'a str {
 	}
 }
 
+/// The count on the chat header's pins or topics button: `n`, or `-1`
+/// (none shown) until the gateway answered.
+pub fn known_count(loaded: bool, n: usize) -> i32 {
+	if loaded { i32::try_from(n).unwrap_or(i32::MAX) } else { -1 }
+}
+
 /// A chat's last message for a list of chats, on one line ("Mira: the
 /// banner I promised: guild-banner.png"), and when it came.
 pub fn preview(message: &ChatMessage) -> (String, String) {
@@ -835,6 +841,15 @@ mod tests {
 		assert_eq!(tab_name("@Nova", &private), "Nova");
 		assert_eq!(tab_name(&title(&ChatTarget::Channel(3)), &ChatTarget::Channel(3)), "#general");
 		assert_eq!(tab_name("@home", &ChatTarget::Channel(4)), "@home");
+	}
+
+	/// The header counts pins and topics only once the gateway sent them.
+	#[test]
+	fn counts_are_unknown_until_loaded() {
+		assert_eq!(known_count(false, 0), -1);
+		assert_eq!(known_count(false, 3), -1);
+		assert_eq!(known_count(true, 0), 0);
+		assert_eq!(known_count(true, 3), 3);
 	}
 
 	/// A run does not wrap: long words (addresses) and long inline code

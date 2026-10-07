@@ -259,6 +259,7 @@ impl App {
 	/// Show a server, and observe it.
 	pub(crate) fn select_server(&mut self, id: i64) {
 		self.current = Some(id);
+		self.prefetch_counts();
 		self.track_reading();
 		self.refresh_all();
 		self.observe(id);
@@ -343,6 +344,7 @@ impl App {
 		self.gateways_looked_up.remove(&id);
 		self.bookmarks = self.store.bookmarks().unwrap_or_default();
 		self.current = self.bookmarks.first().map(|b| b.id);
+		self.prefetch_counts();
 		self.track_reading();
 		self.refresh_all();
 	}

@@ -901,6 +901,10 @@ export global Bridge {
     in property <bool> has-pins;
     in property <bool> has-reactions;
     in property <bool> has-topics;
+    // How many pins and topics the current chat has, for the header's
+    // buttons; -1 until the gateway answered.
+    in property <int> pins-count: -1;
+    in property <int> topics-count: -1;
     // The pins drawer.
     in property <[PinItem]> pins;
     in property <bool> pins-loading;

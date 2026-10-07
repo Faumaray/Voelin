@@ -96,6 +96,8 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
 - The members panel shows a hand on those who need talk power to speak,
   instead of everyone's talk power as a bare number (the member card still
   has it).
+- The chat header's pinned messages and topics are icon buttons with a
+  count, so the channel's topic has room.
 
 ### Fixed
 

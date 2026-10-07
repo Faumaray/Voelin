@@ -845,17 +845,20 @@ export component ChatView inherits VerticalLayout {
             tint: Theme.accent-text;
             y: (parent.height - self.height) / 2;
         }
-        if Bridge.has-pins: Button {
+        // Icons with a count, so the channel's topic has the room.
+        if Bridge.has-pins: IconButton {
             icon: Icons.pin;
-            text: @tr("Pinned Messages");
+            label: @tr("Pinned messages");
             checked: Nav.pins-open;
+            count: Bridge.pins-count;
             y: (parent.height - self.height) / 2;
             clicked => { Nav.show-pins(!Nav.pins-open); }
         }
-        if Bridge.has-topics: Button {
+        if Bridge.has-topics: IconButton {
             icon: Icons.book-open;
-            text: @tr("Topics");
+            label: @tr("Topics");
             checked: Nav.topics-open;
+            count: Bridge.topics-count;
             y: (parent.height - self.height) / 2;
             clicked => { Nav.show-topics(!Nav.topics-open); }
         }
