@@ -13,11 +13,20 @@ pub(super) fn wire(ui: &MainWindow) {
 	bridge.on_open_channel_chat(|cid| {
 		with_app(|app| app.open_chat(ChatTarget::Channel(cid as ChannelId), true));
 	});
+	// A tab of the chat strip, which leaves out private chats.
 	bridge.on_select_tab(|i| {
-		with_app(|app| app.select_tab(i as usize));
+		with_app(|app| {
+			if let Some(index) = app.strip_tab(i) {
+				app.select_tab(index);
+			}
+		});
 	});
 	bridge.on_close_tab(|i| {
-		with_app(|app| app.close_tab(i as usize));
+		with_app(|app| {
+			if let Some(index) = app.strip_tab(i) {
+				app.close_tab(index);
+			}
+		});
 	});
 	bridge.on_send_message(|text| {
 		with_app(|app| app.send_message(text.to_string()));

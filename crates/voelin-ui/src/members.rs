@@ -4,7 +4,6 @@
 
 use slint::ComponentHandle;
 use voelin_core::{Command, Contact, Relation};
-use voelin_model::ChatTarget;
 
 use crate::app::{App, Bridge, MemberCard, Nav};
 use crate::settings::ClientPlayback;
@@ -88,10 +87,11 @@ impl App {
 		};
 		let (client_id, nickname, uid) = (client.id, client.nickname.clone(), client.uid.clone());
 		match action {
+			// Private chats are on the messages page.
 			"message" => {
 				if let Some(uid) = uid {
-					self.open_chat(ChatTarget::Private(uid), true);
 					self.open_member(-1);
+					self.open_dm_with(Some(id), &uid);
 				}
 			}
 			"watch" => {

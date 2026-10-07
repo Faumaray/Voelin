@@ -1,5 +1,7 @@
 //! Chat: tabs per session (server, channels, private chats), their
 //! messages, and what a gateway adds to them (pins, reactions, topics).
+//! The chat strip shows the server's and the channels' tabs; a private chat
+//! is the current tab only while the messages page shows it (messages.rs).
 //!
 //! The engine keeps the history: [`Event::ChatHistory`] is an upsert of
 //! messages by their local id (see `voelin_core::history`), so a tab holds
@@ -103,25 +105,9 @@ fn ago(ts_ms: i64) -> String {
 impl App {
 	pub(crate) fn open_chat(&mut self, target: ChatTarget, focus: bool) {
 		let Some(id) = self.current else { return };
-		let peer = match &target {
-			ChatTarget::Private(uid) => self.peer_name(uid, None),
-			_ => String::new(),
-		};
-		let view = self.sessions.entry(id).or_default();
-		let title = vm::chat::tab_title(&view.presence, &target, &peer);
-		let index = match view.tabs.iter().position(|t| t.target == target) {
-			Some(i) => i,
-			None => {
-				let tab = view.new_tab(target.clone(), title);
-				view.tabs.push(tab);
-				if !self.demo_ui {
-					self.engine.send(Command::OpenChat { session: id as u64, target });
-				}
-				view.tabs.len() - 1
-			}
-		};
+		let index = self.chat_tab(id, target);
 		if focus {
-			view.current_tab = index;
+			self.sessions.entry(id).or_default().focus_tab(index);
 			self.prefetch_counts();
 			self.track_reading();
 		}
@@ -129,11 +115,37 @@ impl App {
 		self.refresh_servers();
 	}
 
+	/// The index of `target`'s tab in session `id`, opened if new (the
+	/// engine then sends its history).
+	pub(crate) fn chat_tab(&mut self, id: i64, target: ChatTarget) -> usize {
+		let peer = match &target {
+			ChatTarget::Private(uid) => self.peer_name(uid, None),
+			_ => String::new(),
+		};
+		let view = self.sessions.entry(id).or_default();
+		if let Some(i) = view.tabs.iter().position(|t| t.target == target) {
+			return i;
+		}
+		let title = vm::chat::tab_title(&view.presence, &target, &peer);
+		let tab = view.new_tab(target.clone(), title);
+		view.tabs.push(tab);
+		if !self.demo_ui {
+			self.engine.send(Command::OpenChat { session: id as u64, target });
+		}
+		view.tabs.len() - 1
+	}
+
+	/// The session's tab that tab `index` of the chat strip is
+	/// (`Bridge.tabs`, [`vm::chat::strip`]).
+	pub(crate) fn strip_tab(&self, index: i32) -> Option<usize> {
+		self.models.strip.borrow().get(usize::try_from(index).ok()?).copied()
+	}
+
 	pub(crate) fn select_tab(&mut self, index: usize) {
 		if let Some(view) = self.view_mut()
 			&& index < view.tabs.len()
 		{
-			view.current_tab = index;
+			view.set_current_tab(index);
 			view.tabs[index].topic = None;
 		}
 		if let Some(id) = self.current {
@@ -152,9 +164,7 @@ impl App {
 			return;
 		}
 		self.save_read(id, index);
-		let view = self.sessions.entry(id).or_default();
-		let tab = view.tabs.remove(index);
-		view.current_tab = view.current_tab.min(view.tabs.len() - 1);
+		let tab = self.sessions.entry(id).or_default().remove_tab(index);
 		self.engine.send(Command::CloseChat { session: id as u64, target: tab.target });
 		self.prefetch_counts();
 		self.track_reading();
@@ -460,6 +470,9 @@ impl App {
 				&self.models.tabs,
 				&[ChatTab { title: "Server".into(), ..Default::default() }],
 			);
+			*self.models.strip.borrow_mut() = vec![0];
+			bridge.set_current_tab(0);
+			bridge.set_current_chat(0);
 			let empty = ModelRc::from(self.models.no_chat.clone());
 			if bridge.get_messages() != empty {
 				bridge.set_messages(empty);
@@ -467,9 +480,12 @@ impl App {
 			bridge.set_unread_index(-1);
 			return;
 		};
-		let tabs: Vec<ChatTab> = view
-			.tabs
+		// Private chats are on the messages page, not in the strip.
+		let (strip, current) =
+			vm::chat::strip(view.tabs.iter().map(|t| &t.target), view.current_tab);
+		let tabs: Vec<ChatTab> = strip
 			.iter()
+			.map(|&i| &view.tabs[i])
 			.map(|t| {
 				let (last, time) = t
 					.messages
@@ -508,10 +524,11 @@ impl App {
 			})
 			.collect();
 		vm::list::sync(&self.models.tabs, &tabs);
-		let current = view.current_tab as i32;
+		*self.models.strip.borrow_mut() = strip;
 		if bridge.get_current_tab() != current {
 			bridge.set_current_tab(current);
 		}
+		bridge.set_current_chat(view.current_tab as i32);
 		let tab = &view.tabs[view.current_tab];
 		// Sessions without stored history push their lines themselves.
 		let mut divider = None;

@@ -889,8 +889,13 @@ export global Bridge {
     in property <[MemberItem]> server-members;
     // How many people are on the server (not counting query clients).
     in property <int> member-total;
+    // The chat strip: the server's chat and the channels' (private chats
+    // are on the messages page), and its current tab (-1 while the current
+    // chat is a private one).
     in property <[ChatTab]> tabs;
     in-out property <int> current-tab: 0;
+    // Which of the session's chats is current (also a private one).
+    in property <int> current-chat;
     in property <[ChatLine]> messages;
     // Older messages can still be loaded in the current chat.
     in property <bool> more-history;
@@ -927,7 +932,8 @@ export global Bridge {
     in property <int> unread-count;
     in property <string> unread-since;
     in property <string> status-text;
-    // Unread messages in all chats of the current server.
+    // Unread messages in the current server's chat and channel chats (its
+    // private chats count in `dm-unread`).
     in property <int> unread-total;
     in property <string> server-title: @tr("No server selected");
     // "12 online · 8 channels"
@@ -1052,6 +1058,7 @@ export global Bridge {
     callback join-with-password(string);
     callback open-channel-chat(int);
     callback toggle-collapse(int);
+    // A tab of `tabs` (the chat strip) by its place there.
     callback select-tab(int);
     callback close-tab(int);
     callback send-message(string);
@@ -1167,8 +1174,10 @@ export global Bridge {
     in property <[RecordingItem]> recordings;
     in property <string> recordings-dir;
     callback open-conversation(int);
-    // The messages page and the Library were opened.
+    // The messages page and the Library were opened; the messages page was
+    // left (a private chat stops being the current chat).
     callback open-messages();
+    callback close-messages();
     callback open-library();
     callback watch-live(int, string);
     callback open-happening(int);

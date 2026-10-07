@@ -424,6 +424,25 @@ pub fn tab_title(presence: &Presence, target: &ChatTarget, peer: &str) -> String
 	}
 }
 
+/// The chat strip of a session's tabs (by their chats, in order): which
+/// tabs it shows, by their index among all, and which of those is the
+/// current one (-1 when the current tab is not shown). The server chat and
+/// the channels' chats are shown; a private chat is on the Direct Messages
+/// page.
+pub fn strip<'a>(
+	targets: impl IntoIterator<Item = &'a ChatTarget>,
+	current: usize,
+) -> (Vec<usize>, i32) {
+	let shown: Vec<usize> = targets
+		.into_iter()
+		.enumerate()
+		.filter(|(_, t)| !matches!(t, ChatTarget::Private(_)))
+		.map(|(i, _)| i)
+		.collect();
+	let selected = shown.iter().position(|&i| i == current).map_or(-1, |i| i as i32);
+	(shown, selected)
+}
+
 /// A chat tab's name for its header: the title without a private chat's
 /// "@" (a channel may start with one).
 pub fn tab_name<'a>(title: &'a str, target: &ChatTarget) -> &'a str {
@@ -841,6 +860,44 @@ mod tests {
 		assert_eq!(tab_name("@Nova", &private), "Nova");
 		assert_eq!(tab_name(&title(&ChatTarget::Channel(3)), &ChatTarget::Channel(3)), "#general");
 		assert_eq!(tab_name("@home", &ChatTarget::Channel(4)), "@home");
+	}
+
+	fn targets() -> Vec<ChatTarget> {
+		vec![
+			ChatTarget::Server,
+			ChatTarget::Private("a".into()),
+			ChatTarget::Channel(1),
+			ChatTarget::Private("b".into()),
+			ChatTarget::Channel(2),
+		]
+	}
+
+	/// Private chats are on the Direct Messages page, not in the strip.
+	#[test]
+	fn strip_hides_private() {
+		let targets = targets();
+		assert_eq!(strip(&targets, 2), (vec![0, 2, 4], 1));
+		assert_eq!(strip(&targets, 4), (vec![0, 2, 4], 2));
+		assert_eq!(strip(&[], 0), (vec![], -1));
+	}
+
+	#[test]
+	fn strip_current_private_is_minus_one() {
+		let targets = targets();
+		assert_eq!(strip(&targets, 1).1, -1);
+		assert_eq!(strip(&targets, 3).1, -1);
+		// A current tab that is gone selects nothing either.
+		assert_eq!(strip(&targets, 9).1, -1);
+	}
+
+	/// The server chat is the strip's first tab, before private chats too.
+	#[test]
+	fn strip_server_tab_first() {
+		let targets = targets();
+		let (shown, selected) = strip(&targets, 0);
+		assert_eq!((shown[0], selected), (0, 0));
+		let only = [ChatTarget::Server, ChatTarget::Private("a".into())];
+		assert_eq!(strip(&only, 0), (vec![0], 0));
 	}
 
 	/// The header counts pins and topics only once the gateway sent them.

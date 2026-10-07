@@ -383,7 +383,9 @@ impl App {
 		self.bookmarks.iter().position(|b| b.id == id).map(|i| tints[i]).unwrap_or_default()
 	}
 
-	/// The rail: servers with their state, unread count and streams.
+	/// The rail: servers with their state, unread count (without private
+	/// chats) and streams; what the chat strip and the private chats have
+	/// unread.
 	pub(crate) fn refresh_servers(&self) {
 		let Some(ui) = self.ui.upgrade() else { return };
 		let bridge = ui.global::<Bridge>();
@@ -395,7 +397,7 @@ impl App {
 			.map(|(b, tint)| {
 				let view = self.sessions.get(&b.id);
 				let state = view.map(|v| v.state.clone()).unwrap_or_default();
-				let unread = view.map_or(0, |v| v.unread());
+				let unread = view.map_or(0, SessionView::channel_unread);
 				let live = view.is_some_and(|v| v.streams_available() && !v.streams.is_empty());
 				let detail = view
 					.filter(|v| !v.presence.channels.is_empty())
@@ -409,7 +411,9 @@ impl App {
 		vm::list::sync(&self.models.servers, &items);
 		bridge.set_last_place(self.last_place(&items));
 		bridge.set_current_server(self.current.map_or(-1, |id| id as i32));
-		bridge.set_unread_total(self.view().map_or(0, |v| v.unread()));
+		// Private chats count on the messages page (and the phone's Home).
+		bridge.set_unread_total(self.view().map_or(0, SessionView::channel_unread));
+		bridge.set_dm_unread(self.dm_unread());
 	}
 
 	/// The server card, the voice controls and who we are.

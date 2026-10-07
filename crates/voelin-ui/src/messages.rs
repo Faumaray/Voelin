@@ -6,8 +6,12 @@
 //! A private chat is a chat tab of its session (`ChatTarget::Private`
 //! stored under the peer's unique id), so opening one selects its server
 //! and its tab: the chat view's machinery (history pages, the composer)
-//! serves it. A chat only in the store (its server is not connected, or no
-//! longer a bookmark) is read from there and shown read-only.
+//! serves it. The chat strip of the server page leaves these tabs out, so
+//! leaving the messages page makes the strip's chat current again
+//! ([`App::close_messages`]), and coming back the open one
+//! ([`App::messages_shown`]). A chat only in the store (its server is not
+//! connected, or no longer a bookmark) is read from there and shown
+//! read-only.
 
 use std::collections::HashMap;
 
@@ -16,7 +20,9 @@ use voelin_core::{Command, HistoryMessage, OfflineMessage, OfflineMessageInfo, V
 use voelin_model::ChatTarget;
 use voelin_store::PageQuery;
 
-use crate::app::{App, Bridge, ConversationItem, DmPeer, FileItem, Nav, OfflineForm, Page, later};
+use crate::app::{
+	App, Bridge, ConversationItem, DmPeer, FileItem, Nav, OfflineForm, Page, SessionView, later,
+};
 use crate::vm;
 use crate::vm::social::{ago, list_time, matches, plain, preview};
 
@@ -305,9 +311,75 @@ impl App {
 				.collect()
 		};
 		vm::list::sync(&self.models.social.conversations, &items);
-		let unread: i32 = dm.chats.iter().filter(private).map(|c| c.unread).sum();
-		bridge.set_dm_unread(unread);
+		bridge.set_dm_unread(self.dm_unread());
 		bridge.set_inbox_unread(dm.inbox.iter().filter(|(_, m)| !m.read).count() as i32);
+	}
+
+	/// Unread messages in the private chats of every server (the rail and
+	/// the chat strip leave them out).
+	pub(crate) fn dm_unread(&self) -> i32 {
+		self.bookmarks
+			.iter()
+			.filter_map(|b| self.sessions.get(&b.id))
+			.map(SessionView::private_unread)
+			.sum()
+	}
+
+	/// The messages page is shown: the open private chat a session holds is
+	/// the current chat again (leaving the page made the strip's current).
+	pub(crate) fn messages_shown(&mut self) {
+		let Some(Open { session: Some(id), uid, mail: None, stored: false, .. }) =
+			self.social.dm.open.clone()
+		else {
+			return;
+		};
+		let target = ChatTarget::Private(uid);
+		// Not for a session that is gone (its server was deleted).
+		let Some(view) = self.sessions.get(&id) else { return };
+		if !view.tabs.iter().any(|t| t.target == target)
+			|| (self.current == Some(id)
+				&& view.tabs.get(view.current_tab).is_some_and(|t| t.target == target))
+		{
+			return;
+		}
+		self.focus_private(id, target);
+	}
+
+	/// Make the private chat `target` session `id`'s current chat, and that
+	/// server the current one. The tab first: selecting the server reads
+	/// the chat it shows, which must not be the strip's.
+	fn focus_private(&mut self, id: i64, target: ChatTarget) {
+		let index = self.chat_tab(id, target.clone());
+		self.sessions.entry(id).or_default().set_current_tab(index);
+		if self.current != Some(id) {
+			self.select_server(id);
+		}
+		self.open_chat(target, true);
+	}
+
+	/// The messages page was left: a session whose current chat is a
+	/// private one goes back to the chat strip's
+	/// ([`SessionView::channel_tab`]).
+	pub(crate) fn close_messages(&mut self) {
+		let mut changed = false;
+		for view in self.sessions.values_mut() {
+			changed |= view.leave_private();
+		}
+		if !changed {
+			return;
+		}
+		self.refresh_chat();
+		self.refresh_servers();
+		// What is read after the callback: a server picked on the rail
+		// (`Nav.select-server` leaves the page first) is selected by then,
+		// and the chat that came back here was never on screen.
+		later(|app| {
+			if let Some(id) = app.current {
+				app.fetch_previews(id);
+			}
+			app.prefetch_counts();
+			app.chat_shown_changed();
+		});
 	}
 
 	pub(crate) fn dm_tab(&mut self, tab: i32) {
@@ -397,10 +469,7 @@ impl App {
 		vm::list::sync(&self.models.social.dm_lines, &[]);
 		let target = ChatTarget::Private(uid.to_owned());
 		if let (true, Some(id)) = (live, session) {
-			if self.current != Some(id) {
-				self.select_server(id);
-			}
-			self.open_chat(target, true);
+			self.focus_private(id, target);
 		} else if let Some(server_uid) = server_uid.filter(|_| !self.demo_ui) {
 			let history = self.engine.history();
 			let uid = uid.to_owned();

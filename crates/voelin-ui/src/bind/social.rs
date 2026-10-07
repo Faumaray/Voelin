@@ -3,7 +3,7 @@
 
 use slint::ComponentHandle;
 
-use crate::app::{Bridge, MainWindow, with_app};
+use crate::app::{App, Bridge, MainWindow, with_app};
 
 pub(super) fn wire(ui: &MainWindow) {
 	let bridge = ui.global::<Bridge>();
@@ -111,9 +111,16 @@ pub(super) fn wire(ui: &MainWindow) {
 		with_app(|app| app.open_preview(key, index)).unwrap_or_default()
 	});
 
-	// Opening the messages or the Library loads what they list.
+	// Opening the messages or the Library loads what they list; the open
+	// private chat is the current chat while the messages page shows it.
 	bridge.on_open_messages(|| {
-		with_app(|app| app.load_recent_chats());
+		with_app(|app| {
+			app.messages_shown();
+			app.load_recent_chats();
+		});
+	});
+	bridge.on_close_messages(|| {
+		with_app(App::close_messages);
 	});
 	bridge.on_open_library(|| {
 		with_app(|app| app.load_library());

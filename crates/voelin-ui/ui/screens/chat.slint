@@ -653,8 +653,9 @@ export component MessageList inherits VerticalLayout {
             root.kept-rows = -1;
         }
     }
-    // Another chat (another tab, or another server's tab at the same
-    // place): start at its end, with nothing of the last one's loading.
+    // Another chat (another tab or private chat, or another server's chat
+    // at the same place): start at its end, with nothing of the last one's
+    // loading.
     function reset() {
         root.follow = true;
         root.kept-rows = -1;
@@ -662,8 +663,8 @@ export component MessageList inherits VerticalLayout {
         root.paused = false;
         list.content-y = root.end;
     }
-    property <int> tab: Bridge.current-tab;
-    changed tab => { root.reset(); }
+    property <int> chat: Bridge.current-chat;
+    changed chat => { root.reset(); }
     property <int> server: Bridge.current-server;
     changed server => { root.reset(); }
     // Scroll to where row `index` is, a third down the view. Rows differ in
@@ -907,7 +908,8 @@ export component ChatView inherits VerticalLayout {
             }
         }
     }
-    // Chat tabs: server chat, channel chats, private chats.
+    // Chat tabs: the server chat and channel chats (private chats are on
+    // the messages page).
     Rectangle {
         height: Theme.control-height + 4px;
         accessible-role: AccessibleRole.tab-list;

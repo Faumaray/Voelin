@@ -107,7 +107,7 @@ export component MobileShell inherits Rectangle {
     in property <string> title;
     in property <string> subtitle;
     in property <image> banner;
-    // Total unread messages (the Chat tab's badge).
+    // Unread messages in the server's chats (the Chat tab's badge).
     in property <int> unread;
     // Show a back arrow (sub-pages such as the settings).
     in property <bool> back;
@@ -264,10 +264,12 @@ export component MobileShell inherits Rectangle {
             HorizontalLayout {
                 padding-left: Theme.space-2;
                 padding-right: Theme.space-2;
+                // The direct messages are on Home: their unread count.
                 NavTab {
                     icon: Icons.home;
                     text: @tr("Home");
                     selected: Nav.page == Page.home || Nav.page == Page.friends || Nav.page == Page.messages || Nav.page == Page.library || (Nav.mobile-tab == MobileTab.home && Nav.page == Page.server);
+                    badge: Bridge.dm-unread + Bridge.inbox-unread;
                     clicked => { Nav.show-tab(MobileTab.home); }
                 }
                 NavTab {

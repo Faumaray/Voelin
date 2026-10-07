@@ -138,8 +138,10 @@ export global Nav {
     out property <bool> chat-shown: (page == Page.server && (!narrow || phone-voice || mobile-tab == MobileTab.chat))
         || (page == Page.messages && Bridge.dm.open && !Bridge.dm.mail && !Bridge.dm.stored);
 
-    // Settings were opened (so leaving them tells Rust).
+    // Settings, or the messages page, were opened (so leaving them tells
+    // Rust).
     property <bool> settings-active;
+    property <bool> messages-active;
 
     public function show(p: Page) {
         if p != Page.settings && settings-active {
@@ -157,10 +159,17 @@ export global Nav {
         }
         page = p;
         notifications-open = false;
+        // After the page changed: the chat Rust goes back to is read only
+        // where the new page shows it.
+        if p != Page.messages && messages-active {
+            messages-active = false;
+            Bridge.close-messages();
+        }
         if p == Page.events {
             Bridge.open-events();
         }
         if p == Page.messages {
+            messages-active = true;
             Bridge.open-messages();
         }
         if p == Page.library {

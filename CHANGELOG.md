@@ -98,6 +98,9 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
   has it).
 - The chat header's pinned messages and topics are icon buttons with a
   count, so the channel's topic has room.
+- Private chats live on the Direct Messages page, not in the server's chat
+  tabs, and their unread messages count there (on the phone, on the Home
+  tab) instead of on the server rail.
 
 ### Fixed
 
@@ -123,6 +126,11 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
   line breaks.
 - Joining a friend in a subchannel of a server without voice connects into
   that subchannel; it connected into the default channel.
+- Closing a chat tab left of the selected one keeps the selected chat; the
+  one after it was selected.
+- Connecting with voice from a private chat (Direct Messages) keeps that
+  conversation open; it turned into the voice channel's chat, and the
+  composer sent there.
 
 ## [0.0.1-alpha] - 2026-10-04
 

@@ -205,6 +205,11 @@ impl Tab {
 		}
 	}
 
+	/// A private chat (on the Direct Messages page, not in the chat strip).
+	pub fn is_private(&self) -> bool {
+		matches!(self.target, ChatTarget::Private(_))
+	}
+
 	/// A handle for a message that has none yet.
 	pub fn take_key(&mut self) -> i32 {
 		self.next_key += 1;
@@ -269,6 +274,10 @@ pub(crate) struct SessionView {
 	pub talking: HashSet<u16>,
 	pub tabs: Vec<Tab>,
 	pub current_tab: usize,
+	/// The chat strip's chat last current (the server's or a channel's): a
+	/// private chat is current only on the Direct Messages page, and this
+	/// one is current again when that page is left.
+	pub channel_tab: ChatTarget,
 	/// The own channel's tab was focused for this voice connection.
 	pub focused_own_channel: bool,
 	/// The streams in our channel (TeamSpeak 6).
@@ -325,6 +334,7 @@ impl Default for SessionView {
 			talking: HashSet::new(),
 			tabs: vec![Tab::new(ChatTarget::Server, "Server".into())],
 			current_tab: 0,
+			channel_tab: ChatTarget::Server,
 			focused_own_channel: false,
 			streams: Vec::new(),
 			applied_playback: HashSet::new(),
@@ -376,9 +386,62 @@ impl SessionView {
 			.map_or_else(|| format!("client {client}"), |c| c.nickname.clone())
 	}
 
-	/// Unread messages in all chats.
-	pub fn unread(&self) -> i32 {
-		self.tabs.iter().map(|t| t.unread).sum()
+	/// Unread messages in the server's and the channels' chats (the rail and
+	/// the chat strip count them; private chats count on the Direct
+	/// Messages page).
+	pub fn channel_unread(&self) -> i32 {
+		self.tabs.iter().filter(|t| !t.is_private()).map(|t| t.unread).sum()
+	}
+
+	/// Unread messages in private chats.
+	pub fn private_unread(&self) -> i32 {
+		self.tabs.iter().filter(|t| t.is_private()).map(|t| t.unread).sum()
+	}
+
+	/// Make tab `index` the current one; the chat strip remembers it unless
+	/// it is a private chat.
+	pub fn set_current_tab(&mut self, index: usize) {
+		self.current_tab = index;
+		if let Some(tab) = self.tabs.get(index).filter(|t| !t.is_private()) {
+			self.channel_tab = tab.target.clone();
+		}
+	}
+
+	/// Focus tab `index`. While a private chat is current (the Direct
+	/// Messages page shows it, and its composer sends there), a chat of the
+	/// strip does not take its place: it is the strip's chat, current once
+	/// that page is left (voice connecting focuses its channel's chat).
+	pub fn focus_tab(&mut self, index: usize) {
+		let Some(tab) = self.tabs.get(index) else { return };
+		if !tab.is_private() && self.tabs.get(self.current_tab).is_some_and(Tab::is_private) {
+			self.channel_tab = tab.target.clone();
+		} else {
+			self.set_current_tab(index);
+		}
+	}
+
+	/// Remove tab `index`. The current tab stays; when it is this one, the
+	/// chat strip's next tab takes its place, else its last.
+	pub fn remove_tab(&mut self, index: usize) -> Tab {
+		let tab = self.tabs.remove(index);
+		if self.current_tab > index {
+			self.current_tab -= 1;
+		} else if self.current_tab == index {
+			let (strip, _) = crate::vm::chat::strip(self.tabs.iter().map(|t| &t.target), 0);
+			let next = strip.iter().find(|&&i| i >= index).or(strip.last()).copied();
+			self.set_current_tab(next.unwrap_or(0));
+		}
+		tab
+	}
+
+	/// Leave a current private chat for the chat strip's last one (the
+	/// Direct Messages page was left); `true` if the current tab changed.
+	pub fn leave_private(&mut self) -> bool {
+		if !self.tabs.get(self.current_tab).is_some_and(Tab::is_private) {
+			return false;
+		}
+		self.current_tab = self.tabs.iter().position(|t| t.target == self.channel_tab).unwrap_or(0);
+		true
 	}
 
 	/// A new tab for `target`, read as far as the store says.
@@ -431,7 +494,10 @@ pub(crate) struct Models {
 	pub tree: Rc<VecModel<TreeItem>>,
 	pub members: Rc<VecModel<MemberItem>>,
 	pub server_members: Rc<VecModel<MemberItem>>,
+	/// The chat strip: the current session's tabs without its private chats.
 	pub tabs: Rc<VecModel<ChatTab>>,
+	/// Which of the session's tabs each of `tabs` is ([`crate::vm::chat::strip`]).
+	pub strip: RefCell<Vec<usize>>,
 	pub streams: Rc<VecModel<StreamItem>>,
 	pub viewers: Rc<VecModel<ViewerItem>>,
 	pub pins: Rc<VecModel<PinItem>>,
@@ -460,6 +526,7 @@ impl Models {
 			members: Rc::default(),
 			server_members: Rc::default(),
 			tabs: Rc::default(),
+			strip: RefCell::new(vec![0]),
 			streams: Rc::default(),
 			viewers: Rc::default(),
 			pins: Rc::default(),
@@ -1259,5 +1326,94 @@ impl App {
 		self.refresh_tree();
 		self.refresh_chat();
 		self.refresh_streams();
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn channel_unread_ignores_private_tabs() {
+		let mut view = SessionView::default();
+		view.tabs.push(Tab::new(ChatTarget::Channel(1), "Lobby".into()));
+		view.tabs.push(Tab::new(ChatTarget::Private("a".into()), "@Nova".into()));
+		for (tab, unread) in view.tabs.iter_mut().zip([1, 2, 4]) {
+			tab.unread = unread;
+		}
+		assert_eq!(view.channel_unread(), 3);
+		assert_eq!(view.private_unread(), 4);
+	}
+
+	/// Closing a tab keeps the current chat, or selects the strip's next
+	/// one (never a private chat).
+	#[test]
+	fn closing_a_tab_keeps_the_current_chat() {
+		let mut view = SessionView::default();
+		for target in [
+			ChatTarget::Channel(1),
+			ChatTarget::Channel(2),
+			ChatTarget::Private("a".into()),
+			ChatTarget::Channel(3),
+		] {
+			view.tabs.push(Tab::new(target, String::new()));
+		}
+		let current = |v: &SessionView| v.tabs[v.current_tab].target.clone();
+		view.set_current_tab(2);
+		view.remove_tab(1);
+		assert_eq!(current(&view), ChatTarget::Channel(2));
+		// [Server, 2, @a, 3]: the next tab of the strip, past the private chat.
+		view.remove_tab(1);
+		assert_eq!(current(&view), ChatTarget::Channel(3));
+		assert_eq!(view.channel_tab, ChatTarget::Channel(3));
+		// The last one: the strip's last, the server chat.
+		view.remove_tab(2);
+		assert_eq!(current(&view), ChatTarget::Server);
+	}
+
+	/// A private chat is current only on the Direct Messages page: leaving
+	/// it goes back to the strip's last chat.
+	#[test]
+	fn leaving_a_private_chat_restores_the_strip_tab() {
+		let mut view = SessionView::default();
+		view.tabs.push(Tab::new(ChatTarget::Channel(1), "Lobby".into()));
+		view.tabs.push(Tab::new(ChatTarget::Private("a".into()), "@Nova".into()));
+		view.set_current_tab(1);
+		assert!(!view.leave_private());
+		view.set_current_tab(2);
+		assert_eq!(view.channel_tab, ChatTarget::Channel(1));
+		assert!(view.leave_private());
+		assert_eq!(view.current_tab, 1);
+		// The strip's chat was closed meanwhile: the server chat.
+		view.set_current_tab(2);
+		view.tabs.remove(1);
+		view.current_tab = 1;
+		assert!(view.leave_private());
+		assert_eq!(view.current_tab, 0);
+	}
+
+	/// A channel's chat focused while a private chat is current (voice
+	/// connecting on the Direct Messages page) waits for the page to be
+	/// left: the conversation and its composer stay the private chat's.
+	#[test]
+	fn a_strip_chat_does_not_replace_a_current_private_chat() {
+		let mut view = SessionView::default();
+		view.tabs.push(Tab::new(ChatTarget::Channel(1), "Lobby".into()));
+		view.tabs.push(Tab::new(ChatTarget::Private("a".into()), "@Nova".into()));
+		view.tabs.push(Tab::new(ChatTarget::Private("b".into()), "@Ivy".into()));
+		view.focus_tab(2);
+		assert_eq!(view.current_tab, 2);
+		view.focus_tab(1);
+		assert_eq!((view.current_tab, &view.channel_tab), (2, &ChatTarget::Channel(1)));
+		// Another private chat does.
+		view.focus_tab(3);
+		assert_eq!(view.current_tab, 3);
+		assert!(view.leave_private());
+		assert_eq!(view.current_tab, 1);
+		// Without a private chat current, any chat.
+		view.focus_tab(0);
+		assert_eq!((view.current_tab, &view.channel_tab), (0, &ChatTarget::Server));
+		view.focus_tab(9);
+		assert_eq!(view.current_tab, 0);
 	}
 }
