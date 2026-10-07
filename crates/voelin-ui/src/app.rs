@@ -24,9 +24,10 @@ use voelin_core::settings::{
 };
 use voelin_core::stream::StreamInfo;
 use voelin_core::{
-	AudioSettings, Command, Engine, Event, History, HistoryMessage, SessionState, VoiceState,
+	AudioSettings, Command, Engine, Event, History, HistoryMessage, ObserveState, SessionState,
+	VoiceState,
 };
-use voelin_model::{Capabilities, ChannelId, ChatTarget, GroupInfo, Presence};
+use voelin_model::{Capabilities, ChannelId, ChatMessage, ChatTarget, GroupInfo, Presence};
 use voelin_platform::crash;
 use voelin_store::{Bookmark, MemorySecrets, Secrets, Store};
 
@@ -144,7 +145,17 @@ pub(crate) struct Tab {
 	/// Live messages of a session that keeps no history (no server unique
 	/// id yet): grouped from the message before, without ids.
 	pub last: Option<Previous>,
+	/// Messages not read, not ours: those after `read` (without stored
+	/// history, those that came while the tab was not on screen).
 	pub unread: i32,
+	/// The newest message read, by `(ts_ms, id)`: kept in the store
+	/// (`chat_reads`) when the tab is left, the session closes and on exit
+	/// (`App::save_read`). `stored_read` is what the store has.
+	pub read: Option<(i64, i64)>,
+	pub stored_read: Option<(i64, i64)>,
+	/// The message the "New" divider is above: the first that was new when
+	/// the tab came on screen. It stays until the tab is left.
+	pub divider: Option<i64>,
 	/// Nothing older exists as far as the engine can tell.
 	pub complete: bool,
 	/// A gateway page arrived: the chat is not only what we saw.
@@ -176,6 +187,9 @@ impl Tab {
 			messages: Vec::new(),
 			last: None,
 			unread: 0,
+			read: None,
+			stored_read: None,
+			divider: None,
 			complete: false,
 			synced: false,
 			loading: false,
@@ -199,6 +213,50 @@ impl Tab {
 
 	pub fn message(&self, key: i32) -> Option<&HistoryMessage> {
 		self.messages.iter().chain(&self.topic_messages).find(|m| m.key == key).map(|m| &m.message)
+	}
+
+	/// Where each message is and whether it is ours (`own`), for the read
+	/// markers ([`crate::vm::chat::first_unread`]).
+	pub fn positions(&self, own: impl Fn(&ChatMessage) -> bool) -> Vec<(i64, i64, bool)> {
+		self.messages
+			.iter()
+			.map(|m| (m.message.message.ts_ms, m.message.id, own(&m.message.message)))
+			.collect()
+	}
+
+	/// Where the newest message is.
+	pub fn newest(&self) -> Option<(i64, i64)> {
+		self.messages.last().map(|m| (m.message.message.ts_ms, m.message.id))
+	}
+
+	/// The tab came on screen: the first new message gets the divider
+	/// (unless one shows), and everything is read.
+	pub fn enter(&mut self, own: impl Fn(&ChatMessage) -> bool) {
+		if self.unread > 0 && self.divider.is_none() {
+			let first = crate::vm::chat::first_unread(&self.positions(own), self.read);
+			self.divider = first.map(|i| self.messages[i].message.id);
+		}
+		self.catch_up();
+	}
+
+	/// Everything in the tab is read (it is on screen).
+	pub fn catch_up(&mut self) {
+		self.read = self.read.max(self.newest());
+		self.unread = 0;
+	}
+
+	/// Count what is not read: what came after `read`, not ours.
+	pub fn count_unread(&mut self, own: impl Fn(&ChatMessage) -> bool) {
+		self.unread = crate::vm::chat::unread_count(&self.positions(own), self.read);
+	}
+
+	/// Start from where the store says the chat was read (`reads`: by the
+	/// store's name of the chat).
+	pub fn read_from(&mut self, reads: &HashMap<String, (i64, i64)>) {
+		if let Some(&read) = reads.get(&crate::chat::store_target(&self.target).key()) {
+			self.read = self.read.max(Some(read));
+			self.stored_read = Some(read);
+		}
 	}
 }
 
@@ -251,6 +309,10 @@ pub(crate) struct SessionView {
 	pub next_transfer: u64,
 	/// What the home, messages and events screens keep of the session.
 	pub extra: crate::social::SessionExtra,
+	/// Where its chats were read, from the store (by the store's name of
+	/// the chat), for the server unique id `reads_of`.
+	pub reads: HashMap<String, (i64, i64)>,
+	pub reads_of: Option<String>,
 }
 
 impl Default for SessionView {
@@ -281,6 +343,8 @@ impl Default for SessionView {
 			downloads: HashMap::new(),
 			next_transfer: 1,
 			extra: Default::default(),
+			reads: HashMap::new(),
+			reads_of: None,
 		}
 	}
 }
@@ -315,6 +379,13 @@ impl SessionView {
 	/// Unread messages in all chats.
 	pub fn unread(&self) -> i32 {
 		self.tabs.iter().map(|t| t.unread).sum()
+	}
+
+	/// A new tab for `target`, read as far as the store says.
+	pub fn new_tab(&self, target: ChatTarget, title: String) -> Tab {
+		let mut tab = Tab::new(target, title);
+		tab.read_from(&self.reads);
+		tab
 	}
 
 	/// The session's gateway offers this feature
@@ -469,6 +540,12 @@ pub(crate) struct App {
 	pub join_target: Option<(i64, ChannelId)>,
 	/// Who the poke dialog pokes: session, client, nickname.
 	pub poke_target: Option<(i64, u16, String)>,
+	/// The window has the focus (desktop: winit tells; elsewhere assumed):
+	/// messages are read only then.
+	pub focused: bool,
+	/// The chat whose messages are on screen (session, target): when it is
+	/// left, it is stored and loses its divider (`App::track_reading`).
+	pub reading: Option<(i64, ChatTarget)>,
 	pub mic_test: bool,
 	pub ptt: GlobalPtt,
 	pub video: Video,
@@ -662,6 +739,8 @@ pub fn run(options: RunOptions) -> Result<()> {
 	bridge.set_app_name(voelin_platform::APP_NAME.into());
 	bridge.set_app_version(env!("CARGO_PKG_VERSION").into());
 	bridge.set_desktop(cfg!(not(target_os = "android")));
+	#[cfg(not(target_os = "android"))]
+	watch_focus(&ui);
 	let models = Models::new(&bridge);
 	// Wayland and X11 find the desktop file (and icon) by this id.
 	#[cfg(not(target_os = "android"))]
@@ -712,6 +791,8 @@ pub fn run(options: RunOptions) -> Result<()> {
 		playback_dialog: None,
 		join_target: None,
 		poke_target: None,
+		focused: true,
+		reading: None,
 		mic_test: false,
 		ptt,
 		video,
@@ -786,6 +867,10 @@ pub fn run(options: RunOptions) -> Result<()> {
 		if let Err(e) = app.prefs.flush() {
 			warn!(%e, "could not store settings");
 		}
+		let ids: Vec<i64> = app.sessions.keys().copied().collect();
+		for id in ids {
+			app.save_reads(id);
+		}
 		app.watch = None;
 		app.share = None;
 		if own && !app.demo_ui {
@@ -803,6 +888,20 @@ pub fn run(options: RunOptions) -> Result<()> {
 		runtime.shutdown_timeout(Duration::from_secs(2));
 	}
 	Ok(())
+}
+
+/// Tell the app when the window gains or loses the focus: messages are read
+/// only while it has it. (winit's focus events; without them, as on
+/// Android, the window counts as focused.)
+#[cfg(not(target_os = "android"))]
+fn watch_focus(ui: &MainWindow) {
+	use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEvent};
+	ui.window().on_winit_window_event(|_, event| {
+		if let WindowEvent::Focused(focused) = *event {
+			later(move |app| app.window_focused(focused));
+		}
+		EventResult::Propagate
+	});
 }
 
 /// Open a file or folder with the desktop's default application.
@@ -922,6 +1021,7 @@ impl App {
 				let id = session as i64;
 				let view = self.sessions.entry(id).or_default();
 				let was_voice = view.state.voice;
+				let was_observe = view.state.observe;
 				view.state = state.clone();
 				if state.voice != VoiceState::Connected {
 					view.focused_own_channel = false;
@@ -935,11 +1035,24 @@ impl App {
 					// A new connection: volumes are sent again.
 					view.applied_playback.clear();
 				}
+				// Where its chats were read, once the server is known; kept
+				// when the session ends.
+				self.load_reads(id);
+				let off = |voice: VoiceState, observe: ObserveState| {
+					voice == VoiceState::Disconnected && observe == ObserveState::Off
+				};
+				if off(state.voice, state.observe) && !off(was_voice, was_observe) {
+					self.save_reads(id);
+				}
+				let view = self.sessions.entry(id).or_default();
 				let focus = !view.focused_own_channel;
 				if state.voice == VoiceState::Connected && was_voice != VoiceState::Connected {
 					self.set_status("Connected");
 				}
 				if self.current == Some(id) {
+					if self.track_reading() {
+						self.refresh_chat();
+					}
 					// The voice channel's chat is always at hand, and focused
 					// once per connection.
 					if let (Some(cid), VoiceState::Connected) = (state.own_channel, state.voice) {

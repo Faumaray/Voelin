@@ -57,6 +57,46 @@ pub struct LineCtx<'a> {
 	pub pictures: Option<&'a HashMap<String, PathBuf>>,
 	/// What earlier lines of the chat were built from, to reuse.
 	pub cache: Option<&'a LineCache>,
+	/// The first new message: the "New" divider is above it, so it starts
+	/// a group of its own.
+	pub unread_start: bool,
+}
+
+/// The first message after `read` (by `(ts_ms, id)`, as a chat is ordered)
+/// that is not ours: where the "New" divider goes. `messages` are
+/// `(ts_ms, id, ours)` in order; `None` read: nothing was.
+pub fn first_unread(messages: &[(i64, i64, bool)], read: Option<(i64, i64)>) -> Option<usize> {
+	messages.iter().position(|&(ts, id, own)| !own && read.is_none_or(|r| (ts, id) > r))
+}
+
+/// How many of `messages` (as for [`first_unread`]) came after `read` and
+/// are not ours.
+pub fn unread_count(messages: &[(i64, i64, bool)], read: Option<(i64, i64)>) -> i32 {
+	let new = |&&(ts, id, own): &&(i64, i64, bool)| !own && read.is_none_or(|r| (ts, id) > r);
+	messages.iter().filter(new).count() as i32
+}
+
+/// Since when messages are new, for "5 new messages since 10:14" (see
+/// [`since`]).
+pub fn since_time(ts_ms: i64) -> String {
+	chrono::DateTime::from_timestamp_millis(ts_ms)
+		.map(|t| {
+			since(t.with_timezone(&chrono::Local).naive_local(), chrono::Local::now().naive_local())
+		})
+		.unwrap_or_default()
+}
+
+/// "10:14" today, "12 Mar 10:14" before, with the year when it is not this
+/// one.
+pub fn since(then: chrono::NaiveDateTime, now: chrono::NaiveDateTime) -> String {
+	use chrono::Datelike;
+	if then.date() == now.date() {
+		then.format("%H:%M").to_string()
+	} else if then.year() == now.year() {
+		then.format("%-d %b %H:%M").to_string()
+	} else {
+		then.format("%-d %b %Y %H:%M").to_string()
+	}
 }
 
 /// When a message was sent, for its header (see [`stamp`]).
@@ -469,9 +509,10 @@ fn line_of(
 	parts: Option<&mut Parts>,
 	reactions: Vec<ReactionItem>,
 ) -> ChatLine {
-	let continued = previous.is_some_and(|p| {
-		p.author == message.author_name && (0..GROUP_MS).contains(&(message.ts_ms - p.ts_ms))
-	});
+	let continued = !ctx.unread_start
+		&& previous.is_some_and(|p| {
+			p.author == message.author_name && (0..GROUP_MS).contains(&(message.ts_ms - p.ts_ms))
+		});
 	let cached = parts.is_some();
 	let mut own = Parts::default();
 	let parts = parts.unwrap_or(&mut own);
@@ -546,6 +587,7 @@ fn line_of(
 		topic: ctx.topic.clone().into(),
 		marked: ctx.marked,
 		link: body.link.into(),
+		unread_start: ctx.unread_start,
 	}
 }
 
@@ -606,6 +648,51 @@ mod tests {
 		assert!(line(&message("Alice", "again", 1_060_000), Some(&prev)).continued);
 		assert!(!line(&message("Bob", "me", 1_060_000), Some(&prev)).continued);
 		assert!(!line(&message("Alice", "later", 1_000_000 + GROUP_MS), Some(&prev)).continued);
+	}
+
+	/// The "New" divider is above its line, so the line has its header even
+	/// right after the same author.
+	#[test]
+	fn the_first_new_line_is_not_continued() {
+		let prev = Previous::of(&message("Alice", "hi", 1_000_000));
+		let again = stored(message("Alice", "again", 1_060_000));
+		let line = history_line(&again, Some(&prev), &LineCtx::default());
+		assert!(line.continued && !line.unread_start);
+		let ctx = LineCtx { unread_start: true, ..Default::default() };
+		let line = history_line(&again, Some(&prev), &ctx);
+		assert!(line.unread_start && !line.continued);
+	}
+
+	#[test]
+	fn first_unread_messages() {
+		// (ts_ms, id, ours), in order.
+		let chat = [(10, 1, false), (20, 2, true), (20, 3, false), (30, 4, false)];
+		// Nothing read: everything not ours is new.
+		assert_eq!((first_unread(&chat, None), unread_count(&chat, None)), (Some(0), 3));
+		// Our own messages are skipped.
+		assert_eq!(first_unread(&chat, Some((10, 1))), Some(2));
+		assert_eq!(unread_count(&chat, Some((10, 1))), 2);
+		// At the same time the id decides.
+		assert_eq!(first_unread(&chat, Some((20, 2))), Some(2));
+		assert_eq!(first_unread(&chat, Some((20, 3))), Some(3));
+		assert_eq!(first_unread(&[(20, 5, false), (20, 6, false)], Some((20, 5))), Some(1));
+		// Everything read, or read past the end.
+		for read in [(30, 4), (40, 0)] {
+			assert_eq!(
+				(first_unread(&chat, Some(read)), unread_count(&chat, Some(read))),
+				(None, 0)
+			);
+		}
+		assert_eq!(first_unread(&[], None), None);
+	}
+
+	#[test]
+	fn new_since() {
+		let at = |d: &str| chrono::NaiveDateTime::parse_from_str(d, "%Y-%m-%d %H:%M").unwrap();
+		let now = at("2026-10-03 09:00");
+		assert_eq!(since(at("2026-10-03 08:05"), now), "08:05");
+		assert_eq!(since(at("2026-03-12 10:14"), now), "12 Mar 10:14");
+		assert_eq!(since(at("2025-12-31 10:14"), now), "31 Dec 2025 10:14");
 	}
 
 	/// The runs of block `i` of a line, as (text, emoji).

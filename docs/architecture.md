@@ -69,7 +69,7 @@ fuzz/                cargo-fuzz targets
 | `voelin-query` | ServerQuery codec and transports: raw TCP, SSH (russh), HTTP WebQuery | done |
 | `voelin-observer` | Presence tracker + chat relay pool over `voelin-query` | done |
 | `voelin-gateway-proto`, `voelin-gateway` (`tsgw`) | Companion service for server admins: identity-challenge auth, permission-mirroring authorization, presence stream, chat relay, SQLite history, WebSocket + JSON (`tsgw.v1+json`) | done |
-| `voelin-store` | Identities, bookmarks, settings, chat history (dedupe, paging, sync cursors), contacts, secrets (keyring / Android Keystore); versioned schema | done |
+| `voelin-store` | Identities, bookmarks, settings, chat history (dedupe, paging, sync cursors, where each chat was read), contacts, secrets (keyring / Android Keystore); versioned schema | done |
 | `voelin-audio` | Capture/playback, Opus, echo cancellation, resampling, jitter buffer, mixer, VAD/push-to-talk | v0 (no AEC yet) |
 | `voelin-stream` | TS6 stream commands, JSON signalling, str0m peer connections, host/STUN candidates, streamer/viewer sessions, frame-source seam | sessions + transport |
 | `voelin-core` | Engine: runtime, per-server sessions, merge of voice/gateway/query sources, event bus, command API, chat history, the gateway's features, audio settings and volumes, streams on TS6, files, avatar and icon cache, pokes, offline messages, contacts; `media` module (capture → encoder → stream, stream → decoder) | done |

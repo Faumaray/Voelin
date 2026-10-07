@@ -23,6 +23,7 @@ const MIGRATIONS: &[Migration] = &[
 	Migration::Code(crate::chat::migrate_2),
 	Migration::Sql(crate::contacts::SCHEMA_3),
 	Migration::Sql(SCHEMA_4),
+	Migration::Sql(crate::chat::SCHEMA_5),
 ];
 
 /// Version 4: where each identity came from ([`IdentityOrigin`]) and which
@@ -527,6 +528,48 @@ mod tests {
 		assert_eq!((list[1].origin, list[1].is_default), (IdentityOrigin::Imported, false));
 		// The keys are untouched.
 		assert_eq!(store.identity(list[1].id).unwrap().counter(), imported.counter());
+		drop(store);
+		std::fs::remove_dir_all(dir).unwrap();
+	}
+
+	/// A database of version 4 learns where its chats were read, keeping
+	/// its messages; nothing is read yet.
+	#[test]
+	fn migrates_version_4_read_markers() {
+		use crate::{ChatRead, ChatTarget, PageQuery};
+		let dir = std::env::temp_dir().join(format!("voelin-store-v4-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&dir);
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("client.db");
+		{
+			let mut db = rusqlite::Connection::open(&path).unwrap();
+			db.execute_batch(SCHEMA_1).unwrap();
+			let tx = db.transaction().unwrap();
+			crate::chat::migrate_2(&tx).unwrap();
+			tx.commit().unwrap();
+			db.execute_batch(crate::contacts::SCHEMA_3).unwrap();
+			db.execute_batch(SCHEMA_4).unwrap();
+			db.pragma_update(None, "user_version", 4).unwrap();
+			db.execute(
+				"INSERT INTO messages (server_uid, target, ts, ts_ms, author_name, text)
+				 VALUES ('srv', 'channel/1', 1, 1000, 'a', 'kept')",
+				[],
+			)
+			.unwrap();
+		}
+		let store = Store::open(&path).unwrap();
+		assert_eq!(Store::SCHEMA_VERSION, 5);
+		assert_eq!(store.schema_version().unwrap(), Store::SCHEMA_VERSION);
+		let channel = ChatTarget::Channel(1);
+		let rows = store.messages("srv", &channel, PageQuery::default()).unwrap();
+		assert_eq!(rows.len(), 1);
+		assert!(store.chat_reads("srv").unwrap().is_empty());
+		let read = ChatRead { ts_ms: rows[0].ts_ms, id: rows[0].id, updated_ms: 1 };
+		store.set_chat_read("srv", &channel, &read).unwrap();
+		drop(store);
+		// Opened again: the marker is there and nothing runs twice.
+		let store = Store::open(&path).unwrap();
+		assert_eq!(store.chat_read("srv", &channel).unwrap(), Some(read));
 		drop(store);
 		std::fs::remove_dir_all(dir).unwrap();
 	}

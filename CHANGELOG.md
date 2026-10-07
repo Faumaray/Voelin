@@ -34,6 +34,10 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
 - Every message can be quoted into the composer (`> ` lines) and its text
   copied, from the actions on hover or a right-click menu, also on servers
   without a gateway.
+- A "New" line above the first unread message of a chat, and a bar that
+  counts the new messages with a jump to the first; unread counts survive
+  restarts. Messages count as read only while their chat is on screen in
+  the focused window.
 
 ### Changed
 

@@ -16,7 +16,8 @@
 //!   of the other, or (without both unique ids) the same nickname.
 //!
 //! Pages are by time: `(ts_ms, id)` orders a chat ([`PageQuery`]). A
-//! [`ChatCursor`] remembers how far a chat is synced with a gateway.
+//! [`ChatCursor`] remembers how far a chat is synced with a gateway, a
+//! [`ChatRead`] how far it was read on this device.
 
 use rusqlite::{OptionalExtension, Row, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -225,6 +226,31 @@ pub struct ChatCursor {
 	/// Unix milliseconds of the last sync.
 	pub updated_ms: i64,
 }
+
+/// How far a chat was read on this device: the newest message read, by
+/// `(ts_ms, id)` as a chat is ordered. TeamSpeak has no read receipts, so
+/// this stays on the device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChatRead {
+	/// Unix milliseconds of the message.
+	pub ts_ms: i64,
+	/// Its local id ([`StoredMessage::id`]).
+	pub id: i64,
+	/// Unix milliseconds of the last change.
+	pub updated_ms: i64,
+}
+
+/// Version 5: how far each chat was read ([`ChatRead`]).
+pub(crate) const SCHEMA_5: &str = r#"
+	CREATE TABLE chat_reads (
+		server_uid TEXT NOT NULL,
+		target TEXT NOT NULL,
+		read_ms INTEGER NOT NULL,
+		read_id INTEGER NOT NULL DEFAULT 0,
+		updated_ms INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (server_uid, target)
+	) WITHOUT ROWID;
+"#;
 
 /// Version 2: times in milliseconds, sources, gateway ids and metadata,
 /// dedupe keys, sync cursors and server aliases. Old messages keep their
@@ -686,6 +712,53 @@ impl Store {
 		Ok(())
 	}
 
+	/// How far a chat was read on this device.
+	pub fn chat_read(&self, server_uid: &str, target: &ChatTarget) -> Result<Option<ChatRead>> {
+		Ok(self
+			.db
+			.prepare_cached(
+				"SELECT read_ms, read_id, updated_ms FROM chat_reads
+				 WHERE server_uid = ?1 AND target = ?2",
+			)?
+			.query_row(params![server_uid, target.key()], |r| {
+				Ok(ChatRead { ts_ms: r.get(0)?, id: r.get(1)?, updated_ms: r.get(2)? })
+			})
+			.optional()?)
+	}
+
+	/// How far each chat of a server was read on this device.
+	pub fn chat_reads(&self, server_uid: &str) -> Result<Vec<(ChatTarget, ChatRead)>> {
+		let mut stmt = self.db.prepare_cached(
+			"SELECT target, read_ms, read_id, updated_ms FROM chat_reads
+			 WHERE server_uid = ?1 ORDER BY target",
+		)?;
+		let rows = stmt.query_map([server_uid], |r| {
+			let target: String = r.get(0)?;
+			let read = ChatRead { ts_ms: r.get(1)?, id: r.get(2)?, updated_ms: r.get(3)? };
+			Ok((ChatTarget::from_key(&target), read))
+		})?;
+		Ok(rows.collect::<rusqlite::Result<_>>()?)
+	}
+
+	/// Remember how far a chat was read on this device (replacing what was
+	/// there).
+	pub fn set_chat_read(
+		&self,
+		server_uid: &str,
+		target: &ChatTarget,
+		read: &ChatRead,
+	) -> Result<()> {
+		self.db
+			.prepare_cached(
+				"INSERT INTO chat_reads (server_uid, target, read_ms, read_id, updated_ms)
+				 VALUES (?1, ?2, ?3, ?4, ?5)
+				 ON CONFLICT (server_uid, target) DO UPDATE SET read_ms = excluded.read_ms,
+					read_id = excluded.read_id, updated_ms = excluded.updated_ms",
+			)?
+			.execute(params![server_uid, target.key(), read.ts_ms, read.id, read.updated_ms])?;
+		Ok(())
+	}
+
 	/// Forget the gateway ids of a chat (another gateway numbers its
 	/// messages differently) and its cursor; the rows stay, as seen by this
 	/// device, and are matched again with the new gateway's copies.
@@ -960,6 +1033,25 @@ mod tests {
 		store.set_server_alias("voice:host", "uid1").unwrap();
 		store.set_server_alias("voice:host", "uid2").unwrap();
 		assert_eq!(store.server_alias("voice:host").unwrap().as_deref(), Some("uid2"));
+	}
+
+	#[test]
+	fn read_markers() {
+		let store = Store::open_in_memory().unwrap();
+		let (channel, dm) = (ChatTarget::Channel(1), ChatTarget::Private("uid-b".into()));
+		assert_eq!(store.chat_read(SRV, &channel).unwrap(), None);
+		assert!(store.chat_reads(SRV).unwrap().is_empty());
+		let read = ChatRead { ts_ms: 1_000, id: 7, updated_ms: 5 };
+		store.set_chat_read(SRV, &channel, &read).unwrap();
+		assert_eq!(store.chat_read(SRV, &channel).unwrap(), Some(read));
+		// Set again: the same row, moved.
+		let later = ChatRead { ts_ms: 2_000, id: 9, updated_ms: 6 };
+		store.set_chat_read(SRV, &channel, &later).unwrap();
+		assert_eq!(store.chat_read(SRV, &channel).unwrap(), Some(later));
+		store.set_chat_read(SRV, &dm, &read).unwrap();
+		store.set_chat_read("other", &channel, &read).unwrap();
+		assert_eq!(store.chat_reads(SRV).unwrap(), [(channel.clone(), later), (dm, read)]);
+		assert_eq!(store.chat_reads("other").unwrap(), [(channel, read)]);
 	}
 
 	/// A database of version 1 with messages is upgraded in place.

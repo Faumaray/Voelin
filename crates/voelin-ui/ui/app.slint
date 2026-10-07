@@ -105,6 +105,10 @@ export component MainWindow inherits Window {
     property <length> panel-width: Nav.right-panel-width;
     changed panel-width => { Bridge.panel-resized(panel-width / 1px); }
 
+    // Messages are read while the chat is on screen.
+    property <bool> chat-shown: Nav.chat-shown;
+    changed chat-shown => { Bridge.chat-shown-changed(); }
+
     // Compatibility with callers from before the navigation global.
     public function open-share-dialog() {
         Nav.open-share();

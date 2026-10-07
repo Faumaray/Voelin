@@ -262,6 +262,9 @@ export struct ChatLine {
     marked: bool,
     // The first web address it links to, "" if none.
     link: string,
+    // The first new message: the "New" divider is above it (never
+    // `continued`).
+    unread-start: bool,
 }
 
 // A pinned message in the pins drawer.
@@ -886,6 +889,12 @@ export global Bridge {
     // that changes with every jump.
     in property <int> jump-index: -1;
     in property <int> jump-requests;
+    // The "New" divider of the current chat: its row in `messages` (-1:
+    // none), how many messages are new from there, and since when
+    // ("10:14"). It stays until the chat is left or marked read.
+    in property <int> unread-index: -1;
+    in property <int> unread-count;
+    in property <string> unread-since;
     in property <string> status-text;
     // Unread messages in all chats of the current server.
     in property <int> unread-total;
@@ -1017,6 +1026,11 @@ export global Bridge {
     callback send-message(string);
     // The page before the oldest shown message.
     callback load-older();
+    // The current chat is read: its "New" divider goes.
+    callback mark-read();
+    // The current chat's messages came on screen or left it
+    // (Nav.chat-shown): messages are read only while they are shown.
+    callback chat-shown-changed();
     // A message of the current chat, by its `key`.
     callback react(int, string);
     callback pin(int, bool);

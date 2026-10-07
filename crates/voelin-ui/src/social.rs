@@ -224,6 +224,17 @@ pub(crate) fn now_ms() -> i64 {
 	chrono::Utc::now().timestamp_millis()
 }
 
+/// Whether a message is ours: by one of our unique ids, or by our client in
+/// its session (`own_client`).
+pub(crate) fn own_message(
+	own_uids: &HashSet<String>,
+	own_client: Option<u16>,
+	message: &ChatMessage,
+) -> bool {
+	message.author_uid.as_ref().is_some_and(|u| own_uids.contains(u))
+		|| (own_client.is_some() && message.author_id == own_client)
+}
+
 /// The settings pages a search finds, with words that lead to them.
 const SETTING_PAGES: [(&str, &str, SettingsSection); 11] = [
 	("My Account", "account identity unique id nickname myteamspeak", SettingsSection::Account),
@@ -688,10 +699,8 @@ impl App {
 
 	/// Whether a message is ours.
 	pub(crate) fn is_own(&self, session: i64, message: &ChatMessage) -> bool {
-		message.author_uid.as_ref().is_some_and(|u| self.social.own_uids.contains(u))
-			|| self.sessions.get(&session).is_some_and(|v| {
-				v.state.own_client.is_some() && message.author_id == v.state.own_client
-			})
+		let own_client = self.sessions.get(&session).and_then(|v| v.state.own_client);
+		own_message(&self.social.own_uids, own_client, message)
 	}
 
 	/// A new chat message: a private message, or one that mentions us.

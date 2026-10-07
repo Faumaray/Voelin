@@ -25,6 +25,12 @@ pub(super) fn wire(ui: &MainWindow) {
 	bridge.on_load_older(|| {
 		with_app(App::load_older);
 	});
+	bridge.on_mark_read(|| {
+		with_app(App::mark_read);
+	});
+	bridge.on_chat_shown_changed(|| {
+		with_app(App::chat_shown_changed);
+	});
 	bridge.on_react(|key, emoji| {
 		with_app(|app| app.react(key, emoji.to_string()));
 	});

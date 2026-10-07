@@ -256,6 +256,7 @@ impl App {
 	/// Show a server, and observe it.
 	pub(crate) fn select_server(&mut self, id: i64) {
 		self.current = Some(id);
+		self.track_reading();
 		self.refresh_all();
 		self.observe(id);
 	}
@@ -325,10 +326,12 @@ impl App {
 			let _ = self.secrets.delete(&b.query_password_key());
 		}
 		let _ = self.store.delete_bookmark(id);
+		self.save_reads(id);
 		self.sessions.remove(&id);
 		self.gateways_looked_up.remove(&id);
 		self.bookmarks = self.store.bookmarks().unwrap_or_default();
 		self.current = self.bookmarks.first().map(|b| b.id);
+		self.track_reading();
 		self.refresh_all();
 	}
 

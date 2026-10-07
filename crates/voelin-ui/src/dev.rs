@@ -28,6 +28,9 @@
 //!   `channel-password` (the password dialog of the first locked channel,
 //!   the sample's Officers; `channel-password:wrong` as after a refused
 //!   one), `actions` (the last message's actions, as if hovered),
+//!   `unread` (the current chat read up to five messages before its end:
+//!   the "New" divider, scrolled up to; `unread:end` ten messages before,
+//!   at the list's end, under the bar that counts the new messages),
 //!   `link-confirm[:<url>]` (the question before a masked link opens, by
 //!   default the sample's raid board), `watch` (the first stream; with
 //!   sample data the local test pattern in its place), `popout` (the same,
@@ -154,6 +157,7 @@ fn mobile_tab(name: &str) -> MobileTab {
 pub(crate) struct Running {
 	_screenshot: Option<slint::Timer>,
 	_resize: Option<slint::Timer>,
+	_scroll: Option<slint::Timer>,
 }
 
 /// Apply the switches once the app is set up.
@@ -289,6 +293,10 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 			}
 			// A screenshot cannot hover.
 			"actions" => nav.set_show_actions(true),
+			// `end`: further back, so the divider is above the view.
+			"unread" => {
+				with_app(|app| open_unread(app, if arg == "end" { 10 } else { 5 }));
+			}
 			"link-confirm" => {
 				let url = if arg.is_empty() { DEMO_RAID_BOARD } else { arg };
 				with_app(|app| app.open_link_text(url, true));
@@ -362,6 +370,24 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 		);
 		timer
 	});
+	// `unread`: up to the divider once the list is laid out (after the
+	// resize above).
+	let scroll = switches.open.iter().any(|o| o == "unread").then(|| {
+		let weak = ui.as_weak();
+		let timer = slint::Timer::default();
+		timer.start(
+			slint::TimerMode::SingleShot,
+			Duration::from_millis(switches.screenshot_delay * 1000 * 3 / 4),
+			move || {
+				if let Some(ui) = weak.upgrade() {
+					let bridge = ui.global::<Bridge>();
+					bridge.set_jump_index(bridge.get_unread_index());
+					bridge.set_jump_requests(bridge.get_jump_requests().wrapping_add(1));
+				}
+			},
+		);
+		timer
+	});
 	let screenshot = switches.screenshot.clone().map(|path| {
 		let weak = ui.as_weak();
 		let timer = slint::Timer::default();
@@ -381,7 +407,27 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 		);
 		timer
 	});
-	Running { _screenshot: screenshot, _resize: resize }
+	Running { _screenshot: screenshot, _resize: resize, _scroll: scroll }
+}
+
+/// The current chat's read marker `back` messages before its end, as if
+/// they came while away, its "New" divider shown (`VOELIN_OPEN=unread`).
+fn open_unread(app: &mut App, back: usize) {
+	let Some(id) = app.current else { return };
+	let own_uids = app.social.own_uids.clone();
+	let Some(view) = app.sessions.get_mut(&id) else { return };
+	let own_client = view.state.own_client;
+	let own = |m: &ChatMessage| crate::social::own_message(&own_uids, own_client, m);
+	let index = view.current_tab;
+	let tab = &mut view.tabs[index];
+	let Some(at) = tab.messages.len().checked_sub(back + 1) else { return };
+	let read = &tab.messages[at].message;
+	tab.read = Some((read.message.ts_ms, read.id));
+	tab.divider = None;
+	tab.count_unread(own);
+	tab.enter(own);
+	app.refresh_chat();
+	app.refresh_servers();
 }
 
 fn save_screenshot(ui: &MainWindow, path: &std::path::Path) -> Result<()> {
@@ -848,14 +894,19 @@ fn demo_social(app: &mut App) {
 	neon.message.author_id = None;
 	app.social.dm.stored.push(("demo-dev".into(), neon));
 	app.social.dm.bookmark_of.insert("demo-dev".into(), DEMO + 2);
-	// Unread: Mira's and Lumen's messages came while away.
-	if let Some(view) = app.sessions.get_mut(&DEMO) {
+	// The samples came one by one, as new ones do: all are read (no "New"
+	// line, which a gateway page on screen gets), but for Mira's and
+	// Lumen's messages, which came while away.
+	for view in app.sessions.values_mut() {
 		for tab in &mut view.tabs {
+			tab.divider = None;
+			tab.catch_up();
 			match &tab.target {
 				ChatTarget::Private(uid) if uid == "demo-4" => tab.unread = 1,
 				ChatTarget::Private(uid) if uid == "demo-2" => tab.unread = 2,
-				_ => {}
+				_ => continue,
 			}
+			tab.read = None;
 		}
 	}
 	// A poke from Kairo, shown among the messages and in the bell.

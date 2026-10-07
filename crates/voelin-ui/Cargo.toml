@@ -50,7 +50,9 @@ tsclientlib = { path = "../proto/tsclientlib" }
 # and PipeWire, global hotkeys through the portal and X11.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 voelin-myts = { path = "../voelin-myts" }
-slint = { version = "1.18", features = ["renderer-software"] }
+# winit's focus events (an unstable API, so this minor version only):
+# messages are read only while the window has the focus (`app::watch_focus`).
+slint = { version = "~1.18", features = ["renderer-software", "unstable-winit-030"] }
 voelin-core = { path = "../voelin-core", default-features = false, features = ["media-desktop"] }
 voelin-platform = { path = "../voelin-platform" }
 voelin-store = { path = "../voelin-store", features = ["keyring"] }

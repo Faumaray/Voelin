@@ -319,6 +319,34 @@ component MessageActions inherits Rectangle {
     }
 }
 
+// Where the messages not read yet start: a red line with "New" at its end.
+component NewDivider inherits HorizontalLayout {
+    padding-left: Theme.space-6;
+    padding-right: Theme.space-6;
+    padding-top: Theme.space-3;
+    Rectangle {
+        horizontal-stretch: 1;
+        Rectangle {
+            height: 1px;
+            background: Theme.danger;
+        }
+    }
+    Rectangle {
+        width: new.preferred-width + 2 * Theme.space-2;
+        height: 16px;
+        border-radius: Theme.radius-xs;
+        background: Theme.danger;
+        accessible-role: AccessibleRole.text;
+        accessible-label: @tr("New messages");
+        new := Text {
+            text: @tr("New");
+            color: Theme.on-accent;
+            font-size: Theme.font-xs;
+            font-weight: Theme.weight-bold;
+        }
+    }
+}
+
 // One message; `continued` lines (same author just before) omit the header.
 export component MessageRow inherits Rectangle {
     in property <ChatLine> line;
@@ -334,7 +362,7 @@ export component MessageRow inherits Rectangle {
     property <bool> can-act: root.actions && !line.blocked && (line.text != "" || line.remote);
     // The pointer on the message or on its actions (above its top).
     property <bool> active: hover.has-hover || bar.hovered;
-    min-height: body.preferred-height;
+    min-height: column.preferred-height;
     background: line.marked ? Theme.accent-soft : root.active ? Theme.surface-2.transparentize(0.6) : transparent;
     accessible-role: AccessibleRole.list-item;
     accessible-label: line.author + ": " + line.text;
@@ -349,90 +377,94 @@ export component MessageRow inherits Rectangle {
                 menu.show(self.mouse-x, self.mouse-y);
             }
         }
-        body := HorizontalLayout {
-            padding-left: Theme.space-6;
-            padding-right: Theme.space-6;
-            padding-top: line.continued ? 2px : Theme.space-5;
-            padding-bottom: 2px;
-            spacing: Theme.space-4;
-            VerticalLayout {
-                width: root.avatar;
-                alignment: start;
-                if !line.continued: Avatar {
-                    size: root.avatar;
-                    initials: line.initials;
-                    tint: line.tint;
-                    image: line.avatar;
-                    label: line.author;
-                }
-            }
-            VerticalLayout {
-                horizontal-stretch: 1;
-                spacing: 2px;
-                if !line.continued: HorizontalLayout {
-                    spacing: Theme.space-3;
+        column := VerticalLayout {
+            if line.unread-start: NewDivider { }
+            HorizontalLayout {
+                padding-left: Theme.space-6;
+                padding-right: Theme.space-6;
+                padding-top: line.continued ? 2px : line.unread-start ? Theme.space-3 : Theme.space-5;
+                padding-bottom: 2px;
+                spacing: Theme.space-4;
+                VerticalLayout {
+                    width: root.avatar;
                     alignment: start;
-                    Text {
-                        text: line.author;
-                        color: Theme.name-text;
-                        font-size: Theme.font-lg;
-                        font-weight: Theme.weight-medium;
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        text: line.time;
-                        color: Theme.text-muted;
-                        font-size: Theme.font-sm;
-                        vertical-alignment: center;
-                    }
-                    if line.pinned: Chip {
-                        text: @tr("pinned");
-                        icon: Icons.pin;
-                        tint: Theme.warning;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    if line.topic != "": Chip {
-                        text: line.topic;
-                        icon: Icons.messages-square;
-                        tint: Theme.accent-text;
-                        y: (parent.height - self.height) / 2;
+                    if !line.continued: Avatar {
+                        size: root.avatar;
+                        initials: line.initials;
+                        tint: line.tint;
+                        image: line.avatar;
+                        label: line.author;
                     }
                 }
-                MessageText {
-                    line: line;
-                    font-size: Theme.font-md;
-                }
-                if line.files.length > 0 && !line.blocked: VerticalLayout {
-                    padding-top: Theme.space-2;
-                    padding-bottom: Theme.space-1;
-                    spacing: Theme.space-2;
-                    for file in line.files: HorizontalLayout {
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 2px;
+                    if !line.continued: HorizontalLayout {
+                        spacing: Theme.space-3;
                         alignment: start;
-                        if file.preview.width > 0: ImageCard {
-                            key: line.key;
-                            file: file;
+                        Text {
+                            text: line.author;
+                            color: Theme.name-text;
+                            font-size: Theme.font-lg;
+                            font-weight: Theme.weight-medium;
+                            vertical-alignment: center;
                         }
-                        if file.preview.width == 0: FileCard {
-                            key: line.key;
-                            file: file;
-                            max-width: 440px;
+                        Text {
+                            text: line.time;
+                            color: Theme.text-muted;
+                            font-size: Theme.font-sm;
+                            vertical-alignment: center;
+                        }
+                        if line.pinned: Chip {
+                            text: @tr("pinned");
+                            icon: Icons.pin;
+                            tint: Theme.warning;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        if line.topic != "": Chip {
+                            text: line.topic;
+                            icon: Icons.messages-square;
+                            tint: Theme.accent-text;
+                            y: (parent.height - self.height) / 2;
                         }
                     }
-                }
-                if line.reactions.length > 0: VerticalLayout {
-                    padding-top: Theme.space-2;
-                    padding-bottom: Theme.space-1;
-                    Reactions {
-                        key: line.key;
-                        model: line.reactions;
+                    MessageText {
+                        line: line;
+                        font-size: Theme.font-md;
+                    }
+                    if line.files.length > 0 && !line.blocked: VerticalLayout {
+                        padding-top: Theme.space-2;
+                        padding-bottom: Theme.space-1;
+                        spacing: Theme.space-2;
+                        for file in line.files: HorizontalLayout {
+                            alignment: start;
+                            if file.preview.width > 0: ImageCard {
+                                key: line.key;
+                                file: file;
+                            }
+                            if file.preview.width == 0: FileCard {
+                                key: line.key;
+                                file: file;
+                                max-width: 440px;
+                            }
+                        }
+                    }
+                    if line.reactions.length > 0: VerticalLayout {
+                        padding-top: Theme.space-2;
+                        padding-bottom: Theme.space-1;
+                        Reactions {
+                            key: line.key;
+                            model: line.reactions;
+                        }
                     }
                 }
             }
         }
     }
+    // Below the "New" divider (`NewDivider`) when the message has one.
     bar := MessageActions {
         x: parent.width - self.width - Theme.space-6;
-        y: root.first ? 2px : -12px;
+        y: root.first || line.unread-start ? (line.unread-start ? Theme.space-3 + 16px : 0px) + 2px : -12px;
         line: line;
         shown: root.can-act && (root.active || root.show-actions);
     }
@@ -467,6 +499,54 @@ export component MessageRow inherits Rectangle {
     }
 }
 
+// Over a chat whose "New" divider is above the view: how many messages
+// are new and since when, a jump to the first, and Mark as read.
+component UnreadBar inherits Rectangle {
+    callback jump();
+    height: 36px;
+    border-radius: Theme.radius-pill;
+    background: Theme.surface-3;
+    border-width: 1px;
+    border-color: Theme.border-popup;
+    HorizontalLayout {
+        padding-left: Theme.space-5;
+        padding-right: Theme.space-2;
+        spacing: Theme.space-3;
+        Rectangle {
+            width: 8px;
+            height: 8px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 4px;
+            background: Theme.danger;
+        }
+        Text {
+            text: @tr("{n} new message since {}" | "{n} new messages since {}" % Bridge.unread-count, Bridge.unread-since);
+            color: Theme.text;
+            font-size: Theme.font-sm;
+            font-weight: Theme.weight-semibold;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        Button {
+            small: true;
+            kind: ButtonKind.primary;
+            icon: Icons.arrow-up;
+            text: @tr("Jump");
+            y: (parent.height - self.height) / 2;
+            clicked => { root.jump(); }
+        }
+        IconButton {
+            icon: Icons.x;
+            label: @tr("Mark as read");
+            size: 28px;
+            icon-size: Theme.icon-sm;
+            y: (parent.height - self.height) / 2;
+            clicked => { Bridge.mark-read(); }
+        }
+    }
+}
+
 // The top of a chat with older messages: the button that loads them, or a
 // spinner while they load.
 component OlderRow inherits HorizontalLayout {
@@ -491,7 +571,8 @@ component OlderRow inherits HorizontalLayout {
 // scrolling to within a screen of the top loads the page before, and the
 // rows on screen stay where they are while it comes in above them. The
 // button above the oldest message is for a chat too short to scroll, and
-// for after a page that brought nothing.
+// for after a page that brought nothing. While the "New" divider is above
+// the view, a bar over the list says how many messages are new.
 export component MessageList inherits VerticalLayout {
     in property <[ChatLine]> model;
     in property <bool> older;
@@ -585,16 +666,21 @@ export component MessageList inherits VerticalLayout {
     changed tab => { root.reset(); }
     property <int> server: Bridge.current-server;
     changed server => { root.reset(); }
-    // A pinned message was jumped to: scroll to where its row is. Rows
-    // differ in height, so this is the place of an average row (as the
-    // standard list estimates it); the row itself is highlighted.
-    property <int> jumps: Bridge.jump-requests;
-    changed jumps => {
+    // Scroll to where row `index` is, a third down the view. Rows differ in
+    // height, so this is the place of an average row (as the standard list
+    // estimates it).
+    function jump-to(index: int) {
         if root.older && root.model.length > 0 {
             root.settle = 0;
-            list.content-y = max(root.end, min(0px, list.visible-height / 3 - Bridge.jump-index * list.content-height / root.model.length));
+            list.content-y = max(root.end, min(0px, list.visible-height / 3 - index * list.content-height / root.model.length));
         }
     }
+    // A pinned message was jumped to (the row is highlighted).
+    property <int> jumps: Bridge.jump-requests;
+    changed jumps => { root.jump-to(Bridge.jump-index); }
+    // The "New" divider is above the view (as estimated for a jump).
+    property <bool> new-above: root.older && Bridge.unread-index >= 0 && root.model.length > 0
+        && list.content-y + Bridge.unread-index * list.content-height / root.model.length < 0;
     if Bridge.local-history: Rectangle {
         height: 30px;
         background: Theme.warning-soft;
@@ -619,22 +705,32 @@ export component MessageList inherits VerticalLayout {
     if root.older && Bridge.more-history && root.model.length == 0: OlderRow {
         load => { root.load(); }
     }
-    list := ListView {
+    Rectangle {
         vertical-stretch: 1;
         // A long chat must not make the window taller: the list scrolls.
         preferred-height: 0px;
-        accessible-label: @tr("Messages");
-        // Scrolled by hand: the view is where the user put it.
-        scrolled => { root.settle = 0; }
-        for line[i] in root.model: VerticalLayout {
-            if i == 0 && root.older && Bridge.more-history: OlderRow {
-                load => { root.load(); }
+        list := ListView {
+            width: parent.width;
+            height: parent.height;
+            accessible-label: @tr("Messages");
+            // Scrolled by hand: the view is where the user put it.
+            scrolled => { root.settle = 0; }
+            for line[i] in root.model: VerticalLayout {
+                if i == 0 && root.older && Bridge.more-history: OlderRow {
+                    load => { root.load(); }
+                }
+                MessageRow {
+                    line: line;
+                    show-actions: Nav.show-actions && i == root.model.length - 1;
+                    first: i == 0;
+                }
             }
-            MessageRow {
-                line: line;
-                show-actions: Nav.show-actions && i == root.model.length - 1;
-                first: i == 0;
-            }
+        }
+        if root.new-above: UnreadBar {
+            x: Theme.space-5;
+            y: Theme.space-3;
+            width: parent.width - 2 * Theme.space-5;
+            jump => { root.jump-to(Bridge.unread-index); }
         }
     }
 }

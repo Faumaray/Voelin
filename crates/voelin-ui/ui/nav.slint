@@ -131,6 +131,11 @@ export global Nav {
     // The voice channel screen (design mockup 02) instead of a tab: the
     // voice channel view, or a stream we watch.
     out property <bool> phone-voice: narrow && page == Page.server && Bridge.voice-connected && (voice-view || Bridge.viewer-open);
+    // The current chat's messages are on screen: the server page (on the
+    // phone its Chats tab or the voice screen), or a private chat open on
+    // the messages page. Only then are new messages read.
+    out property <bool> chat-shown: (page == Page.server && (!narrow || phone-voice || mobile-tab == MobileTab.chat))
+        || (page == Page.messages && Bridge.dm.open && !Bridge.dm.mail && !Bridge.dm.stored);
 
     // Settings were opened (so leaving them tells Rust).
     property <bool> settings-active;

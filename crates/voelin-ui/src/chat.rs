@@ -7,6 +7,12 @@
 //! the selected tab are rebuilt from them with [`vm::list::sync`], which
 //! touches only the rows that changed. Sessions the engine keeps no history
 //! for (it does not know the server yet) fall back to [`Event::Chat`].
+//!
+//! Messages are read while their tab is on screen in the focused window
+//! ([`App::track_reading`]). A tab remembers the newest message read
+//! (`Tab::read`, kept in the store's `chat_reads`), counts what came after
+//! it, and when it comes on screen shows a "New" divider above the first
+//! of those until it is left.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,6 +26,7 @@ use voelin_core::{
 };
 use voelin_gateway_proto::{ErrorCode, TopicInfo, feature};
 use voelin_model::{ChatMessage, ChatTarget, HostMessageMode, ServerDetails};
+use voelin_store::ChatRead;
 
 use crate::app::{App, Bridge, ChatLine, ChatTab, FileItem, Msg, Nav, PinItem, SessionView, Tab};
 use crate::settings::UI_IMAGE_PREVIEW_KB;
@@ -50,6 +57,15 @@ pub(crate) fn server_text<'a>(view: &'a SessionView, tab: &Tab, key: i32) -> Opt
 		return None;
 	}
 	server_texts(&view.presence.server).get((-1 - key) as usize).map(|(text, _)| *text)
+}
+
+/// The store's name of a chat.
+pub(crate) fn store_target(target: &ChatTarget) -> voelin_store::ChatTarget {
+	match target {
+		ChatTarget::Server => voelin_store::ChatTarget::Server,
+		ChatTarget::Channel(cid) => voelin_store::ChatTarget::Channel(*cid),
+		ChatTarget::Private(uid) => voelin_store::ChatTarget::Private(uid.clone()),
+	}
 }
 
 /// A file being downloaded from a chat message.
@@ -103,7 +119,8 @@ impl App {
 		let index = match view.tabs.iter().position(|t| t.target == target) {
 			Some(i) => i,
 			None => {
-				view.tabs.push(Tab::new(target.clone(), title));
+				let tab = view.new_tab(target.clone(), title);
+				view.tabs.push(tab);
 				if !self.demo_ui {
 					self.engine.send(Command::OpenChat { session: id as u64, target });
 				}
@@ -112,7 +129,7 @@ impl App {
 		};
 		if focus {
 			view.current_tab = index;
-			view.tabs[index].unread = 0;
+			self.track_reading();
 		}
 		self.refresh_chat();
 		self.refresh_servers();
@@ -123,12 +140,12 @@ impl App {
 			&& index < view.tabs.len()
 		{
 			view.current_tab = index;
-			view.tabs[index].unread = 0;
 			view.tabs[index].topic = None;
 		}
 		if let Some(id) = self.current {
 			self.fetch_previews(id);
 		}
+		self.track_reading();
 		self.refresh_chat();
 		self.refresh_servers();
 	}
@@ -139,10 +156,14 @@ impl App {
 		if index == 0 || index >= view.tabs.len() {
 			return;
 		}
+		self.save_read(id, index);
+		let view = self.sessions.entry(id).or_default();
 		let tab = view.tabs.remove(index);
 		view.current_tab = view.current_tab.min(view.tabs.len() - 1);
 		self.engine.send(Command::CloseChat { session: id as u64, target: tab.target });
+		self.track_reading();
 		self.refresh_chat();
+		self.refresh_servers();
 	}
 
 	pub(crate) fn send_message(&mut self, text: String) {
@@ -161,7 +182,8 @@ impl App {
 		match view.tabs.iter().position(|t| t.target == *target) {
 			Some(i) => i,
 			None => {
-				view.tabs.push(Tab::new(target.clone(), title()));
+				let tab = view.new_tab(target.clone(), title());
+				view.tabs.push(tab);
 				view.tabs.len() - 1
 			}
 		}
@@ -186,21 +208,24 @@ impl App {
 	/// comes, without an id.
 	pub(crate) fn add_message(&mut self, id: i64, message: ChatMessage) {
 		let current = self.current == Some(id);
+		let reading = self.reads_now(id);
+		let new = !self.is_own(id, &message);
 		let view = self.sessions.entry(id).or_default();
 		let title = Self::tab_title(view, &message.target, &message.author_name);
 		let index = Self::tab_for(view, &message.target, || title);
-		let shown = current && view.current_tab == index;
+		let seen = reading && view.current_tab == index;
 		let tab = &mut view.tabs[index];
 		let line = vm::chat::line(&message, tab.last.as_ref());
 		tab.last = Some(Previous::of(&message));
 		tab.lines.push(line);
-		if !shown {
+		let counted = new && !seen;
+		if counted {
 			tab.unread += 1;
 		}
 		if current {
 			self.refresh_chat();
 		}
-		if !shown {
+		if counted {
 			self.refresh_servers();
 		}
 		self.studio_chat_changed(id, &message.target);
@@ -216,6 +241,7 @@ impl App {
 		complete: bool,
 	) {
 		let current = self.current == Some(id);
+		let reading = self.reads_now(id);
 		// A private chat is named after the peer, whoever wrote first.
 		let peer = match target {
 			ChatTarget::Private(uid) => Some(format!(
@@ -231,7 +257,8 @@ impl App {
 		let author = messages.first().map_or("", |m| m.message.author_name.as_str());
 		let title = peer.unwrap_or_else(|| Self::tab_title(view, target, author));
 		let index = Self::tab_for(view, target, || title);
-		let shown = current && view.current_tab == index;
+		let seen = reading && view.current_tab == index;
+		let own_client = view.state.own_client;
 		let tab = &mut view.tabs[index];
 		if source == HistorySource::Gateway {
 			tab.synced = true;
@@ -240,28 +267,49 @@ impl App {
 			tab.loading = false;
 			tab.complete = tab.complete || complete;
 		}
-		let mut fresh = 0;
+		// Without a marker, what the tab holds was read.
+		if tab.read.is_none() {
+			tab.read = tab.newest();
+		}
 		for message in messages {
 			match tab.messages.iter().position(|m| m.message.id == message.id) {
 				Some(i) => tab.messages[i].message = message,
 				None => {
 					let key = tab.take_key();
-					if source == HistorySource::Live {
-						fresh += 1;
-					}
 					tab.messages.push(Msg { key, message });
 				}
 			}
 		}
 		tab.messages.sort_by_key(|m| (m.message.message.ts_ms, m.message.id));
-		if !shown {
-			tab.unread += fresh;
+		// ...and so is a first stored page; a first live message is new.
+		if tab.read.is_none() {
+			tab.read = match source {
+				HistorySource::Live => tab
+					.messages
+					.first()
+					.map(|m| (m.message.message.ts_ms, m.message.id.saturating_sub(1))),
+				_ => tab.newest(),
+			};
 		}
+		let unread = tab.unread;
+		let own =
+			|m: &ChatMessage| crate::social::own_message(&self.social.own_uids, own_client, m);
+		if seen && source == HistorySource::Live {
+			tab.catch_up();
+		} else {
+			tab.count_unread(own);
+			// What came while away (a stored or gateway page) gets the
+			// divider also when its chat is on screen already.
+			if seen {
+				tab.enter(own);
+			}
+		}
+		let counted = tab.unread != unread;
 		if current {
 			self.fetch_previews(id);
 			self.refresh_chat();
 		}
-		if fresh > 0 && !shown {
+		if counted {
 			self.refresh_servers();
 		}
 		self.studio_chat_changed(id, target);
@@ -332,6 +380,7 @@ impl App {
 				previews,
 				pictures,
 				cache,
+				unread_start: main && tab.divider == Some(m.message.id),
 			};
 			lines.push((
 				m.message.message.ts_ms,
@@ -434,6 +483,7 @@ impl App {
 			if bridge.get_messages() != empty {
 				bridge.set_messages(empty);
 			}
+			bridge.set_unread_index(-1);
 			return;
 		};
 		let tabs: Vec<ChatTab> = view
@@ -483,13 +533,31 @@ impl App {
 		}
 		let tab = &view.tabs[view.current_tab];
 		// Sessions without stored history push their lines themselves.
+		let mut divider = None;
 		if view.has_history() {
-			vm::list::sync(&tab.lines, &self.lines_of(view, tab, true));
+			let lines = self.lines_of(view, tab, true);
+			divider = lines.iter().position(|l| l.unread_start);
+			vm::list::sync(&tab.lines, &lines);
 		}
 		let lines = ModelRc::from(tab.lines.clone());
 		if bridge.get_messages() != lines {
 			bridge.set_messages(lines);
 		}
+		// The "New" divider: how many came from there on, and when.
+		let new = tab
+			.divider
+			.and_then(|d| tab.messages.iter().position(|m| m.message.id == d))
+			.map_or(&[][..], |i| &tab.messages[i..]);
+		let session = self.current.unwrap_or_default();
+		let count = new.iter().filter(|m| !self.is_own(session, &m.message.message)).count();
+		bridge.set_unread_index(divider.map_or(-1, |i| i as i32));
+		bridge.set_unread_count(count as i32);
+		bridge.set_unread_since(
+			new.first()
+				.map(|m| vm::chat::since_time(m.message.message.ts_ms))
+				.unwrap_or_default()
+				.into(),
+		);
 		bridge.set_more_history(view.has_history() && !tab.complete);
 		bridge.set_loading_history(tab.loading);
 		bridge.set_local_history(
@@ -581,6 +649,148 @@ impl App {
 			}
 			// A file opens from its card.
 			LinkKind::File | LinkKind::Refused => String::new(),
+		}
+	}
+
+	// What is read.
+
+	/// The current chat's messages are on screen (`Nav.chat-shown`).
+	fn chat_shown(&self) -> bool {
+		self.ui.upgrade().is_some_and(|ui| ui.global::<Nav>().get_chat_shown())
+	}
+
+	/// New messages of session `id` in its current tab are read as they
+	/// come: they are on screen in the focused window.
+	fn reads_now(&self, id: i64) -> bool {
+		self.focused && self.current == Some(id) && self.chat_shown()
+	}
+
+	/// After anything that can change which chat is on screen (a tab, a
+	/// server, the page, the window's focus): the chat left is stored and
+	/// loses its divider; the one on screen, in the focused window, is read
+	/// (its divider above what was new). `true` if a tab changed.
+	pub(crate) fn track_reading(&mut self) -> bool {
+		let open = self.current.filter(|_| self.chat_shown()).and_then(|id| {
+			let view = self.sessions.get(&id)?;
+			Some((id, view.tabs.get(view.current_tab)?.target.clone()))
+		});
+		let mut changed = false;
+		if open != self.reading {
+			if let Some((id, target)) = self.reading.take()
+				&& let Some(index) = self.tab_index(id, &target)
+			{
+				let tab = &mut self.sessions.entry(id).or_default().tabs[index];
+				changed |= tab.divider.take().is_some();
+				self.save_read(id, index);
+			}
+			self.reading = open.clone();
+		}
+		if let (true, Some((id, target))) = (self.focused, open)
+			&& let Some(index) = self.tab_index(id, &target)
+		{
+			let own_uids = &self.social.own_uids;
+			let view = self.sessions.entry(id).or_default();
+			let own_client = view.state.own_client;
+			let tab = &mut view.tabs[index];
+			let before = (tab.unread, tab.divider);
+			tab.enter(|m| crate::social::own_message(own_uids, own_client, m));
+			changed |= (tab.unread, tab.divider) != before;
+		}
+		changed
+	}
+
+	/// Where the tab of `target` is in session `id`.
+	fn tab_index(&self, id: i64, target: &ChatTarget) -> Option<usize> {
+		self.sessions.get(&id)?.tabs.iter().position(|t| t.target == *target)
+	}
+
+	/// The current chat came on screen or left it (`Nav.chat-shown`).
+	pub(crate) fn chat_shown_changed(&mut self) {
+		if self.track_reading() {
+			self.refresh_chat();
+			self.refresh_servers();
+		}
+	}
+
+	/// The window gained or lost the focus (winit's events: the desktop
+	/// only).
+	#[cfg(not(target_os = "android"))]
+	pub(crate) fn window_focused(&mut self, focused: bool) {
+		self.focused = focused;
+		if self.track_reading() {
+			self.refresh_chat();
+			self.refresh_servers();
+		}
+	}
+
+	/// The current chat is read (the bar over its messages): the divider
+	/// goes.
+	pub(crate) fn mark_read(&mut self) {
+		let Some(id) = self.current else { return };
+		let Some(view) = self.sessions.get_mut(&id) else { return };
+		let index = view.current_tab;
+		let tab = &mut view.tabs[index];
+		tab.divider = None;
+		tab.catch_up();
+		self.save_read(id, index);
+		self.refresh_chat();
+		self.refresh_servers();
+	}
+
+	/// Store where tab `index` of session `id` was read, if that moved (not
+	/// for the sample data of VOELIN_DEMO_UI).
+	pub(crate) fn save_read(&mut self, id: i64, index: usize) {
+		if self.demo_ui {
+			return;
+		}
+		let Some(view) = self.sessions.get_mut(&id) else { return };
+		let Some(server_uid) = view.state.server_uid.as_deref() else { return };
+		let Some(tab) = view.tabs.get_mut(index) else { return };
+		let Some((ts_ms, message)) = tab.read.filter(|r| tab.stored_read != Some(*r)) else {
+			return;
+		};
+		let read =
+			ChatRead { ts_ms, id: message, updated_ms: chrono::Utc::now().timestamp_millis() };
+		let target = store_target(&tab.target);
+		match self.store.set_chat_read(server_uid, &target, &read) {
+			Ok(()) => {
+				tab.stored_read = tab.read;
+				// A tab closed and opened again starts from here.
+				view.reads.insert(target.key(), (ts_ms, message));
+			}
+			Err(e) => tracing::warn!(%e, "could not keep where a chat was read"),
+		}
+	}
+
+	/// Store where every chat of session `id` was read (it ended, or the
+	/// app exits).
+	pub(crate) fn save_reads(&mut self, id: i64) {
+		let count = self.sessions.get(&id).map_or(0, |v| v.tabs.len());
+		for index in 0..count {
+			self.save_read(id, index);
+		}
+	}
+
+	/// Where the chats of session `id` were read, from the store, once its
+	/// server is known (or another one: the gateway's id wins): its tabs
+	/// start from there, now and when they open.
+	pub(crate) fn load_reads(&mut self, id: i64) {
+		let Some(view) = self.sessions.get_mut(&id) else { return };
+		if self.demo_ui || view.state.server_uid.is_none() || view.reads_of == view.state.server_uid
+		{
+			return;
+		}
+		view.reads_of = view.state.server_uid.clone();
+		let server_uid = view.reads_of.as_deref().unwrap_or_default();
+		view.reads = match self.store.chat_reads(server_uid) {
+			Ok(reads) => reads.into_iter().map(|(t, r)| (t.key(), (r.ts_ms, r.id))).collect(),
+			Err(e) => {
+				tracing::warn!(%e, "could not read where the chats were read");
+				HashMap::new()
+			}
+		};
+		for tab in &mut view.tabs {
+			tab.read_from(&view.reads);
 		}
 	}
 
