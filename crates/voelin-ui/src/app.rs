@@ -1022,6 +1022,7 @@ impl App {
 				let view = self.sessions.entry(id).or_default();
 				let was_voice = view.state.voice;
 				let was_observe = view.state.observe;
+				let was_channel = view.state.own_channel;
 				view.state = state.clone();
 				if state.voice != VoiceState::Connected {
 					view.focused_own_channel = false;
@@ -1060,6 +1061,12 @@ impl App {
 						self.sessions.entry(id).or_default().focused_own_channel = true;
 					}
 				}
+				// Where we are with voice, when it changed here: home's last
+				// place, which `refresh_servers` shows (voice on another
+				// server does not take it back at each of its events).
+				if (state.voice, state.own_channel) != (was_voice, was_channel) {
+					self.remember_voice(id);
+				}
 				self.refresh_servers();
 				self.refresh_toolbar();
 				self.refresh_tree();
@@ -1090,9 +1097,19 @@ impl App {
 				// their pictures.
 				let said = crate::chat::server_texts(&view.presence.server)
 					!= crate::chat::server_texts(&presence.server);
+				// Our channel's path: known only now (a new connection),
+				// or renamed.
+				let path = |v: &SessionView| {
+					v.state.own_channel.map(|c| crate::vm::tree::channel_path(&v.presence, c))
+				};
+				let path_before = path(view);
 				view.presence = presence;
+				let renamed = path(view) != path_before;
 				self.apply_client_playback(session as i64);
 				self.join_after_connect(session as i64);
+				if renamed && self.remember_voice(session as i64) {
+					self.refresh_servers();
+				}
 				if self.current == Some(session as i64) {
 					if said {
 						self.fetch_previews(session as i64);

@@ -271,6 +271,9 @@ pub struct UiSettings {
 	/// "Continue without an account" was chosen on the login page: it does
 	/// not show at start any more (signing in clears it).
 	pub skip_account_prompt: bool,
+	/// The voice channel we were in last (Home's "Continue where you left
+	/// off").
+	pub last_voice: Option<LastVoice>,
 }
 
 impl Default for UiSettings {
@@ -283,8 +286,19 @@ impl Default for UiSettings {
 			share: ShareDefaults::default(),
 			crash_reports: false,
 			skip_account_prompt: false,
+			last_voice: None,
 		}
 	}
+}
+
+/// Where we were with voice last: the bookmark with the address it had
+/// then (one that now points elsewhere does not resume), and the channel's
+/// path, its names from the top as the server has them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastVoice {
+	pub bookmark: i64,
+	pub address: String,
+	pub channel: Vec<String>,
 }
 
 /// The last choices in the share dialog. Frame rate and bitrate are the
@@ -526,6 +540,15 @@ mod tests {
 		assert!(!parsed.crash_reports, "crash reports are opt-in");
 		assert_eq!(parsed.ptt_key, "Ctrl+Shift+T");
 		assert_eq!(parsed.share, ShareDefaults::default());
+		assert_eq!(parsed.last_voice, None, "older settings have no last channel");
+		let last = LastVoice {
+			bookmark: 3,
+			address: "ts.example".into(),
+			channel: vec!["Games".into(), "Chess".into()],
+		};
+		let settings = UiSettings { last_voice: Some(last.clone()), ..UiSettings::default() };
+		let json = serde_json::to_string(&settings).unwrap();
+		assert_eq!(serde_json::from_str::<UiSettings>(&json).unwrap().last_voice, Some(last));
 		assert_eq!(serde_json::to_value(ThemeChoice::System).unwrap(), "system");
 		assert_eq!(ThemeChoice::parse("light"), ThemeChoice::Light);
 		assert_eq!(ThemeChoice::parse("??"), ThemeChoice::Dark);

@@ -7,8 +7,8 @@ import { Bridge, NoticeItem, SearchItem } from "../bridge.slint";
 import { Nav, Page, SettingsSection } from "../nav.slint";
 import { Icon, Button, ButtonKind, IconButton, Avatar, Status, Chip, CountBadge, TextField, Kbd, Divider, ScrollView } from "../components/index.slint";
 
-// One notification.
-component NoticeRow inherits Rectangle {
+// One notification (also home's unread mentions).
+export component NoticeRow inherits Rectangle {
     in property <NoticeItem> notice;
     // Never shorter than its text, so a long list scrolls instead of
     // squeezing the rows.

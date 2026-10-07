@@ -6,6 +6,7 @@
 pub mod avatar;
 pub mod bbcode;
 pub mod chat;
+pub mod home;
 pub mod list;
 pub mod servers;
 pub mod social;

@@ -11,8 +11,8 @@ import { Nav, Page } from "../nav.slint";
 import { Icon, Button, ButtonKind, IconButton, Avatar, Status, Chip, CountBadge, SearchBox, TextField, Field, Slider, Divider, Banner, Modal, PopupMenu, MenuEntry, ListView, ScrollView } from "../components/index.slint";
 import { MessageList, Composer } from "chat.slint";
 
-// One conversation of the list.
-component ConversationRow inherits Rectangle {
+// One conversation of the list (also the home sidebar's).
+export component ConversationRow inherits Rectangle {
     in property <ConversationItem> chat;
     height: 64px * Theme.font-scale;
     border-radius: Theme.radius-md;

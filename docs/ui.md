@@ -179,7 +179,7 @@ where a server has it.
 
 | Part | `VOELIN_OPEN` | What it shows | Engine data |
 |---|---|---|---|
-| Home | `home` | A banner with Voelin and a slide per server (connect, open); friends online (as many whole bubbles as fit, Find Friends after them); live streams on our servers (any channel, the gateways' directories, clients flagged streaming) with viewers, server, channel and kind; our servers with who is there and Join or Open; the latest chats of every server. At the right what friends do, quick actions (find friends, and join or add a server: both open the add-server dialog) and what is happening (gateway events and scheduled streams, soonest first, then server news). The phone has the messages, servers, live streams and recent activity in one column | `FriendPresence`, `ContactsChanged`, `StreamsChanged`, `Gateway` (stream directory, events), `Presence` (the servers' welcome and host messages), `History::recent_chats` |
+| Home | `home`, `first-run` | Before the first server a banner with Voelin and Add a Server; after it "Continue where you left off": the voice channel we were in last (`ui.last_voice`, kept when our channel changes) with Join, which connects into it, or Open while voice is there (none once its server is deleted or has another address), and up to three unread mentions (they open their chat). Then friends online where the right column is hidden (as many whole bubbles as fit, Find Friends after them); live streams on our servers (any channel, the gateways' directories, clients flagged streaming) with viewers, server, channel and kind; our servers with who is there and Join or Open; the latest chats of every server. At the right what friends do and what is happening (gateway events and scheduled streams, soonest first, then server news). The sidebar lists the five newest private chats, unread first (not on the messages page). The phone has the messages, servers and live streams in one column after the friends | `State` (our channel), `FriendPresence`, `ContactsChanged`, `StreamsChanged`, `Gateway` (stream directory, events), `Presence` (the servers' welcome and host messages), `Chat` (mentions), `History::recent_chats` |
 | Library | `library` | The Stream Studio's recordings and clips (the files in `studio.recording_dir`, newest first) with Play and Open Folder | the folder |
 | Friends | `friends[:<uid>]` | Online, All and Blocked tabs, a search; each contact with where they are (server, channel, away, live), message, poke, join, watch. The selected one at the right: relation, where, a note, our volume and mute for them, friend, block, forget | `ContactsChanged`, `FriendPresence`; `Command::SetContact`, `RemoveContact`, `Poke`, `MoveToChannel` |
 | Direct messages | `messages[:<uid>]`, `inbox`, `offline` | The private chats of every server and of the store (peers by unique id) with the last message and unread counts, All, Unread and Inbox (offline messages); the conversation with the chat's message list, pokes among the messages, pictures and files, a composer, and a clear state when the peer cannot be reached (an offline message instead, where the server keeps them); the peer at the right: relation, note, the servers they are on, shared pictures and files, our volume for them | `ChatHistory` (`ChatTarget::Private` by unique id), `Command::LoadOlderHistory`, `Poke`, offline messages (`ListOfflineMessages`, `GetOfflineMessage`, `SendOfflineMessage`, `DeleteOfflineMessage`, `SetOfflineMessageRead`) |
@@ -318,9 +318,9 @@ then Cancel, Save and Connect. Save keeps the server. Connect, also Enter in
 the address or password field, keeps it, connects it with voice and shows it
 (`Bridge.save-and-connect`, `App::save_and_connect`): nothing connects when
 saving failed. While the server has voice, Connect is hidden and Save is the
-main button. Home's Join a Server and Add a Server both open this dialog. The
-form also carries a channel, its password and a privilege key for TeamSpeak
-links, which are not stored with the server: with a channel the dialog shows
+main button. Home's Add a Server opens this dialog too. The form also
+carries a channel, its password and a privilege key for TeamSpeak links,
+which are not stored with the server: with a channel the dialog shows
 "Joins <channel>" and Connect connects into it; with a key it shows "This
 link grants a server group".
 
@@ -448,7 +448,8 @@ Environment variables (see `src/dev.rs`):
   `about`, `share[:live]`, `bookmark[:edit]`, `emoji`, `client`, `panel`, `no-panel`,
   `voice`, `pins`, `topics`, `topic:<id>`, `member`, `poke`,
   `channel-password[:wrong]`, `actions` (the last message's actions, as if
-  hovered: a screenshot cannot hover), `link-confirm[:<url>]` (the question
+  hovered: a screenshot cannot hover), `first-run` (Home's banner as before
+  the first server, over the sample data), `link-confirm[:<url>]` (the question
   before a masked link opens, by default the sample's), `unread` (the
   current chat read up to five messages before its end: the New line,
   scrolled up to; `unread:end` ten messages before, at the end of the list,

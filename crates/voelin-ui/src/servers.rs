@@ -397,6 +397,7 @@ impl App {
 			})
 			.collect();
 		vm::list::sync(&self.models.servers, &items);
+		bridge.set_last_place(self.last_place(&items));
 		bridge.set_current_server(self.current.map_or(-1, |id| id as i32));
 		bridge.set_unread_total(self.view().map_or(0, |v| v.unread()));
 	}
@@ -531,20 +532,14 @@ impl App {
 	pub(crate) fn invite_link(&mut self) -> String {
 		let bookmark = self.current.and_then(|id| self.bookmark(id)).map(|b| b.address.clone());
 		let path = self.view().and_then(|v| {
-			let mut names = Vec::new();
-			let own = v.presence.channels.get(&v.state.own_channel?)?;
-			let mut channel = own;
-			loop {
-				names.push(channel.name.clone());
-				match v.presence.channels.get(&channel.parent) {
-					Some(parent) if channel.parent != 0 && names.len() < 64 => channel = parent,
-					_ => break,
-				}
-			}
-			names.reverse();
+			let cid = v.state.own_channel?;
+			let own = v.presence.channels.get(&cid)?;
 			// The link names the channels as the server has them; the
 			// toast as the tree shows them.
-			Some((names, vm::tree::channel_title(own).0.to_owned()))
+			Some((
+				vm::tree::channel_path(&v.presence, cid),
+				vm::tree::channel_title(own).0.to_owned(),
+			))
 		});
 		let (Some(address), Some((path, title))) = (bookmark, path) else {
 			self.set_status("Join a voice channel to invite others to it");

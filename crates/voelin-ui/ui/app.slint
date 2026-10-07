@@ -237,7 +237,7 @@ export component MainWindow inherits Window {
                     : Bridge.server-title;
                 subtitle: Nav.page == Page.settings || Nav.page == Page.friends || Nav.page == Page.messages || Nav.page == Page.library ? ""
                     : Nav.page == Page.events || Nav.phone-voice ? Bridge.server-title
-                    : Nav.page == Page.home || Nav.mobile-tab == MobileTab.home ? @tr("Find your people. Talk beyond.")
+                    : Nav.page == Page.home || Nav.mobile-tab == MobileTab.home ? ""
                     : Nav.mobile-tab == MobileTab.chat && Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length ? Bridge.tabs[Bridge.current-tab].title
                     : Nav.mobile-tab == MobileTab.servers ? Bridge.server-stats : "";
                 back: Nav.page == Page.settings || Nav.page == Page.friends || Nav.page == Page.messages || Nav.page == Page.library || Nav.page == Page.events;

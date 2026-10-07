@@ -1,7 +1,7 @@
 //! Texts of the home, friends, messages, bell and events screens: times
 //! ("12m ago", "Yesterday"), message previews without BBCode (read by
-//! `vm::bbcode`), mentions, event dates, a poke's message; pure, so they
-//! are tested here.
+//! `vm::bbcode`), mentions, event dates, a poke's message, the private
+//! chats of the home sidebar; pure, so they are tested here.
 
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 
@@ -112,6 +112,17 @@ pub fn matches(query: &str, fields: &[&str]) -> bool {
 pub fn poke_message(text: &str) -> String {
 	let cut: String = text.trim().chars().take(voelin_core::POKE_MESSAGE_MAX).collect();
 	cut.trim_end().to_owned()
+}
+
+/// The private chats of the home sidebar, by their index in `chats`
+/// (newest first): at most `n`, those with unread messages first.
+pub fn sidebar_dms(chats: &[crate::messages::ChatRef], n: usize) -> Vec<usize> {
+	let mut private: Vec<usize> = (0..chats.len())
+		.filter(|&i| matches!(chats[i].target, voelin_model::ChatTarget::Private(_)))
+		.collect();
+	private.sort_by_key(|&i| chats[i].unread == 0);
+	private.truncate(n);
+	private
 }
 
 /// The channels the search (Ctrl+K) finds for `query`, with their titles:
@@ -271,6 +282,33 @@ mod tests {
 		// its own.
 		assert_eq!(found_channels(&channels, "spacer"), [(4, "[cspacer]Game Night")]);
 		assert_eq!(found_channels(&channels, "").len(), 3);
+	}
+
+	#[test]
+	fn sidebar_chats() {
+		use voelin_model::ChatTarget;
+		let chat = |target: ChatTarget, unread| crate::messages::ChatRef {
+			session: Some(1),
+			server_uid: None,
+			target,
+			last: None,
+			unread,
+		};
+		let dm = |uid: &str, unread| chat(ChatTarget::Private(uid.into()), unread);
+		let chats = [
+			dm("a", 0),
+			chat(ChatTarget::Server, 4),
+			dm("b", 2),
+			chat(ChatTarget::Channel(3), 1),
+			dm("c", 0),
+			dm("d", 1),
+			dm("e", 0),
+			dm("f", 0),
+		];
+		// Private chats only, unread first, otherwise newest first; capped.
+		assert_eq!(sidebar_dms(&chats, 5), [2, 5, 0, 4, 6]);
+		assert_eq!(sidebar_dms(&chats, 1), [2]);
+		assert!(sidebar_dms(&chats[1..2], 5).is_empty());
 	}
 
 	#[test]

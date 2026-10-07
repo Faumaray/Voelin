@@ -169,11 +169,13 @@ pub(crate) struct SocialModels {
 	pub blocked: Rc<VecModel<ContactItem>>,
 	pub live: Rc<VecModel<LiveItem>>,
 	pub recent: Rc<VecModel<ConversationItem>>,
+	pub sidebar_dms: Rc<VecModel<ConversationItem>>,
 	pub conversations: Rc<VecModel<ConversationItem>>,
 	pub dm_lines: Rc<VecModel<ChatLine>>,
 	pub happenings: Rc<VecModel<HappeningItem>>,
 	pub recordings: Rc<VecModel<RecordingItem>>,
 	pub notices: Rc<VecModel<NoticeItem>>,
+	pub mentions: Rc<VecModel<NoticeItem>>,
 	pub search: Rc<VecModel<SearchItem>>,
 	pub events: Rc<VecModel<crate::app::EventItem>>,
 }
@@ -187,11 +189,13 @@ impl SocialModels {
 			blocked: Rc::default(),
 			live: Rc::default(),
 			recent: Rc::default(),
+			sidebar_dms: Rc::default(),
 			conversations: Rc::default(),
 			dm_lines: Rc::default(),
 			happenings: Rc::default(),
 			recordings: Rc::default(),
 			notices: Rc::default(),
+			mentions: Rc::default(),
 			search: Rc::default(),
 			events: Rc::default(),
 		};
@@ -201,11 +205,13 @@ impl SocialModels {
 		bridge.set_blocked(ModelRc::from(m.blocked.clone()));
 		bridge.set_live_rooms(ModelRc::from(m.live.clone()));
 		bridge.set_recent_chats(ModelRc::from(m.recent.clone()));
+		bridge.set_sidebar_dms(ModelRc::from(m.sidebar_dms.clone()));
 		bridge.set_conversations(ModelRc::from(m.conversations.clone()));
 		bridge.set_dm_messages(ModelRc::from(m.dm_lines.clone()));
 		bridge.set_happenings(ModelRc::from(m.happenings.clone()));
 		bridge.set_recordings(ModelRc::from(m.recordings.clone()));
 		bridge.set_notifications(ModelRc::from(m.notices.clone()));
+		bridge.set_home_mentions(ModelRc::from(m.mentions.clone()));
 		bridge.set_search_results(ModelRc::from(m.search.clone()));
 		bridge.set_events(ModelRc::from(m.events.clone()));
 		m
@@ -630,26 +636,31 @@ impl App {
 		self.refresh_notices();
 	}
 
+	/// The bell's notices, and home's unread mentions (the newest three).
 	pub(crate) fn refresh_notices(&self) {
 		let Some(ui) = self.ui.upgrade() else { return };
-		let items: Vec<NoticeItem> = self
-			.social
-			.notices
-			.iter()
-			.map(|n| NoticeItem {
-				key: n.key,
-				kind: n.kind.name().into(),
-				title: n.title.clone().into(),
-				body: n.body.clone().into(),
-				time: ago(n.ts_ms).into(),
-				unread: n.unread,
-				initials: vm::avatar::initials(&n.name).into(),
-				tint: vm::avatar::tint(&n.name),
-				avatar: n.uid.as_deref().map(|u| self.avatar_of(u)).unwrap_or_default(),
-			})
-			.collect();
+		let item = |n: &Notice| NoticeItem {
+			key: n.key,
+			kind: n.kind.name().into(),
+			title: n.title.clone().into(),
+			body: n.body.clone().into(),
+			time: ago(n.ts_ms).into(),
+			unread: n.unread,
+			initials: vm::avatar::initials(&n.name).into(),
+			tint: vm::avatar::tint(&n.name),
+			avatar: n.uid.as_deref().map(|u| self.avatar_of(u)).unwrap_or_default(),
+		};
+		let notices = &self.social.notices;
+		let items: Vec<NoticeItem> = notices.iter().map(item).collect();
 		vm::list::sync(&self.models.social.notices, &items);
-		let unread = self.social.notices.iter().filter(|n| n.unread).count();
+		let mentions: Vec<NoticeItem> = notices
+			.iter()
+			.filter(|n| n.unread && n.kind == NoticeKind::Mention)
+			.take(3)
+			.map(item)
+			.collect();
+		vm::list::sync(&self.models.social.mentions, &mentions);
+		let unread = notices.iter().filter(|n| n.unread).count();
 		ui.global::<Bridge>().set_notifications_unread(unread as i32);
 	}
 

@@ -26,6 +26,9 @@ pub(super) fn wire(ui: &MainWindow) {
 	bridge.on_connect_server(|id| {
 		with_app(|app| app.connect_server(i64::from(id)));
 	});
+	bridge.on_resume(|| {
+		with_app(|app| app.resume());
+	});
 
 	// Friends.
 	bridge.on_friends_tab(|tab| {

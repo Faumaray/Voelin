@@ -72,14 +72,18 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
 - Older chat messages load when scrolling up, above the messages on screen,
   which stay in place; the Older messages button remains for a chat that
   fits on the screen.
-- One dialog adds a server, with Save and Connect (Enter connects); Home's
-  Join a Server opens it too. Connect connects only a server it saved (Join
-  connected the server shown before when saving failed).
+- One dialog adds a server, with Save and Connect (Enter connects).
+  Connect connects only a server it saved (Join connected the server shown
+  before when saving failed).
 - A slimmer top bar on desktop: only the search and the bell. The bell's
   panel opens under the bell and is as tall as its notices; the members
   button is in the voice channel's header (as in the chat's), About in
   Settings. The user card has no settings gear (the rail's stays); its
   avatar and name open your account.
+- Home shows where you left off (the last voice channel, joined in one
+  click) and your unread mentions; the welcome banner shows only before the
+  first server. Friends show once, the quick actions are gone, and the
+  sidebar lists your recent private chats.
 
 ### Fixed
 

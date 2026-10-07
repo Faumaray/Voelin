@@ -1,7 +1,7 @@
 //! Direct messages (design mockup 02) and the recent chats of the home
-//! page: every chat the sessions hold and the newest ones in the history
-//! store, across servers; the open private chat with who it is with; TS3
-//! and TS6 offline messages (mail the server keeps).
+//! page and its sidebar: every chat the sessions hold and the newest ones
+//! in the history store, across servers; the open private chat with who it
+//! is with; TS3 and TS6 offline messages (mail the server keeps).
 //!
 //! A private chat is a chat tab of its session (`ChatTarget::Private`
 //! stored under the peer's unique id), so opening one selects its server
@@ -237,7 +237,8 @@ impl App {
 		}
 	}
 
-	/// The DM list, the recent chats of home and the unread counts.
+	/// The DM list, the recent chats of home, the private chats of its
+	/// sidebar and the unread counts.
 	fn refresh_conversations(&self) {
 		let Some(ui) = self.ui.upgrade() else { return };
 		let bridge = ui.global::<Bridge>();
@@ -251,6 +252,15 @@ impl App {
 			.map(|(i, c)| self.conversation_item(i, c))
 			.collect();
 		vm::list::sync(&self.models.social.recent, &recent);
+		// Shown beside other pages: none is the open one.
+		let sidebar: Vec<ConversationItem> = vm::social::sidebar_dms(&dm.chats, 5)
+			.into_iter()
+			.map(|i| ConversationItem {
+				selected: false,
+				..self.conversation_item(i, &dm.chats[i])
+			})
+			.collect();
+		vm::list::sync(&self.models.social.sidebar_dms, &sidebar);
 		let private = |c: &&ChatRef| matches!(c.target, ChatTarget::Private(_));
 		let items: Vec<ConversationItem> = if dm.tab == 2 {
 			dm.inbox

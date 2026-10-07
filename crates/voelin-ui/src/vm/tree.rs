@@ -162,6 +162,24 @@ pub fn listed_title(channel: &ChannelInfo) -> Option<&str> {
 	}
 }
 
+/// Channels deeper than this are not followed up (a broken presence could
+/// loop).
+const PATH_DEPTH: usize = 64;
+
+/// The path of a channel, its names from the top as the server has them
+/// (what an invite link names, what connecting into it takes); empty for a
+/// channel the presence does not know.
+pub fn channel_path(presence: &Presence, channel: ChannelId) -> Vec<String> {
+	let mut names = Vec::new();
+	let mut next = presence.channels.get(&channel);
+	while let Some(c) = next.filter(|_| names.len() < PATH_DEPTH) {
+		names.push(c.name.clone());
+		next = presence.channels.get(&c.parent).filter(|_| c.parent != 0);
+	}
+	names.reverse();
+	names
+}
+
 /// About as many characters as a fill spacer's row holds: more than the
 /// widest tree shows.
 const FILL_CHARS: usize = 200;
@@ -826,5 +844,16 @@ mod tests {
 		let found = matching(all, "al");
 		assert_eq!(found.len(), 1);
 		assert!(found[0].first_in_group && found[0].group == "Guest" && found[0].group_count == 1);
+	}
+
+	#[test]
+	fn channel_paths() {
+		let mut p = presence();
+		assert_eq!(channel_path(&p, 1), ["Lobby"], "a channel at the top");
+		assert_eq!(channel_path(&p, 3), ["Games", "Chess"], "the names from the top");
+		assert!(channel_path(&p, 99).is_empty(), "an unknown channel");
+		// Two channels each other's parent: the path stops.
+		p.channels.get_mut(&2).unwrap().parent = 3;
+		assert_eq!(channel_path(&p, 3).len(), PATH_DEPTH);
 	}
 }

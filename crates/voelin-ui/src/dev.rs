@@ -28,6 +28,8 @@
 //!   `channel-password` (the password dialog of the first locked channel,
 //!   the sample's Officers; `channel-password:wrong` as after a refused
 //!   one), `actions` (the last message's actions, as if hovered),
+//!   `first-run` (home's banner as before the first server, over the
+//!   sample data),
 //!   `unread` (the current chat read up to five messages before its end:
 //!   the "New" divider, scrolled up to; `unread:end` ten messages before,
 //!   at the list's end, under the bar that counts the new messages),
@@ -77,6 +79,7 @@ use voelin_store::{Bookmark, MessageSource};
 use crate::app::{
 	App, Bridge, MainWindow, MobileTab, Nav, Page, RecordingItem, SettingsSection, with_app,
 };
+use crate::settings::LastVoice;
 
 /// The switches read at start.
 #[derive(Clone, Debug, Default)]
@@ -294,6 +297,8 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 			}
 			// A screenshot cannot hover.
 			"actions" => nav.set_show_actions(true),
+			// Home as before the first server, over the sample data.
+			"first-run" => nav.set_first_run(true),
 			// `end`: further back, so the divider is above the view.
 			"unread" => {
 				with_app(|app| open_unread(app, if arg == "end" { 10 } else { 5 }));
@@ -523,6 +528,13 @@ fn demo_ui(app: &mut App) {
 		bookmark(DEMO + 1, "Pixel Lounge", "pixel.example"),
 		bookmark(DEMO + 2, "Dev TS3", "127.0.0.1:9987"),
 	];
+	// Home's "Continue where you left off": a channel of a server without
+	// voice, so it shows Join.
+	app.settings.last_voice = Some(LastVoice {
+		bookmark: DEMO + 1,
+		address: "pixel.example".into(),
+		channel: vec!["Art Corner".into()],
+	});
 	app.current = Some(DEMO);
 	let session = DEMO as u64;
 
@@ -1095,8 +1107,8 @@ fn demo_social(app: &mut App) {
 		},
 	});
 
-	// Notifications: a mention, a message, an event, a friend online (and
-	// the poke above).
+	// Notifications: two mentions (unread: home shows them), a message, an
+	// event, a friend online (and the poke above).
 	use crate::social::{NoticeKind, NoticeTarget};
 	app.notify(
 		NoticeKind::Mention,
@@ -1105,6 +1117,14 @@ fn demo_social(app: &mut App) {
 		NoticeTarget::Chat(DEMO, ChatTarget::Channel(2)),
 		"Talon".into(),
 		Some("demo-6".into()),
+	);
+	app.notify(
+		NoticeKind::Mention,
+		"Zeph mentioned you".into(),
+		"Nova, are you healing tonight? — #Raid Night · Nightfall Guild".into(),
+		NoticeTarget::Chat(DEMO, ChatTarget::Channel(4)),
+		"Zeph".into(),
+		Some("demo-7".into()),
 	);
 	app.notify(
 		NoticeKind::Event,
@@ -1132,7 +1152,7 @@ fn demo_social(app: &mut App) {
 	);
 	for (i, n) in app.social.notices.iter_mut().enumerate() {
 		n.ts_ms = now - (i as i64 * 9 + 2) * min;
-		n.unread = i < 3;
+		n.unread = i < 3 || n.kind == NoticeKind::Mention;
 	}
 	app.refresh_notices();
 

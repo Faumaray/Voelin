@@ -522,6 +522,23 @@ export struct HappeningItem {
     live: bool,
 }
 
+// Home's "Continue where you left off": the voice channel we were in last.
+export struct ResumeItem {
+    // There is one: its server is still a bookmark at the same address.
+    shown: bool,
+    server-id: int,
+    server: string,
+    initials: string,
+    tint: color,
+    icon: image,
+    // The channel's name as the tree shows it.
+    channel: string,
+    // Voice is connected there: the button shows the server; else it
+    // connects into the channel.
+    open: bool,
+    connecting: bool,
+}
+
 // A scheduled event of a server's gateway.
 export struct EventItem {
     id: int,
@@ -1129,8 +1146,14 @@ export global Bridge {
     // Home, friends, direct messages, notifications, search, events and
     // the settings pages.
 
-    // Home: friends online first, live streams on our servers, the latest
-    // chats, what friends do, events and server news, the Library.
+    // Home: where we were with voice last and the unread mentions (at most
+    // three, newest first), friends online, live streams on our servers,
+    // the latest chats, what friends do, events and server news, the
+    // Library; in the sidebar the newest private chats (five, unread
+    // first).
+    in property <ResumeItem> last-place;
+    in property <[NoticeItem]> home-mentions;
+    in property <[ConversationItem]> sidebar-dms;
     in property <[ContactItem]> friends-online;
     in property <[LiveItem]> live-rooms;
     in property <[ConversationItem]> recent-chats;
@@ -1148,6 +1171,9 @@ export global Bridge {
     callback open-recordings-folder();
     // Connect a bookmark with voice (the Join buttons).
     callback connect-server(int);
+    // The last place's button: its server, connected into the channel if
+    // voice is not there yet.
+    callback resume();
 
     // Friends: the contacts (friends, then the others), the selected one.
     in property <[ContactItem]> contacts;
