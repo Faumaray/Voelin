@@ -624,9 +624,8 @@ impl App {
 	/// A link in a message was clicked (`masked`: its text shows something
 	/// else, [`vm::bbcode::is_masked`]). A page on the web opens in the
 	/// browser, a masked one once the user saw where it goes (Nav.link-open);
-	/// a TeamSpeak link is copied until Voelin opens them. Returns what to
-	/// copy ("": nothing).
-	pub(crate) fn open_link_text(&mut self, link: &str, masked: bool) -> String {
+	/// a TeamSpeak link in Voelin ([`App::open_link`]).
+	pub(crate) fn open_link_text(&mut self, link: &str, masked: bool) {
 		match vm::bbcode::classify_link(link) {
 			LinkKind::Web(url) if masked => {
 				if let Some(ui) = self.ui.upgrade() {
@@ -635,20 +634,15 @@ impl App {
 					nav.set_link_url(url.into());
 					nav.set_link_open(true);
 				}
-				String::new()
 			}
 			LinkKind::Web(url) => {
 				if let Err(e) = self.open_url(&url) {
 					self.set_status(format!("Cannot open the link: {e}"));
 				}
-				String::new()
 			}
-			LinkKind::Server(url) => {
-				self.copy_note = Some("TeamSpeak links open in Voelin soon; copied".to_owned());
-				url
-			}
+			LinkKind::Server(url) => self.open_link(&url),
 			// A file opens from its card.
-			LinkKind::File | LinkKind::Refused => String::new(),
+			LinkKind::File | LinkKind::Refused => {}
 		}
 	}
 

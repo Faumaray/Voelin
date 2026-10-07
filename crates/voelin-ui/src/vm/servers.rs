@@ -2,7 +2,7 @@
 
 use slint::SharedString;
 use voelin_core::{ObserveState, SessionState, VoiceState};
-use voelin_model::{ChannelId, ChannelInfo};
+use voelin_model::{ChannelId, ChannelInfo, Presence, ServerLink};
 use voelin_store::Bookmark;
 
 use crate::app::{BookmarkForm, ServerItem};
@@ -107,43 +107,88 @@ pub fn connect_to(form: &BookmarkForm, saved: Option<&Bookmark>) -> Option<Conne
 /// the top) on the server at `address` (`host`, `host:port` or
 /// `[v6]:port`), as TeamSpeak clients open them.
 pub fn invite_link(address: &str, path: &[&str]) -> String {
-	fn encode(text: &str) -> String {
-		text.bytes()
-			.map(|b| match b {
-				b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-					char::from(b).to_string()
-				}
-				_ => format!("%{b:02X}"),
-			})
-			.collect()
-	}
-	let address = address.trim();
-	// A port follows the last colon, unless that colon is inside an IPv6
-	// address without brackets.
-	let (host, port) = match address.rsplit_once(':') {
-		Some((host, port))
-			if !port.is_empty()
-				&& port.bytes().all(|b| b.is_ascii_digit())
-				&& (!host.contains(':') || host.ends_with(']')) =>
-		{
-			(host, Some(port))
-		}
-		_ => (address, None),
+	let mut link = ServerLink::new(address);
+	link.channel = (!path.is_empty()).then(|| voelin_model::join_channel_path(path));
+	link.to_url()
+}
+
+/// TeamSpeak's voice port, of an address without one.
+const DEFAULT_PORT: u16 = 9987;
+
+/// Whether two addresses name the same server: the host in any case, an
+/// IPv6 address with or without its brackets, no port as 9987 (a port a
+/// DNS record gives is not looked up).
+pub fn same_address(a: &str, b: &str) -> bool {
+	let key = |address: &str| {
+		let link = ServerLink::new(address);
+		(link.host.trim_end_matches('.').to_lowercase(), link.port.unwrap_or(DEFAULT_PORT))
 	};
-	let mut link = format!("ts3server://{host}");
-	let mut query = Vec::new();
-	if let Some(port) = port {
-		query.push(format!("port={port}"));
+	let a = key(a);
+	!a.0.is_empty() && a == key(b)
+}
+
+/// The saved server a link to `address` opens, and whether it has voice
+/// (`in_voice`): of those at that address ([`same_address`]; two can be,
+/// with other identities), the one in voice, else the one shown
+/// (`current`), else the first.
+pub fn link_server(
+	bookmarks: &[Bookmark],
+	address: &str,
+	current: Option<i64>,
+	in_voice: impl Fn(i64) -> bool,
+) -> Option<(i64, bool)> {
+	let saved: Vec<i64> =
+		bookmarks.iter().filter(|b| same_address(&b.address, address)).map(|b| b.id).collect();
+	if let Some(id) = saved.iter().copied().find(|id| in_voice(*id)) {
+		return Some((id, true));
 	}
-	if !path.is_empty() {
-		let names: Vec<String> = path.iter().map(|n| encode(n)).collect();
-		query.push(format!("channel={}", names.join("/")));
+	let shown = saved.iter().copied().find(|id| Some(*id) == current);
+	shown.or_else(|| saved.first().copied()).map(|id| (id, false))
+}
+
+/// The channel a link's path names (`/<id>`, or names from the top as the
+/// server has them, [`voelin_model::split_channel_path`]). Of siblings with
+/// the same name, the first in the tree's order that has the rest of the
+/// path.
+pub fn channel_by_path(presence: &Presence, path: &str) -> Option<ChannelId> {
+	fn below(presence: &Presence, parent: ChannelId, names: &[String]) -> Option<ChannelId> {
+		let (name, rest) = names.split_first()?;
+		let siblings = presence.channels.values().filter(|c| c.parent == parent).collect();
+		voelin_model::order_siblings(siblings)
+			.into_iter()
+			.filter(|c| c.name == *name)
+			.find_map(|c| if rest.is_empty() { Some(c.id) } else { below(presence, c.id, rest) })
 	}
-	if !query.is_empty() {
-		link.push('?');
-		link.push_str(&query.join("&"));
+	match voelin_model::channel_path_id(path) {
+		Some(id) => presence.channels.contains_key(&id).then_some(id),
+		None => below(presence, 0, &voelin_model::split_channel_path(path)),
 	}
-	link
+}
+
+/// The server dialog's form for a link, over `form`: a saved server's
+/// keeps its address, name and nickname (a link never changes it), and its
+/// stored password unless the link has one; a new server's takes the
+/// link's address, nickname (else `default_nickname`) and password. The
+/// link's channel, its password and privilege key come along, for Connect.
+pub fn link_form(
+	link: &ServerLink,
+	mut form: BookmarkForm,
+	default_nickname: &str,
+) -> BookmarkForm {
+	let text = |value: &Option<String>| SharedString::from(value.as_deref().unwrap_or_default());
+	if form.id < 0 {
+		form.address = link.address().into();
+	}
+	if form.id < 0 || form.nickname.is_empty() {
+		form.nickname = link.nickname.as_deref().unwrap_or(default_nickname).into();
+	}
+	if let Some(password) = &link.password {
+		form.server_password = password.into();
+	}
+	form.channel = text(&link.channel);
+	form.channel_password = text(&link.channel_password);
+	form.token = text(&link.token);
+	form
 }
 
 /// What joining a channel takes ([`join_password`]).
@@ -311,6 +356,148 @@ mod tests {
 		// A bare IPv6 address has no port.
 		assert_eq!(invite_link("2001:db8::1", &[]), "ts3server://2001:db8::1");
 		assert_eq!(invite_link("h:x", &["Ä/b"]), "ts3server://h:x?channel=%C3%84%2Fb");
+		// Read back, they name the same server and channel.
+		let Some(voelin_model::Link::Server(link)) =
+			voelin_model::Link::parse(&invite_link("[2001:db8::1]:9987", &["Games", "Ä/b"]))
+		else {
+			panic!("not a server link");
+		};
+		assert!(same_address(&link.address(), "[2001:db8::1]:9987"));
+		assert_eq!(voelin_model::split_channel_path(&link.channel.unwrap()), ["Games", "Ä/b"]);
+	}
+
+	#[test]
+	fn same_addresses() {
+		for (a, b) in [
+			("ts.example.org", "TS.Example.org"),
+			(" ts.example.org ", "ts.example.org:9987"),
+			("ts.example.org.", "ts.example.org"),
+			("[2001:db8::1]:9987", "2001:db8::1"),
+			("[2001:db8::1]", "[2001:DB8::1]:9987"),
+			("127.0.0.1:9988", "127.0.0.1:9988"),
+		] {
+			assert!(same_address(a, b), "{a} = {b}");
+		}
+		for (a, b) in [
+			("ts.example.org", "ts.example.org:9988"),
+			("ts.example.org", "example.org"),
+			("[2001:db8::1]:9988", "2001:db8::1"),
+			("", ""),
+		] {
+			assert!(!same_address(a, b), "{a} != {b}");
+		}
+	}
+
+	#[test]
+	fn servers_of_links() {
+		let saved =
+			|id, address: &str| Bookmark { id, address: address.into(), ..Default::default() };
+		let bookmarks = [
+			saved(1, "other.example"),
+			saved(2, "ts.example.org"),
+			saved(3, "TS.example.org:9987"),
+			saved(4, "ts.example.org:9988"),
+		];
+		let voice = |ids: &'static [i64]| move |id| ids.contains(&id);
+		// Not in voice: the one shown, else the first.
+		assert_eq!(link_server(&bookmarks, "ts.example.org", None, voice(&[])), Some((2, false)));
+		assert_eq!(
+			link_server(&bookmarks, "ts.example.org", Some(3), voice(&[])),
+			Some((3, false))
+		);
+		// In voice on one of them, also when another is shown.
+		assert_eq!(
+			link_server(&bookmarks, "ts.example.org:9987", Some(2), voice(&[1, 3])),
+			Some((3, true))
+		);
+		// Voice on the server at another port does not count.
+		assert_eq!(
+			link_server(&bookmarks, "ts.example.org:9988", None, voice(&[2])),
+			Some((4, false))
+		);
+		assert_eq!(link_server(&bookmarks, "new.example", Some(1), voice(&[1])), None);
+	}
+
+	#[test]
+	fn channels_by_path() {
+		let channel = |id, parent, order, name: &str| ChannelInfo {
+			id,
+			parent,
+			order,
+			name: name.into(),
+			..Default::default()
+		};
+		let mut p = Presence::default();
+		for c in [
+			channel(1, 0, 0, "Lobby"),
+			// Two of the same name, the first in the tree with the higher id.
+			channel(4, 0, 1, "Games"),
+			channel(3, 4, 0, "Chess"),
+			channel(7, 0, 4, "AC/DC"),
+			channel(2, 0, 7, "Games"),
+			channel(5, 2, 0, "Go"),
+			channel(6, 2, 5, "Chess"),
+		] {
+			p.channels.insert(c.id, c);
+		}
+		assert_eq!(channel_by_path(&p, "Lobby"), Some(1), "at the top");
+		assert_eq!(channel_by_path(&p, "Games/Chess"), Some(3), "nested");
+		// The same name: the first, unless only another has the rest.
+		assert_eq!(channel_by_path(&p, "Games"), Some(4));
+		assert_eq!(channel_by_path(&p, "Games/Go"), Some(5));
+		assert_eq!(channel_by_path(&p, "AC\\/DC"), Some(7), "a / in a name");
+		assert_eq!(channel_by_path(&p, "/6"), Some(6), "by id");
+		for missing in ["Chess", "Games/Poker", "Lobby/Games", "/99", "", "lobby"] {
+			assert_eq!(channel_by_path(&p, missing), None, "{missing}");
+		}
+	}
+
+	#[test]
+	fn forms_from_links() {
+		let link = ServerLink {
+			host: "ts.example.org".into(),
+			port: Some(9988),
+			nickname: Some("Link".into()),
+			password: Some("pw".into()),
+			channel: Some("Gaming/Raid Night".into()),
+			channel_password: Some("raid".into()),
+			token: Some("key".into()),
+		};
+		let bare = ServerLink::new("ts.example.org");
+		// A new server: the link's address, nickname and password.
+		let new = BookmarkForm { id: -1, nickname: "Me".into(), ..Default::default() };
+		let f = link_form(&link, new.clone(), "Me");
+		assert_eq!((f.id, f.name.as_str(), f.address.as_str()), (-1, "", "ts.example.org:9988"));
+		assert_eq!((f.nickname.as_str(), f.server_password.as_str()), ("Link", "pw"));
+		assert_eq!(
+			(f.channel.as_str(), f.channel_password.as_str(), f.token.as_str()),
+			("Gaming/Raid Night", "raid", "key")
+		);
+		let f = link_form(&bare, new, "Me");
+		assert_eq!((f.address.as_str(), f.nickname.as_str()), ("ts.example.org", "Me"));
+		assert_eq!(
+			(f.server_password.as_str(), f.channel.as_str(), f.token.as_str()),
+			("", "", "")
+		);
+		// A saved server keeps its address, name, nickname and password...
+		let saved = BookmarkForm {
+			id: 3,
+			name: "Nightfall".into(),
+			address: "TS.example.org:9988".into(),
+			nickname: "Nova".into(),
+			server_password: "stored".into(),
+			..Default::default()
+		};
+		let f = link_form(&bare, saved.clone(), "Me");
+		assert_eq!(
+			(f.id, f.name.as_str(), f.address.as_str()),
+			(3, "Nightfall", "TS.example.org:9988")
+		);
+		assert_eq!((f.nickname.as_str(), f.server_password.as_str()), ("Nova", "stored"));
+		// ...the link's password in place of the stored one.
+		let f = link_form(&link, saved, "Me");
+		assert_eq!((f.nickname.as_str(), f.server_password.as_str()), ("Nova", "pw"));
+		assert_eq!((f.channel.as_str(), f.token.as_str()), ("Gaming/Raid Night", "key"));
 	}
 
 	#[test]

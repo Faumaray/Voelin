@@ -34,7 +34,9 @@
 //!   the "New" divider, scrolled up to; `unread:end` ten messages before,
 //!   at the list's end, under the bar that counts the new messages),
 //!   `link-confirm[:<url>]` (the question before a masked link opens, by
-//!   default the sample's raid board), `watch` (the first stream; with
+//!   default the sample's raid board), `link:<url>` (a TeamSpeak link
+//!   opened: the server dialog filled in from it, or in voice on its
+//!   server a move into its channel), `watch` (the first stream; with
 //!   sample data the local test pattern in its place), `popout` (the same,
 //!   popped out),
 //!   `tab:<home|servers|chat|activity|you>` (phone layout); `friends[:<uid>]`,
@@ -307,6 +309,8 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 				let url = if arg.is_empty() { DEMO_RAID_BOARD } else { arg };
 				with_app(|app| app.open_link_text(url, true));
 			}
+			// As a link from the platform comes.
+			"link" => crate::inbox::request(crate::inbox::Request::OpenLink(arg.to_owned())),
 			"watch" | "popout" => {
 				with_app(|app| {
 					if switches.demo_ui { app.demo_watch() } else { app.watch_first_stream() }

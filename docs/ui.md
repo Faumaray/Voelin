@@ -151,7 +151,7 @@ comes from the engine's events; what a gateway adds is hidden without it.
 
 | Part | `VOELIN_OPEN` | What it shows | Engine data |
 |---|---|---|---|
-| Chat | `server` (`server:chat`: the server chat), `actions`, `link-confirm[:<url>]`, `unread[:end]` | Header with Pinned Messages, Topics, the voice channel and the members button; chat tabs; messages grouped by author ("Today at 10:14"), avatars, BBCode formatting (see Formatting below), emoji, reactions with an add button, pin and topic marks, file cards with download; composer with attach, emoji and send. A link opens in the browser; one whose text is not its address (a masked link) first shows where it goes in `LinkDialog` (the host, the whole address; Open, Copy link, Cancel); a TeamSpeak link is copied for now; a right-click on a link offers Open link and Copy link. Every message has actions on hover (`MessageActions`; `actions` shows the last one's): Quote (`> Author: …` lines at the start of the composer, which takes the focus to write below them and grows to show up to about eight lines) and Copy text, and with a gateway quick reactions, pin and Start a topic; a right-click on a message shows Copy text, Copy link (its first web address), Quote, and with a gateway React… and Pin. The server chat starts with the server's welcome message (and its host message when the server puts it in the chat log). Opens at the newest message and follows new ones while at the end. Scrolling up to within a screen of the top loads the page before, above the rows on screen, which stay in place (a spinner above the oldest message while it loads). The Older messages button there is for a chat too short to scroll, and for after a page that brought nothing (scrolling loads again once the list was a screen away). The voice view, the phone's voice screen and private chats load the same way. Messages count as read while their chat is on screen in the focused window; the chat tabs and the server rail count the others (not our own). A chat that comes on screen with new messages, or that is on screen when messages that came while away arrive (a stored or gateway page), shows a red line with New above the first (`NewDivider`) until the chat is left; while that line is above the view, a bar over the list says how many are new and since when (`UnreadBar`: "5 new messages since 10:14", Jump, and × to mark them read). Where each chat was read is kept on this device (the store's `chat_reads`), so the counts survive a restart: messages that came while away (a gateway's history) count as new | `ChatHistory` (and `Chat` for servers without history), `Presence` (welcome and host message), `AvatarReady`, `Transfer`, `Gateway` (pins; reactions arrive as stored messages); `Command::LoadOlderHistory`, `DownloadChatFile`, `UploadFile`, `GatewayRequest::React`, `Unreact`, `Pin`, `Unpin` |
+| Chat | `server` (`server:chat`: the server chat), `actions`, `link-confirm[:<url>]`, `unread[:end]` | Header with Pinned Messages, Topics, the voice channel and the members button; chat tabs; messages grouped by author ("Today at 10:14"), avatars, BBCode formatting (see Formatting below), emoji, reactions with an add button, pin and topic marks, file cards with download; composer with attach, emoji and send. A link opens in the browser; one whose text is not its address (a masked link) first shows where it goes in `LinkDialog` (the host, the whole address; Open, Copy link, Cancel); a TeamSpeak link opens in Voelin (Adding a server: Links, below); a right-click on a link offers Open link and Copy link. Every message has actions on hover (`MessageActions`; `actions` shows the last one's): Quote (`> Author: …` lines at the start of the composer, which takes the focus to write below them and grows to show up to about eight lines) and Copy text, and with a gateway quick reactions, pin and Start a topic; a right-click on a message shows Copy text, Copy link (its first web address), Quote, and with a gateway React… and Pin. The server chat starts with the server's welcome message (and its host message when the server puts it in the chat log). Opens at the newest message and follows new ones while at the end. Scrolling up to within a screen of the top loads the page before, above the rows on screen, which stay in place (a spinner above the oldest message while it loads). The Older messages button there is for a chat too short to scroll, and for after a page that brought nothing (scrolling loads again once the list was a screen away). The voice view, the phone's voice screen and private chats load the same way. Messages count as read while their chat is on screen in the focused window; the chat tabs and the server rail count the others (not our own). A chat that comes on screen with new messages, or that is on screen when messages that came while away arrive (a stored or gateway page), shows a red line with New above the first (`NewDivider`) until the chat is left; while that line is above the view, a bar over the list says how many are new and since when (`UnreadBar`: "5 new messages since 10:14", Jump, and × to mark them read). Where each chat was read is kept on this device (the store's `chat_reads`), so the counts survive a restart: messages that came while away (a gateway's history) count as new | `ChatHistory` (and `Chat` for servers without history), `Presence` (welcome and host message), `AvatarReady`, `Transfer`, `Gateway` (pins; reactions arrive as stored messages); `Command::LoadOlderHistory`, `DownloadChatFile`, `UploadFile`, `GatewayRequest::React`, `Unreact`, `Pin`, `Unpin` |
 | Members panel | `server` (`panel`, `no-panel`) | "Members — N" and a search; those streaming first (the people in our channel while the voice channel or a stream is shown), then each server group in the server's order with its icon, then those without a group. Rows: avatar with status, name, crown (admin groups), priority speaker, channel commander, recording, up to three myTeamSpeak badges, moderator role, talk power, what they do or the channel they are in. Resizable: the width is `ui.members_width` | `Presence`, `Groups`, `Talking`, `IconReady`, `PictureReady` |
 | Member card | `member` | Description, groups, badges (up to three chips in the client's order, what each is for on hover; "Badge" for one the app does not know), talk power, country; private message, poke, friend, block; volume and mute for us | `ContactsChanged`, `PictureReady` (badges); `Command::SetContact`, `SetClientVolume`, `SetClientMuted`, `Poke` |
 | Poke | `poke` (the first other member's, card open; after `friends` a contact's) | `PokeDialog`, from the member card, a friend's row and the direct message header: an optional message with a "12/100" count, Send off above 100 characters, Enter sends, Escape cancels | `Command::Poke` (trimmed, cut to 100 characters; the engine cuts too) |
@@ -188,6 +188,7 @@ where a server has it.
 | Events | `events`, `event-form` | Above the channel tree (gateway `events`): a server's events with date, time, channel, scheduled stream, Going, Maybe and Not going with counts, who answered, reminders, Watch while live; create, edit and delete. Members (above the tree too) opens the members panel | `Gateway` events; `GatewayRequest::Events`, `CreateEvent`, `UpdateEvent`, `DeleteEvent`, `Rsvp` |
 | Pictures in chat | `picture` | A linked png, jpg, gif or webp up to `ui.image_preview_kb` is downloaded into memory, decoded once into the image cache and shown as a card in the message; a click opens it larger. A picture on the web a message shows (`[img]`) comes into the engine's picture cache like banners, up to the same size and only with `cache.fetch_images`; until then, or without it, the message shows its address as a link | `Command::DownloadChatFile` with `DownloadTo::Memory`, `Transfer`; `Command::FetchPicture`, `PictureReady` |
 | Join by address | `join` (the same as `bookmark`) | The add-server dialog (Adding a server, below): Connect saves the server, then connects | `Command::ConnectVoice` |
+| TeamSpeak links | `link:<url>` | A `ts3server://`, `teamspeak://` or `tmspk.gg` link: in voice on its server, a move into its channel; else the add-server dialog filled in from it (Adding a server: Links, below) | `Command::MoveToChannel`, `Command::ConnectVoice` |
 
 Settings sections (`settings:<section>`):
 
@@ -324,6 +325,38 @@ which are not stored with the server: with a channel the dialog shows
 "Joins <channel>" and Connect connects into it; with a key it shows "This
 link grants a server group".
 
+### Links
+
+A TeamSpeak link clicked in chat (or `link:<url>`, below) opens in Voelin
+(`App::open_link` in `links.rs`). `voelin_model::Link::parse` reads
+`ts3server://` and `teamspeak://` links (the scheme and the keys in any
+case): the host (with a port as `host:port` or `[v6]:port`), and `port`,
+`nickname`, `password`, `channel` (names from the top, `A/B`; a `/` in a
+name is `%2F`, and `\/` in the path the dialog and the server get), `cid`
+(a channel id, kept as the path `/<id>`), `channelpassword` and `token` (a
+privilege key); other keys are ignored.
+`tmspk.gg/s/<host>?…` (and `/s=<host>`) is the same server link, as its
+page sends the browser on to `teamspeak://<host>?…`. Invite codes
+(`tmspk.gg/<code>`, `teamspeak://invite=<code>`) only a TeamSpeak service
+can resolve: the toast says they can't be opened yet.
+
+The link's server is a saved one when the addresses match
+(`vm::servers::same_address`: the host in any case, an IPv6 address with or
+without brackets, no port as 9987; of several saved at that address, the
+one in voice, else the one shown, `vm::servers::link_server`). In voice on
+it, Voelin shows it and moves into the link's channel
+(`vm::servers::channel_by_path`; of channels with the same name the first
+in the tree that has the rest of the path) through `App::join_channel`,
+with the link's channel password: a locked channel without one, or with a
+wrong one, asks for it. A channel the server does not have is a toast.
+Otherwise the dialog above opens filled in by
+`vm::servers::link_form`: a saved server keeps its address, name, nickname
+(a link never changes it) and stored password unless the link has one; a
+new server takes the link's address, nickname (else the default one) and
+password; both get the link's channel, its password and the key. Nothing
+connects before Connect. `vm::servers::invite_link` (Copy invite link)
+writes links with `ServerLink::to_url`, so they read back the same.
+
 Selecting a server observes it invisibly through its gateway (or a query
 login an older version stored), so its channels, members and chats show
 without joining; there is no Observe button. Without a gateway, observing
@@ -450,7 +483,9 @@ Environment variables (see `src/dev.rs`):
   `channel-password[:wrong]`, `actions` (the last message's actions, as if
   hovered: a screenshot cannot hover), `first-run` (Home's banner as before
   the first server, over the sample data), `link-confirm[:<url>]` (the question
-  before a masked link opens, by default the sample's), `unread` (the
+  before a masked link opens, by default the sample's), `link:<url>` (a
+  TeamSpeak link opened, as from chat: the server dialog filled in from
+  it, or in voice on its server a move; Adding a server: Links), `unread` (the
   current chat read up to five messages before its end: the New line,
   scrolled up to; `unread:end` ten messages before, at the end of the list,
   under the bar that counts them), `watch`, `popout`

@@ -336,9 +336,9 @@ export global Nav {
         }
     }
 
-    // A link in a message: Rust opens it, asks first, or has it copied.
+    // A link in a message: Rust opens it, or asks first.
     public function open-link(link: string, masked: bool) {
-        copy(Bridge.open-link(link, masked));
+        Bridge.open-link(link, masked);
     }
 
     // Quote a message at the start of the composer, then write after it.

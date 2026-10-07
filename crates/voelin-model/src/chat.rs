@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::percent;
 use crate::presence::{ChannelId, ClientId};
 
 fn is_false(b: &bool) -> bool {
@@ -93,7 +94,7 @@ impl FileRef {
 		let mut channel = None;
 		for pair in query.split('&') {
 			let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-			let value = percent_decode(value);
+			let value = percent::decode(value);
 			match key.to_ascii_lowercase().as_str() {
 				"serveruid" => file.server_uid = Some(value).filter(|v| !v.is_empty()),
 				"channel" | "cid" => channel = value.parse().ok(),
@@ -106,7 +107,7 @@ impl FileRef {
 			}
 		}
 		if file.name.is_empty() {
-			file.name = percent_decode(host.trim_end_matches('/'));
+			file.name = percent::decode(host.trim_end_matches('/'));
 		}
 		file.channel = channel?;
 		(!file.name.is_empty()).then_some(file)
@@ -114,15 +115,15 @@ impl FileRef {
 
 	/// The link as TeamSpeak clients post it: `[URL=ts3file://…]name[/URL]`.
 	pub fn to_bbcode(&self) -> String {
-		let mut url = format!("ts3file://{}?", percent_encode(&self.name));
+		let mut url = format!("ts3file://{}?", percent::encode(&self.name));
 		if let Some(uid) = &self.server_uid {
-			url.push_str(&format!("serverUID={}&", percent_encode(uid)));
+			url.push_str(&format!("serverUID={}&", percent::encode(uid)));
 		}
 		url.push_str(&format!(
 			"channel={}&path={}&filename={}&isDir={}",
 			self.channel,
-			percent_encode(&self.path),
-			percent_encode(&self.name),
+			percent::encode(&self.path),
+			percent::encode(&self.name),
 			u8::from(self.is_dir)
 		));
 		if let Some(size) = self.size {
@@ -155,39 +156,6 @@ pub fn parse_file_links(text: &str) -> Vec<FileRef> {
 		at = end.max(start + 1);
 	}
 	found
-}
-
-/// `%XX` escapes to bytes (a `+` stays: file names keep theirs).
-fn percent_decode(s: &str) -> String {
-	let bytes = s.as_bytes();
-	let hex = |b: u8| (b as char).to_digit(16);
-	let mut out = Vec::with_capacity(bytes.len());
-	let mut i = 0;
-	while i < bytes.len() {
-		if bytes[i] == b'%'
-			&& let (Some(h), Some(l)) =
-				(bytes.get(i + 1).and_then(|b| hex(*b)), bytes.get(i + 2).and_then(|b| hex(*b)))
-		{
-			out.push((h * 16 + l) as u8);
-			i += 3;
-			continue;
-		}
-		out.push(bytes[i]);
-		i += 1;
-	}
-	String::from_utf8_lossy(&out).into_owned()
-}
-
-fn percent_encode(s: &str) -> String {
-	let mut out = String::with_capacity(s.len());
-	for b in s.bytes() {
-		if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-			out.push(b as char);
-		} else {
-			out.push_str(&format!("%{b:02X}"));
-		}
-	}
-	out
 }
 
 /// Format of messages a relay posts on behalf of a user.

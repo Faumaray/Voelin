@@ -62,7 +62,7 @@ pub(super) fn wire(ui: &MainWindow) {
 		with_app(|app| app.create_topic(key, title.to_string()));
 	});
 	bridge.on_open_link(|link, masked| {
-		with_app(|app| app.open_link_text(&link, masked)).unwrap_or_default().into()
+		with_app(|app| app.open_link_text(&link, masked));
 	});
 	bridge.on_quote_text(|author, text| crate::vm::chat::quote(&author, &text).into());
 	bridge.on_open_member(|id| {

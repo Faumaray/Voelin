@@ -1135,8 +1135,8 @@ export global Bridge {
     callback invite() -> string;
     // A link in a message was clicked (`TextRun.link` and `masked`): Rust
     // opens a page on the web (a masked one after asking: Nav.link-open),
-    // or gives back what the caller copies (a TeamSpeak link, for now).
-    callback open-link(string, bool) -> string;
+    // or a TeamSpeak link in the app (the server dialog, or a move).
+    callback open-link(string, bool);
     // A message's text (`ChatLine.text`) by its author as a quote for the
     // composer: "> Author: line" and "> line" for the next ones.
     callback quote-text(string, string) -> string;

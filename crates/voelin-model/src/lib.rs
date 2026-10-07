@@ -5,11 +5,14 @@
 
 pub mod badges;
 mod chat;
+mod link;
+mod percent;
 mod presence;
 mod server;
 mod tree;
 
 pub use chat::{ChatMessage, ChatTarget, FileRef, parse_file_links, relay_text, split_message};
+pub use link::{Link, ServerLink, channel_path_id, join_channel_path, split_channel_path};
 pub use presence::{
 	ChannelId, ChannelInfo, ClientId, ClientInfo, GroupId, GroupInfo, GroupNamingMode, GroupType,
 	Presence, PresenceDelta, PresenceSnapshot, parse_badges,

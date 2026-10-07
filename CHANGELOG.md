@@ -29,8 +29,12 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
   in the channel tree and the members panel, and their names on the member
   card (what each is for on hover).
 - Links in chat open in the browser; one whose text is not its address
-  first shows where it goes. A right-click on a link opens or copies it;
-  TeamSpeak links are copied for now.
+  first shows where it goes. A right-click on a link opens or copies it.
+- `ts3server://` and `teamspeak://` links in chat (and `tmspk.gg/s/…`)
+  open the server dialog filled in from the link, its channel and key
+  included, or move you into the link's channel when you are in voice on
+  that server. Nothing connects before Connect, and a saved server keeps
+  its nickname. `tmspk.gg` invite codes can't be opened yet.
 - Every message can be quoted into the composer (`> ` lines) and its text
   copied, from the actions on hover or a right-click menu, also on servers
   without a gateway.
