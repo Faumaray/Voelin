@@ -60,8 +60,8 @@ export component HoldToTalk inherits Rectangle {
     }
 }
 
-// "Voice Connected — channel / server", disconnect, and hold-to-talk
-// with push-to-talk.
+// "Voice Connected" and our channel, disconnect, and hold-to-talk with
+// push-to-talk.
 export component VoiceCard inherits Rectangle {
     border-radius: Theme.radius-lg;
     background: Theme.surface-2;
@@ -94,8 +94,9 @@ export component VoiceCard inherits Rectangle {
                     font-size: Theme.font-sm;
                     font-weight: Theme.weight-semibold;
                 }
-                Text {
-                    text: Bridge.own-channel != "" ? Bridge.own-channel + " / " + Bridge.server-title : Bridge.server-title;
+                // Our channel; none yet while connecting.
+                if Bridge.own-channel != "": Text {
+                    text: Bridge.own-channel;
                     color: Theme.text-muted;
                     font-size: Theme.font-xs;
                     overflow: elide;

@@ -147,9 +147,13 @@ Shell pieces (ui/shells/): `DesktopShell` (rail + top bar + panels as
 server shows its icon or its initials, on a colour no other server has while
 there are at most ten, kept when a server is added),
 `TopBar` (the search, starting over the main panel, opens the search like
-Ctrl+K; the bell at the right), `MobileShell` (top bar, on the voice screen
-with Back, the channel, the people, Chats and More; the page; bottom
-navigation), `VoiceCard`, `VoiceButtons` (mute, deafen, share; `gear` adds
+Ctrl+K; the bell at the right), `MobileShell` (top bar: the tab's or the
+page's name, such as Servers, Activity, You or Settings, the app's name on
+Home, the server with the chat below on Chats; on the voice screen Back,
+the channel with the server below, the people, Chats and More; the page;
+bottom navigation), `VoiceCard` (Voice Connected, or Connecting…, and our
+channel; Disconnect, and Hold to talk with push-to-talk; on the phone a tap
+opens the voice screen), `VoiceButtons` (mute, deafen, share; `gear` adds
 the voice settings; `round` and `filled` for the voice view's call bar),
 `UserCard` (its avatar and name open Settings → My Account), `HoldToTalk`.
 Pages bring their own title; About is in the settings (and on the phone's
@@ -188,6 +192,12 @@ phone the chat is the Chat tab and the members of our channel are on the
 Activity tab, with the streams (the streamer's avatar on their colour, Watch,
 Show and Leave). The Chat tab counts the server's unread chats; private chats
 count on the Home tab, where the direct messages are.
+
+The phone's Servers tab (`tab:servers`) is titled Servers: the servers as a
+row of icons (a double tap edits one, + adds one), then the server card, the
+one place for the server's name, counts and banner, with its menu (Edit
+server, Add a server); Connect, or the voice card with our channel (a tap
+opens the voice screen); and the channel tree.
 
 The phone's voice screen (`voice` in a phone-sized window,
 `screens/mobile-voice.slint`) has one header, the shell's top bar: Back (it

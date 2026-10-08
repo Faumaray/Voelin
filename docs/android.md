@@ -87,13 +87,13 @@ capture, NDK MediaCodec format queries); targetSdk and compileSdk 36.
   do not recreate it.
 - **Voice in the background**: while any session has a voice connection,
   `VoiceService` runs as a foreground service of type `microphone`. Its
-  notification reads like the app's voice card: the channel as the title,
-  the server and who is there ("Home · 3 in voice", "just you"), the time
-  in voice as a chronometer, and Mute, Deafen and Leave, which act on every
-  voice session; with several servers, "In voice on 2 servers" and their
-  names. Tapping it opens the voice channel screen (the activity hands the
-  request to Rust, which queues it until the window runs:
-  `voelin_ui::request`). Rust drives it from engine events (`foreground.rs`,
+  notification has the channel as the title, the server and who is there
+  ("Home · 3 in voice", "just you"), the time in voice as a chronometer,
+  and Mute, Deafen and Leave, which act on every voice session; with
+  several servers, "In voice on 2 servers" and their names. Tapping it
+  opens the voice channel screen (the activity hands the request to Rust,
+  which queues it until the window runs: `voelin_ui::request`). Rust
+  drives it from engine events (`foreground.rs`,
   `Bridge.setVoiceNotification`). Audio itself is cpal on AAudio, as on
   desktop.
 - **Sharing the screen**: `voelin_media::capture::default_screen_capture()`

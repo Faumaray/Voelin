@@ -157,6 +157,9 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
   Share are one Share button that opens the share menu (a screen, or the
   Stream Studio) as on desktop. The microphone button says Mic on or Mic
   off.
+- The phone's Servers tab is titled Servers; the server's name and counts
+  are only in the server card below the server icons, no longer in the top
+  bar too. The voice card shows only your channel, on desktop too.
 - Banners: up to 128 MiB, more time on slow hosts, BMP and ICO too, and
   SVG after a comment or DOCTYPE; pictures larger than 4096 pixels on a
   side are scaled down. A banner that fails is tried again for as long as

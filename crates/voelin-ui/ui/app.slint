@@ -267,6 +267,9 @@ export component MainWindow inherits Window {
                     && Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length
                     && Bridge.tabs[Bridge.current-tab].kind == 1;
                 banner: Nav.phone-voice ? Bridge.own-channel-banner : self.channel-chat ? Bridge.tabs[Bridge.current-tab].banner : @image-url("");
+                // The page's or the tab's name (on the Servers tab the server
+                // card below names the server); on the Chats tab the server,
+                // with the chat below it.
                 title: Nav.page == Page.settings ? @tr("Settings")
                     : Nav.page == Page.friends ? @tr("Friends")
                     : Nav.page == Page.messages ? @tr("Messages")
@@ -274,14 +277,14 @@ export component MainWindow inherits Window {
                     : Nav.page == Page.events ? @tr("Events")
                     : Nav.phone-voice ? Bridge.own-channel
                     : Nav.page == Page.home || Nav.mobile-tab == MobileTab.home ? Bridge.app-name
+                    : Nav.mobile-tab == MobileTab.servers ? @tr("Servers")
                     : Nav.mobile-tab == MobileTab.you ? @tr("You")
                     : Nav.mobile-tab == MobileTab.activity ? @tr("Activity")
                     : Bridge.server-title;
                 subtitle: Nav.page == Page.settings || Nav.page == Page.friends || Nav.page == Page.messages || Nav.page == Page.library ? ""
                     : Nav.page == Page.events || Nav.phone-voice ? Bridge.server-title
                     : Nav.page == Page.home || Nav.mobile-tab == MobileTab.home ? ""
-                    : Nav.mobile-tab == MobileTab.chat && Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length ? Bridge.tabs[Bridge.current-tab].title
-                    : Nav.mobile-tab == MobileTab.servers ? Bridge.server-stats : "";
+                    : Nav.mobile-tab == MobileTab.chat && Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length ? Bridge.tabs[Bridge.current-tab].title : "";
                 back: Nav.phone-voice || Nav.page == Page.settings || Nav.page == Page.friends || Nav.page == Page.messages || Nav.page == Page.library || Nav.page == Page.events;
                 unread: Bridge.unread-total;
                 voice: Nav.phone-voice;
