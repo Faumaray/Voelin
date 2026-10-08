@@ -27,8 +27,10 @@ export struct ServerItem {
 
 export struct TreeItem {
     is-channel: bool,
-    // Recognized centred TeamSpeak spacer; name excludes its wire prefix.
-    centered-spacer: bool,
+    // A TeamSpeak spacer channel, its name without the `[cspacer1]` part:
+    // 0 none, 1 left, 2 centred, 3 right, 4 a line (the name repeats its
+    // pattern across the row).
+    spacer: int,
     depth: int,
     id: int,
     name: string,
@@ -60,6 +62,11 @@ export struct TreeItem {
     icon: image,
     icon-2: image,
     icon-3: image,
+    // A client's badges (myTeamSpeak), the first three in its order, empty
+    // where absent; shown after the name.
+    badge: image,
+    badge-2: image,
+    badge-3: image,
     // A channel's banner picture (TeamSpeak 6), drawn behind the row;
     // Wire sizing metadata; compact decorative backgrounds always cover.
     banner: image,
@@ -99,8 +106,21 @@ export struct MemberItem {
     priority: bool,
     commander: bool,
     recording: bool,
-    // `client_talk_power`; shown when the channel needs it.
-    talk-power: int,
+    // Its channel needs more talk power than it has (and it is no
+    // talker): it cannot speak.
+    cannot-talk: bool,
+    // myTeamSpeak badges, as in `TreeItem`.
+    badge: image,
+    badge-2: image,
+    badge-3: image,
+}
+
+// A myTeamSpeak badge on the member card: "Badge" and its GUID for one
+// the app does not know; its picture is empty until it is downloaded.
+export struct BadgeItem {
+    name: string,
+    description: string,
+    icon: image,
 }
 
 // The member card over a member row: everything about one client and what
@@ -116,6 +136,8 @@ export struct MemberCard {
     description: string,
     // Server groups, one per line.
     groups: [string],
+    // The badges the client shows (at most three, in its order).
+    badges: [BadgeItem],
     country: string,
     talk-power: int,
     friend: bool,
@@ -130,7 +152,7 @@ export struct MemberCard {
 }
 
 export struct ChatTab {
-    // "#Lobby", "@alice", "Server"
+    // "Lobby", "@alice", "Server"
     title: string,
     // The name alone ("Lobby").
     name: string,
@@ -148,11 +170,36 @@ export struct ChatTab {
     banner-mode: int,
 }
 
-// A piece of a chat line: text, or an emoji shown as an image (`emoji` is
-// its Twemoji key, e.g. "1f600"; `text` then holds the characters).
+// A piece of a chat line: a word in its style, or an emoji shown as an
+// image (`emoji` is its Twemoji key, e.g. "1f600"; `text` then holds the
+// characters).
 export struct TextRun {
     text: string,
     emoji: string,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strike: bool,
+    // Code: on a background.
+    code: bool,
+    // The author's colour, made readable on each theme; transparent: the
+    // text's own.
+    ink-dark: color,
+    ink-light: color,
+    // Where it links to ("": nowhere), and whether its text shows something
+    // else (a page's name, another address): asked about before it opens.
+    link: string,
+    masked: bool,
+}
+
+// A block of a chat line (`vm::bbcode`): its runs, and what it is.
+export struct TextBlock {
+    runs: [TextRun],
+    // 0 = a line, 1 = a quote's line, 2 = a line of code, 3 = a list item,
+    // 4 = a rule (no runs)
+    kind: int,
+    // Who a quote quotes, on its first line.
+    caption: string,
 }
 
 // One emoji under a message, with how many put it there.
@@ -187,10 +234,13 @@ export struct ChatLine {
     // (the engine's ids do not fit a Slint int).
     key: int,
     author: string,
+    // The text without formatting, a line per block (shown as it is when
+    // the message has neither formatting nor emoji, and read out).
     text: string,
     time: string,
-    // The text split into runs; only filled when it has emoji (`rich`).
-    runs: [TextRun],
+    // The text in blocks of styled runs; only filled when it has
+    // formatting or emoji (`rich`).
+    blocks: [TextBlock],
     rich: bool,
     // Only one to three emoji: shown large.
     jumbo: bool,
@@ -211,6 +261,11 @@ export struct ChatLine {
     topic: string,
     // Highlighted after jumping to it from the pins.
     marked: bool,
+    // The first web address it links to, "" if none.
+    link: string,
+    // The first new message: the "New" divider is above it (never
+    // `continued`).
+    unread-start: bool,
 }
 
 // A pinned message in the pins drawer.
@@ -233,12 +288,21 @@ export struct TopicItem {
     archived: bool,
 }
 
+// The server dialog: a bookmark (id -1: a new one) and, from a link, where
+// Connect goes.
 export struct BookmarkForm {
     id: int,
     name: string,
     address: string,
     nickname: string,
     server-password: string,
+    // The server has voice: no Connect.
+    connected: bool,
+    // From a link, not stored with the server: the channel to join (a
+    // path, or /<id>), its password and a privilege key.
+    channel: string,
+    channel-password: string,
+    token: string,
 }
 
 // A stream on the server, ours first: a stream can be watched from any
@@ -252,6 +316,11 @@ export struct StreamItem {
     channel: string,
     // The streamer's client id (their avatar in the members).
     streamer-id: int,
+    // The streamer's avatar, as the members show it: their picture, or
+    // their initials on their colour (also the card's picture's colour).
+    initials: string,
+    tint: color,
+    avatar: image,
     // How many watch it (the gateway's directory; 0 unknown).
     viewers: int,
     audio: bool,
@@ -262,6 +331,8 @@ export struct StreamItem {
     watching: bool,
     // Our own stream.
     own: bool,
+    // Ours from the Stream Studio: its preview is the card's picture.
+    studio: bool,
 }
 
 // A viewer of our stream. state: "requested", "connecting" or "connected".
@@ -366,7 +437,7 @@ export struct ContactItem {
     muted: bool,
     // "Contact since 14 Jan 2022".
     since: string,
-    // Every session that sees them: "Nightfall Guild · #Chill Zone".
+    // Every session that sees them: "Nightfall Guild · Chill Zone".
     spots: [string],
     // A voice connection sees them: they can be messaged, poked, joined.
     reachable: bool,
@@ -459,6 +530,23 @@ export struct HappeningItem {
     live: bool,
 }
 
+// Home's "Continue where you left off": the voice channel we were in last.
+export struct ResumeItem {
+    // There is one: its server is still a bookmark at the same address.
+    shown: bool,
+    server-id: int,
+    server: string,
+    initials: string,
+    tint: color,
+    icon: image,
+    // The channel's name as the tree shows it.
+    channel: string,
+    // Voice is connected there: the button shows the server; else it
+    // connects into the channel.
+    open: bool,
+    connecting: bool,
+}
+
 // A scheduled event of a server's gateway.
 export struct EventItem {
     id: int,
@@ -470,7 +558,7 @@ export struct EventItem {
     month: string,
     // "Sat 26 Apr, 19:00 – 21:00"
     when: string,
-    // "#Raid Night" or "Server-wide".
+    // "Raid Night" or "Server-wide".
     place: string,
     // A scheduled stream: "Exploring the Lands Between · Elden Ring".
     stream: string,
@@ -525,7 +613,7 @@ export struct DmPeer {
     tint: color,
     avatar: image,
     online: bool,
-    // "Online · Nightfall Guild · #Chill Zone", "Offline · last seen 2 h ago".
+    // "Online · Nightfall Guild · Chill Zone", "Offline · last seen 2 h ago".
     status: string,
     description: string,
     groups: [string],
@@ -760,6 +848,15 @@ export struct AdvancedForm {
     crash-dir: string,
 }
 
+// A badge of the account, as servers can be shown it: its place among the
+// shown ones (1 to 3; 0: not shown), and whether that can change now (at
+// most three are shown).
+export struct MytsBadge {
+    name: string,
+    shown: int,
+    can-change: bool,
+}
+
 // Who we are (My Account page).
 export struct MytsForm {
     prompt: bool,
@@ -781,6 +878,9 @@ export struct MytsForm {
     member-since: string,
     last-login: string,
     badges: [string],
+    // The badges signed for servers, to choose from; the primary User Tag.
+    badge-choice: [MytsBadge],
+    user-tag: string,
     devices: [string],
     status: int,
     persistence-status: int,
@@ -808,8 +908,13 @@ export global Bridge {
     in property <[MemberItem]> server-members;
     // How many people are on the server (not counting query clients).
     in property <int> member-total;
+    // The chat strip: the server's chat and the channels' (private chats
+    // are on the messages page), and its current tab (-1 while the current
+    // chat is a private one).
     in property <[ChatTab]> tabs;
     in-out property <int> current-tab: 0;
+    // Which of the session's chats is current (also a private one).
+    in property <int> current-chat;
     in property <[ChatLine]> messages;
     // Older messages can still be loaded in the current chat.
     in property <bool> more-history;
@@ -820,6 +925,10 @@ export global Bridge {
     in property <bool> has-pins;
     in property <bool> has-reactions;
     in property <bool> has-topics;
+    // How many pins and topics the current chat has, for the header's
+    // buttons; -1 until the gateway answered.
+    in property <int> pins-count: -1;
+    in property <int> topics-count: -1;
     // The pins drawer.
     in property <[PinItem]> pins;
     in property <bool> pins-loading;
@@ -835,8 +944,15 @@ export global Bridge {
     // that changes with every jump.
     in property <int> jump-index: -1;
     in property <int> jump-requests;
+    // The "New" divider of the current chat: its row in `messages` (-1:
+    // none), how many messages are new from there, and since when
+    // ("10:14"). It stays until the chat is left or marked read.
+    in property <int> unread-index: -1;
+    in property <int> unread-count;
+    in property <string> unread-since;
     in property <string> status-text;
-    // Unread messages in all chats of the current server.
+    // Unread messages in the current server's chat and channel chats (its
+    // private chats count in `dm-unread`).
     in property <int> unread-total;
     in property <string> server-title: @tr("No server selected");
     // "12 online · 8 channels"
@@ -883,24 +999,30 @@ export global Bridge {
     // Whether capture and encoding are built in.
     in property <bool> can-share: true;
 
-    // The stream shown in the viewer.
+    // The stream shown in the viewer. Open: the player is in this window
+    // (the main window's is not while the stream plays in its own).
     in property <bool> viewer-open;
+    // The stream plays in a window of its own (desktop, src/popout.rs),
+    // which can stay over the other windows.
+    in property <bool> viewer-popped;
+    in-out property <bool> viewer-on-top;
     in property <image> viewer-frame;
     in property <bool> viewer-has-frame;
     in property <string> viewer-title;
-    // Who streams it (their client id: -1 unknown).
+    // Who streams it, and their avatar as the members show it: their
+    // picture, else their initials on their colour.
     in property <string> viewer-streamer;
+    in property <image> viewer-streamer-avatar;
+    in property <string> viewer-streamer-initials;
+    in property <color> viewer-streamer-tint;
     // The voice channel the watched stream is in.
     in property <string> viewer-channel;
-    in property <int> viewer-streamer-id: -1;
     // Shown instead of (or over) the picture: waiting, ended, errors.
     in property <string> viewer-status;
     in property <string> viewer-info;
     in property <bool> viewer-ended;
     in-out property <float> viewer-volume: 100;
     in property <bool> viewer-fullscreen;
-    // The viewer fills the window without the shell ("pop out").
-    in-out property <bool> viewer-popped;
     // "12:34" since the stream was joined.
     in property <string> viewer-elapsed;
     in property <int> viewer-count;
@@ -934,6 +1056,9 @@ export global Bridge {
     // The product name (voelin_platform::APP_NAME, not translated) and version.
     in property <string> app-name: "Voelin";
     in property <string> app-version;
+    // False in the Android app; the one platform flag (tooltips are desktop
+    // only). The studio's own window, desktop only, keeps the default.
+    in property <bool> desktop: true;
     in-out property <ClientAudio> client-audio;
     // Opt-in local crash reports, and a notice about reports on disk.
     in-out property <bool> crash-reports;
@@ -952,14 +1077,23 @@ export global Bridge {
     callback search(string);
     callback connect-voice();
     callback disconnect-voice();
+    // A double-click on a channel: Rust moves there, or asks for its
+    // password first (Nav.channel-password-open); the dialog's Join.
     callback join-channel(int);
+    callback join-with-password(string);
     callback open-channel-chat(int);
     callback toggle-collapse(int);
+    // A tab of `tabs` (the chat strip) by its place there.
     callback select-tab(int);
     callback close-tab(int);
     callback send-message(string);
     // The page before the oldest shown message.
     callback load-older();
+    // The current chat is read: its "New" divider goes.
+    callback mark-read();
+    // The current chat's messages came on screen or left it
+    // (Nav.chat-shown): messages are read only while they are shown.
+    callback chat-shown-changed();
     // A message of the current chat, by its `key`.
     callback react(int, string);
     callback pin(int, bool);
@@ -978,12 +1112,19 @@ export global Bridge {
     // The member card: open it for a client (-1 closes it).
     callback open-member(int);
     callback member-action(string);
+    // The poke dialog's Send (Nav.poke-open, opened by Rust for the member
+    // card and contacts), with its message.
+    callback send-poke(string);
     callback member-volume(float);
     callback set-input-muted(bool);
     callback set-output-muted(bool);
     callback push-to-talk(bool);
     callback edit-bookmark(int) -> BookmarkForm;
     callback save-bookmark(BookmarkForm);
+    // The server dialog's Connect: save, then connect with voice (into the
+    // form's channel, if any); false when saving failed, and nothing
+    // connects.
+    callback save-and-connect(BookmarkForm) -> bool;
     callback delete-bookmark(int);
 
     callback open-share() -> ShareForm;
@@ -1000,6 +1141,12 @@ export global Bridge {
     callback leave-stream();
     callback set-stream-volume(float);
     callback toggle-fullscreen();
+    // The player into a window of its own (true) or back into the main
+    // window.
+    callback pop-out-viewer(bool);
+    // Show or hide the pointer over the window: the player hides it with
+    // its controls in full screen.
+    callback show-cursor(bool);
     // A simulcast layer of the watched stream (0: Auto).
     callback set-stream-quality(int);
 
@@ -1013,6 +1160,8 @@ export global Bridge {
     callback appearance-changed(AppearanceForm);
     // The members panel was dragged to another width (pixels).
     callback panel-resized(float);
+    // The voice channel view's stage was made smaller (true) or larger.
+    callback voice-compact-changed(bool);
     // The voice channel view was opened or closed.
     callback show-voice-view(bool);
     // The members panel's search field.
@@ -1027,14 +1176,29 @@ export global Bridge {
     callback dismiss-crash-notice();
     callback open-about();
     // A link to our voice channel (`ts3server://`) to hand to others; the
-    // caller copies it.
+    // caller copies it (Nav.copy).
     callback invite() -> string;
+    // A link in a message was clicked (`TextRun.link` and `masked`): Rust
+    // opens a page on the web (a masked one after asking: Nav.link-open),
+    // or a TeamSpeak link in the app (the server dialog, or a move).
+    callback open-link(string, bool);
+    // A message's text (`ChatLine.text`) by its author as a quote for the
+    // composer: "> Author: line" and "> line" for the next ones.
+    callback quote-text(string, string) -> string;
+    // Nav.copy put text on the clipboard: Rust says so in the toast.
+    callback copied();
 
     // Home, friends, direct messages, notifications, search, events and
     // the settings pages.
 
-    // Home: friends online first, live streams on our servers, the latest
-    // chats, what friends do, events and server news, the Library.
+    // Home: where we were with voice last and the unread mentions (at most
+    // three, newest first), friends online, live streams on our servers,
+    // the latest chats, what friends do, events and server news, the
+    // Library; in the sidebar the newest private chats (five, unread
+    // first).
+    in property <ResumeItem> last-place;
+    in property <[NoticeItem]> home-mentions;
+    in property <[ConversationItem]> sidebar-dms;
     in property <[ContactItem]> friends-online;
     in property <[LiveItem]> live-rooms;
     in property <[ConversationItem]> recent-chats;
@@ -1043,8 +1207,10 @@ export global Bridge {
     in property <[RecordingItem]> recordings;
     in property <string> recordings-dir;
     callback open-conversation(int);
-    // The messages page and the Library were opened.
+    // The messages page and the Library were opened; the messages page was
+    // left (a private chat stops being the current chat).
     callback open-messages();
+    callback close-messages();
     callback open-library();
     callback watch-live(int, string);
     callback open-happening(int);
@@ -1052,6 +1218,9 @@ export global Bridge {
     callback open-recordings-folder();
     // Connect a bookmark with voice (the Join buttons).
     callback connect-server(int);
+    // The last place's button: its server, connected into the channel if
+    // voice is not there yet.
+    callback resume();
 
     // Friends: the contacts (friends, then the others), the selected one.
     in property <[ContactItem]> contacts;
@@ -1119,6 +1288,8 @@ export global Bridge {
     callback myts-dismiss();
     callback myts-retry();
     callback myts-portal(int);
+    // Show the badge at this index (of `myts.badge-choice`) on servers, or not.
+    callback myts-badge(int, bool);
     callback myts-login(string, string, string);
     callback myts-logout();
     in property <[IdentityItem]> identities;
@@ -1208,6 +1379,9 @@ export global Images {
     pure callback emoji(string) -> image;
     // The characters of a Twemoji key, to react with or to insert.
     pure callback emoji-text(string) -> string;
+    // The first letter of initials, for small avatars (Slint cannot cut
+    // strings).
+    pure callback first-letter(string) -> string;
 }
 
 // One emoji of the picker. `text` is what picking it inserts.

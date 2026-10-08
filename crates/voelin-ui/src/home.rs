@@ -1,15 +1,20 @@
-//! The home page (design mockup 01): live streams on our servers, what is
-//! happening there (events, scheduled streams, server news), and the
-//! Library of recordings and clips. Friends are in `social.rs`, the recent
-//! chats in `messages.rs`.
+//! The home page (design mockup 01): where we were with voice last, live
+//! streams on our servers, what is happening there (events, scheduled
+//! streams, server news), and the Library of recordings and clips.
+//! Friends and the unread mentions are in `social.rs`, the recent chats in
+//! `messages.rs`.
 
 use std::path::{Path, PathBuf};
 
 use slint::ComponentHandle;
 use voelin_core::VoiceState;
 
-use crate::app::{App, Bridge, HappeningItem, LiveItem, Page, RecordingItem};
+use crate::app::{
+	App, Bridge, HappeningItem, LiveItem, Page, RecordingItem, ResumeItem, ServerItem,
+};
+use crate::settings::LastVoice;
 use crate::vm;
+use crate::vm::home::ResumeAction;
 use crate::vm::social::{event_when, plain};
 
 /// What a "What's Happening" entry opens.
@@ -19,26 +24,19 @@ pub(crate) enum Happening {
 	News(i64),
 }
 
-/// "screen" → "Screen".
-fn kind_label(kind: &str) -> String {
-	let mut chars = kind.chars();
-	chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
-}
-
 impl App {
 	/// Streams on our servers: those the server lists (any channel; we can
 	/// watch them at once), the gateways' directories, and clients flagged
 	/// streaming.
 	fn live_rooms(&self) -> Vec<LiveItem> {
 		let mut rooms = Vec::new();
-		for b in &self.bookmarks {
+		for (b, backdrop) in self.bookmarks.iter().zip(vm::servers::tints(&self.bookmarks)) {
 			let Some(view) = self.sessions.get(&b.id) else { continue };
 			let channel_of = |cid: Option<u64>| {
 				cid.and_then(|c| view.presence.channels.get(&c))
-					.map(|c| c.name.clone())
+					.map(|c| vm::tree::channel_title(c).0.to_owned())
 					.unwrap_or_default()
 			};
-			let backdrop = vm::avatar::tint(&b.name);
 			let item = |id: String,
 			            title: String,
 			            client: Option<u16>,
@@ -71,13 +69,7 @@ impl App {
 					let mut room = item(s.id.clone(), title, Some(s.streamer.0), None, name);
 					room.channel = channel_of(view.channel_of(s.streamer.0)).into();
 					room.viewers = view.stream_viewers.get(&s.id).map_or(0, |v| *v as i32);
-					room.kind = match s.kind {
-						voelin_core::stream::StreamKind::Screen => "Screen",
-						voelin_core::stream::StreamKind::Window => "Window",
-						voelin_core::stream::StreamKind::Camera => "Camera",
-						voelin_core::stream::StreamKind::Other(_) => "",
-					}
-					.into();
+					room.kind = vm::streams::kind_label(&s.kind).into();
 					room.watchable = view.state.own_client != Some(s.streamer.0);
 					covered.push(s.streamer.0);
 					rooms.push(room);
@@ -101,7 +93,7 @@ impl App {
 				);
 				room.channel = channel_of(e.channel).into();
 				room.viewers = e.viewers.map_or(0, |v| v as i32);
-				room.kind = kind_label(&e.kind).into();
+				room.kind = vm::streams::directory_kind_label(&e.kind).into();
 				covered.extend(e.client_id);
 				rooms.push(room);
 			}
@@ -240,6 +232,62 @@ impl App {
 		self.connect_voice();
 	}
 
+	fn last_resume(&self) -> Option<vm::home::Resume> {
+		let voice = |id| self.sessions.get(&id).map_or(VoiceState::Disconnected, |v| v.state.voice);
+		vm::home::resume(self.settings.last_voice.as_ref(), &self.bookmarks, voice)
+	}
+
+	/// Home's "Continue where you left off", its server as the rail shows
+	/// it (`servers`).
+	pub(crate) fn last_place(&self, servers: &[ServerItem]) -> ResumeItem {
+		let Some(resume) = self.last_resume() else { return ResumeItem::default() };
+		let Some(server) = servers.iter().find(|s| i64::from(s.id) == resume.bookmark) else {
+			return ResumeItem::default();
+		};
+		ResumeItem {
+			shown: true,
+			server_id: server.id,
+			server: server.name.clone(),
+			initials: server.initials.clone(),
+			tint: server.tint,
+			icon: server.icon.clone(),
+			channel: resume.title().into(),
+			open: resume.action == ResumeAction::Open,
+			connecting: server.status == "connecting",
+		}
+	}
+
+	/// The last place's button: its server, connected into the channel
+	/// unless voice is there already.
+	pub(crate) fn resume(&mut self) {
+		let Some(resume) = self.last_resume() else { return };
+		self.show_server(resume.bookmark);
+		if resume.action == ResumeAction::Join {
+			self.connect_voice_to(Some(resume.path.join("/")), None, None);
+		}
+	}
+
+	/// Keep where we are with voice in `session` as the last place
+	/// (`ui.last_voice`); whether it changed. Not for the sample sessions.
+	pub(crate) fn remember_voice(&mut self, session: i64) -> bool {
+		if self.demo_ui {
+			return false;
+		}
+		let Some(view) = self.sessions.get(&session) else { return false };
+		let (VoiceState::Connected, Some(cid)) = (view.state.voice, view.state.own_channel) else {
+			return false;
+		};
+		let channel = vm::tree::channel_path(&view.presence, cid);
+		let Some(b) = self.bookmark(session).filter(|_| !channel.is_empty()) else { return false };
+		let last = LastVoice { bookmark: session, address: b.address.clone(), channel };
+		if self.settings.last_voice.as_ref() == Some(&last) {
+			return false;
+		}
+		self.settings.last_voice = Some(last);
+		self.store_settings();
+		true
+	}
+
 	/// The folder of recordings and clips.
 	fn recordings_dir(&self) -> PathBuf {
 		voelin_core::studio::recording_dir(&self.prefs)
@@ -324,7 +372,5 @@ mod tests {
 		assert!(items.iter().any(|i| i.clip && i.detail.starts_with("2 B")));
 		assert!(recordings_in(&dir.join("missing")).is_empty());
 		std::fs::remove_dir_all(&dir).unwrap();
-		assert_eq!(kind_label("screen"), "Screen");
-		assert_eq!(kind_label(""), "");
 	}
 }

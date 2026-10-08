@@ -1121,15 +1121,16 @@ pub static CHAT_RETENTION_DAYS: Key<u32> = Key::new(
 pub static CACHE_MAX_MB: Key<u64> = Key::new(
 	"cache.max_mb",
 	Kind::UInt { min: 0 },
-	"Size of the avatar and icon cache in MiB (0: no limit).",
-	|| 256,
+	"Size of the picture cache (avatars, icons, banners) in MiB (0: no limit).",
+	|| 1024,
 );
 
-/// Download the avatars, icons and banners of servers we are on.
+/// Download the avatars, icons, banners and badges of servers we are on,
+/// and the pictures their chats show (`[img]`).
 pub static CACHE_FETCH_IMAGES: Key<bool> = Key::new(
 	"cache.fetch_images",
 	Kind::Bool,
-	"Download avatars, icons and banners of the servers we are on.",
+	"Download avatars, icons, banners and badges of the servers we are on, and pictures in chat.",
 	|| true,
 );
 

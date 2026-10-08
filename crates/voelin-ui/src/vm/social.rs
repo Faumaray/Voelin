@@ -1,6 +1,7 @@
 //! Texts of the home, friends, messages, bell and events screens: times
-//! ("12m ago", "Yesterday"), message previews without BBCode, mentions,
-//! event dates; pure, so they are tested here.
+//! ("12m ago", "Yesterday"), message previews without BBCode (read by
+//! `vm::bbcode`), mentions, event dates, a poke's message, the private
+//! chats of the home sidebar; pure, so they are tested here.
 
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 
@@ -50,38 +51,24 @@ pub fn list_time_at(then: NaiveDateTime, now: NaiveDateTime) -> String {
 	}
 }
 
-/// Chat text without BBCode tags (`[b]`, `[URL=…]`, `[/URL]`), on one line.
+/// Chat text without BBCode (`[b]`, `[URL=…]`, `[/URL]`), on one line.
 pub fn plain(text: &str) -> String {
-	let mut out = String::with_capacity(text.len());
-	let mut rest = text;
-	while let Some(open) = rest.find('[') {
-		out.push_str(&rest[..open]);
-		let after = &rest[open + 1..];
-		match after.find(']') {
-			Some(close) if is_tag(&after[..close]) => rest = &after[close + 1..],
-			_ => {
-				out.push('[');
-				rest = after;
-			}
-		}
+	without_emoji(&crate::vm::bbcode::parse(text).one_line())
+}
+
+/// Text without emoji, runs of spaces as one: one line of text draws no
+/// emoji (they are pictures in the chat).
+pub fn without_emoji(text: &str) -> String {
+	let mut words = String::with_capacity(text.len());
+	for run in crate::emoji::split(text).into_iter().filter(|r| r.emoji.is_none()) {
+		words.extend(run.text.chars().filter(|c| !is_emoji(*c)));
 	}
-	out.push_str(rest);
-	// Plain text draws no emoji (they are pictures in the chat): leave
-	// them out of one-line previews.
-	let out: String = out.chars().filter(|c| !is_emoji(*c)).collect();
-	out.split_whitespace().collect::<Vec<_>>().join(" ")
+	words.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Pictographs, symbols and their joiners and variation selectors.
 fn is_emoji(c: char) -> bool {
 	matches!(u32::from(c), 0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0xFE0F | 0x200D)
-}
-
-/// `b`, `/url`, `URL=https://…`, `color=#f00`: a BBCode tag.
-fn is_tag(inside: &str) -> bool {
-	let name = inside.strip_prefix('/').unwrap_or(inside);
-	let name = name.split('=').next().unwrap_or_default();
-	!name.is_empty() && name.len() <= 8 && name.chars().all(|c| c.is_ascii_alphabetic())
 }
 
 /// A one-line preview of a message: "You: …" for our own, "Sent a
@@ -118,6 +105,37 @@ pub fn mentions(text: &str, nick: &str) -> bool {
 pub fn matches(query: &str, fields: &[&str]) -> bool {
 	let q = query.trim().to_lowercase();
 	q.is_empty() || fields.iter().any(|f| f.to_lowercase().contains(&q))
+}
+
+/// A poke's message as it is sent: trimmed, and cut to the
+/// [`voelin_core::POKE_MESSAGE_MAX`] characters servers take.
+pub fn poke_message(text: &str) -> String {
+	let cut: String = text.trim().chars().take(voelin_core::POKE_MESSAGE_MAX).collect();
+	cut.trim_end().to_owned()
+}
+
+/// The private chats of the home sidebar, by their index in `chats`
+/// (newest first): at most `n`, those with unread messages first.
+pub fn sidebar_dms(chats: &[crate::messages::ChatRef], n: usize) -> Vec<usize> {
+	let mut private: Vec<usize> = (0..chats.len())
+		.filter(|&i| matches!(chats[i].target, voelin_model::ChatTarget::Private(_)))
+		.collect();
+	private.sort_by_key(|&i| chats[i].unread == 0);
+	private.truncate(n);
+	private
+}
+
+/// The channels the search (Ctrl+K) finds for `query`, with their titles:
+/// a spacer by its text, never a line or an empty spacer.
+pub fn found_channels<'a>(
+	channels: impl IntoIterator<Item = &'a voelin_model::ChannelInfo>,
+	query: &str,
+) -> Vec<(u64, &'a str)> {
+	channels
+		.into_iter()
+		.filter_map(|c| Some((c.id, crate::vm::tree::listed_title(c)?)))
+		.filter(|(_, title)| matches(query, &[*title]))
+		.collect()
 }
 
 /// The date block of an event: "SAT", "26", "APR".
@@ -204,6 +222,9 @@ mod tests {
 		assert_eq!(plain("a [not a tag here] b"), "a [not a tag here] b");
 		assert_eq!(plain("[1] item"), "[1] item");
 		assert_eq!(plain("later? 👀 Posting ❤️"), "later? Posting");
+		// Only known tags go.
+		assert_eq!(plain("[nick] hi"), "[nick] hi");
+		assert_eq!(plain("[quote=Mira]raid?[/quote]\nyes [i]now[/i]"), "raid? yes now");
 		assert_eq!(preview("Hello", true, &[]), "You: Hello");
 		let file = |name: &str| voelin_model::FileRef { name: name.into(), ..Default::default() };
 		assert_eq!(
@@ -222,6 +243,72 @@ mod tests {
 		assert!(matches("kai", &["Kairo", "x"]));
 		assert!(matches("", &[]));
 		assert!(!matches("zz", &["Kairo"]));
+	}
+
+	#[test]
+	fn poke_messages() {
+		assert_eq!(poke_message("  Raid in 5?  "), "Raid in 5?");
+		assert_eq!(poke_message(""), "");
+		assert_eq!(poke_message(" \n "), "");
+		let exact = "x".repeat(100);
+		assert_eq!(poke_message(&exact), exact);
+		// Characters, not bytes: two bytes each.
+		assert_eq!(poke_message(&"ä".repeat(150)), "ä".repeat(100));
+		assert_eq!(poke_message(&format!("{}€!", "ü".repeat(99))), format!("{}€", "ü".repeat(99)));
+		// A cut that ends in a space leaves it out.
+		assert_eq!(poke_message(&format!("{} more", "a".repeat(99))), "a".repeat(99));
+	}
+
+	/// The search shows spacers by their text and leaves out lines.
+	#[test]
+	fn search_channels() {
+		let channel = |id, parent, name: &str| voelin_model::ChannelInfo {
+			id,
+			parent,
+			name: name.into(),
+			..Default::default()
+		};
+		let channels = [
+			channel(1, 0, "[cspacer0]Gaming"),
+			channel(2, 0, "[*spacer]---"),
+			channel(3, 0, "[spacer1]"),
+			// Only top-level channels are spacers.
+			channel(4, 1, "[cspacer]Game Night"),
+			channel(5, 0, "Lobby"),
+		];
+		assert_eq!(found_channels(&channels, "gam"), [(1, "Gaming"), (4, "[cspacer]Game Night")]);
+		assert!(found_channels(&channels, "-").is_empty());
+		// A spacer is not found by its prefix; a sub-channel's name is all
+		// its own.
+		assert_eq!(found_channels(&channels, "spacer"), [(4, "[cspacer]Game Night")]);
+		assert_eq!(found_channels(&channels, "").len(), 3);
+	}
+
+	#[test]
+	fn sidebar_chats() {
+		use voelin_model::ChatTarget;
+		let chat = |target: ChatTarget, unread| crate::messages::ChatRef {
+			session: Some(1),
+			server_uid: None,
+			target,
+			last: None,
+			unread,
+		};
+		let dm = |uid: &str, unread| chat(ChatTarget::Private(uid.into()), unread);
+		let chats = [
+			dm("a", 0),
+			chat(ChatTarget::Server, 4),
+			dm("b", 2),
+			chat(ChatTarget::Channel(3), 1),
+			dm("c", 0),
+			dm("d", 1),
+			dm("e", 0),
+			dm("f", 0),
+		];
+		// Private chats only, unread first, otherwise newest first; capped.
+		assert_eq!(sidebar_dms(&chats, 5), [2, 5, 0, 4, 6]);
+		assert_eq!(sidebar_dms(&chats, 1), [2]);
+		assert!(sidebar_dms(&chats[1..2], 5).is_empty());
 	}
 
 	#[test]

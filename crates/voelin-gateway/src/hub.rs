@@ -5,7 +5,7 @@
 //! feed are in `features.rs`, the stream directory in `streams.rs`, the
 //! background tasks in `tasks.rs`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -21,10 +21,11 @@ use voelin_gateway_proto::{
 };
 use voelin_model::{ChannelId, ChatMessage, ChatTarget, Presence, ServerFlavor};
 use voelin_observer::{Observer, ObserverConfig, RelayConfig, RelayPool, post_as};
-use voelin_query::{Command, Connect, QueryClient};
+use voelin_query::{Command, Connect};
 
-use crate::config::{Bootstrap, Layers, Runtime};
+use crate::config::{Layers, Runtime};
 use crate::db::{Db, TokenInfo};
+use crate::lookup::Lookup;
 use crate::perms::{
 	ChannelAccess, GroupResolver, PermIds, PermResolver, UserGroups, channel_access, effective,
 	granted, rule_allows,
@@ -192,7 +193,6 @@ impl Feature {
 }
 
 pub struct Hub {
-	pub boot: Bootstrap,
 	pub settings: Settings,
 	pub gateway_id: String,
 	pub server_uid: String,
@@ -205,7 +205,7 @@ pub struct Hub {
 	relays: RwLock<RelayPool>,
 	/// Serializes rebuilding the relay pool.
 	relay_rebuild: tokio::sync::Mutex<()>,
-	lookup: QueryClient,
+	pub(crate) lookup: Arc<Lookup>,
 	/// One server-chat post at a time: each borrows the poster's nickname.
 	lookup_posting: tokio::sync::Mutex<()>,
 	perms: PermResolver,
@@ -214,57 +214,51 @@ pub struct Hub {
 	events: broadcast::Sender<Arc<HubEvent>>,
 	/// Readers per relayed channel, and when the last one left.
 	readers: Mutex<HashMap<ChannelId, (usize, Instant)>>,
-	/// Our own query clients, whose messages are echoes.
-	own_clients: Mutex<HashSet<u16>>,
 	/// Message ids while history is off.
 	next_message_id: Mutex<i64>,
 	pub(crate) directory: Mutex<Directory>,
 }
 
 impl Hub {
-	/// Connect to the server, open the database and start the background tasks.
+	/// Connect to the server, open the database and start the background
+	/// tasks. Waits for the TeamSpeak server as long as it takes.
 	pub async fn start(layers: Layers) -> Result<Arc<Self>> {
+		let started = Instant::now();
 		let boot = layers.bootstrap()?;
 		let db = Db::open(&boot.db_path)
 			.with_context(|| format!("failed to open {}", boot.db_path.display()))?;
 		let settings = Settings::new(layers, &db)?;
 		let rt = settings.current();
 
+		// Clones share the count of commands for the flood protection.
 		let connect = boot.query_connect();
-		let (lookup, _) =
-			QueryClient::connect(&connect).await.context("query login for lookups failed")?;
-		let info = lookup.send(&Command::new("serverinfo")).await?;
-		let info = info.first().context("empty serverinfo")?;
-		let version = info.get("virtualserver_version").unwrap_or_default();
-		let is_ts6 = matches!(ServerFlavor::from_version_string(version), ServerFlavor::Ts6(_));
-		let server_uid =
-			info.get("virtualserver_unique_identifier").unwrap_or_default().to_string();
-		let server_name = info.get("virtualserver_name").unwrap_or_default().to_string();
-		let needed_level = info.parse("virtualserver_needed_identity_security_level").unwrap_or(8);
-		let channels = lookup.send(&Command::new("channellist").flag("flags")).await?;
-		let default_channel = channels
-			.iter()
-			.find(|r| r.flag("channel_flag_default") == Some(true))
-			.and_then(|r| r.parse("cid"))
-			.unwrap_or(1);
-		let perms = PermResolver::new(PermIds::load(&lookup).await?);
-		let own_id = lookup.own_client_id().await?;
-		set_lookup_nickname(&lookup, &rt.relay.nickname).await;
+		let lookup = Lookup::open(connect.clone(), lookup_nickname(&rt.relay.nickname)).await;
+		lookup.log_address(boot.allowlisted).await;
+		let server = ServerFacts::load_until_it_works(&lookup, &connect).await;
+		let perms = PermResolver::new(server.perm_ids);
 
 		let observer = Observer::spawn(ObserverConfig::new(connect.clone()));
 		let relays = new_relay_pool(&connect, &rt.relay.nickname);
 		let directory = Directory::load(&db);
 
-		info!(%server_name, %server_uid, version, is_ts6, "gateway connected to server");
+		info!(
+			server_name = %server.name,
+			server_uid = %server.uid,
+			version = %server.version,
+			is_ts6 = server.is_ts6,
+			default_channel = server.default_channel,
+			needed_level = server.needed_level,
+			elapsed_ms = started.elapsed().as_millis() as u64,
+			"gateway connected to server"
+		);
 		let hub = Arc::new(Self {
 			gateway_id: boot.gateway_id(),
-			boot,
 			settings,
-			server_uid,
-			server_name,
-			is_ts6,
-			needed_level,
-			default_channel,
+			server_uid: server.uid,
+			server_name: server.name,
+			is_ts6: server.is_ts6,
+			needed_level: server.needed_level,
+			default_channel: server.default_channel,
 			observer,
 			connect,
 			relays: RwLock::new(relays),
@@ -276,15 +270,13 @@ impl Hub {
 			db,
 			events: broadcast::channel(4096).0,
 			readers: Default::default(),
-			own_clients: Mutex::new([own_id].into()),
 			next_message_id: Mutex::new(0),
 			directory: Mutex::new(directory),
 		});
 		crate::tasks::spawn_all(&hub);
+		// Apps may log in meanwhile.
 		for &cid in &rt.relay.pinned_channels {
-			if let Err(error) = hub.relays().open(cid).await {
-				warn!(cid, %error, "could not open pinned relay");
-			}
+			hub.open_relay_soon(cid);
 		}
 		Ok(hub)
 	}
@@ -306,7 +298,7 @@ impl Hub {
 	}
 
 	pub(crate) fn is_own_client(&self, id: u16) -> bool {
-		self.own_clients.lock().unwrap().contains(&id)
+		self.lookup.is_own(id)
 	}
 
 	/// Features for the `hello` message.
@@ -350,30 +342,62 @@ impl Hub {
 		let pool = new_relay_pool(&self.connect, nickname);
 		tokio::spawn(crate::tasks::pump_relays(self.clone(), pool.subscribe()));
 		let old = std::mem::replace(&mut *self.relays.write().unwrap(), pool);
-		let channels = old.channels().await;
-		old.close_all().await;
+		// Also the relays being opened now, which open no more in the old pool.
+		let channels = old.close_all().await;
 		drop(old);
-		set_lookup_nickname(&self.lookup, nickname).await;
+		self.lookup.set_nickname(&lookup_nickname(nickname)).await;
 		let pool = self.relays();
 		for cid in channels {
-			if let Err(error) = pool.open(cid).await {
-				warn!(cid, %error, "could not reopen relay");
+			// A failure is logged by the pool.
+			if pool.open(cid).await.is_err() && self.relay_wanted(cid) {
+				let hub = self.clone();
+				tokio::spawn(async move { hub.reopen_relay(cid).await });
 			}
 		}
 		info!(nickname, "relays renamed");
 	}
 
-	/// Pinned channels changed: open new ones, let removed ones idle out.
-	pub(crate) async fn apply_pinned_channels(&self, old: &[u64], new: &[u64]) {
-		let pool = self.relays();
-		for cid in new.iter().filter(|c| !old.contains(c)) {
-			if let Err(error) = pool.open(*cid).await {
-				warn!(cid, %error, "could not open pinned relay");
+	/// Open a channel's relay in the background, and while that fails, again
+	/// for as long as it is wanted ([`Hub::reopen_relay`]).
+	fn open_relay_soon(self: &Arc<Self>, cid: ChannelId) {
+		let hub = self.clone();
+		tokio::spawn(async move {
+			// A failure is logged by the pool.
+			if hub.relays().open(cid).await.is_err() {
+				hub.reopen_relay(cid).await;
 			}
+		});
+	}
+
+	/// Pinned channels changed: open new ones, let removed ones idle out.
+	pub(crate) fn apply_pinned_channels(self: &Arc<Self>, old: &[u64], new: &[u64]) {
+		for cid in new.iter().filter(|c| !old.contains(c)) {
+			self.open_relay_soon(*cid);
 		}
 		for cid in old.iter().filter(|c| !new.contains(c)) {
 			// The idle teardown closes it once nobody reads it.
 			self.readers.lock().unwrap().entry(*cid).or_insert((0, Instant::now()));
+		}
+	}
+
+	/// Someone reads the channel, or it is pinned.
+	pub(crate) fn relay_wanted(&self, cid: ChannelId) -> bool {
+		self.runtime().relay.pinned_channels.contains(&cid)
+			|| self.readers.lock().unwrap().get(&cid).is_some_and(|(n, _)| *n > 0)
+	}
+
+	/// Open a relay the server dropped again, waiting longer after each
+	/// failure, for as long as it is wanted.
+	pub(crate) async fn reopen_relay(&self, cid: ChannelId) {
+		let mut attempt = 0;
+		while self.relay_wanted(cid) {
+			attempt += 1;
+			tokio::time::sleep(self.connect.retry_delay(attempt)).await;
+			// A failure is logged by the pool.
+			if self.relays().open(cid).await.is_ok() {
+				info!(channel = cid, attempt, "relay reopened");
+				return;
+			}
 		}
 	}
 
@@ -711,7 +735,15 @@ impl Hub {
 				));
 			}
 		}
-		self.relays().open(cid).await?;
+		loop {
+			let pool = self.relays();
+			match pool.open(cid).await {
+				// Replaced on the way (a new nickname): open in the new pool.
+				Err(_) if pool.is_closed() => continue,
+				result => result?,
+			}
+			break;
+		}
 		self.readers.lock().unwrap().entry(cid).or_insert((0, Instant::now())).0 += 1;
 		Ok(())
 	}
@@ -760,7 +792,7 @@ impl Hub {
 			ChatTarget::Server => {
 				let _posting = self.lookup_posting.lock().await;
 				post_as(
-					&self.lookup,
+					&self.lookup.client().await,
 					&lookup_nickname(&rt.relay.nickname),
 					&user.nickname,
 					&relayed,
@@ -811,10 +843,61 @@ fn lookup_nickname(nickname: &str) -> String {
 	format!("{nickname} Gateway")
 }
 
-async fn set_lookup_nickname(lookup: &QueryClient, nickname: &str) {
-	let _ = lookup
-		.send(&Command::new("clientupdate").arg("client_nickname", lookup_nickname(nickname)))
-		.await;
+/// What the gateway reads from the server once, at start.
+struct ServerFacts {
+	version: String,
+	is_ts6: bool,
+	uid: String,
+	name: String,
+	needed_level: u8,
+	default_channel: ChannelId,
+	perm_ids: PermIds,
+}
+
+impl ServerFacts {
+	async fn load_until_it_works(lookup: &Lookup, connect: &Connect) -> Self {
+		let mut attempt = 0;
+		loop {
+			attempt += 1;
+			match Self::load(lookup).await {
+				Ok(facts) => return facts,
+				Err(error) => {
+					let retry_in = connect.retry_delay(attempt);
+					warn!(
+						error = format!("{error:#}"),
+						attempt,
+						retry_in_s = retry_in.as_secs_f32(),
+						"could not read the server's settings; trying again"
+					);
+					tokio::time::sleep(retry_in).await;
+				}
+			}
+		}
+	}
+
+	async fn load(lookup: &Lookup) -> Result<Self> {
+		// Failures are logged by the caller.
+		let info = lookup.send_quiet(&Command::new("serverinfo")).await.context("serverinfo")?;
+		let info = info.first().context("empty serverinfo")?;
+		let version = info.get("virtualserver_version").unwrap_or_default().to_string();
+		let channels = lookup
+			.send_quiet(&Command::new("channellist").flag("flags"))
+			.await
+			.context("channellist")?;
+		Ok(Self {
+			is_ts6: matches!(ServerFlavor::from_version_string(&version), ServerFlavor::Ts6(_)),
+			version,
+			uid: info.get("virtualserver_unique_identifier").unwrap_or_default().to_string(),
+			name: info.get("virtualserver_name").unwrap_or_default().to_string(),
+			needed_level: info.parse("virtualserver_needed_identity_security_level").unwrap_or(8),
+			default_channel: channels
+				.iter()
+				.find(|r| r.flag("channel_flag_default") == Some(true))
+				.and_then(|r| r.parse("cid"))
+				.unwrap_or(1),
+			perm_ids: PermIds::load(lookup).await.context("looking up permission ids")?,
+		})
+	}
 }
 
 /// Split `text` by a topic format like `[#{topic}] {text}` into title and

@@ -11,7 +11,7 @@ use voelin_core::settings::{
 	AudioSourceSetting, STREAM_AUDIO_SOURCES, STREAM_BITRATE_KBPS, STREAM_FPS,
 };
 use voelin_core::stream::{
-	EndReason, LayerId, LayerSpec, LeaveReason, StreamKind, StreamSetup, ViewerInfo, ViewerState,
+	EndReason, LayerId, LayerSpec, LeaveReason, StreamSetup, ViewerInfo, ViewerState,
 };
 use voelin_core::{Command, Event, StreamState, WatchState};
 
@@ -79,7 +79,7 @@ fn demo_viewers() -> Vec<ViewerInfo> {
 /// The stream in the viewer.
 pub(crate) struct Watch {
 	/// `None` for the local demo stream.
-	session: Option<i64>,
+	pub(crate) session: Option<i64>,
 	stream_id: String,
 	title: String,
 	streamer: String,
@@ -165,6 +165,19 @@ fn bitrate_text(kbps: u32) -> String {
 		_ if kbps.is_multiple_of(1000) => format!("{} Mbit/s", kbps / 1000),
 		_ => format!("{:.1} Mbit/s", f64::from(kbps) / 1000.0),
 	}
+}
+
+/// Show or hide the pointer over `window`. In full screen the player hides
+/// it with its controls: Slint applies a TouchArea's cursor only when the
+/// pointer moves, so the window is told directly. (No pointer on Android.)
+pub(crate) fn show_cursor(window: &slint::Window, shown: bool) {
+	#[cfg(not(target_os = "android"))]
+	{
+		use slint::winit_030::WinitWindowAccessor;
+		window.with_winit_window(|w| w.set_cursor_visible(shown));
+	}
+	#[cfg(target_os = "android")]
+	let _ = (window, shown);
 }
 
 impl App {
@@ -295,29 +308,31 @@ impl App {
 			let own_channel = view.state.own_channel;
 			let mut streams: Vec<_> = view.streams.iter().collect();
 			streams.sort_by_key(|s| view.channel_of(s.streamer.0) != own_channel);
+			// Our own stream from the studio shows its preview.
+			let studio = current.is_some_and(|c| self.studio_streams_to(c));
 			for s in streams {
-				let watching = self
-					.watch
-					.as_ref()
-					.is_some_and(|w| w.session == current && w.stream_id == s.id && !w.ended);
+				// Also the sample data's test pattern dressed as this stream
+				// (`VOELIN_OPEN=watch`), which has no session.
+				let watching = self.watch.as_ref().is_some_and(|w| {
+					(w.session == current || w.session.is_none()) && w.stream_id == s.id && !w.ended
+				});
+				let own = view.state.own_client == Some(s.streamer.0);
 				items.push(StreamItem {
 					id: s.id.clone().into(),
 					name: s.name.clone().into(),
-					streamer: view.nickname(s.streamer.0).into(),
 					channel: view.other_channel_name(s.streamer.0).into(),
 					streamer_id: i32::from(s.streamer.0),
 					viewers: viewer_count(view, &s.id).unwrap_or(0) as i32,
 					audio: s.audio,
 					watching,
-					own: view.state.own_client == Some(s.streamer.0),
-					kind: match s.kind {
-						StreamKind::Screen => "Screen",
-						StreamKind::Window => "Window",
-						StreamKind::Camera => "Camera",
-						StreamKind::Other(_) => "",
-					}
-					.into(),
+					own,
+					studio: own && studio,
+					kind: crate::vm::streams::kind_label(&s.kind).into(),
 					bitrate: bitrate_text(s.bitrate).into(),
+					..crate::vm::streams::streamer(
+						&view.nickname(s.streamer.0),
+						view.avatar(s.streamer.0),
+					)
 				});
 			}
 			// Streams that started before we joined, or in another channel:
@@ -329,10 +344,9 @@ impl App {
 				if c.streaming == Some(true) && !announced && view.state.own_client != Some(c.id) {
 					items.push(StreamItem {
 						name: c.nickname.clone().into(),
-						streamer: c.nickname.clone().into(),
 						channel: view.other_channel_name(c.id).into(),
 						streamer_id: i32::from(c.id),
-						..StreamItem::default()
+						..crate::vm::streams::streamer(&c.nickname, view.avatar(c.id))
 					});
 				}
 			}
@@ -341,11 +355,10 @@ impl App {
 			items.push(StreamItem {
 				id: "demo".into(),
 				name: "Test pattern".into(),
-				streamer: "local preview".into(),
 				audio: false,
 				watching: self.watch.as_ref().is_some_and(|w| w.session.is_none() && !w.ended),
 				own: false,
-				..StreamItem::default()
+				..crate::vm::streams::streamer("local preview", None)
 			});
 		}
 		bridge.set_streams_available(self.demo || view.is_some_and(|v| v.streams_available()));
@@ -398,60 +411,97 @@ impl App {
 		bridge.set_share_status(status.into());
 	}
 
+	/// The viewer in the main window and in its own: the same facts, but
+	/// the main window's player only while the stream is not popped out.
 	pub(crate) fn refresh_viewer(&self) {
-		let Some(ui) = self.ui.upgrade() else { return };
-		let bridge = ui.global::<Bridge>();
+		let popped = self.popout.window.is_some();
 		let Some(watch) = &self.watch else {
-			bridge.set_viewer_open(false);
-			bridge.set_viewer_has_frame(false);
-			bridge.set_viewer_frame(slint::Image::default());
+			self.viewer_each(|bridge| {
+				bridge.set_viewer_open(false);
+				bridge.set_viewer_popped(popped);
+				bridge.set_viewer_has_frame(false);
+				bridge.set_viewer_frame(slint::Image::default());
+			});
 			return;
 		};
-		bridge.set_viewer_open(
-			watch.shown && (watch.session.is_none() || watch.session == self.current),
-		);
-		bridge.set_viewer_title(watch.title.clone().into());
-		bridge.set_viewer_status(watch.status.clone().into());
-		bridge.set_viewer_ended(watch.ended);
-		bridge.set_viewer_has_frame(watch.has_frame);
-		bridge.set_viewer_volume(self.stream_volume);
+		if let Some(ui) = self.ui.upgrade() {
+			let bridge = ui.global::<Bridge>();
+			let open = watch.shown && !popped && self.watch_here();
+			if !open && bridge.get_viewer_open() && bridge.get_viewer_fullscreen() {
+				// The player goes, still in full screen: it may have hidden the cursor.
+				show_cursor(ui.window(), true);
+			}
+			bridge.set_viewer_open(open);
+		}
+		if let Some(window) = &self.popout.window {
+			window.global::<Bridge>().set_viewer_open(true);
+		}
+		// The watched stream's server, which the main window may have left
+		// while the stream plays in its own.
+		let view = match watch.session {
+			Some(id) => self.sessions.get(&id),
+			None => self.view(),
+		};
 		let decoded = watch.decoder.as_ref().map(Decoder::info).unwrap_or_default();
 		let info = [format!("by {}", watch.streamer), decoded.clone()]
 			.into_iter()
 			.filter(|s| !s.is_empty())
 			.collect::<Vec<_>>()
 			.join(" · ");
-		bridge.set_viewer_info(info.into());
-		bridge.set_viewer_streamer(watch.streamer.clone().into());
-		let streamer = self
-			.view()
+		let streamer = view
 			.and_then(|v| v.streams.iter().find(|s| s.id == watch.stream_id))
 			.map_or(-1, |s| i32::from(s.streamer.0));
-		bridge.set_viewer_streamer_id(streamer);
-		let members = &self.models.members;
-		bridge.set_viewer_streamer_admin(
-			(0..members.row_count())
-				.filter_map(|i| members.row_data(i))
-				.any(|m| m.id == streamer && m.admin),
+		let face = crate::vm::streams::streamer(
+			&watch.streamer,
+			view.zip(u16::try_from(streamer).ok()).and_then(|(v, id)| v.avatar(id)),
 		);
+		// The members are the current server's.
+		let members = &self.models.members;
+		let admin = self.watch_here()
+			&& (0..members.row_count())
+				.filter_map(|i| members.row_data(i))
+				.any(|m| m.id == streamer && m.admin);
 		let channel = u16::try_from(streamer).ok().and_then(|id| {
-			let view = self.view()?;
-			view.presence.channels.get(&view.channel_of(id)?).map(|c| c.name.clone())
+			let view = view?;
+			let channel = view.presence.channels.get(&view.channel_of(id)?)?;
+			Some(crate::vm::tree::channel_title(channel).0.to_owned())
 		});
-		bridge.set_viewer_channel(channel.unwrap_or_default().into());
-		bridge.set_viewer_elapsed(watch.elapsed().into());
-		let viewers = self.view().and_then(|v| viewer_count(v, &watch.stream_id));
-		bridge.set_viewer_count(viewers.unwrap_or(0) as i32);
+		let channel = slint::SharedString::from(channel.unwrap_or_default());
+		let elapsed = slint::SharedString::from(watch.elapsed());
+		let viewers = view.and_then(|v| viewer_count(v, &watch.stream_id));
 		let qualities = watch.qualities();
 		let chosen = watch
 			.layer
 			.and_then(|id| watch.layers.iter().position(|l| l.id == id))
 			.map_or(0, |i| i as i32 + 1);
 		crate::vm::list::sync(&self.models.qualities, &qualities);
-		if bridge.get_viewer_quality() != chosen {
-			bridge.set_viewer_quality(chosen);
-		}
-		bridge.set_viewer_quality_detail(decoded.into());
+		self.viewer_each(|bridge| {
+			bridge.set_viewer_popped(popped);
+			bridge.set_viewer_title(watch.title.as_str().into());
+			bridge.set_viewer_status(watch.status.as_str().into());
+			bridge.set_viewer_ended(watch.ended);
+			bridge.set_viewer_has_frame(watch.has_frame);
+			bridge.set_viewer_volume(self.stream_volume);
+			bridge.set_viewer_info(info.as_str().into());
+			bridge.set_viewer_streamer(watch.streamer.as_str().into());
+			bridge.set_viewer_streamer_avatar(face.avatar.clone());
+			bridge.set_viewer_streamer_initials(face.initials.clone());
+			bridge.set_viewer_streamer_tint(face.tint);
+			bridge.set_viewer_streamer_admin(admin);
+			bridge.set_viewer_channel(channel.clone());
+			bridge.set_viewer_elapsed(elapsed.clone());
+			bridge.set_viewer_count(viewers.unwrap_or(0) as i32);
+			if bridge.get_viewer_quality() != chosen {
+				bridge.set_viewer_quality(chosen);
+			}
+			bridge.set_viewer_quality_detail(decoded.as_str().into());
+		});
+	}
+
+	/// The watched stream is on the server on screen (or is the local test
+	/// stream).
+	pub(crate) fn watch_here(&self) -> bool {
+		self.watch.as_ref().is_some_and(|w| w.session.is_none() || w.session == self.current)
 	}
 
 	/// A simulcast layer of the watched stream (0: follow the bandwidth
@@ -751,7 +801,8 @@ impl App {
 		let streamer = view.nickname(info.streamer.0);
 		let title =
 			if info.name.is_empty() { format!("{streamer}'s stream") } else { info.name.clone() };
-		self.leave_stream();
+		// A window of its own stays, for this stream.
+		self.stop_watching();
 		self.engine
 			.send(Command::WatchStream { session: session as u64, stream_id: stream_id.clone() });
 		if self.stream_volume != 100.0 {
@@ -820,7 +871,7 @@ impl App {
 
 	/// The local test stream in the viewer (`VOELIN_DEMO_STREAM`).
 	pub(crate) fn start_demo(&mut self) {
-		self.leave_stream();
+		self.stop_watching();
 		self.watch = Some(Watch {
 			session: None,
 			stream_id: "demo".into(),
@@ -867,6 +918,8 @@ impl App {
 			(watch.stream_id, watch.title, watch.streamer) = (id, title, streamer);
 		}
 		self.refresh_viewer();
+		// Its card shows it as watched.
+		self.refresh_streams();
 	}
 
 	/// A decoded picture is waiting.
@@ -879,16 +932,19 @@ impl App {
 			watch.status.clear();
 			watch.since = Some(std::time::Instant::now());
 		}
-		if let Some(ui) = self.ui.upgrade() {
-			let bridge = ui.global::<Bridge>();
-			bridge.set_viewer_frame(image);
-			if first {
-				self.refresh_viewer();
-			}
+		// Only the window with the player: each would scale it again.
+		self.with_player(|bridge, _| bridge.set_viewer_frame(image));
+		if first {
+			self.refresh_viewer();
 		}
 	}
 
 	pub(crate) fn show_viewer(&mut self, shown: bool) {
+		// Shown in the main window: from a window of its own, it comes back.
+		if shown && self.popout.window.is_some() {
+			self.viewer_dock();
+			return;
+		}
 		if let Some(watch) = &mut self.watch {
 			watch.shown = shown;
 		}
@@ -901,8 +957,14 @@ impl App {
 		self.refresh_tree();
 	}
 
-	/// Stop watching and close the viewer.
+	/// Stop watching and close the viewer, its own window too.
 	pub(crate) fn leave_stream(&mut self) {
+		self.close_popout();
+		self.stop_watching();
+	}
+
+	/// Stop watching; a window of its own stays (for the next stream).
+	fn stop_watching(&mut self) {
 		if let Some(watch) = self.watch.take()
 			&& let Some(session) = watch.session
 			&& !watch.ended
@@ -931,19 +993,24 @@ impl App {
 	}
 
 	pub(crate) fn toggle_fullscreen(&mut self) {
-		let Some(ui) = self.ui.upgrade() else { return };
-		let full = !ui.global::<Bridge>().get_viewer_fullscreen();
+		let mut full = false;
+		self.with_player(|bridge, _| full = !bridge.get_viewer_fullscreen());
 		self.set_fullscreen(full);
 	}
 
-	fn set_fullscreen(&self, full: bool) {
-		let Some(ui) = self.ui.upgrade() else { return };
-		let bridge = ui.global::<Bridge>();
-		if bridge.get_viewer_fullscreen() == full {
-			return;
-		}
-		bridge.set_viewer_fullscreen(full);
-		ui.window().set_fullscreen(full);
+	/// The window with the player in full screen, or back.
+	pub(crate) fn set_fullscreen(&self, full: bool) {
+		self.with_player(|bridge, window| {
+			if bridge.get_viewer_fullscreen() == full {
+				return;
+			}
+			bridge.set_viewer_fullscreen(full);
+			window.set_fullscreen(full);
+			if !full {
+				// The player that hid the cursor may be gone already.
+				show_cursor(window, true);
+			}
+		});
 	}
 }
 

@@ -126,12 +126,16 @@ impl App {
 		self.refresh_events();
 	}
 
-	/// Channels an event can be in: server-wide first.
+	/// Channels an event can be in: server-wide first; no lines or empty
+	/// spacers.
 	fn event_channels(&self) -> Vec<(Option<u64>, String)> {
 		let mut out = vec![(None, "Server-wide".to_owned())];
 		if let Some(view) = self.view() {
 			out.extend(
-				view.presence.channels.values().map(|c| (Some(c.id), format!("#{}", c.name))),
+				view.presence
+					.channels
+					.values()
+					.filter_map(|c| Some((Some(c.id), vm::tree::listed_title(c)?.to_owned()))),
 			);
 		}
 		out

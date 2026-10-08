@@ -130,7 +130,8 @@ pub(crate) struct Spot {
 	pub server: String,
 	pub client: u16,
 	pub channel: u64,
-	pub channel_name: String,
+	/// The channel's name as shown (a spacer's text).
+	pub channel_title: String,
 	pub away: Option<String>,
 	pub streaming: bool,
 	/// We are connected with voice there (messages, pokes, moving).
@@ -168,11 +169,13 @@ pub(crate) struct SocialModels {
 	pub blocked: Rc<VecModel<ContactItem>>,
 	pub live: Rc<VecModel<LiveItem>>,
 	pub recent: Rc<VecModel<ConversationItem>>,
+	pub sidebar_dms: Rc<VecModel<ConversationItem>>,
 	pub conversations: Rc<VecModel<ConversationItem>>,
 	pub dm_lines: Rc<VecModel<ChatLine>>,
 	pub happenings: Rc<VecModel<HappeningItem>>,
 	pub recordings: Rc<VecModel<RecordingItem>>,
 	pub notices: Rc<VecModel<NoticeItem>>,
+	pub mentions: Rc<VecModel<NoticeItem>>,
 	pub search: Rc<VecModel<SearchItem>>,
 	pub events: Rc<VecModel<crate::app::EventItem>>,
 }
@@ -186,11 +189,13 @@ impl SocialModels {
 			blocked: Rc::default(),
 			live: Rc::default(),
 			recent: Rc::default(),
+			sidebar_dms: Rc::default(),
 			conversations: Rc::default(),
 			dm_lines: Rc::default(),
 			happenings: Rc::default(),
 			recordings: Rc::default(),
 			notices: Rc::default(),
+			mentions: Rc::default(),
 			search: Rc::default(),
 			events: Rc::default(),
 		};
@@ -200,11 +205,13 @@ impl SocialModels {
 		bridge.set_blocked(ModelRc::from(m.blocked.clone()));
 		bridge.set_live_rooms(ModelRc::from(m.live.clone()));
 		bridge.set_recent_chats(ModelRc::from(m.recent.clone()));
+		bridge.set_sidebar_dms(ModelRc::from(m.sidebar_dms.clone()));
 		bridge.set_conversations(ModelRc::from(m.conversations.clone()));
 		bridge.set_dm_messages(ModelRc::from(m.dm_lines.clone()));
 		bridge.set_happenings(ModelRc::from(m.happenings.clone()));
 		bridge.set_recordings(ModelRc::from(m.recordings.clone()));
 		bridge.set_notifications(ModelRc::from(m.notices.clone()));
+		bridge.set_home_mentions(ModelRc::from(m.mentions.clone()));
 		bridge.set_search_results(ModelRc::from(m.search.clone()));
 		bridge.set_events(ModelRc::from(m.events.clone()));
 		m
@@ -221,6 +228,17 @@ pub(crate) struct Touched {
 
 pub(crate) fn now_ms() -> i64 {
 	chrono::Utc::now().timestamp_millis()
+}
+
+/// Whether a message is ours: by one of our unique ids, or by our client in
+/// its session (`own_client`).
+pub(crate) fn own_message(
+	own_uids: &HashSet<String>,
+	own_client: Option<u16>,
+	message: &ChatMessage,
+) -> bool {
+	message.author_uid.as_ref().is_some_and(|u| own_uids.contains(u))
+		|| (own_client.is_some() && message.author_id == own_client)
 }
 
 /// The settings pages a search finds, with words that lead to them.
@@ -275,16 +293,14 @@ impl App {
 			else {
 				continue;
 			};
+			let channel = view.presence.channels.get(&c.channel);
 			spots.push(Spot {
 				session: id,
 				server: self.server_name(id),
 				client: c.id,
 				channel: c.channel,
-				channel_name: view
-					.presence
-					.channels
-					.get(&c.channel)
-					.map(|ch| ch.name.clone())
+				channel_title: channel
+					.map(|ch| vm::tree::channel_title(ch).0.to_owned())
 					.unwrap_or_default(),
 				away: c.away.clone(),
 				streaming: c.streaming == Some(true),
@@ -328,8 +344,8 @@ impl App {
 			(Some(s), None) => match &s.away {
 				Some(m) if !m.is_empty() => format!("Away: {m}"),
 				Some(_) => "Away".into(),
-				None if s.channel_name.is_empty() => "Online".into(),
-				None => format!("In {}", s.channel_name),
+				None if s.channel_title.is_empty() => "Online".into(),
+				None => format!("In {}", s.channel_title),
 			},
 			(None, None) => "Offline".into(),
 		};
@@ -356,10 +372,10 @@ impl App {
 		let spot_texts: Vec<SharedString> = spots
 			.iter()
 			.map(|s| {
-				if s.channel_name.is_empty() {
+				if s.channel_title.is_empty() {
 					s.server.clone().into()
 				} else {
-					format!("{} · #{}", s.server, s.channel_name).into()
+					format!("{} · {}", s.server, s.channel_title).into()
 				}
 			})
 			.collect();
@@ -490,15 +506,7 @@ impl App {
 					self.set_status("Connect with voice to a server they are on to poke them.");
 					return;
 				};
-				if !self.demo_ui {
-					self.engine.send(Command::Poke {
-						session: s.session as u64,
-						client: s.client,
-						message: String::new(),
-					});
-				}
-				let name = self.sessions[&s.session].nickname(s.client);
-				self.set_status(format!("Poked {name}"));
+				self.ask_poke(s.session, s.client);
 			}
 			"join" => self.join_person(&spots),
 			"watch" => self.watch_person(&spots),
@@ -530,24 +538,14 @@ impl App {
 	}
 
 	/// Go to someone's channel: move there with voice, or connect to that
-	/// server into it.
+	/// server into it (`join_channel`, which asks for a password first).
 	fn join_person(&mut self, spots: &[Spot]) {
 		let Some(s) = spots.iter().find(|s| s.voice).or(spots.first()).cloned() else {
 			self.set_status("They are not on any of your servers right now.");
 			return;
 		};
 		self.show_server(s.session);
-		if s.voice {
-			if !self.demo_ui {
-				self.engine.send(Command::MoveToChannel {
-					session: s.session as u64,
-					channel: s.channel,
-					password: None,
-				});
-			}
-		} else {
-			self.connect_voice_to(Some(s.channel_name.clone()));
-		}
+		self.join_channel(s.session, s.channel);
 	}
 
 	/// Watch someone's stream: from any channel of a server we are on with
@@ -638,26 +636,31 @@ impl App {
 		self.refresh_notices();
 	}
 
+	/// The bell's notices, and home's unread mentions (the newest three).
 	pub(crate) fn refresh_notices(&self) {
 		let Some(ui) = self.ui.upgrade() else { return };
-		let items: Vec<NoticeItem> = self
-			.social
-			.notices
-			.iter()
-			.map(|n| NoticeItem {
-				key: n.key,
-				kind: n.kind.name().into(),
-				title: n.title.clone().into(),
-				body: n.body.clone().into(),
-				time: ago(n.ts_ms).into(),
-				unread: n.unread,
-				initials: vm::avatar::initials(&n.name).into(),
-				tint: vm::avatar::tint(&n.name),
-				avatar: n.uid.as_deref().map(|u| self.avatar_of(u)).unwrap_or_default(),
-			})
-			.collect();
+		let item = |n: &Notice| NoticeItem {
+			key: n.key,
+			kind: n.kind.name().into(),
+			title: n.title.clone().into(),
+			body: n.body.clone().into(),
+			time: ago(n.ts_ms).into(),
+			unread: n.unread,
+			initials: vm::avatar::initials(&n.name).into(),
+			tint: vm::avatar::tint(&n.name),
+			avatar: n.uid.as_deref().map(|u| self.avatar_of(u)).unwrap_or_default(),
+		};
+		let notices = &self.social.notices;
+		let items: Vec<NoticeItem> = notices.iter().map(item).collect();
 		vm::list::sync(&self.models.social.notices, &items);
-		let unread = self.social.notices.iter().filter(|n| n.unread).count();
+		let mentions: Vec<NoticeItem> = notices
+			.iter()
+			.filter(|n| n.unread && n.kind == NoticeKind::Mention)
+			.take(3)
+			.map(item)
+			.collect();
+		vm::list::sync(&self.models.social.mentions, &mentions);
+		let unread = notices.iter().filter(|n| n.unread).count();
 		ui.global::<Bridge>().set_notifications_unread(unread as i32);
 	}
 
@@ -707,10 +710,8 @@ impl App {
 
 	/// Whether a message is ours.
 	pub(crate) fn is_own(&self, session: i64, message: &ChatMessage) -> bool {
-		message.author_uid.as_ref().is_some_and(|u| self.social.own_uids.contains(u))
-			|| self.sessions.get(&session).is_some_and(|v| {
-				v.state.own_client.is_some() && message.author_id == v.state.own_client
-			})
+		let own_client = self.sessions.get(&session).and_then(|v| v.state.own_client);
+		own_message(&self.social.own_uids, own_client, message)
 	}
 
 	/// A new chat message: a private message, or one that mentions us.
@@ -742,7 +743,7 @@ impl App {
 						.sessions
 						.get(&session)
 						.and_then(|v| v.presence.channels.get(cid))
-						.map(|c| format!("#{} · {server}", c.name))
+						.map(|c| format!("{} · {server}", vm::tree::channel_title(c).0))
 						.unwrap_or(server),
 					_ => server,
 				};
@@ -906,10 +907,15 @@ impl App {
 			});
 			if new {
 				let s = &sessions[0];
-				let place = if s.channel_name.is_empty() {
+				let channel = self
+					.sessions
+					.get(&(s.session as i64))
+					.and_then(|v| v.presence.channels.get(&s.channel))
+					.map_or(s.channel_name.as_str(), |c| vm::tree::channel_title(c).0);
+				let place = if channel.is_empty() {
 					format!("on {}", self.server_name(s.session as i64))
 				} else {
-					format!("on {} · #{}", self.server_name(s.session as i64), s.channel_name)
+					format!("on {} · {channel}", self.server_name(s.session as i64))
 				};
 				self.notify(
 					NoticeKind::Friend,
@@ -949,15 +955,16 @@ impl App {
 			let servers = self
 				.bookmarks
 				.iter()
-				.filter(|b| matches(&query, &[&b.name, &b.address]))
-				.map(|b| {
+				.zip(vm::servers::tints(&self.bookmarks))
+				.filter(|(b, _)| matches(&query, &[&b.name, &b.address]))
+				.map(|(b, tint)| {
 					(
 						SearchItem {
 							kind: "server".into(),
 							title: b.name.clone().into(),
 							subtitle: b.address.clone().into(),
 							initials: vm::avatar::initials(&b.name).into(),
-							tint: vm::avatar::tint(&b.name),
+							tint,
 							avatar: self.server_list_icon(b),
 							..Default::default()
 						},
@@ -971,15 +978,17 @@ impl App {
 			let mut channels = Vec::new();
 			for b in &self.bookmarks {
 				let Some(view) = self.sessions.get(&b.id) else { continue };
-				for c in view.presence.channels.values().filter(|c| matches(&query, &[&c.name])) {
+				for (channel, title) in
+					vm::social::found_channels(view.presence.channels.values(), &query)
+				{
 					channels.push((
 						SearchItem {
 							kind: "channel".into(),
-							title: c.name.clone().into(),
+							title: title.into(),
 							subtitle: b.name.clone().into(),
 							..Default::default()
 						},
-						Found::Channel(b.id, c.id),
+						Found::Channel(b.id, channel),
 					));
 				}
 			}
@@ -1004,13 +1013,12 @@ impl App {
 						.presence
 						.channels
 						.get(&c.channel)
-						.map(|ch| ch.name.as_str())
-						.unwrap_or("");
+						.map_or("", |ch| vm::tree::channel_title(ch).0);
 					people.push((
 						SearchItem {
 							kind: "person".into(),
 							title: c.nickname.clone().into(),
-							subtitle: format!("{} · #{channel}", b.name).into(),
+							subtitle: format!("{} · {channel}", b.name).into(),
 							initials: vm::avatar::initials(&c.nickname).into(),
 							tint: vm::avatar::tint(&c.nickname),
 							avatar: vm::avatar::image(view.avatar(c.id)),

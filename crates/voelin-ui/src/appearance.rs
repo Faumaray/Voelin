@@ -1,6 +1,7 @@
 //! Appearance settings (`ui.theme`, `ui.font_scale`, `ui.narrow_breakpoint`,
-//! `ui.image_cache_mb`): applied to the Theme and Nav globals and the image
-//! cache whenever they change, from the settings page or elsewhere.
+//! `ui.image_cache_mb`, `ui.members_width`, `ui.voice_compact`): applied to
+//! the Theme and Nav globals and the image cache whenever they change, from
+//! the settings page or elsewhere.
 
 use slint::ComponentHandle;
 use tracing::warn;
@@ -8,7 +9,8 @@ use tracing::warn;
 use crate::app::{App, AppearanceForm, Bridge, Nav, Theme};
 use crate::images;
 use crate::settings::{
-	ThemeChoice, UI_FONT_SCALE, UI_IMAGE_CACHE_MB, UI_MEMBERS_WIDTH, UI_NARROW_BREAKPOINT, UI_THEME,
+	ThemeChoice, UI_FONT_SCALE, UI_IMAGE_CACHE_MB, UI_MEMBERS_WIDTH, UI_NARROW_BREAKPOINT,
+	UI_THEME, UI_VOICE_COMPACT,
 };
 
 impl App {
@@ -29,6 +31,7 @@ impl App {
 		if nav.get_right_panel_width() != width {
 			nav.set_right_panel_width(width);
 		}
+		nav.set_voice_compact(self.prefs.get(&UI_VOICE_COMPACT));
 		let bridge = ui.global::<Bridge>();
 		bridge.set_appearance(AppearanceForm {
 			theme: theme.as_str().into(),
@@ -37,7 +40,20 @@ impl App {
 			image_cache_mb: cache_mb as f32,
 		});
 		bridge.set_image_cache_usage(images::usage_text().into());
-		self.studio_theme();
+		self.theme_windows();
+	}
+
+	/// The windows of their own (the studio's, the stream's) follow the main
+	/// window's theme.
+	pub(crate) fn theme_windows(&self) {
+		let Some(ui) = self.ui.upgrade() else { return };
+		let theme = ui.global::<Theme>();
+		if let Some(window) = &self.studio.window {
+			copy_theme(&theme, &window.global::<Theme>());
+		}
+		if let Some(window) = &self.popout.window {
+			copy_theme(&theme, &window.global::<Theme>());
+		}
 	}
 
 	/// The settings page changed the form: store the keys (they apply
@@ -71,4 +87,22 @@ impl App {
 			warn!(%e, "could not store the panel width");
 		}
 	}
+
+	/// The voice channel view's stage was made smaller or larger: store it
+	/// (`ui.voice_compact`), so it comes back the same.
+	pub(crate) fn voice_compact_changed(&mut self, compact: bool) {
+		if self.prefs.get(&UI_VOICE_COMPACT) == compact {
+			return;
+		}
+		if let Err(e) = self.prefs.set(&UI_VOICE_COMPACT, compact) {
+			warn!(%e, "could not store the stage size");
+		}
+	}
+}
+
+/// Each window has its own Theme global.
+fn copy_theme(from: &Theme, to: &Theme) {
+	to.set_mode(from.get_mode());
+	to.set_font_scale(from.get_font_scale());
+	to.set_system_dark(from.get_system_dark());
 }

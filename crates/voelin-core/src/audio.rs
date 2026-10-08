@@ -42,6 +42,12 @@ pub(crate) enum AudioIn {
 	},
 	/// The client left; client ids are reused, so forget its volume.
 	ClientLeft(ClientId),
+	/// The priority speakers: while one talks, everyone else (streams too)
+	/// is dimmed by `dimm_db` (the server's setting, e.g. -18).
+	PrioritySpeakers {
+		clients: Vec<ClientId>,
+		dimm_db: f32,
+	},
 	/// An Opus frame (48 kHz) of a watched stream; `time` is its RTP time
 	/// on the 48 kHz clock.
 	StreamAudio {
@@ -208,6 +214,9 @@ impl Pipeline {
 			AudioIn::ClientVolume { client, volume } => self.mixer.set_volume(client, volume),
 			AudioIn::ClientMuted { client, muted } => self.mixer.set_muted(client, muted),
 			AudioIn::ClientLeft(client) => self.mixer.forget(client),
+			AudioIn::PrioritySpeakers { clients, dimm_db } => {
+				self.mixer.set_priority(clients, dimm_db);
+			}
 			AudioIn::StreamAudio { stream, time, data } => self.stream_packet(stream, time, &data),
 			AudioIn::StreamVolume { stream, volume } => {
 				if let Some(s) = self.streams.get(&stream) {
@@ -547,7 +556,7 @@ mod devices {
 
 #[cfg(test)]
 mod tests {
-	use voelin_audio::pcm::{SAMPLE_RATE, energy, sine, white_noise};
+	use voelin_audio::pcm::{SAMPLE_RATE, energy, goertzel_power, sine, white_noise};
 	use voelin_audio::{ProcessingSettings, VadSettings};
 
 	use super::*;
@@ -666,6 +675,44 @@ mod tests {
 		assert!(play(&mut p, 3) < 1e-8);
 		p.handle(AudioIn::ClientLeft(ClientId(3)));
 		assert!(!p.mixer.is_muted(ClientId(3)));
+	}
+
+	/// While a priority speaker talks, another talker and a watched stream
+	/// are dimmed by the server's setting.
+	#[test]
+	fn priority_speaker() {
+		let mut p = pipeline(TransmitMode::PushToTalk);
+		p.handle(AudioIn::PrioritySpeakers { clients: vec![ClientId(2)], dimm_db: -12.0 });
+		let mut voice = VoiceEncoder::new(VoiceCodec::Voice).unwrap();
+		let mut priority = VoiceEncoder::new(VoiceCodec::Voice).unwrap();
+		let mut music = VoiceEncoder::new(VoiceCodec::Music).unwrap();
+		let tone = sine(700.0, 2.0, 0.3);
+		let stream = pcm::from_mono(&sine(1100.0, 2.0, 0.3), 2);
+		let other = sine(1700.0, 1.0, 0.3);
+		let mut out = Vec::new();
+		for (i, frame) in tone.chunks_exact(FRAME_SAMPLES).enumerate() {
+			p.handle(incoming(1, i as u16, voice.encode_to_bytes(frame).unwrap()));
+			let frame = &stream[i * FRAME_SAMPLES * 2..(i + 1) * FRAME_SAMPLES * 2];
+			let data: Arc<[u8]> = music.encode_to_bytes(frame).unwrap().into();
+			let time = i as u64 * OPUS_FRAME;
+			p.handle(AudioIn::StreamAudio { stream: "s".into(), time, data });
+			// The priority speaker talks during the second second.
+			if let Some(j) = i.checked_sub(50) {
+				let frame = &other[j * FRAME_SAMPLES..(j + 1) * FRAME_SAMPLES];
+				p.handle(incoming(2, j as u16, priority.encode_to_bytes(frame).unwrap()));
+			}
+			out.extend(p.playback_frame());
+		}
+		// The second half of each second.
+		let half = SAMPLE_RATE as usize / 2;
+		let level = |second: usize, freq: f32| {
+			let from = second * 2 * half + half;
+			goertzel_power(&out[from..from + half], freq, SAMPLE_RATE)
+		};
+		for freq in [700.0, 1100.0] {
+			let ratio_db = 10.0 * (level(1, freq) / level(0, freq)).log10();
+			assert!((ratio_db + 12.0).abs() < 1.0, "{freq} Hz dimmed by {ratio_db} dB");
+		}
 	}
 
 	/// End to end: a remote talker is played, the speakers leak into the

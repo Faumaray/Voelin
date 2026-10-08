@@ -25,6 +25,9 @@ pub(super) fn wire(ui: &MainWindow) {
 		bridge.on_myts_portal(|action| {
 			with_app(|app| app.myts_portal(action));
 		});
+		bridge.on_myts_badge(|index, on| {
+			with_app(|app| app.myts_badge(index, on));
+		});
 	}
 	bridge.on_open_settings(|| {
 		with_app(|app| app.open_settings());
@@ -49,6 +52,9 @@ pub(super) fn wire(ui: &MainWindow) {
 	});
 	bridge.on_panel_resized(|width| {
 		with_app(|app| app.panel_resized(width));
+	});
+	bridge.on_voice_compact_changed(|compact| {
+		with_app(|app| app.voice_compact_changed(compact));
 	});
 	bridge.on_appearance_changed(|form| {
 		with_app(|app| app.appearance_changed(&form));

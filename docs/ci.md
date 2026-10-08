@@ -9,9 +9,12 @@ Both GitHub and Gitea provide release packaging; see [release.md](release.md)
 and [building.md](building.md).
 
 Cargo builds use one job in CI (`ci.yml`) so the generated UI library and
-its test target do not compile concurrently. The release workflows, their
-Docker images and the Flatpak build use Cargo's defaults (one job per CPU,
-no incremental builds in release mode). The release profile uses ThinLTO and
+its test target do not compile concurrently. GitHub's release workflow uses
+one job too, also inside its Flatpak build: on its 16 GB runners the UI
+library does not fit next to other crates, and the runner is killed. The
+Gitea release workflow, its Docker images and the Flatpak manifest itself
+use Cargo's defaults (one job per CPU, no incremental builds in release
+mode). The release profile uses ThinLTO and
 16 codegen units instead of fat LTO and one unit, reducing peak compiler
 memory while retaining optimised builds and panic unwinding. This trades some
 whole-program optimisation for lower build-memory requirements; release

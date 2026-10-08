@@ -1,6 +1,7 @@
 //! Avatars without pictures: initials on a colour from the name.
 
 use slint::Color;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Background colours for initials; white text reads on all of them.
 const TINTS: [u32; 10] = [
@@ -24,21 +25,36 @@ pub fn initials(name: &str) -> String {
 	letters.to_uppercase()
 }
 
+/// The first letter of `initials`, for avatars too small for two ("NS" →
+/// "N").
+pub fn first_letter(initials: &str) -> String {
+	initials.graphemes(true).next().unwrap_or_default().to_owned()
+}
+
 /// A picture from the engine's cache (an avatar, a group icon), decoded
 /// once; an empty image when there is none.
 pub fn image(path: Option<&std::path::PathBuf>) -> slint::Image {
 	path.map(|p| crate::images::file(p)).unwrap_or_default()
 }
 
-/// A stable colour for a name (FNV-1a).
-pub fn tint(name: &str) -> Color {
+/// A stable number for a name, in any case (FNV-1a).
+pub fn name_hash(name: &str) -> u32 {
 	let mut hash: u32 = 0x811c_9dc5;
 	for b in name.to_lowercase().bytes() {
 		hash ^= u32::from(b);
 		hash = hash.wrapping_mul(0x0100_0193);
 	}
-	let rgb = TINTS[(hash % TINTS.len() as u32) as usize];
+	hash
+}
+
+/// `0xrrggbb` as a colour.
+pub fn rgb(rgb: u32) -> Color {
 	Color::from_rgb_u8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+}
+
+/// A stable colour for a name.
+pub fn tint(name: &str) -> Color {
+	rgb(TINTS[(name_hash(name) % TINTS.len() as u32) as usize])
 }
 
 #[cfg(test)]
@@ -54,6 +70,16 @@ mod tests {
 		assert_eq!(initials("  "), "");
 		assert_eq!(initials("[Bot] Relay"), "BR");
 		assert_eq!(initials("Ärger über"), "ÄÜ");
+	}
+
+	#[test]
+	fn first_letter_of_initials() {
+		assert_eq!(first_letter("NS"), "N");
+		assert_eq!(first_letter("ÄÜ"), "Ä");
+		assert_eq!(first_letter(""), "");
+		assert_eq!(first_letter("X"), "X");
+		// A letter with a combining mark stays whole.
+		assert_eq!(first_letter("A\u{308}B"), "A\u{308}");
 	}
 
 	#[test]

@@ -5,12 +5,14 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, NoticeItem, SearchItem } from "../bridge.slint";
 import { Nav, Page, SettingsSection } from "../nav.slint";
-import { Icon, Button, ButtonKind, IconButton, Avatar, Status, Chip, CountBadge, TextField, Kbd, Divider, ListView, ScrollView } from "../components/index.slint";
+import { Icon, Button, ButtonKind, IconButton, Avatar, Status, Chip, CountBadge, TextField, Kbd, Divider, ScrollView } from "../components/index.slint";
 
-// One notification.
-component NoticeRow inherits Rectangle {
+// One notification (also home's unread mentions).
+export component NoticeRow inherits Rectangle {
     in property <NoticeItem> notice;
-    min-height: 64px;
+    // Never shorter than its text, so a long list scrolls instead of
+    // squeezing the rows.
+    min-height: max(64px, body.preferred-height);
     border-radius: Theme.radius-md;
     background: touch.has-hover ? Theme.surface-4 : notice.unread ? Theme.accent-soft.transparentize(0.6) : transparent;
     accessible-role: AccessibleRole.list-item;
@@ -24,7 +26,7 @@ component NoticeRow inherits Rectangle {
             Nav.notifications-open = false;
         }
     }
-    HorizontalLayout {
+    body := HorizontalLayout {
         padding: Theme.space-3;
         spacing: Theme.space-3;
         VerticalLayout {
@@ -106,7 +108,7 @@ export component NotificationsPanel inherits Rectangle {
     background: Theme.surface-3;
     border-radius: Theme.radius-lg;
     border-width: 1px;
-    border-color: Theme.border-strong;
+    border-color: Theme.border-popup;
     clip: true;
     accessible-role: AccessibleRole.groupbox;
     accessible-label: @tr("Notifications");
@@ -229,11 +231,17 @@ export component NotificationsPanel inherits Rectangle {
                 wrap: word-wrap;
             }
         }
-        ListView {
+        // All the rows (there are at most 100), so the panel can be as
+        // tall as they are; it scrolls when they need more room.
+        if Bridge.notifications.length > 0: list := ScrollView {
             vertical-stretch: 1;
-            min-height: Bridge.notifications.length > 0 ? 200px : 0px;
-            for notice in Bridge.notifications: NoticeRow {
-                notice: notice;
+            preferred-height: rows.preferred-height;
+            min-height: min(rows.preferred-height, 200px);
+            rows := VerticalLayout {
+                width: list.visible-width;
+                for notice in Bridge.notifications: NoticeRow {
+                    notice: notice;
+                }
             }
         }
     }
@@ -289,7 +297,7 @@ component ResultRow inherits VerticalLayout {
                     border-radius: Theme.radius-md;
                     background: Theme.surface-4;
                     Icon {
-                        source: root.item.kind == "channel" ? Icons.hash : Icons.settings;
+                        source: root.item.kind == "channel" ? Icons.channel : Icons.settings;
                         size: Theme.icon-sm;
                         tint: Theme.accent-text;
                     }

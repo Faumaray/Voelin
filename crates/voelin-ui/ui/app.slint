@@ -31,8 +31,8 @@ import { MessagesPage, ConversationList, Conversation, DmProfile, OfflineDialog 
 import { ServerLinks, EventsPage, EventDialog } from "screens/events.slint";
 import { NotificationsPanel, SearchPalette, Lightbox } from "screens/overlays.slint";
 import { MobileServers, ActivityPage, YouPage, PhoneSheet } from "screens/mobile.slint";
-import { MobileVoice } from "screens/mobile-voice.slint";
-import { BookmarkDialog, ShareDialog, ClientAudioDialog, AboutDialog } from "screens/dialogs.slint";
+import { MobileVoice, PhoneVoice } from "screens/mobile-voice.slint";
+import { BookmarkDialog, ShareDialog, ClientAudioDialog, ChannelPasswordDialog, PokeDialog, LinkDialog, AboutDialog } from "screens/dialogs.slint";
 import { StudioBridge } from "studio-bridge.slint";
 import { StudioPage, MobileStudio } from "screens/studio.slint";
 
@@ -43,6 +43,8 @@ export { Nav, Page, MobileTab, SettingsSection } from "nav.slint";
 // The Stream Studio: its data, and its own window (src/studio.rs).
 export { StudioBridge, StudioNav, StudioScene, StudioSource, StudioAudio, StudioLayer, StudioViewer, StudioPick, StudioStatus, StudioForm, StudioSourceForm, StudioSettingsForm } from "studio-bridge.slint";
 export { StudioWindow } from "studio-window.slint";
+// The stream we watch in a window of its own (src/popout.rs).
+export { ViewerWindow } from "viewer-window.slint";
 
 export component MainWindow inherits Window {
     title: Bridge.app-name;
@@ -62,9 +64,11 @@ export component MainWindow inherits Window {
         Nav.wide = self.width > 1180px;
     }
     changed breakpoint => { Nav.narrow = self.width < Nav.narrow-breakpoint; }
+    changed height => { Nav.short = self.height < 800px; }
     init => {
         Nav.narrow = self.width < Nav.narrow-breakpoint;
         Nav.wide = self.width > 1180px;
+        Nav.short = self.height < 800px;
         Theme.system-dark = Palette.color-scheme != ColorScheme.light;
     }
     // Android: the space under the on-screen keyboard (the window is not
@@ -74,8 +78,33 @@ export component MainWindow inherits Window {
         keyboard-inset = self.virtual-keyboard-size.height > 0 ? self.height - self.virtual-keyboard-position.y : 0;
     }
 
-    // The viewer takes the whole window in full screen and when popped out.
-    property <bool> chrome: !(Bridge.viewer-open && (Bridge.viewer-fullscreen || Bridge.viewer-popped));
+    // The viewer takes the whole window in full screen and in theatre mode
+    // (a narrow window keeps the phone layout).
+    property <bool> chrome: !(Bridge.viewer-open && (Bridge.viewer-fullscreen || (Nav.theatre && !Nav.narrow)));
+    // Theatre mode ends with the viewer here, which is also when it moves
+    // into a window of its own (Rust sets viewer-open false meanwhile).
+    property <bool> viewer-open: Bridge.viewer-open;
+    changed viewer-open => {
+        if !viewer-open {
+            Nav.theatre = false;
+        }
+    }
+    // The viewer moves to the whole window, or loses its chat for full
+    // screen, and what had the focus goes with it: the keys take it, so
+    // Escape works.
+    changed chrome => {
+        if !chrome {
+            keys.focus();
+        }
+    }
+    // Back from full screen to theatre mode, the player's button that was
+    // clicked goes as well.
+    property <bool> fullscreen: Bridge.viewer-fullscreen;
+    changed fullscreen => {
+        if fullscreen || !chrome {
+            keys.focus();
+        }
+    }
 
     // The standard widgets follow the theme. In "system" mode the palette
     // is left alone (it tracks the system) unless an explicit mode was
@@ -105,6 +134,10 @@ export component MainWindow inherits Window {
     property <length> panel-width: Nav.right-panel-width;
     changed panel-width => { Bridge.panel-resized(panel-width / 1px); }
 
+    // Messages are read while the chat is on screen.
+    property <bool> chat-shown: Nav.chat-shown;
+    changed chat-shown => { Bridge.chat-shown-changed(); }
+
     // Compatibility with callers from before the navigation global.
     public function open-share-dialog() {
         Nav.open-share();
@@ -115,6 +148,19 @@ export component MainWindow inherits Window {
         capture-key-pressed(event) => {
             if event.modifiers.control && (event.text == "k" || event.text == "K") && root.chrome && !Bridge.myts.prompt {
                 Nav.open-search("");
+                return accept;
+            }
+            reject
+        }
+        // Escape leaves full screen, then theatre mode (after the focused
+        // field had its turn).
+        key-pressed(event) => {
+            if event.text == Key.Escape && Bridge.viewer-fullscreen {
+                Bridge.toggle-fullscreen();
+                return accept;
+            }
+            if event.text == Key.Escape && Nav.theatre && Bridge.viewer-open {
+                Nav.theatre = false;
                 return accept;
             }
             reject
@@ -131,7 +177,6 @@ export component MainWindow inherits Window {
             if !Bridge.myts.prompt && !root.chrome: StreamViewer { }
 
             if !Bridge.myts.prompt && !Nav.narrow && root.chrome: DesktopShell {
-                context: Nav.page == Page.settings ? @tr("Settings") : Nav.page == Page.studio ? @tr("Stream Studio") : "";
                 if Nav.page == Page.home: Sidebar {
                     HomeNav { }
                 }
@@ -221,29 +266,34 @@ export component MainWindow inherits Window {
                     && Nav.mobile-tab == MobileTab.chat && !Bridge.viewer-open
                     && Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length
                     && Bridge.tabs[Bridge.current-tab].kind == 1;
-                banner: self.channel-chat ? Bridge.tabs[Bridge.current-tab].banner : @image-url("");
+                banner: Nav.phone-voice ? Bridge.own-channel-banner : self.channel-chat ? Bridge.tabs[Bridge.current-tab].banner : @image-url("");
+                // The page's or the tab's name (on the Servers tab the server
+                // card below names the server); on the Chats tab the server,
+                // with the chat below it.
                 title: Nav.page == Page.settings ? @tr("Settings")
                     : Nav.page == Page.friends ? @tr("Friends")
                     : Nav.page == Page.messages ? @tr("Messages")
                     : Nav.page == Page.library ? @tr("Library")
                     : Nav.page == Page.events ? @tr("Events")
-                    : Nav.phone-voice ? Bridge.app-name
+                    : Nav.phone-voice ? Bridge.own-channel
                     : Nav.page == Page.home || Nav.mobile-tab == MobileTab.home ? Bridge.app-name
+                    : Nav.mobile-tab == MobileTab.servers ? @tr("Servers")
                     : Nav.mobile-tab == MobileTab.you ? @tr("You")
                     : Nav.mobile-tab == MobileTab.activity ? @tr("Activity")
                     : Bridge.server-title;
                 subtitle: Nav.page == Page.settings || Nav.page == Page.friends || Nav.page == Page.messages || Nav.page == Page.library ? ""
                     : Nav.page == Page.events || Nav.phone-voice ? Bridge.server-title
-                    : Nav.page == Page.home || Nav.mobile-tab == MobileTab.home ? @tr("Find your people. Talk beyond.")
-                    : Nav.mobile-tab == MobileTab.chat && Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length ? Bridge.tabs[Bridge.current-tab].title
-                    : Nav.mobile-tab == MobileTab.servers ? Bridge.server-stats : "";
-                back: Nav.page == Page.settings || Nav.page == Page.friends || Nav.page == Page.messages || Nav.page == Page.library || Nav.page == Page.events;
+                    : Nav.page == Page.home || Nav.mobile-tab == MobileTab.home ? ""
+                    : Nav.mobile-tab == MobileTab.chat && Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length ? Bridge.tabs[Bridge.current-tab].title : "";
+                back: Nav.phone-voice || Nav.page == Page.settings || Nav.page == Page.friends || Nav.page == Page.messages || Nav.page == Page.library || Nav.page == Page.events;
                 unread: Bridge.unread-total;
                 voice: Nav.phone-voice;
                 // The voice channel and the studio bring their own controls.
                 navigation: !Nav.phone-voice && Nav.page != Page.studio;
                 go-back => {
-                    if Nav.page == Page.messages && Bridge.dm.open {
+                    if Nav.phone-voice {
+                        PhoneVoice.back();
+                    } else if Nav.page == Page.messages && Bridge.dm.open {
                         Bridge.open-conversation(-1);
                     } else if Nav.page == Page.events || Nav.page == Page.settings {
                         Nav.show(Page.server);
@@ -287,19 +337,11 @@ export component MainWindow inherits Window {
         }
     }
 
-    toast := Toast {
-        x: (parent.width - self.width) / 2;
-        y: parent.height - self.height - (Nav.narrow ? 140px : 96px);
-        text: Bridge.status-text;
-        visible: self.shown && !Bridge.myts.prompt;
-        // A notice from the start (an imported identity) waits for the
-        // account prompt to close.
-        paused: Bridge.myts.prompt;
-        widest: min(560px, parent.width - 32px);
-    }
-
-    // The member card of the members panel, over everything.
+    // The member card of the members panel, over everything. Like the emoji
+    // picker and the bell's panel below, it dims the window a little, and a
+    // click outside it closes it.
     if !Bridge.myts.prompt && (Bridge.member-card.open): Rectangle {
+        background: Theme.scrim-light;
         TouchArea {
             clicked => { Bridge.open-member(-1); }
         }
@@ -310,6 +352,7 @@ export component MainWindow inherits Window {
     }
 
     if !Bridge.myts.prompt && (Nav.emoji-open): Rectangle {
+        background: Theme.scrim-light;
         // Clicks outside the picker close it.
         TouchArea {
             clicked => { Nav.emoji-open = false; }
@@ -334,17 +377,49 @@ export component MainWindow inherits Window {
         }
     }
 
-    // The bell's panel, under the bell (the phone: the whole width).
+    // The bell's panel, under the bell (the phone: the whole width), as
+    // tall as its notices up to 560 px.
     if !Bridge.myts.prompt && (Nav.notifications-open): Rectangle {
+        background: Theme.scrim-light;
         TouchArea {
             clicked => { Nav.notifications-open = false; }
         }
         NotificationsPanel {
-            x: Nav.narrow ? 8px : parent.width - self.width - 100px;
+            x: Nav.narrow ? 8px : parent.width - self.width - Theme.space-4;
             y: Nav.narrow ? 64px : Theme.topbar-height;
             width: Nav.narrow ? parent.width - 16px : 400px;
-            height: min(parent.height - self.y - 16px, 560px);
+            height: min(parent.height - self.y - 16px, 560px, self.preferred-height);
         }
+    }
+
+    // Nav.copy: Slint copies only what is selected in a text field, so the
+    // text goes through this hidden one. Rust confirms it in the toast,
+    // shown again even when its text is the last one's.
+    property <int> clip-requests: Nav.clip-requests;
+    changed clip-requests => {
+        clipboard.text = Nav.clip-text;
+        clipboard.select-all();
+        clipboard.copy();
+        Bridge.copied();
+        toast.shown = true;
+    }
+    clipboard := TextInput {
+        visible: false;
+        width: 0;
+        height: 0;
+    }
+
+    // Over the pop-ups, so their scrim does not dim it (a poke from the
+    // member card says so here); under the dialogs.
+    toast := Toast {
+        x: (parent.width - self.width) / 2;
+        y: parent.height - self.height - (Nav.narrow ? 140px : 96px);
+        text: Bridge.status-text;
+        visible: self.shown && !Bridge.myts.prompt;
+        // A notice from the start (an imported identity) waits for the
+        // account prompt to close.
+        paused: Bridge.myts.prompt;
+        widest: min(560px, parent.width - 32px);
     }
 
     if !Bridge.myts.prompt && (Nav.search-open): SearchPalette { }
@@ -366,7 +441,6 @@ export component MainWindow inherits Window {
 
     if !Bridge.myts.prompt && (Nav.bookmark-open): BookmarkDialog {
         form <=> Nav.bookmark-form;
-        join: Nav.join-open;
         done => { Nav.bookmark-open = false; }
     }
 
@@ -377,6 +451,18 @@ export component MainWindow inherits Window {
 
     if !Bridge.myts.prompt && (Nav.client-open): ClientAudioDialog {
         done => { Nav.client-open = false; }
+    }
+
+    if !Bridge.myts.prompt && (Nav.channel-password-open): ChannelPasswordDialog {
+        done => { Nav.channel-password-open = false; }
+    }
+
+    if !Bridge.myts.prompt && (Nav.poke-open): PokeDialog {
+        done => { Nav.poke-open = false; }
+    }
+
+    if !Bridge.myts.prompt && (Nav.link-open): LinkDialog {
+        done => { Nav.link-open = false; }
     }
 
     if !Bridge.myts.prompt && (Nav.about-open): AboutDialog {

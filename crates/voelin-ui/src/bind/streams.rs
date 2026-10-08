@@ -1,11 +1,9 @@
-//! The streams panel, the share dialog and the viewer.
+//! The streams panel, the share dialog and the viewer, for the main window
+//! and for the viewer's own window (each has its own Bridge global).
 
-use slint::ComponentHandle;
+use crate::app::{Bridge, with_app};
 
-use crate::app::{Bridge, MainWindow, with_app};
-
-pub(super) fn wire(ui: &MainWindow) {
-	let bridge = ui.global::<Bridge>();
+pub(crate) fn wire(bridge: &Bridge) {
 	bridge.on_open_share(|| with_app(|app| app.open_share()).unwrap_or_default());
 	bridge.on_start_share(|form| {
 		with_app(|app| app.start_share(form));
@@ -41,6 +39,12 @@ pub(super) fn wire(ui: &MainWindow) {
 	});
 	bridge.on_toggle_fullscreen(|| {
 		with_app(|app| app.toggle_fullscreen());
+	});
+	bridge.on_pop_out_viewer(|out| {
+		with_app(|app| if out { app.viewer_pop_out() } else { app.viewer_dock() });
+	});
+	bridge.on_show_cursor(|shown| {
+		with_app(|app| app.viewer_cursor(shown));
 	});
 	bridge.on_set_stream_quality(|index| {
 		with_app(|app| app.set_stream_quality(index));

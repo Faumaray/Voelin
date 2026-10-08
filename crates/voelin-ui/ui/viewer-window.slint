@@ -1,0 +1,52 @@
+// The stream we watch in a window of its own (desktop), while the main
+// window goes on: the player alone, as in full screen, optionally over the
+// other windows. It has its own globals, which Rust fills like the main
+// window's (src/popout.rs). Closing it brings the stream back into the
+// main window.
+
+import { Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { Bridge } from "bridge.slint";
+import { StreamPlayer } from "screens/streams.slint";
+
+export component ViewerWindow inherits Window {
+    title: Bridge.viewer-title;
+    preferred-width: 960px;
+    preferred-height: 540px;
+    min-width: 480px;
+    min-height: 270px;
+    // Under the player, which is black.
+    background: Theme.bg-app;
+    default-font-family: "Inter";
+    default-font-size: Theme.font-body;
+    icon: Icons.logo;
+    always-on-top: Bridge.viewer-on-top;
+
+    // Scroll bars and menus follow the theme (Rust copies the main
+    // window's Theme here).
+    property <bool> dark: Theme.dark;
+    changed dark => { Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light; }
+    init => {
+        Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
+        keys.focus();
+    }
+    // Into full screen and out of it the clicked button keeps the focus:
+    // the keys take it back, so Escape works.
+    property <bool> fullscreen: Bridge.viewer-fullscreen;
+    changed fullscreen => { keys.focus(); }
+
+    keys := FocusScope {
+        // Escape leaves full screen.
+        key-pressed(event) => {
+            if event.text == Key.Escape && Bridge.viewer-fullscreen {
+                Bridge.toggle-fullscreen();
+                return accept;
+            }
+            reject
+        }
+        StreamPlayer {
+            compact: true;
+        }
+    }
+}

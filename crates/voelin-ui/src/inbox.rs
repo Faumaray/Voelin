@@ -1,7 +1,8 @@
 //! Requests from the platform around the window: on Android a tapped
-//! notification or something shared to the app ("Share to Voelin"). They
-//! can come from any thread and before the window runs; [`request`] keeps
-//! them until the window takes them on its thread.
+//! notification or something shared to the app ("Share to Voelin"), and a
+//! TeamSpeak link to open. They can come from any thread and before the
+//! window runs; [`request`] keeps them until the window takes them on its
+//! thread.
 
 use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};
@@ -21,6 +22,9 @@ pub enum Request {
 	/// should not post into a chat), the files are uploaded to the current
 	/// channel and linked there, as the composer's attach button does.
 	Share { text: Option<String>, files: Vec<PathBuf> },
+	/// Open a TeamSpeak link (`ts3server://`, `teamspeak://`, `tmspk.gg`):
+	/// the server dialog filled in from it, or a move in voice.
+	OpenLink(String),
 }
 
 static PENDING: Mutex<Vec<Request>> = Mutex::new(Vec::new());
@@ -52,6 +56,9 @@ pub(crate) fn take() {
 				nav.invoke_show(Page::Server);
 				with_app(|app| app.share(&nav, text, files));
 			}
+			Request::OpenLink(url) => {
+				with_app(|app| app.open_link(&url));
+			}
 		}
 	}
 }
@@ -67,8 +74,9 @@ impl App {
 				_ => view.state.own_channel,
 			}
 			.map(|c| {
-				let name = view.presence.channels.get(&c).map(|c| c.name.as_str());
-				(c, name.map_or_else(|| "the channel".to_owned(), |n| format!("#{n}")))
+				let name =
+					view.presence.channels.get(&c).map(|c| crate::vm::tree::channel_title(c).0);
+				(c, name.map_or_else(|| "the channel".to_owned(), str::to_owned))
 			});
 			Some((id, tab.title.clone(), channel))
 		});

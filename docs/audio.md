@@ -4,7 +4,8 @@
 microphone ─ cpal ─ resample 48 kHz mono ─ Processor (AEC3, NS, AGC2) ─ 20 ms frames
           ─ Vad / push-to-talk / continuous ─ Opus ─ voice connection
 
-voice connection ─ Mixer (jitter buffer, Opus decode, per-client volume/mute)
+voice connection ─ Mixer (jitter buffer, Opus decode, per-client volume/mute,
+          priority speaker dimming)
           ─ output volume ─┬─ resample to device ─ cpal ─ speakers
                            └─ Processor::render (echo canceller reference)
 ```
@@ -51,11 +52,12 @@ two 20 ms frames before the gate opened are sent too, so onsets are not cut.
 ## Jitter buffer and clock drift
 
 `Mixer` wraps the vendored `tsclientlib::audio::AudioHandler` (one queue per
-talker) and adds per-client volume and mute. The handler absorbs sender clock
-drift: an underrun plays Opus loss concealment for the missing frame (one inserted
-frame, and the talker is dropped after three in a row), and when the smallest
-queue length over the last 255 packets exceeds its spread, it drops every 100th
-sample (1 % faster) until the surplus is gone; queues above 0.5 s are truncated.
+talker) and adds per-client volume and mute, and priority speaker dimming. The
+handler absorbs sender clock drift: an underrun plays Opus loss concealment for
+the missing frame (one inserted frame, and the talker is dropped after three in a
+row), and when the smallest queue length over the last 255 packets exceeds its
+spread, it drops every 100th sample (1 % faster) until the surplus is gone;
+queues above 0.5 s are truncated.
 
 `crates/voelin-audio/tests/drift.rs` simulates one hour of continuous speech with
 20–60 ms network jitter, reordering and 0.5 % loss, with the sender clock at
@@ -86,6 +88,15 @@ app keeps them by unique id and sends them again when the client shows up. Clien
 ids are reused, so the session forgets the settings of clients that left.
 Watched streams play through the same mixer under made-up client ids (counting
 down from 65535) with their own volume (`SetStreamVolume`).
+
+While a priority speaker has a queue (talking, or buffering before it plays)
+and we have not muted it, every other queue, streams included, is dimmed by the
+server's `virtualserver_priority_speaker_dimm_modificator`
+(`ServerDetails::priority_speaker_dimm_db`, usually -18 dB, clamped to
+-60..=0). The dimming fades in and out sample by sample over 100 ms (5 frames),
+so the gain does not jump; priority speakers are never dimmed. The session sends
+the priority speakers and the server's value to the audio thread when either
+changes (`Mixer::set_priority`).
 
 Push-to-talk works with the button in the window and a global hotkey
 (`voelin_platform::HotkeyManager`: the portal on Wayland, XInput2 on X11, a hook on

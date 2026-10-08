@@ -21,11 +21,13 @@ crates/voelin-ui/
     nav.slint            Nav global: page, settings section, phone tab, dialogs, panel size
     studio-bridge.slint  the Stream Studio's structs and globals (StudioBridge, StudioNav)
     studio-window.slint  StudioWindow: the studio in a window of its own
+    viewer-window.slint  ViewerWindow: the stream we watch in a window of its own
     components/          the design system (catalogue below); index.slint exports all
     shells/              desktop.slint (rail, top bar, Sidebar), mobile.slint (bottom
                          navigation), common.slint (Panel, VoiceCard, UserCard, ...)
     screens/             channels, chat, members (panel, card), drawers (pins, topics),
-                         voice (the voice channel), streams (viewer; the phone's
+                         voice (the voice channel), voice-parts (its people and
+                         streams, also the phone's), streams (viewer; the phone's
                          panel), settings, settings-pages (its sections), home,
                          friends, messages (direct messages), events, overlays
                          (the bell, the search, a picture), dialogs, mobile and
@@ -38,9 +40,9 @@ crates/voelin-ui/
     app.rs               setup, App state, event dispatch
     servers.rs chat.rs members.rs streams.rs settings_page.rs appearance.rs
     home.rs social.rs messages.rs events.rs settings_pages.rs previews.rs
-    studio.rs            the logic of each area (social.rs: contacts, the bell and the
+    studio.rs popout.rs  the logic of each area (social.rs: contacts, the bell and the
                          search; previews.rs: pictures in chat; studio.rs: the Stream
-                         Studio's controller)
+                         Studio's controller; popout.rs: the stream's own window)
     vm/                  pure view models (engine state → Slint structs), unit-tested
     bind/                callbacks of each area, wired once
     images.rs            the image cache (LRU, bounded by `ui.image_cache_mb`)
@@ -64,8 +66,8 @@ literal colours.
 | Group | Tokens |
 |---|---|
 | Mode | `mode` ("dark", "light", "system"; set from `ui.theme`), `dark` (resolved), `font-scale` (from `ui.font_scale`) |
-| Backgrounds | `bg-app`, `backdrop` (gradient), `bg-rail`, `surface` (panels), `surface-2` (cards, inputs), `surface-3` (hover, menus), `surface-4` (pressed), `scrim`, `overlay` |
-| Lines | `border`, `border-strong`, `glow`, `glow-width` (focus/selection ring; the software renderer draws no shadows) |
+| Backgrounds | `bg-app`, `backdrop` (gradient), `bg-rail`, `surface` (panels), `surface-2` (cards, inputs), `surface-3` (hover, menus), `surface-4` (pressed), `scrim` (behind modals), `scrim-light` (behind pop-ups), `overlay` |
+| Lines | `border`, `border-strong`, `border-popup` (pop-ups, menus, tooltips), `glow`, `glow-width` (focus/selection ring; the software renderer draws no shadows) |
 | Accent | `accent`, `accent-hover`, `accent-pressed`, `accent-soft` (selected rows), `accent-soft-hover`, `accent-text` (links), `name-text` (chat authors), `on-accent` |
 | States | `live`, `live-soft`, `danger`, `danger-soft`, `success`, `success-soft`, `warning`, `warning-soft`, `idle`, `dnd`, `offline`, `gold` (crown), `info` |
 | Text | `text`, `text-secondary`, `text-muted`, `text-disabled`, `icon` |
@@ -73,7 +75,7 @@ literal colours.
 | Radii | `radius-xs` 4, `radius-sm` 6, `radius-md` 8, `radius-lg` 12, `radius-xl` 16, `radius-pill` |
 | Spacing | `space-1` 2 … `space-8` 32 (2, 4, 8, 12, 16, 20, 24, 32) |
 | Type (scaled) | `font-xs` 11, `font-sm` 12, `font-body` 14, `font-md` 15, `font-lg` 17, `font-xl` 20, `font-2xl` 24, `font-3xl` 30; `weight-regular` … `weight-bold` |
-| Sizes | `row-height`, `control-height` 36, `control-height-sm` 28, `icon-sm/md/lg` 16/20/24, `rail-width` 72, `sidebar-width` 264 (grows with the font scale), `topbar-height` 56, `right-panel-min` |
+| Sizes | `row-height`, `control-height` 36, `control-height-sm` 28, `icon-sm/md/lg` 16/20/24, `rail-width` 72, `sidebar-width` 264 (grows with the font scale), `topbar-height` 44 (more when large text makes the controls taller), `right-panel-min` |
 | Motion | `fast` 120 ms, `normal` 200 ms |
 
 A light palette is filled in for every colour; `mode` switches at runtime.
@@ -84,15 +86,24 @@ The standard widgets (scroll bars, context menus) follow through
 
 All in `ui/components/`, exported by `components/index.slint`.
 
+A component used in many places keeps `opacity`, `visible`, shadows and
+animations off its root element: Slint inlines such a component at every
+use, which grows the generated code and the compiler's memory (IconButton
+puts them on an inner `face`).
+
+A 0 × 0 element (`PopupMenu`, `ShareMenu`) inside a layout caps that layout's
+size across its direction at its minimum: put it outside the layout with
+`x: 0; y: 0`, as the phone's `ShareControl` does.
+
 | Component | File | Key properties |
 |---|---|---|
 | `Icon` | icon.slint | `source` (an `Icons.*`), `size`, `tint` |
 | `Spinner` | icon.slint | `size`, `tint`, `running` |
 | `Button` | button.slint | `text`, `icon`, `kind` (`ButtonKind.primary/secondary/danger/ghost`), `enabled`, `checked`, `small`; `clicked` |
-| `IconButton` | button.slint | `icon`, `label` (screen readers), `checked`, `danger`, `round`, `filled`, `size`, `icon-size`, `tint`, `dot`; `clicked` |
-| `ActionButton` | button.slint | round button with a caption (Mute, Deafen, Go Live): `icon`, `text`, `checked`, `danger` |
+| `IconButton` | button.slint | `icon`, `label` (screen readers), `tooltip` (default `label`, "" for none; on hover, also while disabled, desktop only), `checked`, `danger`, `alarm` (filled red with a white icon: Leave), `round`, `filled`, `edge` (the border of a filled one while not checked), `size`, `icon-size`, `tint`, `dot`, `count` (a neutral number at the top right, hidden at 0 or less); `clicked` |
+| `ActionButton` | button.slint | round button with a caption (the phone's voice bar: Mic on or off, Deafen, Share, Leave; the You page: Mute, Deafen, Go Live, Leave), no tooltip: `icon`, `text`, `checked`, `danger`, `alarm`, `checkable` (screen readers hear `checked`), `size`, `icon-size`, `edge` |
 | `FocusRing` | button.slint | the accent ring of focused controls |
-| `TextField` | text-field.slint | `text`, `placeholder`, `input-type`, `icon`, `label`, `bare`, `read-only`; `accepted`, `edited`, `key-pressed`; `clear()`, `select-all()` |
+| `TextField` | text-field.slint | `text`, `placeholder`, `input-type`, `icon`, `label`, `bare`, `read-only`; out `has-focus`, `text-height` (the height of its lines); `accepted`, `edited`, `key-pressed`; `clear()`, `select-all()`, `focus-end()` (the cursor after the text) |
 | `SearchBox` | text-field.slint | a TextField with a magnifier and the Ctrl K hint (`show-shortcut`) |
 | `Kbd` | text-field.slint | a key cap |
 | `Field` | text-field.slint | `label` above a control (@children), `hint` below |
@@ -103,10 +114,12 @@ All in `ui/components/`, exported by `components/index.slint`.
 | `Slider` | slider.slint | `value`, `minimum`, `maximum`, `step`, `label`; `changed(float)` while dragging, `released(float)` |
 | `SegmentedTabs` | tabs.slint | `model`, `current-index`, `label`; `selected(int)` |
 | `TabItem` | tabs.slint | underlined tab: `text`, `selected`, `badge`, `closable`; `clicked`, `close` |
-| `Avatar` | avatar.slint | `image` or `initials` + `tint`, `size`, `status` (`Status.online/idle/dnd/offline/info`), `speaking` (green ring), `crown`, `square` (server icons) |
-| `CountBadge` | badge.slint | red count bubble: `count`, `fill` |
+| `Avatar` | avatar.slint | `image` or `initials` + `tint` (one letter under 28 px, through `Images.first-letter`), `size`, `status` (`Status.online/idle/dnd/offline/info`), `speaking` (green ring), `crown`, `square` (server icons); a server icon at most half as wide (TeamSpeak's 16 px ones) is drawn at twice its size, sharp, on the tint (a person's picture always fills it) |
+| `Art` | art.slint | a painted picture (`Icons.art-*`) covering `cover-width` × `cover-height` at its own aspect ratio, cut by the parent's clip; `align-x`, `align-y` (0 keeps the left or top edge, 1 the other); home's banner and cards, the stream cards |
+| `CountBadge` | badge.slint | count bubble: `count`, `fill` (red), `ink` (the number) |
 | `LiveBadge` | badge.slint | `text` (LIVE), `large` |
-| `Chip` | badge.slint | tag: `text`, `icon`, `tint`, `fill`, `outlined` |
+| `Chip` | badge.slint | tag: `text`, `icon`, `picture` (in its own colours, a badge's), `tint`, `fill`, `outlined` |
+| `BadgeIcons` | badge.slint | up to three 14 px pictures after a name (`first`, `second`, `third`); empty ones take no room |
 | `Dot` | badge.slint | a status dot |
 | `Card` | card.slint | panel card with optional `title`, `icon`, `subtitle`, `selected`; `inset`, `gap` |
 | `SectionHeader` | card.slint | `text`, `icon`, `count`, `action` ("See All >"), `small`; `action-clicked` |
@@ -116,19 +129,45 @@ All in `ui/components/`, exported by `components/index.slint`.
 | `SpeakingBars` | meter.slint | animated "speaking" bars |
 | `NavItem` | list-item.slint | navigation entry: `icon`, `text`, `subtitle`, `selected`, `badge`, `chevron`; `clicked` |
 | `ListItem` | list-item.slint | row with a leading slot (@children), `title`, `subtitle`, `trailing`, `selected` |
-| `PopupMenu` | overlay.slint | themed menu: `entries` ([MenuEntry]), `show(x, y)`; `activated(int)` |
-| `Tooltip` | overlay.slint | wraps @children, shows `text` on hover |
+| `PopupMenu` | overlay.slint | themed menu: `entries` ([MenuEntry]), `show(x, y)`, relative to the menu element (where that is not in a layout give it `x: 0; y: 0`, or Slint centres it in its parent); `activated(int)` |
+| `Tooltip` | overlay.slint | wraps @children; `text` shows at the pointer after a moment, until it leaves (desktop only: `Bridge.desktop`) |
+| `HoverTooltip` | tooltip.slint | the same, put last in an element (as IconButton does): `text`; `pressed` and `hovered` of the element's TouchArea (a press closes it until the pointer leaves) |
+| `TooltipBubble` | tooltip.slint | a tooltip's bubble: `text`, wrapping at `widest` (400px) |
 | `Modal` | overlay.slint | dialog with backdrop: `title`, `subtitle`, `icon`, `card-width`, `card-height`; `dismissed` (backdrop, Escape, ×) |
 | `Toast` | overlay.slint | `text`, `icon`, `timeout`, `shown` |
 | `ResizeHandle` | overlay.slint | drag to resize a side panel: `size` (two-way), `minimum`, `maximum`, `left` |
-| `RichText` | emoji.slint | text with inline emoji: `runs` ([TextRun]) flow and wrap in a FlexboxLayout |
+| `RichText` | emoji.slint | text with formatting and inline emoji: `blocks` ([TextBlock]) of lines, quotes (a bar and the author), code (on a background), list items and rules; a block's `runs` ([TextRun]: bold, italic, underline, strike, code, the author's colour per theme, links underlined in the accent colour) flow and wrap in a FlexboxLayout; a click on a link opens it (`Nav.open-link`), a right-click shows Open link and Copy link |
+| `MessageText` | emoji.slint | a message's text (`line`: ChatLine): one `Text` when it has neither formatting nor emoji, else a `RichText`; a note for a blocked contact's. The chat, the pins drawer and the studio's chat use it |
 | `EmojiPicker` | emoji.slint | search, categories, virtualised grid; `picked(EmojiCell)`, `close` |
 | `ListView`, `ScrollView` | std-widgets | re-exported (virtualised lists) |
 
 Shell pieces (ui/shells/): `DesktopShell` (rail + top bar + panels as
 @children), `Sidebar` (page navigation above the voice card and user card),
-`Panel`, `ServerRail`, `TopBar`, `MobileShell` (top bar, page, bottom
-navigation), `VoiceCard`, `VoiceButtons`, `UserCard`, `HoldToTalk`.
+`Panel`, `ServerRail` (Home, the servers, Add a server, the settings; each
+server shows its icon or its initials, on a colour no other server has while
+there are at most ten, kept when a server is added),
+`TopBar` (the search, starting over the main panel, opens the search like
+Ctrl+K; the bell at the right), `MobileShell` (top bar: the tab's or the
+page's name, such as Servers, Activity, You or Settings, the app's name on
+Home, the server with the chat below on Chats; on the voice screen Back,
+the channel with the server below, the people, Chats and More; the page;
+bottom navigation), `VoiceCard` (Voice Connected, or Connecting…, and our
+channel; Disconnect, and Hold to talk with push-to-talk; on the phone a tap
+opens the voice screen), `VoiceButtons` (mute, deafen, share; `gear` adds
+the voice settings; `round` and `filled` for the voice view's call bar),
+`UserCard` (its avatar and name open Settings → My Account), `HoldToTalk`.
+Pages bring their own title; About is in the settings (and on the phone's
+You page).
+
+Voice parts (ui/screens/voice-parts.slint), for the desktop's voice view and
+the phone's voice screen: `Participant` (`member`, `size`: the avatar's) and
+`StreamCard` (`stream`), both with `compact`, the phone's smaller look (a
+person ringed only while talking or streaming, LIVE below the name; a stream
+as a row with the streamer's avatar). The protocol has no thumbnails (a
+picture means joining the stream, which the streamer sees as a request), so
+a stream card shows the stream only while we watch it, and our own from the
+Stream Studio its preview while live; otherwise the streamer's avatar,
+ringed, with what they share, on a painted scene in their colour.
 
 ## The server page
 
@@ -137,18 +176,44 @@ comes from the engine's events; what a gateway adds is hidden without it.
 
 | Part | `VOELIN_OPEN` | What it shows | Engine data |
 |---|---|---|---|
-| Chat | `server` | Header with Pinned Messages, Topics, the voice channel and the members button; chat tabs; messages grouped by author ("Today at 10:14"), avatars, emoji, reactions with an add button, pin and topic marks, file cards with download; composer with attach, emoji and send. Opens at the newest message and follows new ones while at the end | `ChatHistory` (and `Chat` for servers without history), `AvatarReady`, `Transfer`, `Gateway` (pins; reactions arrive as stored messages); `Command::LoadOlderHistory`, `DownloadChatFile`, `UploadFile`, `GatewayRequest::React`, `Unreact`, `Pin`, `Unpin` |
-| Members panel | `server` (`panel`, `no-panel`) | "Members — N" and a search; those streaming first (the people in our channel while the voice channel or a stream is shown), then each server group in the server's order with its icon, then those without a group. Rows: avatar with status, name, crown (admin groups), priority speaker, channel commander, recording, moderator role, talk power, what they do or the channel they are in. Resizable: the width is `ui.members_width` | `Presence`, `Groups`, `Talking`, `IconReady` |
-| Member card | `member` | Description, groups, talk power, country; private message, poke, friend, block; volume and mute for us | `ContactsChanged`; `Command::SetContact`, `SetClientVolume`, `SetClientMuted`, `Poke` |
+| Chat | `server` (`server:chat`: the server chat), `actions`, `link-confirm[:<url>]`, `unread[:end]` | Header with the channel's topic, then icon buttons for Pinned messages and Topics (each with its count once the gateway sent them: asked for when the chat is shown), the voice channel and the members; chat tabs (the server chat and channel chats; private chats are on the Direct Messages page); messages grouped by author ("Today at 10:14"), avatars, BBCode formatting (see Formatting below), emoji, reactions with an add button, pin and topic marks, file cards with download; composer with attach, emoji and send. A link opens in the browser; one whose text is not its address (a masked link) first shows where it goes in `LinkDialog` (the host, the whole address; Open, Copy link, Cancel); a TeamSpeak link opens in Voelin (Adding a server: Links, below); a right-click on a link offers Open link and Copy link. Every message has actions on hover (`MessageActions`; `actions` shows the last one's): Quote (`> Author: …` lines at the start of the composer, which takes the focus to write below them and grows to show up to about eight lines) and Copy text, and with a gateway quick reactions, pin and Start a topic; a right-click on a message shows Copy text, Copy link (its first web address), Quote, and with a gateway React… and Pin. The server chat starts with the server's welcome message (and its host message when the server puts it in the chat log). Opens at the newest message and follows new ones while at the end. Scrolling up to within a screen of the top loads the page before, above the rows on screen, which stay in place (a spinner above the oldest message while it loads). The Older messages button there is for a chat too short to scroll, and for after a page that brought nothing (scrolling loads again once the list was a screen away). The voice view, the phone's voice screen and private chats load the same way. Messages count as read while their chat is on screen in the focused window; the chat tabs and the server rail count the others (not our own; private chats count on Direct Messages). A chat that comes on screen with new messages, or that is on screen when messages that came while away arrive (a stored or gateway page), shows a red line with New above the first (`NewDivider`) until the chat is left; while that line is above the view, a bar over the list says how many are new and since when (`UnreadBar`: "5 new messages since 10:14", Jump, and × to mark them read). Where each chat was read is kept on this device (the store's `chat_reads`), so the counts survive a restart: messages that came while away (a gateway's history) count as new | `ChatHistory` (and `Chat` for servers without history), `Presence` (welcome and host message), `AvatarReady`, `Transfer`, `Gateway` (pins; reactions arrive as stored messages); `Command::LoadOlderHistory`, `DownloadChatFile`, `UploadFile`, `GatewayRequest::React`, `Unreact`, `Pin`, `Unpin` |
+| Members panel | `server` (`panel`, `no-panel`) | "Members — N" and a search; those streaming first (the people in our channel while the voice channel or a stream is shown), then each server group in the server's order with its icon, then those without a group. Rows: avatar with status, name, crown (admin groups), priority speaker, channel commander, recording, up to three myTeamSpeak badges, moderator role, a hand when their channel needs more talk power than they have ("Needs talk power to speak"; the member card has the number), what they do or the channel they are in. Resizable: the width is `ui.members_width` | `Presence`, `Groups`, `Talking`, `IconReady`, `PictureReady` |
+| Member card | `member` | Description, groups, badges (up to three chips in the client's order, what each is for on hover; "Badge" for one the app does not know), talk power, country; private message (on Direct Messages), poke, friend, block; volume and mute for us | `ContactsChanged`, `PictureReady` (badges); `Command::SetContact`, `SetClientVolume`, `SetClientMuted`, `Poke` |
+| Poke | `poke` (the first other member's, card open; after `friends` a contact's) | `PokeDialog`, from the member card, a friend's row and the direct message header: an optional message with a "12/100" count, Send off above 100 characters, Enter sends, Escape cancels | `Command::Poke` (trimmed, cut to 100 characters; the engine cuts too) |
+| Channel password | `channel-password`, `channel-password:wrong` | Joining a channel (a double-click in the tree, joining a friend) moves there with voice, or connects into it (by its id) without; when the server puts us elsewhere on connecting, as it does for a wrong password, it is joined again, which says why. A locked channel first asks for its password in `ChannelPasswordDialog`, unless one was given since voice connected; a refused one asks again under "Wrong password". A full channel or another refusal is a toast | `Presence` (`has_password`), `JoinFailed`; `Command::MoveToChannel`, `ConnectVoice` (`channel_password`) |
 | Pinned messages | `pins` | In the members panel's place: cards with author, time, text, files and reactions; the pin unpins, a click jumps to the message | `Gateway` `Pins`, `Pinned`, `Unpinned`; `GatewayRequest::Pins`, `Unpin` |
 | Topics | `topics`, `topic:<id>` | In the members panel's place: search, cards with the message count, creator and last activity, Create Topic; an open topic replaces the chat's messages and takes replies | `Gateway` `Topics`, `Topic`, `TopicHistory`; `GatewayRequest::Topics`, `TopicHistory`, `CreateTopic`, `Post` |
-| Voice channel | `voice` | Title, topic, "5 in voice / 50 total", Voice Settings, Leave; the people as large avatars (talking ring and bars, muted, crown, streaming); the streams as cards (LIVE, viewers, kind, bitrate, sound, Watch Stream); the channel's chat | `Presence`, `Talking`, `StreamsChanged`, viewer counts from `StreamsChanged`, else the `Gateway` stream directory |
-| Watching a stream | `watch`, `popout` | The channel's header with "5 in voice" and Leave; the player with the streamer, title, viewers, LIVE, the picture's height (the simulcast picker when a Voelin streamer offers layers), volume, elapsed time, what arrives (codec, size, frame rate, bitrate), back to the chat, pop out, full screen; a note that the stream belongs to the channel; the channel's chat and a Stream Info tab. Popped out (and in full screen) it fills the window | `WatchState`, `WatchLayers`, decoded frames and their stats (`src/video.rs`), `StreamsChanged` (viewer counts; the `Gateway` stream directory where the server gives none) |
+| Voice channel | `voice`, `voice:compact` | Title, topic, "5 in voice / 50 total", Copy invite link (a `ts3server://` link to the channel; the phone's Invite button does the same), the members button, Smaller stage / Larger stage, Chat only; the people as large avatars (talking ring and bars, muted, crown, streaming); the streams as cards (the streamer's avatar on a painted scene in their colour, or the picture while watched, and our own from the Stream Studio its preview: `studio:live,server,voice`; LIVE, viewers, kind, bitrate, sound, Watch Stream); the call bar: mute and deafen (red while on), share (its menu opens above it), the voice settings and Leave; the channel's chat. The smaller stage (`ui.voice_compact`, and always in windows under 800 px tall, where its button is disabled) is one row of small avatars, scrolling sideways, and the streams as rows (Watch, Show), so the chat gets about 200 to 240 px more | `Presence`, `Talking`, `StreamsChanged`, viewer counts from `StreamsChanged`, else the `Gateway` stream directory |
+| Watching a stream | `watch`, `watch,theatre`, `popout` | A header (on our channel's background) with the streamer's avatar, the title, the streamer and viewers, LIVE, the picture's height (the simulcast picker when a Voelin streamer offers layers), the members button and Leave; the player, with nothing over the picture but its controls: volume, elapsed time, what arrives (codec, size, frame rate, bitrate), back to the chat, theatre mode, pop out (desktop), full screen. The controls hide 2.5 s after the pointer last moved over the picture and come back when it moves (in full screen the cursor hides with them; on a touch screen a tap on the picture shows or hides them); while waiting for the picture and after the stream ended they stay, and so do they before the pointer was ever over the picture, as in screenshots. Then a note that the stream belongs to the channel; the channel's chat and a Stream Info tab. In theatre mode (`Nav.theatre`) it fills the window without the shell or the members button, the chat still under the picture; it ends with the viewer, and a narrow window keeps the phone layout. Escape leaves full screen, then theatre mode. In full screen (and on the phone outside the voice screen) the player is alone, with the streamer, title, viewers, LIVE and the quality over the picture's top, hiding with the controls. Popped out (`ViewerWindow`, `src/popout.rs`), the player alone is in a window of its own titled with the stream, while the main window goes on (`Bridge.viewer-popped`; the main window's `viewer-open` is false meanwhile): its controls keep it on top of the other windows (`always-on-top`, picture in picture; the next pop-out remembers it for the run) and bring it back; full screen and Escape are that window's, and it stays when another stream is watched. The stream's card on the voice page says "Playing in its own window", with Bring back (the streams panel's card has Bring back too). Closing the window brings the stream back too, on its server's page; Leave closes it, and so does closing the main window. The pictures go only to the window that shows the player | `WatchState`, `WatchLayers`, decoded frames and their stats (`src/video.rs`), `StreamsChanged` (viewer counts; the `Gateway` stream directory where the server gives none) |
 
 The pins and topics share the place of the members panel: opening one
 closes the other, and the members button brings the panel back. On the
 phone the chat is the Chat tab and the members of our channel are on the
-Activity tab.
+Activity tab, with the streams (the streamer's avatar on their colour, Watch,
+Show and Leave). The Chat tab counts the server's unread chats; private chats
+count on the Home tab, where the direct messages are.
+
+The phone's Servers tab (`tab:servers`) is titled Servers: the servers as a
+row of icons (a double tap edits one, + adds one), then the server card, the
+one place for the server's name, counts and banner, with its menu (Edit
+server, Add a server); Connect, or the voice card with our channel (a tap
+opens the voice screen); and the channel tree.
+
+The phone's voice screen (`voice` in a phone-sized window,
+`screens/mobile-voice.slint`) has one header, the shell's top bar: Back (it
+closes the pins, the topics or the members over the screen first, then the
+screen), the channel's name on its banner with the server below, the people
+in voice (the members page), Chats with the unread count, and More: Pinned
+Messages and Topics (with a gateway), Stream Studio, Voice Settings and
+Activity (`more` opens it). Below it come the stream we watch or the streams
+as rows, the people (44 px avatars, scrolling sideways) and Invite, the
+channel's chat and the composer. The stream and the people take at most
+45 % of the screen, so the chat keeps about 320 px at 390 × 844 while
+watching. The bottom bar has Mic on or Mic off and Deafen; with push-to-talk
+Hold to talk in the middle (green, Talking…, while held) and Share,
+otherwise Share in the middle; Share opens the share menu (Share screen,
+Stream Studio) as the desktop's call bar does; and Leave, the screen's only
+one. The transmit mode comes from the stored audio settings at start.
 
 ## Home, friends, messages and the settings pages
 
@@ -163,15 +228,16 @@ where a server has it.
 
 | Part | `VOELIN_OPEN` | What it shows | Engine data |
 |---|---|---|---|
-| Home | `home` | A banner with Voelin and a slide per server (connect, open); friends online (as many whole bubbles as fit, Find Friends after them); live streams on our servers (any channel, the gateways' directories, clients flagged streaming) with viewers, server, channel and kind; our servers with who is there and Join or Open; the latest chats of every server. At the right what friends do, quick actions (find friends, join by address, add a server) and what is happening (gateway events and scheduled streams, soonest first, then server news). The phone has the messages, servers, live streams and recent activity in one column | `FriendPresence`, `ContactsChanged`, `StreamsChanged`, `Gateway` (stream directory, events), `Presence` (the servers' welcome and host messages), `History::recent_chats` |
+| Home | `home`, `first-run` | Before the first server a banner with Voelin and Add a Server; after it "Continue where you left off": the voice channel we were in last (`ui.last_voice`, kept when our channel changes) with Join, which connects into it, or Open while voice is there (none once its server is deleted or has another address), and up to three unread mentions (they open their chat). Then friends online where the right column is hidden (as many whole bubbles as fit, Find Friends after them); live streams on our servers (any channel, the gateways' directories, clients flagged streaming) with viewers, server, channel and kind; our servers with who is there and Join or Open; the latest chats of every server. At the right what friends do and what is happening (gateway events and scheduled streams, soonest first, then server news). The sidebar lists the five newest private chats, unread first (not on the messages page). The phone has the messages, servers and live streams in one column after the friends | `State` (our channel), `FriendPresence`, `ContactsChanged`, `StreamsChanged`, `Gateway` (stream directory, events), `Presence` (the servers' welcome and host messages), `Chat` (mentions), `History::recent_chats` |
 | Library | `library` | The Stream Studio's recordings and clips (the files in `studio.recording_dir`, newest first) with Play and Open Folder | the folder |
 | Friends | `friends[:<uid>]` | Online, All and Blocked tabs, a search; each contact with where they are (server, channel, away, live), message, poke, join, watch. The selected one at the right: relation, where, a note, our volume and mute for them, friend, block, forget | `ContactsChanged`, `FriendPresence`; `Command::SetContact`, `RemoveContact`, `Poke`, `MoveToChannel` |
-| Direct messages | `messages[:<uid>]`, `inbox`, `offline` | The private chats of every server and of the store (peers by unique id) with the last message and unread counts, All, Unread and Inbox (offline messages); the conversation with the chat's message list, pokes among the messages, pictures and files, a composer, and a clear state when the peer cannot be reached (an offline message instead, where the server keeps them); the peer at the right: relation, note, the servers they are on, shared pictures and files, our volume for them | `ChatHistory` (`ChatTarget::Private` by unique id), `Command::LoadOlderHistory`, `Poke`, offline messages (`ListOfflineMessages`, `GetOfflineMessage`, `SendOfflineMessage`, `DeleteOfflineMessage`, `SetOfflineMessageRead`) |
-| The bell | `notifications` | Mentions, pokes, private messages, event reminders and friends coming online, newest first, unread marked; Mark all read, clear, the settings. Each kind is off, in the app or also a desktop notification (`notify.*`) | `Chat` and `ChatHistory` (mentions, private messages), `Poke`, `GatewayUpdate::EventReminder`, `FriendPresence`; `voelin_platform::notify` |
+| Direct messages | `messages[:<uid>]`, `inbox`, `offline` | The private chats of every server and of the store (peers by unique id) with the last message and unread counts, All, Unread and Inbox (offline messages); the conversation with the chat's message list, pokes among the messages, pictures and files, a composer, and a clear state when the peer cannot be reached (an offline message instead, where the server keeps them); the peer at the right: relation, note, the servers they are on, shared pictures and files, our volume for them. A private chat is not a tab of the server page: while it is open here it is its server's current chat (a channel's chat opened meanwhile, as voice connecting opens its channel's, waits), and leaving the page goes back to the server's last chat tab (coming back reopens it). Its unread messages count on Direct Messages (on the phone, on the Home tab), not on the server rail | `ChatHistory` (`ChatTarget::Private` by unique id), `Command::LoadOlderHistory`, `Poke`, offline messages (`ListOfflineMessages`, `GetOfflineMessage`, `SendOfflineMessage`, `DeleteOfflineMessage`, `SetOfflineMessageRead`) |
+| The bell | `notifications` | A panel under the bell, as tall as its notices (up to 560 px, then it scrolls): mentions, pokes, private messages, event reminders and friends coming online, newest first, unread marked; Mark all read, clear, the settings. Each kind is off, in the app or also a desktop notification (`notify.*`) | `Chat` and `ChatHistory` (mentions, private messages), `Poke`, `GatewayUpdate::EventReminder`, `FriendPresence`; `voelin_platform::notify` |
 | Search | `search[:<text>]` | Ctrl+K: servers, channels of every server, people (on the servers and the contacts) and the settings pages; arrows choose, Enter opens | the sessions, contacts, bookmarks |
 | Events | `events`, `event-form` | Above the channel tree (gateway `events`): a server's events with date, time, channel, scheduled stream, Going, Maybe and Not going with counts, who answered, reminders, Watch while live; create, edit and delete. Members (above the tree too) opens the members panel | `Gateway` events; `GatewayRequest::Events`, `CreateEvent`, `UpdateEvent`, `DeleteEvent`, `Rsvp` |
-| Pictures in chat | `picture` | A linked png, jpg, gif or webp up to `ui.image_preview_kb` is downloaded into memory, decoded once into the image cache and shown as a card in the message; a click opens it larger | `Command::DownloadChatFile` with `DownloadTo::Memory`, `Transfer` |
-| Join by address | `join` | The add-server dialog that connects once saved | `Command::ConnectVoice` |
+| Pictures in chat | `picture` | A linked png, jpg, gif or webp up to `ui.image_preview_kb` is downloaded into memory, decoded once into the image cache and shown as a card in the message; a click opens it larger. A picture on the web a message shows (`[img]`) comes into the engine's picture cache like banners, up to the same size and only with `cache.fetch_images`; until then, or without it, the message shows its address as a link | `Command::DownloadChatFile` with `DownloadTo::Memory`, `Transfer`; `Command::FetchPicture`, `PictureReady` |
+| Join by address | `join` (the same as `bookmark`) | The add-server dialog (Adding a server, below): Connect saves the server, then connects | `Command::ConnectVoice` |
+| TeamSpeak links | `link:<url>` | A `ts3server://`, `teamspeak://` or `tmspk.gg` link: in voice on its server, a move into its channel; else the add-server dialog filled in from it (Adding a server: Links, below) | `Command::MoveToChannel`, `Command::ConnectVoice` |
 
 Settings sections (`settings:<section>`):
 
@@ -203,8 +269,10 @@ back. The signed-in username/email and the account's avatar become the
 primary app profile in the desktop user card and mobile You page; they do
 not replace server identities or bookmark nicknames. Settings → My Account
 shows the profile from the account service (avatar, name, email,
-description, member since, previous sign-in, badges, signed-in devices, the
-account and myTS ids) or the sign-in form, supports retry/OTP/sign-out, and
+description, member since, previous sign-in, badges with a toggle each to
+show up to three of them on servers, in the order picked, signed-in
+devices, the User Tag, the account and myTS ids) or the sign-in form,
+supports retry/OTP/sign-out, and
 opens official browser flows for registration, activation, recovery and
 account management. Account and renewal material live only in the keyring;
 passwords and one-time codes are cleared after submission. Expired sessions
@@ -294,8 +362,51 @@ There are no gateway or ServerQuery fields: the gateway is looked up from
 the address (DNS SRV records, else the gateway's `/.well-known/tsgw`) when
 the server is saved, selected or connected
 ([gateway-admin.md](gateway-admin.md#letting-voelin-find-the-gateway)), one
-found is stored, and a new address looks again. `bookmark` and
+found is stored, and a new address looks again. `bookmark` (or `join`) and
 `bookmark:edit` open it (below).
+
+Its footer has Delete at the left (when editing; only the icon on a phone),
+then Cancel, Save and Connect. Save keeps the server. Connect, also Enter in
+the address or password field, keeps it, connects it with voice and shows it
+(`Bridge.save-and-connect`, `App::save_and_connect`): nothing connects when
+saving failed. While the server has voice, Connect is hidden and Save is the
+main button. Home's Add a Server opens this dialog too. The form also
+carries a channel, its password and a privilege key for TeamSpeak links,
+which are not stored with the server: with a channel the dialog shows
+"Joins <channel>" and Connect connects into it; with a key it shows "This
+link grants a server group".
+
+### Links
+
+A TeamSpeak link clicked in chat (or `link:<url>`, below) opens in Voelin
+(`App::open_link` in `links.rs`). `voelin_model::Link::parse` reads
+`ts3server://` and `teamspeak://` links (the scheme and the keys in any
+case): the host (with a port as `host:port` or `[v6]:port`), and `port`,
+`nickname`, `password`, `channel` (names from the top, `A/B`; a `/` in a
+name is `%2F`, and `\/` in the path the dialog and the server get), `cid`
+(a channel id, kept as the path `/<id>`), `channelpassword` and `token` (a
+privilege key); other keys are ignored.
+`tmspk.gg/s/<host>?…` (and `/s=<host>`) is the same server link, as its
+page sends the browser on to `teamspeak://<host>?…`. Invite codes
+(`tmspk.gg/<code>`, `teamspeak://invite=<code>`) only a TeamSpeak service
+can resolve: the toast says they can't be opened yet.
+
+The link's server is a saved one when the addresses match
+(`vm::servers::same_address`: the host in any case, an IPv6 address with or
+without brackets, no port as 9987; of several saved at that address, the
+one in voice, else the one shown, `vm::servers::link_server`). In voice on
+it, Voelin shows it and moves into the link's channel
+(`vm::servers::channel_by_path`; of channels with the same name the first
+in the tree that has the rest of the path) through `App::join_channel`,
+with the link's channel password: a locked channel without one, or with a
+wrong one, asks for it. A channel the server does not have is a toast.
+Otherwise the dialog above opens filled in by
+`vm::servers::link_form`: a saved server keeps its address, name, nickname
+(a link never changes it) and stored password unless the link has one; a
+new server takes the link's address, nickname (else the default one) and
+password; both get the link's channel, its password and the key. Nothing
+connects before Connect. `vm::servers::invite_link` (Copy invite link)
+writes links with `ServerLink::to_url`, so they read back the same.
 
 Selecting a server observes it invisibly through its gateway (or a query
 login an older version stored), so its channels, members and chats show
@@ -315,7 +426,8 @@ for importing the official clients' identities on start
 1. Write the screen in `ui/screens/<name>.slint` from the components
    (`import { ... } from "../components/index.slint";`), reading data from
    `Bridge` and navigating through `Nav` (e.g. `Nav.open-settings(...)`,
-   `Nav.show(Page.home)`).
+   `Nav.show(Page.home)`). Text goes to the clipboard with `Nav.copy(text)`
+   (through a hidden text field in `MainWindow`; a toast confirms it).
 2. New data: add a struct and a property (models: `[Struct]`) and callbacks to
    `ui/bridge.slint`.
 3. Place it: add a `Page` value in `ui/nav.slint` if it is a page, and in
@@ -340,9 +452,10 @@ live when they change (settings page, `--set`, another window):
 | `ui.theme` | dark / light / system | dark | colours |
 | `ui.font_scale` | number above 0 | 1.0 | every type size |
 | `ui.narrow_breakpoint` | pixels | 800 | below this width the phone layout |
-| `ui.image_cache_mb` | megabytes | 64 | decoded images kept in memory (0: none) |
+| `ui.image_cache_mb` | megabytes | 256 | decoded images kept in memory (0: none) |
 | `ui.members_width` | pixels | 280 | width of the members panel (dragging its edge sets it) |
-| `ui.image_preview_kb` | kilobytes | 8192 | pictures linked in chat up to this size show as pictures (0: never) |
+| `ui.voice_compact` | bool | false | the voice channel view's smaller stage (its Smaller stage / Larger stage button sets it; windows under 800 px tall always have it) |
+| `ui.image_preview_kb` | kilobytes | 8192 | pictures linked in chat (files and `[img]`) up to this size show as pictures (0: never) |
 | `notify.mentions`, `notify.private_messages`, `notify.pokes`, `notify.event_reminders`, `notify.friends_online` | off / app / desktop | desktop (friends: app) | what the bell and the desktop say about each kind |
 | `video.camera`, `video.background`, `video.resolution`, `video.mirror` | device id; none / blur; auto or WxH; bool | first camera, none, auto, true | the camera of the preview and the default of camera sources |
 | `studio.ui` | JSON | see below | the Stream Studio's stream settings: `title`, `game`, `message` (go-live), `show_viewers`, `show_chat`, `show_now_playing`, `audio` (stream audio), `preview_width` (960), `preview_fps` (15) |
@@ -359,34 +472,90 @@ picker names and categories; 1.9 MB) and embedded in the binary. `emoji.rs`
 splits chat text into grapheme clusters, maps emoji to Twemoji keys (code
 points in hex; U+FE0F dropped outside ZWJ sequences, as Twemoji names its
 files; text-default symbols such as © or digits only with U+FE0F) and makes
-runs: one per word and one per emoji. A message without emoji stays one
-`Text` (fast path); one with emoji is a `RichText`, whose runs wrap in a
-`FlexboxLayout` (lines break between words, not inside them). One to three
-emoji alone are shown large. `Images.emoji(key)` decodes an emoji once
+runs of each span of a message (see Formatting): one per word and one per
+emoji. A message without formatting or emoji stays one `Text` (fast path);
+any other is a `RichText`, whose runs wrap in a `FlexboxLayout` (lines break
+between words, not inside them; a run does not wrap, so a word longer than
+24 characters, such as an address, is cut into runs). One to three emoji
+alone are shown large. `Images.emoji(key)` decodes an emoji once
 (`images.rs`, LRU by bytes) when a visible row asks for it.
 
 The picker lists the emoji without skin-tone variants by category (coarse
 code-point ranges) and searches Unicode names. There are no shortcodes yet.
 
+## Formatting
+
+TeamSpeak clients format chat with BBCode. `vm/bbcode.rs` reads a message
+into a `Doc`: blocks (lines, quote lines, code, list items, rules) of spans
+with a style (bold, italic, underline, strike, code, colour, link) or a
+picture. The Doc does not depend on BBCode, so Markdown (TeamSpeak 6) can be
+a second parser making the same Doc.
+
+- Tags: `[b]`, `[i]`, `[u]`, `[s]`, `[color=#rgb|#rrggbb|name]`, `[url]`,
+  `[url=…]`, `[img]`, `[quote]`, `[quote=Name]`, `[code]` (nothing inside is
+  a tag; one line is inline code, more are a block), `[list]` with `[*]`,
+  `[hr]`. `[left]`, `[center]`, `[right]`, `[size]`, `[table]`, `[th]` and
+  `[td]` are dropped and their text kept; `[tr]` starts a line.
+- Tags are read in any case, and only known ones: `[Nova] hi` and `[1]`
+  stay text. A tag left open ends with the message; a closing tag that
+  closes nothing stays text.
+- A line break starts a block. Bare `http(s)://` and `www.` addresses are
+  links, without the punctuation after them. Links go only to the web,
+  TeamSpeak servers and channel files: `[url=javascript:…]` is no link.
+  `classify_link` says which (`LinkKind`: `Web`, `Server` for
+  `ts3server://`, `teamspeak://` and `tmspk.gg` invites, `File`, `Refused`
+  for other schemes, backslashes, spaces, control characters and a leading
+  `-`); only those reach `TextRun.link`. A link whose text is not its own
+  address (`[url=…]raid board[/url]`, another address) is masked
+  (`is_masked`, `TextRun.masked`): it asks before it opens.
+- Colours are honoured, made readable on each theme (a contrast of 4.5:1 to
+  the chat's background, keeping the hue).
+- Past 16 tags open at once or 1500 spans (or runs), a message is plain
+  text.
+
+`vm::chat` turns a Doc into `TextBlock`s of `TextRun`s, leaves out the file
+links shown as cards, and shows `[img]` pictures that are in the engine's
+cache as picture cards (else their address as a link). `ChatLine.text` is
+the plain text (quotes as `> `, list items as `• `), for screen readers and
+copying; `ChatLine.link` is the first web address. Lists of chats,
+notifications and the home's news show the text on one line
+(`Doc::one_line`). Built lines are kept per message id and revision
+(`LineCache`), so a refresh leaves unchanged rows alone.
+
 ## Development switches and screenshots
 
 Environment variables (see `src/dev.rs`):
 
-- `VOELIN_DEMO_UI=1`: sample servers, channels, members, chat with emoji and
-  a stream, without a server (nothing is stored).
-- `VOELIN_OPEN=<what>[,<what>...]`: `home`, `server`, `settings[:voice|keybinds|streaming|privacy|appearance|profiles]` (`identities` is the same as `profiles`),
+- `VOELIN_DEMO_UI=1`: sample servers, channels, members, chat with
+  formatting and emoji (and two pages of older messages, which load when
+  scrolled up), and a stream, without a server (nothing is stored).
+- `VOELIN_OPEN=<what>[,<what>...]`: `home`, `server` (`server:chat`: the server chat), `settings[:voice|keybinds|streaming|privacy|appearance|profiles]` (`identities` is the same as `profiles`),
   `about`, `share[:live]`, `bookmark[:edit]`, `emoji`, `client`, `panel`, `no-panel`,
-  `voice`, `pins`, `topics`, `topic:<id>`, `member`, `watch`, `popout`
+  `voice` (`voice:compact`: the smaller stage, not stored), `more` (after `voice` on the phone: the
+  voice screen's More menu), `pins`, `topics`, `topic:<id>`, `member`, `poke`,
+  `channel-password[:wrong]`, `actions` (the last message's actions, as if
+  hovered: a screenshot cannot hover), `first-run` (Home's banner as before
+  the first server, over the sample data), `link-confirm[:<url>]` (the question
+  before a masked link opens, by default the sample's), `link:<url>` (a
+  TeamSpeak link opened, as from chat: the server dialog filled in from
+  it, or in voice on its server a move; Adding a server: Links), `unread` (the
+  current chat read up to five messages before its end: the New line,
+  scrolled up to; `unread:end` ten messages before, at the end of the list,
+  under the bar that counts them), `watch`, `theatre` (after `watch`:
+  theatre mode), `popout` (`watch` in a window of its own)
   (the server page, above), `tab:<home|servers|chat|activity|you>` (phone
   layout); `friends[:<uid>]`, `messages[:<uid>]`, `inbox`, `offline`,
   `library`, `events`, `event-form`, `search[:<text>]`, `notifications`,
-  `join`, `picture`, `camera` (the settings' camera preview, the test
-  pattern) and the settings sections `account`, `profiles`, `devices`,
+  `join` (the same as `bookmark`), `picture`, `camera` (the settings'
+  camera preview, the test pattern) and the settings sections `account`,
+  `profiles`, `devices`,
   `notifications`, `integrations`, `advanced` (above). With sample data, `watch` plays the local test pattern in the
   sample stream's place. `studio[:window|live|record|source|audio|camera|scene|settings]`
-  opens the Stream Studio (above) in that state; with its window open a
-  screenshot also saves the window alone (`<name>-window.png`) and draws it
-  over the main window.
+  opens the Stream Studio (above) in that state (`studio:live` also with a
+  screen opened after it: `studio:live,server,voice` shows our stream's card
+  with the studio's picture); with its window open, or the stream's
+  (`popout`), a screenshot also saves the window alone (`<name>-window.png`)
+  and draws it over the main window.
 - `VOELIN_WINDOW_SIZE=390x844`: window size (phone layout below the breakpoint).
 - `VOELIN_SCREENSHOT=<png>`, `VOELIN_SCREENSHOT_DELAY=<s>`: save the window and exit.
 - `VOELIN_DEMO_STREAM=1`, `VOELIN_AUTOCONNECT`, `VOELIN_AUTOWATCH`,
@@ -455,10 +624,23 @@ The compact server card shows its icon over the host banner. TeamSpeak 6
 channel banners sit behind their titles in fixed-height tree rows (34 pixels),
 and behind desktop and phone chat/voice headers. Artwork uses centred cover
 cropping without distortion; it never adds height to navigation. Custom channel
-icons lead the title, and recognized `[cspacerN]` labels are centred without
-showing the prefix. A theme-aware surface gradient (74% to 66% opacity) keeps
-primary text above 4.5:1 contrast even on all-white or all-black artwork, while
-leaving the image visible. Missing pictures retain the normal background.
+icons lead the title. Top-level spacer channels show their text without the
+prefix and without an icon or a member count: `[spacerN]` and `[lspacerN]` on
+the left, `[cspacerN]` centred, `[rspacerN]` on the right, and `[*spacerN]---`
+repeats its text across the row as a line (any text may follow `spacer`, as
+it only keeps names unique). Every screen that names a channel, and the
+Android voice notification, shows a spacer's text; the tree search, Ctrl+K and
+the event form leave out lines and empty spacers. A theme-aware surface
+gradient (74% to 66% opacity) keeps primary text above 4.5:1 contrast even on
+all-white or all-black artwork, while leaving the image visible. Missing
+pictures retain the normal background.
+
+A channel has one icon everywhere, a speaker (`Icons.channel`, a lock for a
+locked one in the tree), and chat tabs, notifications and search results name
+it without a `#`. A server icon at most half as wide as its avatar (TeamSpeak's
+are often 16 pixels) is drawn at twice its size, sharp, on the server's colour
+instead of stretched. Avatars under 28 pixels, as the tree's clients, show one
+letter.
 
 Bookmarks remember the server icon ID and the address that supplied it. The
 server list, search results and server header load its cached bytes before
@@ -477,7 +659,22 @@ profile requires account setup before the server list, so no fresh-profile
 network capture was obtained. These observations do not establish that every
 server or client version lacks a pre-login mechanism.
 
-The engine downloads banners only while `cache.fetch_images` is enabled.
+Badges arrive as GUIDs (`client_badges`; on TeamSpeak 6 also
+`client_signed_badges`, the myTeamSpeak badges the server verified, which
+come first: `voelin_model::shown_badges`). Their names and descriptions come
+from a table in `voelin-model` (`badges::info`, tsclientlib's list and the
+newer entries of TeamSpeak's own, `https://badges-content.teamspeak.com/list`,
+as of October 2026); newer badges show as "Badge". Their pictures are SVGs
+on TeamSpeak's server (`https://badges-content.teamspeak.com/<guid>/<filename>.svg`,
+`badges::icon_url`), fetched like web banners for the first three badges of
+each client in the presence shown, and reported with `PictureReady`. A
+client's tree row shows the pictures that arrived right after the name (its
+group and client icons stay at the end); so does its row in the members
+panel.
+
+The engine downloads banners and badges, and the pictures chat messages
+show (`[img]`, `Command::FetchPicture`), only while `cache.fetch_images` is
+enabled.
 Banners on the web (`http`, `https`) come from their host; banners in the
 server's own files, linked as `ts3image://` (TeamSpeak 5 and 6:
 `ts3image://<host>?port=…&channel=…&path=…&filename=…`, the file browser's
@@ -485,28 +682,38 @@ server's own files, linked as `ts3image://` (TeamSpeak 5 and 6:
 `ts3image://<name>?channel=…&path=…`), come through the voice connection's
 file transfer, so they need voice and the server's file permissions. Their
 cache entry is named by the server too, as the same address names another
-file elsewhere. Up to eight distinct web banners download concurrently;
-duplicate URLs share a request. A picture may be up to 64 MiB, avatars and
-icons too, and goes to disk as it arrives. Web downloads have a 10-second
-connection timeout and fail after 20 seconds without data or when, after
-their first 30 seconds, they average less than 32 KiB/s; there is no
-fixed overall deadline, so large banners on slow hosts still arrive. Failed
-avatars, icons and banners receive up to three automatic retries after
-1, 4 and 16 seconds,
-without waiting for a presence update. Avatar/icon/banner file-transfer
-negotiation expires after 15 seconds, and the download after 30 seconds
-plus its size at 32 KiB/s. User file transfers retain their existing
-timing. Replaced images and closed sessions discard
-obsolete results. A host banner's reload interval is at least 60 seconds;
-failed refreshes preserve the previous cached picture. Closing the session
-stops its reload timer. `PictureReady` invalidates the decoded image before
-refreshing the visible models, including when the URL and cache path stay
-the same.
+file elsewhere. Up to 16 web downloads run at once, at most 6 per host (a
+redirect's target counts); duplicate URLs share a request. Pictures on the
+web go through the desktop's proxy (the portal's, on Linux) or the
+system's, SOCKS too. A picture may be up to 128 MiB (avatars and icons
+too; myTeamSpeak avatars 4 MiB, a chat's `[img]` up to
+`ui.image_preview_kb`), and goes to disk as it arrives. Web downloads
+connect within 20 seconds, and fail after 60 seconds without data or when,
+after their first 120 seconds, they average less than 8 KiB/s; there is
+no fixed overall deadline, so large banners on slow hosts still arrive.
+Failed banners and badges are tried again after 1, 4, 16, 60, 300 and 900
+seconds, then every 15 minutes while they are shown; one whose address is
+wrong or gone (HTTP 400, 404, 410) after 15 minutes, then hourly; one whose
+host asks to wait (429, 503) when it says (1 minute to 1 hour). Asked for
+again, a cached picture is downloaded only if its host says it changed
+(ETag, Last-Modified). Avatars, icons and chat pictures receive up to three
+automatic retries after 1, 4 and 16 seconds. Retries do not wait for a
+presence update. Avatar/icon/banner file-transfer negotiation expires
+after 30 seconds, and the download after 60 seconds plus its size at
+8 KiB/s. User file transfers retain their existing timing. Replaced images
+and closed sessions discard obsolete results. A host banner's reload
+interval is at least 60 seconds; failed refreshes preserve the previous
+cached picture. Closing the session stops its reload timer.
+`PictureReady` (and `AvatarReady`, `IconReady`) has a file that changed
+decoded again before the visible models refresh, also when the URL and
+cache path stay the same.
 
-PNG, JPEG, GIF, WebP and SVG are decoded by content, since cached files have
-no extension. Raster pictures larger than 16,384 pixels on either axis or
-64 MiB of decoded RGBA are refused before pixel allocation on the UI
-thread. SVG uses Slint's vector loader and the existing vector-cache cost.
+PNG, JPEG, GIF, WebP, BMP, ICO and SVG (also after a comment or DOCTYPE)
+are decoded by content, since cached files have no extension. Raster
+pictures whose decoded RGBA would exceed 128 MiB are refused before pixel
+allocation on the UI thread; those larger than 4096 pixels on a side are
+scaled down (an animation to its first frame). SVG uses Slint's vector
+loader and the existing vector-cache cost.
 Avatars and server, channel, client and group icons use the same image cache.
 
 The focused checks are the `voelin-core`, `voelin-model`, `voelin-observer`,
@@ -555,9 +762,17 @@ renderer; the phone layouts are desktop renders, not Android device tests.
   layers, which only a Voelin streamer does (`a=x-voelin-layers`, see
   [media.md](media.md)); for the official client's streams the player
   shows the decoded picture's height.
-- Popping the stream out fills the main window (no second window yet).
+- The stream's own window is desktop only (Android has one window). It shows
+  no toasts and has no chat; status messages go to the main window. Keeping
+  it on top is a hint to the desktop: Wayland lets no app do it (winit
+  ignores it there; the compositor's window menu may offer it).
 - A jump to a pinned message scrolls to where an average row would be
-  (rows differ in height), and only to messages already loaded.
+  (rows differ in height), and only to messages already loaded. So does
+  the unread bar's Jump, and the bar shows while that estimate of the New
+  line is above the view.
+- What is read stays on this device: TeamSpeak has no read receipts. The
+  window's focus is known on the desktop (winit); on Android a chat on
+  screen counts as read.
 - The window keeps its native decorations (no custom title bar).
 - The Stream Studio streams to the voice channel we are in (a TeamSpeak 6
   stream belongs to its channel): its destination picks among the servers,

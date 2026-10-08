@@ -87,8 +87,8 @@ pub static UI_NARROW_BREAKPOINT: Key<u32> = Key::new(
 pub static UI_IMAGE_CACHE_MB: Key<u32> = Key::new(
 	"ui.image_cache_mb",
 	Kind::UInt { min: 0 },
-	"Memory in MB for decoded images (avatars, icons, emoji); 0 keeps none.",
-	|| 64,
+	"Memory in MB for decoded images (avatars, icons, banners, emoji); 0 keeps none.",
+	|| 256,
 );
 
 /// `ui.members_width`: how wide the members and streams panel is, in
@@ -100,9 +100,25 @@ pub static UI_MEMBERS_WIDTH: Key<u32> = Key::new(
 	|| 280,
 );
 
+/// `ui.voice_compact`: the voice channel view's smaller stage (a strip of
+/// people and stream rows, more room for the chat). Its toggle stores it.
+pub static UI_VOICE_COMPACT: Key<bool> = Key::new(
+	"ui.voice_compact",
+	Kind::Bool,
+	"The voice channel view's smaller stage, leaving more room for the chat.",
+	|| false,
+);
+
 /// The UI's keys besides [`UI`] and [`CLIENT_PLAYBACK`], for registering.
-pub fn appearance_keys() -> [&'static dyn voelin_core::settings::Setting; 5] {
-	[&UI_THEME, &UI_FONT_SCALE, &UI_NARROW_BREAKPOINT, &UI_IMAGE_CACHE_MB, &UI_MEMBERS_WIDTH]
+pub fn appearance_keys() -> [&'static dyn voelin_core::settings::Setting; 6] {
+	[
+		&UI_THEME,
+		&UI_FONT_SCALE,
+		&UI_NARROW_BREAKPOINT,
+		&UI_IMAGE_CACHE_MB,
+		&UI_MEMBERS_WIDTH,
+		&UI_VOICE_COMPACT,
+	]
 }
 
 /// What a kind of notification does: nothing, the bell, or the bell and a
@@ -271,6 +287,9 @@ pub struct UiSettings {
 	/// "Continue without an account" was chosen on the login page: it does
 	/// not show at start any more (signing in clears it).
 	pub skip_account_prompt: bool,
+	/// The voice channel we were in last (Home's "Continue where you left
+	/// off").
+	pub last_voice: Option<LastVoice>,
 }
 
 impl Default for UiSettings {
@@ -283,8 +302,19 @@ impl Default for UiSettings {
 			share: ShareDefaults::default(),
 			crash_reports: false,
 			skip_account_prompt: false,
+			last_voice: None,
 		}
 	}
+}
+
+/// Where we were with voice last: the bookmark with the address it had
+/// then (one that now points elsewhere does not resume), and the channel's
+/// path, its names from the top as the server has them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastVoice {
+	pub bookmark: i64,
+	pub address: String,
+	pub channel: Vec<String>,
 }
 
 /// The last choices in the share dialog. Frame rate and bitrate are the
@@ -388,6 +418,23 @@ fn noise_level(index: i32) -> NoiseLevel {
 	}
 }
 
+/// The form's number for a transmit mode (`AudioForm.transmit`).
+pub fn transmit_index(mode: TransmitMode) -> i32 {
+	match mode {
+		TransmitMode::PushToTalk => 0,
+		TransmitMode::VoiceActivation => 1,
+		TransmitMode::Continuous => 2,
+	}
+}
+
+fn transmit_mode(index: i32) -> TransmitMode {
+	match index {
+		1 => TransmitMode::VoiceActivation,
+		2 => TransmitMode::Continuous,
+		_ => TransmitMode::PushToTalk,
+	}
+}
+
 /// The settings page's form for `settings`.
 pub fn audio_form(
 	settings: &AudioSettings,
@@ -398,11 +445,7 @@ pub fn audio_form(
 	AudioForm {
 		input_index: inputs.index_of(settings.input_device.as_deref()) as i32,
 		output_index: outputs.index_of(settings.output_device.as_deref()) as i32,
-		transmit: match settings.transmit {
-			TransmitMode::PushToTalk => 0,
-			TransmitMode::VoiceActivation => 1,
-			TransmitMode::Continuous => 2,
-		},
+		transmit: transmit_index(settings.transmit),
 		vad_threshold: settings.vad.threshold_db,
 		echo_cancellation: p.echo_cancellation,
 		noise_suppression: p.noise_suppression,
@@ -424,11 +467,7 @@ pub fn apply_audio_form(
 	let mut s = settings.clone();
 	s.input_device = inputs.id_at(form.input_index);
 	s.output_device = outputs.id_at(form.output_index);
-	s.transmit = match form.transmit {
-		1 => TransmitMode::VoiceActivation,
-		2 => TransmitMode::Continuous,
-		_ => TransmitMode::PushToTalk,
-	};
+	s.transmit = transmit_mode(form.transmit);
 	s.vad.threshold_db = form.vad_threshold;
 	s.processing.echo_cancellation = form.echo_cancellation;
 	s.processing.noise_suppression = form.noise_suppression;
@@ -493,6 +532,22 @@ mod tests {
 	}
 
 	#[test]
+	fn transmit_modes() {
+		for (mode, index) in [
+			(TransmitMode::PushToTalk, 0),
+			(TransmitMode::VoiceActivation, 1),
+			(TransmitMode::Continuous, 2),
+		] {
+			assert_eq!(transmit_index(mode), index);
+			assert_eq!(transmit_mode(index), mode);
+		}
+		// Any other number is the default, push-to-talk (Hold to talk shows).
+		assert_eq!(transmit_mode(7), TransmitMode::PushToTalk);
+		assert_eq!(transmit_mode(-1), TransmitMode::PushToTalk);
+		assert_eq!(transmit_index(AudioSettings::default().transmit), 0);
+	}
+
+	#[test]
 	fn free_values() {
 		assert_eq!(nearest_choice(&FPS_CHOICES, 60), 2);
 		assert_eq!(nearest_choice(&FPS_CHOICES, 144), 4);
@@ -520,12 +575,33 @@ mod tests {
 	}
 
 	#[test]
+	fn voice_compact_key() {
+		let settings = voelin_core::settings::Settings::in_memory();
+		for key in appearance_keys() {
+			settings.register(key);
+		}
+		assert_eq!(settings.get_json("ui.voice_compact"), Some(false.into()), "the full stage");
+		assert!(settings.apply_overrides(["ui.voice_compact=true"]).is_empty());
+		assert!(settings.get(&UI_VOICE_COMPACT));
+		assert!(settings.set_json("ui.voice_compact", "small".into()).is_err());
+	}
+
+	#[test]
 	fn ui_settings_defaults() {
 		let parsed: UiSettings = serde_json::from_str(r#"{"openh264":true}"#).unwrap();
 		assert!(parsed.openh264);
 		assert!(!parsed.crash_reports, "crash reports are opt-in");
 		assert_eq!(parsed.ptt_key, "Ctrl+Shift+T");
 		assert_eq!(parsed.share, ShareDefaults::default());
+		assert_eq!(parsed.last_voice, None, "older settings have no last channel");
+		let last = LastVoice {
+			bookmark: 3,
+			address: "ts.example".into(),
+			channel: vec!["Games".into(), "Chess".into()],
+		};
+		let settings = UiSettings { last_voice: Some(last.clone()), ..UiSettings::default() };
+		let json = serde_json::to_string(&settings).unwrap();
+		assert_eq!(serde_json::from_str::<UiSettings>(&json).unwrap().last_voice, Some(last));
 		assert_eq!(serde_json::to_value(ThemeChoice::System).unwrap(), "system");
 		assert_eq!(ThemeChoice::parse("light"), ThemeChoice::Light);
 		assert_eq!(ThemeChoice::parse("??"), ThemeChoice::Dark);

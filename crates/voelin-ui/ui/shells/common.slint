@@ -6,7 +6,7 @@ import { Bridge } from "../bridge.slint";
 import { Nav, SettingsSection } from "../nav.slint";
 import { StudioBridge } from "../studio-bridge.slint";
 import { ShareMenu } from "../share-menu.slint";
-import { Icon, IconButton, Avatar, Status } from "../components/index.slint";
+import { Icon, IconButton, FocusRing, Avatar, Status } from "../components/index.slint";
 
 // A rounded panel of the frame (sidebar, main area, right panel).
 export component Panel inherits Rectangle {
@@ -60,8 +60,8 @@ export component HoldToTalk inherits Rectangle {
     }
 }
 
-// "Voice Connected — channel / server", disconnect, and hold-to-talk
-// with push-to-talk.
+// "Voice Connected" and our channel, disconnect, and hold-to-talk with
+// push-to-talk.
 export component VoiceCard inherits Rectangle {
     border-radius: Theme.radius-lg;
     background: Theme.surface-2;
@@ -94,8 +94,9 @@ export component VoiceCard inherits Rectangle {
                     font-size: Theme.font-sm;
                     font-weight: Theme.weight-semibold;
                 }
-                Text {
-                    text: Bridge.own-channel != "" ? Bridge.own-channel + " / " + Bridge.server-title : Bridge.server-title;
+                // Our channel; none yet while connecting.
+                if Bridge.own-channel != "": Text {
+                    text: Bridge.own-channel;
                     color: Theme.text-muted;
                     font-size: Theme.font-xs;
                     overflow: elide;
@@ -123,9 +124,14 @@ export component VoiceCard inherits Rectangle {
     }
 }
 
-// Mute, deafen, share, settings.
+// Mute, deafen, share, and with `gear` the voice settings. `round` and
+// `filled` are the voice view's call bar.
 export component VoiceButtons inherits HorizontalLayout {
     in property <length> size: 34px;
+    // The rail has the settings; the user card leaves them out.
+    in property <bool> gear: false;
+    in property <bool> round;
+    in property <bool> filled;
     spacing: Theme.space-1;
     IconButton {
         icon: Bridge.input-muted ? Icons.mic-off : Icons.mic;
@@ -133,6 +139,8 @@ export component VoiceButtons inherits HorizontalLayout {
         checked: Bridge.input-muted;
         danger: true;
         size: root.size;
+        round: root.round;
+        filled: root.filled;
         enabled: Bridge.voice-connected;
         clicked => { Bridge.set-input-muted(!Bridge.input-muted); }
     }
@@ -142,6 +150,8 @@ export component VoiceButtons inherits HorizontalLayout {
         checked: Bridge.output-muted;
         danger: true;
         size: root.size;
+        round: root.round;
+        filled: root.filled;
         enabled: Bridge.voice-connected;
         clicked => { Bridge.set-output-muted(!Bridge.output-muted); }
     }
@@ -152,19 +162,24 @@ export component VoiceButtons inherits HorizontalLayout {
             label: Bridge.share-state == "live" ? @tr("Sharing") : StudioBridge.status.live ? @tr("Live in the Stream Studio") : @tr("Share or go live");
             checked: Bridge.share-state == "live" || StudioBridge.status.live;
             size: root.size;
+            round: root.round;
+            filled: root.filled;
             clicked => { share-menu.open(0, - root.size - share-menu.menu-height - 4px); }
         }
         share-menu := ShareMenu { }
     }
-    IconButton {
+    if root.gear: IconButton {
         icon: Icons.settings;
-        label: @tr("Settings");
+        label: @tr("Voice Settings");
         size: root.size;
+        round: root.round;
+        filled: root.filled;
         clicked => { Nav.open-settings(SettingsSection.voice); }
     }
 }
 
 // The primary app profile, with current server voice status and controls.
+// The avatar and the name open Settings › Account.
 export component UserCard inherits Rectangle {
     min-height: 60px;
     border-radius: Theme.radius-lg;
@@ -173,42 +188,76 @@ export component UserCard inherits Rectangle {
     accessible-label: @tr("You");
     HorizontalLayout {
         padding: Theme.space-2;
-        padding-left: Theme.space-3;
-        spacing: Theme.space-3;
-        VerticalLayout {
-            alignment: center;
-            Avatar {
-                size: 38px;
-                initials: Bridge.myts.signed-in || Bridge.nickname != "" ? "" : "?";
-                // The server's avatar for us, else the account's.
-                image: Bridge.own-avatar.width > 0 ? Bridge.own-avatar : Bridge.myts.avatar;
-                tint: Theme.accent;
-                label: Bridge.primary-name;
-                // Green ring while our voice goes out.
-                speaking: Bridge.transmitting;
-                status: Bridge.voice-connected ? Status.online : Bridge.observing ? Status.info : Status.offline;
-                Icon {
-                    source: Icons.user;
-                    size: 20px;
-                    tint: #ffffff;
-                    visible: (Bridge.myts.signed-in || Bridge.nickname != "") && Bridge.own-avatar.width == 0 && Bridge.myts.avatar.width == 0;
+        spacing: Theme.space-2;
+        profile := Rectangle {
+            horizontal-stretch: 1;
+            border-radius: Theme.radius-md;
+            background: profile-touch.pressed ? Theme.surface-4 : profile-touch.has-hover ? Theme.surface-3 : transparent;
+            accessible-role: AccessibleRole.button;
+            accessible-label: @tr("Your profile");
+            accessible-description: Bridge.primary-name;
+            accessible-action-default => { Nav.open-settings(SettingsSection.account); }
+            FocusRing {
+                shown: profile-focus.has-focus;
+                w: profile.width;
+                h: profile.height;
+            }
+            profile-focus := FocusScope {
+                key-pressed(event) => {
+                    if event.text == " " || event.text == "\n" {
+                        Nav.open-settings(SettingsSection.account);
+                        return accept;
+                    }
+                    reject
+                }
+                profile-touch := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        profile-focus.focus();
+                        Nav.open-settings(SettingsSection.account);
+                    }
                 }
             }
-        }
-        VerticalLayout {
-            alignment: center;
-            horizontal-stretch: 1;
-            Text {
-                text: Bridge.primary-name;
-                color: Theme.text;
-                font-weight: Theme.weight-semibold;
-                overflow: elide;
-            }
-            Text {
-                text: Bridge.voice-connected ? @tr("Online") : Bridge.observing ? @tr("Observing") : @tr("Offline");
-                color: Theme.text-muted;
-                font-size: Theme.font-xs;
-                overflow: elide;
+            HorizontalLayout {
+                padding-left: Theme.space-2;
+                padding-right: Theme.space-2;
+                spacing: Theme.space-3;
+                VerticalLayout {
+                    alignment: center;
+                    Avatar {
+                        size: 38px;
+                        initials: Bridge.myts.signed-in || Bridge.nickname != "" ? "" : "?";
+                        // The server's avatar for us, else the account's.
+                        image: Bridge.own-avatar.width > 0 ? Bridge.own-avatar : Bridge.myts.avatar;
+                        tint: Theme.accent;
+                        label: Bridge.primary-name;
+                        // Green ring while our voice goes out.
+                        speaking: Bridge.transmitting;
+                        status: Bridge.voice-connected ? Status.online : Bridge.observing ? Status.info : Status.offline;
+                        Icon {
+                            source: Icons.user;
+                            size: 20px;
+                            tint: #ffffff;
+                            visible: (Bridge.myts.signed-in || Bridge.nickname != "") && Bridge.own-avatar.width == 0 && Bridge.myts.avatar.width == 0;
+                        }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: Bridge.primary-name;
+                        color: Theme.text;
+                        font-weight: Theme.weight-semibold;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: Bridge.voice-connected ? @tr("Online") : Bridge.observing ? @tr("Observing") : @tr("Offline");
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        overflow: elide;
+                    }
+                }
             }
         }
         VoiceButtons { }

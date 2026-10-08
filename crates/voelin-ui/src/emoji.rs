@@ -1,7 +1,7 @@
 //! Twemoji as images. The software renderer draws no colour glyphs, so the
 //! UI shows emoji as pictures: this module reads the packed archive
 //! (`assets/twemoji.bin`, made by `scripts/pack-twemoji.py`), finds the
-//! picture of a grapheme cluster, splits text into runs of text and emoji,
+//! picture of a grapheme cluster, splits text into runs of words and emoji,
 //! and lists emoji for the picker. Decoding the SVGs into images is
 //! `images.rs`' job.
 
@@ -307,27 +307,22 @@ pub struct Run {
 	pub emoji: Option<String>,
 }
 
-/// Text split into runs for a wrapping layout: a run per word (with the
-/// space after it) and per emoji. `None` if the text has no emoji (show it
-/// as one text). Line breaks become spaces.
-pub fn runs(text: &str) -> Option<Vec<Run>> {
-	if !text.chars().any(may_be_emoji) {
-		return None;
-	}
+/// A line of text split into runs for a wrapping layout: a run per word
+/// (with the space after it) and per emoji. A line break is a space: lines
+/// are blocks of their own (`vm::bbcode`).
+pub fn split(text: &str) -> Vec<Run> {
+	let emoji = text.chars().any(may_be_emoji);
 	let mut out: Vec<Run> = Vec::new();
 	let mut word = String::new();
-	let mut any = false;
 	for g in text.graphemes(true) {
-		if let Some(key) = key_for(g) {
+		if let Some(key) = emoji.then(|| key_for(g)).flatten() {
 			if !word.is_empty() {
 				out.push(Run { text: std::mem::take(&mut word), emoji: None });
 			}
 			out.push(Run { text: g.to_owned(), emoji: Some(key) });
-			any = true;
 			continue;
 		}
-		let space = g.chars().all(char::is_whitespace);
-		if space {
+		if g.chars().all(char::is_whitespace) {
 			// Spaces stay with the word before them (or stand alone after
 			// an emoji).
 			word.push(' ');
@@ -339,7 +334,7 @@ pub fn runs(text: &str) -> Option<Vec<Run>> {
 	if !word.is_empty() {
 		out.push(Run { text: word, emoji: None });
 	}
-	any.then_some(out)
+	out
 }
 
 /// One to three emoji and nothing else but spaces: shown large.
@@ -391,15 +386,21 @@ mod tests {
 
 	#[test]
 	fn text_runs() {
-		assert_eq!(runs("plain text, no emoji"), None);
-		assert_eq!(runs("em — dash"), None);
-		let r = runs("hi 👋 there").unwrap();
-		let texts: Vec<_> = r.iter().map(|r| (r.text.as_str(), r.emoji.as_deref())).collect();
-		assert_eq!(texts, [("hi ", None), ("👋", Some("1f44b")), (" ", None), ("there", None)]);
+		let texts = |text: &str| -> Vec<(String, Option<String>)> {
+			split(text).into_iter().map(|r| (r.text, r.emoji)).collect()
+		};
+		let word = |w: &str| (w.to_owned(), None);
+		assert_eq!(texts("plain text, no"), [word("plain "), word("text, "), word("no")]);
+		assert_eq!(texts("em — dash"), [word("em "), word("— "), word("dash")]);
+		let r = split("hi 👋 there");
+		assert_eq!(
+			texts("hi 👋 there"),
+			[word("hi "), ("👋".into(), Some("1f44b".into())), word(" "), word("there")]
+		);
 		assert!(!is_jumbo(&r));
-		let r = runs("🔥🔥 ").unwrap();
-		assert!(is_jumbo(&r));
-		assert!(!is_jumbo(&runs("🔥🔥🔥🔥").unwrap()));
+		assert!(is_jumbo(&split("🔥🔥 ")));
+		assert!(!is_jumbo(&split("🔥🔥🔥🔥")));
+		assert!(!is_jumbo(&split("no emoji")));
 	}
 
 	#[test]

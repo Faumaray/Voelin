@@ -23,6 +23,7 @@ const MIGRATIONS: &[Migration] = &[
 	Migration::Code(crate::chat::migrate_2),
 	Migration::Sql(crate::contacts::SCHEMA_3),
 	Migration::Sql(SCHEMA_4),
+	Migration::Sql(crate::chat::SCHEMA_5),
 ];
 
 /// Version 4: where each identity came from ([`IdentityOrigin`]) and which
@@ -147,8 +148,14 @@ pub struct Bookmark {
 	/// Identity to connect with (`IdentityEntry::id`).
 	pub identity: Option<i64>,
 	pub default_channel: Option<String>,
-	/// `wss://` URL of a companion gateway, for invisible presence and relay chat.
+	/// The companion gateway in use (`wss://` or `ws://`), for invisible
+	/// presence and relay chat: the one that last logged in, else the best
+	/// published one, else one typed into an older version.
 	pub gateway_url: Option<String>,
+	/// Every URL the server publishes for its gateway, best first: tried in
+	/// this order.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub gateway_urls: Vec<String>,
 	/// Own ServerQuery credentials (the password is kept in [`crate::Secrets`]).
 	pub query: Option<QueryConfig>,
 	/// Signed client version to present (`voelinctl versions` spec), `None` for the default.
@@ -167,6 +174,37 @@ pub struct CachedServerIcon {
 }
 
 impl Bookmark {
+	/// The gateways to try, best first: those published, else the one kept.
+	pub fn gateways(&self) -> Vec<String> {
+		if self.gateway_urls.is_empty() {
+			self.gateway_url.iter().cloned().collect()
+		} else {
+			self.gateway_urls.clone()
+		}
+	}
+
+	/// Discovery found `urls` (best first, not empty); true if what is tried
+	/// changed. The one in use stays if it is still published.
+	pub fn set_gateways(&mut self, urls: Vec<String>) -> bool {
+		if self.gateway_urls == urls {
+			return false;
+		}
+		if !self.gateway_url.as_ref().is_some_and(|url| urls.contains(url)) {
+			self.gateway_url = urls.first().cloned();
+		}
+		self.gateway_urls = urls;
+		true
+	}
+
+	/// The gateway logged in at `url`; true if the one in use changed.
+	pub fn gateway_in_use(&mut self, url: &str) -> bool {
+		if self.gateway_url.as_deref() == Some(url) || !self.gateways().iter().any(|u| u == url) {
+			return false;
+		}
+		self.gateway_url = Some(url.to_owned());
+		true
+	}
+
 	pub fn server_icon_id(&self) -> Option<u32> {
 		self.cached_server_icon
 			.as_ref()
@@ -531,6 +569,48 @@ mod tests {
 		std::fs::remove_dir_all(dir).unwrap();
 	}
 
+	/// A database of version 4 learns where its chats were read, keeping
+	/// its messages; nothing is read yet.
+	#[test]
+	fn migrates_version_4_read_markers() {
+		use crate::{ChatRead, ChatTarget, PageQuery};
+		let dir = std::env::temp_dir().join(format!("voelin-store-v4-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&dir);
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("client.db");
+		{
+			let mut db = rusqlite::Connection::open(&path).unwrap();
+			db.execute_batch(SCHEMA_1).unwrap();
+			let tx = db.transaction().unwrap();
+			crate::chat::migrate_2(&tx).unwrap();
+			tx.commit().unwrap();
+			db.execute_batch(crate::contacts::SCHEMA_3).unwrap();
+			db.execute_batch(SCHEMA_4).unwrap();
+			db.pragma_update(None, "user_version", 4).unwrap();
+			db.execute(
+				"INSERT INTO messages (server_uid, target, ts, ts_ms, author_name, text)
+				 VALUES ('srv', 'channel/1', 1, 1000, 'a', 'kept')",
+				[],
+			)
+			.unwrap();
+		}
+		let store = Store::open(&path).unwrap();
+		assert_eq!(Store::SCHEMA_VERSION, 5);
+		assert_eq!(store.schema_version().unwrap(), Store::SCHEMA_VERSION);
+		let channel = ChatTarget::Channel(1);
+		let rows = store.messages("srv", &channel, PageQuery::default()).unwrap();
+		assert_eq!(rows.len(), 1);
+		assert!(store.chat_reads("srv").unwrap().is_empty());
+		let read = ChatRead { ts_ms: rows[0].ts_ms, id: rows[0].id, updated_ms: 1 };
+		store.set_chat_read("srv", &channel, &read).unwrap();
+		drop(store);
+		// Opened again: the marker is there and nothing runs twice.
+		let store = Store::open(&path).unwrap();
+		assert_eq!(store.chat_read("srv", &channel).unwrap(), Some(read));
+		drop(store);
+		std::fs::remove_dir_all(dir).unwrap();
+	}
+
 	#[test]
 	fn bookmarks_keep_order_and_fields() {
 		let store = Store::open_in_memory().unwrap();
@@ -560,6 +640,36 @@ mod tests {
 		store.update_bookmark(&b).unwrap();
 		assert_eq!(store.bookmarks().unwrap()[0].nickname, "renamed");
 		assert_eq!(b.server_password_key(), format!("bookmark/{}/server-password", b.id));
+	}
+
+	#[test]
+	fn published_gateways_are_kept_with_the_one_in_use() {
+		let store = Store::open_in_memory().unwrap();
+		// From an older version: one URL, no list.
+		let mut b = Bookmark {
+			address: "ts.example.org".into(),
+			gateway_url: Some("ws://127.0.0.1:7788/v1".into()),
+			..Default::default()
+		};
+		b.id = store.add_bookmark(&b).unwrap();
+		assert_eq!(b.gateways(), ["ws://127.0.0.1:7788/v1"]);
+		let published =
+			vec!["wss://gw.example.org/v1".to_owned(), "ws://ts.example.org:7788/v1".into()];
+		assert!(b.set_gateways(published.clone()));
+		assert!(!b.set_gateways(published.clone()), "unchanged");
+		// The old one is not published: the best published one is in use.
+		assert_eq!(b.gateway_url.as_deref(), Some("wss://gw.example.org/v1"));
+		assert_eq!(b.gateways(), published);
+		// The plain one logged in; one that is not published never counts.
+		assert!(b.gateway_in_use("ws://ts.example.org:7788/v1"));
+		assert!(!b.gateway_in_use("ws://ts.example.org:7788/v1"));
+		assert!(!b.gateway_in_use("ws://elsewhere.test/v1"));
+		store.update_bookmark(&b).unwrap();
+		let reloaded = store.bookmarks().unwrap().remove(0);
+		assert_eq!(reloaded, b);
+		// Still published: the one in use stays.
+		b.set_gateways(vec!["ws://ts.example.org:7788/v1".into()]);
+		assert_eq!(b.gateway_url.as_deref(), Some("ws://ts.example.org:7788/v1"));
 	}
 
 	#[test]

@@ -1,14 +1,18 @@
 //! Servers: bookmarks, connecting and observing, the rail, the sidebar's
 //! server card and the channel tree.
 
-use slint::{ComponentHandle, SharedString};
-use tracing::{info, warn};
+use std::time::Instant;
+
+use slint::ComponentHandle;
+use tracing::{debug, info, warn};
 use voelin_core::identity::LaunchImport;
-use voelin_core::{Command, ObserveState, Source, VoiceOptions, VoiceState};
+use voelin_core::{Command, JoinFailure, ObserveState, Source, VoiceOptions, VoiceState};
+use voelin_model::ChannelId;
 use voelin_store::{Bookmark, QueryTransport};
 
-use crate::app::{App, BookmarkForm, Bridge, SessionView, later};
+use crate::app::{App, BookmarkForm, Bridge, Nav, SessionView, later};
 use crate::vm;
+use crate::vm::servers::{AfterConnect, JoinStep};
 
 /// The name of the identity the app creates when it has none.
 pub(crate) const CREATED_IDENTITY: &str = "Default";
@@ -49,6 +53,7 @@ fn bookmark_from_form(
 	if old.is_some_and(|old| old.address != bookmark.address) {
 		bookmark.cached_server_icon = None;
 		bookmark.gateway_url = None;
+		bookmark.gateway_urls.clear();
 		bookmark.query = None;
 	}
 	bookmark.name = match form.name.trim() {
@@ -80,19 +85,40 @@ fn apply_server_icon(
 	bookmark.cached_server_icon != before
 }
 
+/// Whether observing goes on as it is when discovery changed the gateways
+/// kept from `previous` to `found`: the same ones (an older version kept
+/// only the one in use), or logged in through `in_use`, still published.
+/// What was found is kept for the next start, without a new login now.
+fn observing_stays(
+	previous: &[String],
+	found: &[String],
+	in_use: Option<&str>,
+	observe: ObserveState,
+) -> bool {
+	found == previous
+		|| (observe == ObserveState::Observing
+			&& in_use.is_some_and(|url| found.iter().any(|u| u == url)))
+}
+
 impl App {
 	pub(crate) fn connect_voice(&mut self) {
 		let channel =
 			self.current.and_then(|id| self.bookmark(id)).and_then(|b| b.default_channel.clone());
-		self.connect_voice_to(channel);
+		self.connect_voice_to(channel, None, None);
 	}
 
-	/// Connect the current server with voice, into `channel` (a name or
-	/// path) if given.
-	pub(crate) fn connect_voice_to(&mut self, channel: Option<String>) {
-		let Some(b) = self.current.and_then(|id| self.bookmark(id)).cloned() else { return };
+	/// Connect the current server with voice, into `channel` (a path, or
+	/// `/<id>`, with its password) if given, with a privilege key if given;
+	/// whether it was asked for.
+	pub(crate) fn connect_voice_to(
+		&mut self,
+		channel: Option<String>,
+		channel_password: Option<String>,
+		token: Option<String>,
+	) -> bool {
+		let Some(b) = self.current.and_then(|id| self.bookmark(id)).cloned() else { return false };
 		if self.demo_ui {
-			return;
+			return false;
 		}
 		let mut options = VoiceOptions::new(&b.address, &b.nickname);
 		if let Some(spec) = &b.client_version {
@@ -100,13 +126,15 @@ impl App {
 				Ok(version) => options.client_version = version,
 				Err(error) => {
 					self.set_status(format!("Invalid client compatibility version: {error}"));
-					return;
+					return false;
 				}
 			}
 		}
 		options.identity = Some(self.identity_for(Some(b.id)));
 		options.server_password = self.secrets.get(&b.server_password_key()).ok().flatten();
 		options.channel = channel;
+		options.channel_password = channel_password;
+		options.token = token;
 		options.audio = true;
 		options.stream_peer = self.video.peer_config(options.stream_peer);
 		self.engine
@@ -114,6 +142,7 @@ impl App {
 		self.set_status(format!("Connecting to {}…", b.address));
 		// The admin may have published the gateway since it was added.
 		self.discover_gateway(b.id);
+		true
 	}
 
 	/// The nickname a new server gets: the default identity's (one imported
@@ -135,10 +164,10 @@ impl App {
 	}
 
 	/// Look up the gateway of a server ([`voelin_core::discover`]), once a
-	/// run: one found is kept as if typed, and takes the place of a stored
-	/// one that is no longer what the server publishes (a gateway that
-	/// moved, or one typed into an older version, which showed the field).
-	/// Nothing found keeps what is stored.
+	/// run: every one the server publishes is kept, best first, and tried in
+	/// turn; they take the place of a stored one that is no longer published
+	/// (a gateway that moved, or one typed into an older version, which
+	/// showed the field). Nothing found keeps what is stored.
 	pub(crate) fn discover_gateway(&mut self, id: i64) {
 		if self.demo_ui || !self.gateways_looked_up.insert(id) {
 			return;
@@ -146,31 +175,47 @@ impl App {
 		let Some(b) = self.bookmark(id) else { return };
 		let address = b.address.clone();
 		self.engine.runtime().spawn(async move {
-			if let Some(url) = voelin_core::discover::gateway(&address).await {
-				later(move |app| app.gateway_found(id, &address, url));
+			let started = Instant::now();
+			let urls = voelin_core::discover::gateways(&address).await;
+			let elapsed_ms = started.elapsed().as_millis() as u64;
+			if urls.is_empty() {
+				info!(server = %address, elapsed_ms, "no gateway published");
+			} else {
+				later(move |app| app.gateway_found(id, &address, urls, elapsed_ms));
 			}
 		});
 	}
 
-	/// A gateway was found for the server at `address`; it is kept unless
-	/// the server changed meanwhile, and the server is observed through it
-	/// if it is the one shown. Users never hear of it (logged only).
-	fn gateway_found(&mut self, id: i64, address: &str, url: String) {
+	/// Gateways were found for the server at `address` (best first); they
+	/// are kept unless the server changed meanwhile, and the server is
+	/// observed through them if it is the one shown. Users never hear of
+	/// them (logged only).
+	fn gateway_found(&mut self, id: i64, address: &str, urls: Vec<String>, elapsed_ms: u64) {
 		let Some(b) = self.bookmarks.iter_mut().find(|b| b.id == id && b.address == address) else {
 			return;
 		};
-		if b.gateway_url.as_deref() == Some(url.as_str()) {
+		let previous = b.gateways();
+		let in_use = b.gateway_url.clone();
+		if !b.set_gateways(urls) {
+			debug!(server = %b.address, urls = ?b.gateway_urls, elapsed_ms, "gateway found, as kept");
 			return;
 		}
-		let previous = b.gateway_url.replace(url.clone());
 		if let Err(e) = self.store.update_bookmark(b) {
 			warn!(%e, "could not keep the gateway found");
 			return;
 		}
-		info!(server = %b.address, %url, ?previous, "gateway found");
+		let observe = self.sessions.get(&id).map(|v| v.state.observe).unwrap_or_default();
+		let kept = observing_stays(&previous, &b.gateways(), in_use.as_deref(), observe);
+		info!(server = %b.address, urls = ?b.gateway_urls, ?previous, kept, elapsed_ms, "gateway found");
 		self.refresh_toolbar();
-		// Observed through the old one: through this one now.
-		if previous.is_some() {
+		if kept {
+			if self.current == Some(id) && observe == ObserveState::Off {
+				self.observe(id);
+			}
+			return;
+		}
+		// Observed through the old ones: through these now.
+		if !previous.is_empty() {
 			self.engine.send(Command::StopObserving { session: id as u64 });
 			if let Some(view) = self.sessions.get_mut(&id) {
 				view.state.observe = ObserveState::Off;
@@ -179,6 +224,19 @@ impl App {
 		if self.current == Some(id) {
 			self.observe(id);
 		}
+	}
+
+	/// The gateway logged in at `url`: it is the one in use from now on.
+	pub(crate) fn gateway_in_use(&mut self, id: i64, url: &str) {
+		let Some(b) = self.bookmarks.iter_mut().find(|b| b.id == id) else { return };
+		if !b.gateway_in_use(url) {
+			return;
+		}
+		if let Err(e) = self.store.update_bookmark(b) {
+			warn!(%e, "could not keep the gateway in use");
+			return;
+		}
+		info!(server = %b.address, %url, "gateway in use");
 	}
 
 	/// The server told its name: a server still named by its address takes
@@ -201,22 +259,38 @@ impl App {
 	/// Observe the server invisibly, unless it is already: through its
 	/// gateway, else its own query login. Without either the gateway is
 	/// looked up first, and observing starts when it is found
-	/// (`gateway_found`).
+	/// (`gateway_found`). Asked while still connecting, the engine tries
+	/// the gateway again sooner.
 	pub(crate) fn observe(&mut self, id: i64) {
 		let Some(b) = self.bookmark(id).cloned() else { return };
 		if self.demo_ui {
 			return;
 		}
 		let session = b.id as u64;
-		let observing =
-			self.sessions.get(&b.id).is_some_and(|v| v.state.observe != ObserveState::Off);
-		if observing {
-			return;
+		let state = self.sessions.get(&b.id).map(|v| v.state.observe).unwrap_or_default();
+		let urls = b.gateways();
+		match state {
+			ObserveState::Observing => return,
+			// The engine decides: the same gateways are not started over,
+			// at most tried again now.
+			ObserveState::Connecting => {
+				if !urls.is_empty() {
+					debug!(server = %b.address, "still connecting to the gateway: try now");
+					self.engine.send(Command::ObserveGateway {
+						session,
+						urls,
+						identity: Box::new(self.identity_for(Some(b.id))),
+					});
+				}
+				return;
+			}
+			ObserveState::Off => {}
 		}
-		if let Some(url) = &b.gateway_url {
+		if !urls.is_empty() {
+			info!(server = %b.address, ?urls, "observing through the gateway");
 			self.engine.send(Command::ObserveGateway {
 				session,
-				url: url.clone(),
+				urls,
 				identity: Box::new(self.identity_for(Some(b.id))),
 			});
 			// Still the one the server publishes?
@@ -248,6 +322,8 @@ impl App {
 	/// Show a server, and observe it.
 	pub(crate) fn select_server(&mut self, id: i64) {
 		self.current = Some(id);
+		self.prefetch_counts();
+		self.track_reading();
 		self.refresh_all();
 		self.observe(id);
 	}
@@ -260,22 +336,16 @@ impl App {
 				..Default::default()
 			};
 		};
-		let secret = |key: String| -> SharedString {
-			self.secrets.get(&key).ok().flatten().unwrap_or_default().into()
-		};
-		BookmarkForm {
-			id: b.id as i32,
-			// Named by its address: empty, so a new address names it again.
-			name: if b.name == b.address { SharedString::new() } else { b.name.clone().into() },
-			address: b.address.clone().into(),
-			nickname: b.nickname.clone().into(),
-			server_password: secret(b.server_password_key()),
-		}
+		let password = self.secrets.get(&b.server_password_key()).ok().flatten();
+		let state = self.sessions.get(&b.id).map(|view| &view.state);
+		vm::servers::form(b, state, password.as_deref().unwrap_or_default())
 	}
 
-	pub(crate) fn save_bookmark(&mut self, form: BookmarkForm) {
+	/// Save the server dialog's server, and show it; its id, none when it
+	/// could not be saved (the toast says why).
+	pub(crate) fn save_bookmark(&mut self, form: &BookmarkForm) -> Option<i64> {
 		let old = self.bookmark(form.id as i64).cloned();
-		let mut bookmark = bookmark_from_form(old.as_ref(), &form, || self.default_nickname());
+		let mut bookmark = bookmark_from_form(old.as_ref(), form, || self.default_nickname());
 		let result = if bookmark.id < 0 {
 			self.store.add_bookmark(&bookmark).map(|id| bookmark.id = id)
 		} else {
@@ -283,7 +353,7 @@ impl App {
 		};
 		if let Err(e) = result {
 			self.set_status(format!("Could not save: {e}"));
-			return;
+			return None;
 		}
 		let key = bookmark.server_password_key();
 		let result = if form.server_password.is_empty() {
@@ -308,6 +378,21 @@ impl App {
 		}
 		self.bookmarks = self.store.bookmarks().unwrap_or_default();
 		self.select_server(bookmark.id);
+		Some(bookmark.id)
+	}
+
+	/// The server dialog's Connect: save the server, then connect it with
+	/// voice, into the channel of the link that filled the form if one did
+	/// ([`vm::servers::connect_to`]). Only once saved: connecting what is
+	/// shown after a failed save would connect the server shown before.
+	/// Whether it was saved.
+	pub(crate) fn save_and_connect(&mut self, form: &BookmarkForm) -> bool {
+		let saved = self.save_bookmark(form);
+		let Some(to) = vm::servers::connect_to(form, saved.and_then(|id| self.bookmark(id))) else {
+			return false;
+		};
+		self.connect_voice_to(to.channel, to.channel_password, to.token);
+		true
 	}
 
 	pub(crate) fn delete_bookmark(&mut self, id: i64) {
@@ -317,10 +402,13 @@ impl App {
 			let _ = self.secrets.delete(&b.query_password_key());
 		}
 		let _ = self.store.delete_bookmark(id);
+		self.save_reads(id);
 		self.sessions.remove(&id);
 		self.gateways_looked_up.remove(&id);
 		self.bookmarks = self.store.bookmarks().unwrap_or_default();
 		self.current = self.bookmarks.first().map(|b| b.id);
+		self.prefetch_counts();
+		self.track_reading();
 		self.refresh_all();
 	}
 
@@ -352,17 +440,27 @@ impl App {
 		}
 	}
 
-	/// The rail: servers with their state, unread count and streams.
+	/// A server's colour, as the rail shows it ([`vm::servers::tints`]).
+	pub(crate) fn server_tint(&self, id: i64) -> slint::Color {
+		let tints = vm::servers::tints(&self.bookmarks);
+		self.bookmarks.iter().position(|b| b.id == id).map(|i| tints[i]).unwrap_or_default()
+	}
+
+	/// The rail: servers with their state, unread count (without private
+	/// chats) and streams; what the chat strip and the private chats have
+	/// unread.
 	pub(crate) fn refresh_servers(&self) {
 		let Some(ui) = self.ui.upgrade() else { return };
 		let bridge = ui.global::<Bridge>();
+		let tints = vm::servers::tints(&self.bookmarks);
 		let items: Vec<_> = self
 			.bookmarks
 			.iter()
-			.map(|b| {
+			.zip(tints)
+			.map(|(b, tint)| {
 				let view = self.sessions.get(&b.id);
 				let state = view.map(|v| v.state.clone()).unwrap_or_default();
-				let unread = view.map_or(0, |v| v.unread());
+				let unread = view.map_or(0, SessionView::channel_unread);
 				let live = view.is_some_and(|v| v.streams_available() && !v.streams.is_empty());
 				let detail = view
 					.filter(|v| !v.presence.channels.is_empty())
@@ -370,12 +468,15 @@ impl App {
 					.unwrap_or_default();
 				let flavor = view.map(|v| v.extra.flavor.clone()).unwrap_or_default();
 				let icon = self.server_list_icon(b);
-				vm::servers::item(b, &state, unread, live, detail, flavor, icon)
+				vm::servers::item(b, &state, unread, live, detail, flavor, icon, tint)
 			})
 			.collect();
 		vm::list::sync(&self.models.servers, &items);
+		bridge.set_last_place(self.last_place(&items));
 		bridge.set_current_server(self.current.map_or(-1, |id| id as i32));
-		bridge.set_unread_total(self.view().map_or(0, |v| v.unread()));
+		// Private chats count on the messages page (and the phone's Home).
+		bridge.set_unread_total(self.view().map_or(0, SessionView::channel_unread));
+		bridge.set_dm_unread(self.dm_unread());
 	}
 
 	/// The server card, the voice controls and who we are.
@@ -470,8 +571,9 @@ impl App {
 		let connected = view.state.voice == VoiceState::Connected;
 		let members = if connected { vm::tree::members(&input) } else { Vec::new() };
 		vm::list::sync(&self.models.members, &members);
-		// The people in our channel first while their view is shown.
-		let watching = self.watch.as_ref().is_some_and(|w| w.shown);
+		// The people in our channel first while their view is shown (not
+		// while the stream plays in a window of its own).
+		let watching = self.watch.as_ref().is_some_and(|w| w.shown) && self.popout.window.is_none();
 		let voice_first = connected && (self.voice_view || watching);
 		let everyone = vm::tree::server_members(&input, voice_first);
 		let filter = self.member_filter.trim().to_lowercase();
@@ -503,30 +605,137 @@ impl App {
 	}
 
 	/// A link to the voice channel we are in, for the Invite button (which
-	/// copies it); empty, with a note, without one.
+	/// copies it, and the copy's toast names the channel); empty, with a
+	/// note, without one.
 	pub(crate) fn invite_link(&mut self) -> String {
 		let bookmark = self.current.and_then(|id| self.bookmark(id)).map(|b| b.address.clone());
 		let path = self.view().and_then(|v| {
-			let mut names = Vec::new();
-			let mut channel = v.presence.channels.get(&v.state.own_channel?)?;
-			loop {
-				names.push(channel.name.clone());
-				match v.presence.channels.get(&channel.parent) {
-					Some(parent) if channel.parent != 0 && names.len() < 64 => channel = parent,
-					_ => break,
-				}
-			}
-			names.reverse();
-			Some(names)
+			let cid = v.state.own_channel?;
+			let own = v.presence.channels.get(&cid)?;
+			// The link names the channels as the server has them; the
+			// toast as the tree shows them.
+			Some((
+				vm::tree::channel_path(&v.presence, cid),
+				vm::tree::channel_title(own).0.to_owned(),
+			))
 		});
-		let (Some(address), Some(path)) = (bookmark, path) else {
+		let (Some(address), Some((path, title))) = (bookmark, path) else {
 			self.set_status("Join a voice channel to invite others to it");
 			return String::new();
 		};
 		let path: Vec<&str> = path.iter().map(String::as_str).collect();
 		let link = vm::servers::invite_link(&address, &path);
-		self.set_status(format!("Copied an invite to {}: {link}", path.last().unwrap_or(&"")));
+		self.copy_note = Some(format!("Copied an invite to {title}: {link}"));
 		link
+	}
+
+	/// Join a channel of a session (a double-click in the tree, joining a
+	/// friend): move there with voice, or connect into it. A locked channel
+	/// asks for its password first, unless it was given this connection.
+	pub(crate) fn join_channel(&mut self, session: i64, channel: ChannelId) {
+		let Some(view) = self.sessions.get(&session) else { return };
+		let Some(info) = view.presence.channels.get(&channel) else { return };
+		let remembered = view.channel_passwords.get(&channel).map(String::as_str);
+		match vm::servers::join_password(info, remembered) {
+			JoinStep::Send(password) => self.enter_channel(session, channel, password),
+			JoinStep::Ask => self.ask_channel_password(session, channel, false),
+		}
+	}
+
+	/// The password dialog's Join.
+	pub(crate) fn join_with_password(&mut self, password: String) {
+		let Some((session, channel)) = self.join_target.take() else { return };
+		if password.is_empty() {
+			return;
+		}
+		if let Some(view) = self.sessions.get_mut(&session) {
+			view.channel_passwords.insert(channel, password.clone());
+		}
+		self.enter_channel(session, channel, Some(password));
+	}
+
+	/// Move into a channel; without voice on its server, connect into it.
+	fn enter_channel(&mut self, session: i64, channel: ChannelId, password: Option<String>) {
+		let Some(view) = self.sessions.get_mut(&session) else { return };
+		if view.state.voice != VoiceState::Disconnected {
+			// Chosen while connecting: no longer the one to join after.
+			view.join_after_connect = None;
+			if !self.demo_ui {
+				self.engine.send(Command::MoveToChannel {
+					session: session as u64,
+					channel,
+					password,
+				});
+			}
+			return;
+		}
+		if self.current != Some(session) {
+			self.select_server(session);
+		}
+		// By id: by its name the server finds only a top-level channel (a
+		// subchannel's name connects into the default channel).
+		if self.connect_voice_to(Some(format!("/{channel}")), password, None)
+			&& let Some(view) = self.sessions.get_mut(&session)
+		{
+			view.join_after_connect = Some(channel);
+		}
+	}
+
+	/// Connected into another channel than the one asked for
+	/// (`SessionView::join_after_connect`): the server says nothing when,
+	/// for one, the password was wrong, so it is joined again, and that
+	/// move says why. Once the channel shows in the voice
+	/// connection's presence, which can come after the own channel.
+	pub(crate) fn join_after_connect(&mut self, session: i64) {
+		let Some(view) = self.sessions.get_mut(&session) else { return };
+		let (VoiceState::Connected, Some(asked)) = (view.state.voice, view.join_after_connect)
+		else {
+			return;
+		};
+		let known = view.presence.channels.contains_key(&asked);
+		match vm::servers::after_connect(view.state.own_channel, asked, known) {
+			AfterConnect::Wait => {}
+			AfterConnect::Joined => view.join_after_connect = None,
+			AfterConnect::JoinAgain => {
+				view.join_after_connect = None;
+				self.join_channel(session, asked);
+			}
+		}
+	}
+
+	/// Open the password dialog for a locked channel; `wrong`: the one
+	/// given was refused.
+	fn ask_channel_password(&mut self, session: i64, channel: ChannelId, wrong: bool) {
+		let Some(info) =
+			self.sessions.get(&session).and_then(|v| v.presence.channels.get(&channel))
+		else {
+			return;
+		};
+		let name = vm::tree::channel_title(info).0.to_owned();
+		self.join_target = Some((session, channel));
+		let Some(ui) = self.ui.upgrade() else { return };
+		let nav = ui.global::<Nav>();
+		nav.set_channel_password_name(name.into());
+		nav.set_channel_password_error(wrong);
+		nav.set_channel_password_open(true);
+	}
+
+	/// The server refused a move ([`voelin_core::Event::JoinFailed`]): a
+	/// password asks again (the one given is forgotten), the rest is a
+	/// toast.
+	pub(crate) fn join_failed(&mut self, session: i64, channel: ChannelId, reason: JoinFailure) {
+		match reason {
+			JoinFailure::Password => {
+				let given = self
+					.sessions
+					.get_mut(&session)
+					.and_then(|v| v.channel_passwords.remove(&channel))
+					.is_some();
+				self.ask_channel_password(session, channel, given);
+			}
+			JoinFailure::Full => self.set_status("The channel is full"),
+			JoinFailure::Other(text) => self.set_status(text),
+		}
 	}
 
 	pub(crate) fn toggle_collapse(&mut self, channel: u64) {
@@ -608,6 +817,7 @@ mod tests {
 			identity: Some(2),
 			default_channel: Some("Lobby/Sub".into()),
 			gateway_url: Some("ws://gw.example.test:7788/v1".into()),
+			gateway_urls: vec!["ws://gw.example.test:7788/v1".into()],
 			query: Some(QueryConfig { server_port: Some(9988), ..Default::default() }),
 			client_version: Some("linux".into()),
 			cached_server_icon: Some(voelin_store::CachedServerIcon {
@@ -636,6 +846,7 @@ mod tests {
 		assert_eq!((b.identity, b.default_channel), (Some(2), Some("Lobby/Sub".into())));
 		assert_eq!(b.client_version.as_deref(), Some("linux"));
 		assert_eq!((b.gateway_url, b.query), (None, None));
+		assert!(b.gateway_urls.is_empty());
 	}
 
 	#[test]
@@ -665,5 +876,24 @@ mod tests {
 			imported_status(&report(&[], Some("Main"), true)).unwrap(),
 			"You now use your TeamSpeak identity \u{201c}Main\u{201d}; your previous one is kept"
 		);
+	}
+
+	#[test]
+	fn a_gateway_found_again_is_not_logged_in_again() {
+		let (tls, plain) = ("wss://gw.example.test/v1", "ws://ts.example.test:7788/v1");
+		let urls = |list: &[&str]| list.iter().map(|u| u.to_string()).collect::<Vec<_>>();
+		let stays = |previous: &[&str], found: &[&str], observe| {
+			observing_stays(&urls(previous), &urls(found), Some(plain), observe)
+		};
+		// The same ones (an older version kept only the one in use).
+		assert!(stays(&[plain], &[plain], ObserveState::Connecting));
+		assert!(stays(&[plain], &[plain], ObserveState::Observing));
+		// Logged in through one still published.
+		assert!(stays(&[plain], &[tls, plain], ObserveState::Observing));
+		// Not logged in yet: through the new ones.
+		assert!(!stays(&[plain], &[tls, plain], ObserveState::Connecting));
+		// The one in use is no longer published.
+		assert!(!stays(&[plain], &[tls], ObserveState::Observing));
+		assert!(!observing_stays(&[], &urls(&[tls]), None, ObserveState::Off));
 	}
 }

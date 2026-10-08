@@ -5,7 +5,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge } from "../bridge.slint";
 import { Nav } from "../nav.slint";
-import { Icon, Spinner, Button, ButtonKind, IconButton, TextField, Field, Card, Divider, Banner, Avatar, Status, Chip, ScrollView } from "../components/index.slint";
+import { Icon, Spinner, Button, ButtonKind, IconButton, TextField, Field, Card, Divider, Banner, Avatar, Status, Chip, ScrollView, Toggle } from "../components/index.slint";
 
 component Note inherits Text {
     // Keep wrapped account copy in the card’s layout bounds.
@@ -257,7 +257,42 @@ component ProfileDetails inherits VerticalLayout {
         label: @tr("Previous sign-in");
         value: Bridge.myts.last-login;
     }
-    if Bridge.myts.badges.length > 0: VerticalLayout {
+    // The badges signed for servers: up to three are shown there.
+    if Bridge.myts.badge-choice.length > 0: VerticalLayout {
+        spacing: Theme.space-2;
+        Text {
+            text: @tr("Badges");
+            color: Theme.text-secondary;
+            font-size: Theme.font-sm;
+            font-weight: Theme.weight-medium;
+        }
+        Note { text: @tr("Choose up to three badges to show on servers, in the order you pick them."); }
+        for badge[i] in Bridge.myts.badge-choice: HorizontalLayout {
+            spacing: Theme.space-3;
+            Icon {
+                source: Icons.star;
+                size: Theme.icon-sm;
+                tint: badge.shown > 0 ? Theme.gold : Theme.text-muted;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: badge.shown > 0 ? @tr("{} · place {} on servers", badge.name, badge.shown) : badge.name;
+                color: Theme.text;
+                font-size: Theme.font-sm;
+                overflow: elide;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Toggle {
+                checked: badge.shown > 0;
+                enabled: badge.can-change;
+                label: @tr("Show {} on servers", badge.name);
+                y: (parent.height - self.height) / 2;
+                toggled(on) => { Bridge.myts-badge(i, on); }
+            }
+        }
+    }
+    if Bridge.myts.badge-choice.length == 0 && Bridge.myts.badges.length > 0: VerticalLayout {
         spacing: Theme.space-2;
         Text {
             text: @tr("Badges");
@@ -320,6 +355,15 @@ component AccountProfile inherits VerticalLayout {
             read-only: true;
             label: @tr("Account ID");
             icon: Icons.id-card;
+        }
+    }
+    if Bridge.myts.user-tag != "": Field {
+        label: @tr("User Tag");
+        TextField {
+            text: Bridge.myts.user-tag;
+            read-only: true;
+            label: @tr("User Tag");
+            icon: Icons.at-sign;
         }
     }
     if Bridge.myts.myts-id != "": Field {

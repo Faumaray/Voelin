@@ -1,5 +1,7 @@
 import { Theme } from "../theme.slint";
 import { Icon } from "icon.slint";
+import { CountBadge } from "badge.slint";
+import { HoverTooltip } from "tooltip.slint";
 
 export enum ButtonKind {
     // Filled accent: the main action.
@@ -117,11 +119,19 @@ export component Button inherits Rectangle {
     }
 }
 
-// A square (or round) button with only an icon; `label` is for screen
-// readers and the tooltip-less toolbar.
+// A square (or round) button with only an icon. `label` names it for
+// screen readers and, on the desktop, in a tooltip.
+//
+// The look is on `face`, not on the root: an opacity or an animation on a
+// component's root makes Slint inline the component where it is used, and
+// there are over a hundred IconButtons. Shared, their code stays small (and
+// so does the compiler's memory).
 export component IconButton inherits Rectangle {
     in property <image> icon;
     in property <string> label;
+    // Shown when the pointer rests on the button (desktop only, also while
+    // disabled); "" for none.
+    in property <string> tooltip: label;
     in property <bool> enabled: true;
     in property <bool> checked;
     in property <bool> round;
@@ -129,80 +139,110 @@ export component IconButton inherits Rectangle {
     in property <bool> filled;
     // Red while checked (muted microphone).
     in property <bool> danger;
+    // Filled red, with a white icon (Leave).
+    in property <bool> alarm;
+    // The edge while filled and not checked.
+    in property <color> edge: Theme.border;
     in property <length> size: Theme.control-height;
     in property <length> icon-size: Theme.icon-md;
-    in property <brush> tint: checked ? (danger ? Theme.danger : Theme.accent-text) : Theme.icon;
+    in property <brush> tint: alarm ? Theme.on-accent : checked ? (danger ? Theme.danger : Theme.accent-text) : Theme.icon;
     // A small dot at the top right (unread, live).
     in property <bool> dot;
     in property <color> dot-color: Theme.live;
+    // A neutral count at the top right (pins, topics); hidden at 0 or less.
+    in property <int> count;
     callback clicked();
 
     width: size;
     height: size;
-    border-radius: round ? size / 2 : Theme.radius-md;
-    background: touch.pressed ? Theme.surface-4
-        : checked ? (danger ? Theme.danger-soft : Theme.accent-soft)
-        : touch.has-hover ? Theme.surface-3
-        : filled ? Theme.surface-2 : transparent;
-    border-width: filled || checked ? 1px : 0px;
-    border-color: checked ? (danger ? Theme.danger.transparentize(50%) : Theme.accent) : Theme.border;
-    opacity: enabled ? 1.0 : 0.45;
-    animate background { duration: Theme.fast; }
 
     accessible-role: AccessibleRole.button;
     accessible-label: label;
     accessible-enabled: enabled;
     accessible-action-default => { if enabled { clicked(); } }
 
-    FocusRing {
-        shown: focus.has-focus;
-        radius: root.border-radius;
-        w: root.width;
-        h: root.height;
-    }
-    focus := FocusScope {
-        enabled: root.enabled;
-        key-pressed(event) => {
-            if event.text == " " || event.text == "\n" {
-                root.clicked();
-                return accept;
-            }
-            reject
+    face := Rectangle {
+        border-radius: root.round ? root.size / 2 : Theme.radius-md;
+        background: root.alarm ? (touch.pressed ? Theme.danger.darker(0.2) : touch.has-hover ? Theme.danger.brighter(0.1) : Theme.danger)
+            : touch.pressed ? Theme.surface-4
+            : root.checked ? (root.danger ? Theme.danger-soft : Theme.accent-soft)
+            : touch.has-hover ? Theme.surface-3
+            : root.filled ? Theme.surface-2 : transparent;
+        border-width: !root.alarm && (root.filled || root.checked) ? 1px : 0px;
+        border-color: root.checked ? (root.danger ? Theme.danger.transparentize(50%) : Theme.accent) : root.edge;
+        opacity: root.enabled ? 1.0 : 0.45;
+        animate background { duration: Theme.fast; }
+
+        FocusRing {
+            shown: focus.has-focus;
+            radius: face.border-radius;
+            w: root.width;
+            h: root.height;
         }
-        touch := TouchArea {
+        focus := FocusScope {
             enabled: root.enabled;
-            mouse-cursor: MouseCursor.pointer;
-            clicked => {
-                focus.focus();
-                root.clicked();
+            key-pressed(event) => {
+                if event.text == " " || event.text == "\n" {
+                    root.clicked();
+                    return accept;
+                }
+                reject
+            }
+            touch := TouchArea {
+                enabled: root.enabled;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => {
+                    focus.focus();
+                    root.clicked();
+                }
             }
         }
-    }
-    Icon {
-        source: icon;
-        size: icon-size;
-        tint: root.tint;
-    }
-    if dot: Rectangle {
-        x: parent.width - self.width - root.size * 0.18;
-        y: root.size * 0.16;
-        width: 9px;
-        height: 9px;
-        border-radius: 4.5px;
-        background: dot-color;
-        border-width: 2px;
-        border-color: Theme.surface;
+        Icon {
+            source: root.icon;
+            size: root.icon-size;
+            tint: root.tint;
+        }
+        if root.dot: Rectangle {
+            x: parent.width - self.width - root.size * 0.18;
+            y: root.size * 0.16;
+            width: 9px;
+            height: 9px;
+            border-radius: 4.5px;
+            background: root.dot-color;
+            border-width: 2px;
+            border-color: Theme.surface;
+        }
+        if root.count > 0: CountBadge {
+            x: parent.width - self.width + 4px;
+            y: -4px;
+            count: root.count;
+            fill: Theme.icon;
+            ink: Theme.surface;
+        }
+        HoverTooltip {
+            text: root.tooltip;
+            pressed: touch.pressed;
+            hovered: touch.has-hover;
+        }
     }
 }
 
-// A round control with a caption below (voice bar: Mute, Deafen, Go Live).
+// A round control with a caption below (the phone's voice bar and You page:
+// Mute, Deafen, Go Live, Leave).
 export component ActionButton inherits VerticalLayout {
     in property <image> icon;
     in property <string> text;
     in property <bool> checked;
     in property <bool> danger;
+    // Filled red (Leave).
+    in property <bool> alarm;
+    // A toggle for screen readers, which are told `checked`.
+    in property <bool> checkable;
     in property <bool> enabled: true;
     in property <length> size: 40px;
+    in property <length> icon-size: Theme.icon-md;
+    // The circle's edge while not checked.
+    in property <color> edge: Theme.border;
     callback clicked();
     spacing: Theme.space-1;
     alignment: center;
@@ -211,12 +251,19 @@ export component ActionButton inherits VerticalLayout {
         IconButton {
             icon: root.icon;
             label: root.text;
+            // The caption already names it.
+            tooltip: "";
             checked: root.checked;
             danger: root.danger;
+            alarm: root.alarm;
             enabled: root.enabled;
             round: true;
             filled: true;
             size: root.size;
+            icon-size: root.icon-size;
+            edge: root.edge;
+            accessible-checkable: root.checkable;
+            accessible-checked: root.checked;
             clicked => { root.clicked(); }
         }
     }

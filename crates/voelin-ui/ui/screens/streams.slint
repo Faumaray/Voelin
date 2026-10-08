@@ -5,7 +5,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, StreamItem, MemberItem } from "../bridge.slint";
 import { Nav } from "../nav.slint";
-import { Icon, Button, ButtonKind, IconButton, Avatar, Status, LiveBadge, Chip, Select, SectionHeader, SpeakingBars, Slider, Spinner, TextField, TabItem, ListView, ScrollView } from "../components/index.slint";
+import { Icon, Button, ButtonKind, IconButton, Avatar, Status, LiveBadge, Chip, Select, SectionHeader, SpeakingBars, Slider, Spinner, TextField, TabItem, Art, ListView, ScrollView } from "../components/index.slint";
 import { MemberRow, GroupHeader } from "members.slint";
 import { PageHeader, MessageList, Composer } from "chat.slint";
 
@@ -23,20 +23,34 @@ component StreamCard inherits Rectangle {
         spacing: Theme.space-3;
         HorizontalLayout {
             spacing: Theme.space-3;
-            // A picture-less preview: the live mark on a gradient.
+            // No picture before watching (the protocol has none): the
+            // streamer's avatar on a painted scene in their colour, LIVE
+            // under it.
             Rectangle {
                 width: 64px;
                 height: 40px;
                 border-radius: Theme.radius-sm;
+                clip: true;
                 background: @linear-gradient(135deg, #2b1f6e 0%, #0f2a66 100%);
-                Icon {
-                    source: Icons.monitor-up;
-                    size: Theme.icon-md;
-                    tint: #ffffffc0;
+                Art {
+                    source: Icons.art-scenes[mod(stream.streamer-id, 3)];
+                    cover-width: parent.width;
+                    cover-height: parent.height;
+                    align-y: 0.3;
+                }
+                Rectangle {
+                    background: stream.tint.with-alpha(0.3);
+                }
+                Avatar {
+                    y: 3px;
+                    size: 28px;
+                    initials: stream.initials;
+                    tint: stream.tint;
+                    image: stream.avatar;
+                    label: stream.streamer;
                 }
                 if stream.id != "": LiveBadge {
-                    x: 3px;
-                    y: 3px;
+                    y: parent.height - self.height - 1px;
                     height: 14px;
                 }
             }
@@ -71,11 +85,12 @@ component StreamCard inherits Rectangle {
                 accessible-label: @tr("Watch {}", stream.name);
                 clicked => { Bridge.watch-stream(stream.id); }
             }
+            // Also back from a window of its own.
             if stream.watching && !Bridge.viewer-open: Button {
                 horizontal-stretch: 1;
                 small: true;
-                icon: Icons.monitor;
-                text: @tr("Show");
+                icon: Bridge.viewer-popped ? Icons.minimize-2 : Icons.monitor;
+                text: Bridge.viewer-popped ? @tr("Bring back") : @tr("Show");
                 clicked => { Bridge.show-viewer(); }
             }
             if stream.watching: Button {
@@ -193,11 +208,53 @@ export component StreamsPanel inherits VerticalLayout {
     }
 }
 
-// The player: the picture with the streamer, the title and LIVE over its
-// top, and the controls over its bottom. `compact` (full screen, the
-// phone) adds Leave, which the header has otherwise.
-component StreamPlayer inherits Rectangle {
+// The simulcast layers the streamer offers ("Auto" follows the bandwidth
+// estimate), else the height of the picture that arrives.
+component StreamQuality inherits HorizontalLayout {
+    // Over the picture: white on a dark fill.
+    in property <bool> on-picture;
+    if Bridge.viewer-qualities.length > 1: Select {
+        width: 150px;
+        horizontal-stretch: 0;
+        icon: Icons.sliders-horizontal;
+        label: @tr("Quality");
+        model: Bridge.viewer-qualities;
+        current-index <=> Bridge.viewer-quality;
+        y: (parent.height - self.height) / 2;
+        selected(_) => { Bridge.set-stream-quality(Bridge.viewer-quality); }
+    }
+    if Bridge.viewer-qualities.length <= 1 && Bridge.viewer-has-frame: Chip {
+        text: @tr("{}p", Bridge.viewer-frame.height);
+        tint: root.on-picture ? #ffffff : Theme.text-secondary;
+        fill: root.on-picture ? #060a18b0 : Theme.surface-3;
+        outlined: true;
+        height: 26px;
+        y: (parent.height - self.height) / 2;
+    }
+}
+
+// The player: the picture with the controls over its bottom. `compact`
+// (full screen, the phone, a window of its own) also has the streamer, the
+// title and LIVE over its top, and Leave; otherwise the header shows them.
+//
+// The controls hide 2.5 s after the pointer last moved over the picture,
+// once it has been there (in full screen it is), and come back when it
+// moves; with the pointer elsewhere, as in a screenshot, they stay. A
+// status and the end of the stream keep them. A touch screen has no
+// pointer to move: a tap on the picture shows or hides them.
+export component StreamPlayer inherits Rectangle {
     in property <bool> compact;
+    property <bool> touch: !Bridge.desktop;
+    property <bool> pinned: Bridge.viewer-status != "" || Bridge.viewer-ended;
+    // The pointer has been over the picture (in full screen it is).
+    property <bool> woken: Bridge.viewer-fullscreen;
+    property <bool> shown: true;
+    property <bool> up: root.shown || root.pinned;
+    // In full screen the cursor hides with the controls. The window is
+    // told: Slint sets a TouchArea's cursor only when the pointer moves,
+    // and a move brings the controls back.
+    property <bool> no-cursor: Bridge.viewer-fullscreen && !root.up;
+    changed no-cursor => { Bridge.show-cursor(!root.no-cursor); }
     border-radius: compact ? 0px : Theme.radius-lg;
     clip: true;
     background: #000000;
@@ -205,6 +262,24 @@ component StreamPlayer inherits Rectangle {
     border-color: Theme.border-strong;
     accessible-role: AccessibleRole.groupbox;
     accessible-label: Bridge.viewer-title;
+
+    function wake() {
+        root.woken = true;
+        root.shown = true;
+        if !root.pinned {
+            idle.restart();
+        }
+    }
+    // A touch moves the pointer too: on a control it keeps the controls a
+    // while longer, but only a tap on the picture shows or hides them.
+    function moved() {
+        if !root.touch {
+            root.wake();
+        } else if root.shown && !root.pinned {
+            idle.restart();
+        }
+    }
+
     Image {
         width: parent.width;
         height: parent.height;
@@ -230,183 +305,215 @@ component StreamPlayer inherits Rectangle {
             accessible-live-region: polite;
         }
     }
-    // Shades for the text over the picture.
-    Rectangle {
-        y: 0;
-        height: 110px;
-        background: @linear-gradient(180deg, #000000c0 0%, #00000000 100%);
-    }
-    Rectangle {
-        y: parent.height - self.height;
-        height: 90px;
-        background: @linear-gradient(180deg, #00000000 0%, #000000c8 100%);
-    }
-    // Who streams what, LIVE and the quality.
-    HorizontalLayout {
-        y: 0;
-        height: 84px;
-        padding: Theme.space-4;
-        spacing: Theme.space-3;
-        if Bridge.viewer-streamer-id >= 0: VerticalLayout {
-            alignment: start;
-            Rectangle {
-                width: 44px;
-                height: 44px;
-                for member in Bridge.members: Avatar {
-                    visible: member.id == Bridge.viewer-streamer-id;
+    // Sees the pointer also over the controls: they are its children.
+    activity := TouchArea {
+        opacity: root.up ? 1 : 0;
+        animate opacity { duration: Theme.fast; }
+        changed mouse-x => { root.moved(); }
+        changed mouse-y => { root.moved(); }
+        clicked => {
+            if root.touch && root.shown {
+                root.shown = false;
+            } else {
+                root.wake();
+            }
+        }
+        // Shades for what is drawn over the picture.
+        if root.compact: Rectangle {
+            y: 0;
+            height: 140px;
+            background: @linear-gradient(180deg, #000000d8 0%, #00000000 100%);
+        }
+        Rectangle {
+            y: parent.height - self.height;
+            height: 90px;
+            background: @linear-gradient(180deg, #00000000 0%, #000000c8 100%);
+        }
+        // Who streams what, LIVE and the quality.
+        if root.compact: HorizontalLayout {
+            y: 0;
+            height: 84px;
+            padding: Theme.space-4;
+            spacing: Theme.space-3;
+            VerticalLayout {
+                alignment: start;
+                Avatar {
                     size: 44px;
-                    initials: member.initials;
-                    tint: member.tint;
-                    image: member.avatar;
-                    label: member.name;
+                    image: Bridge.viewer-streamer-avatar;
+                    initials: Bridge.viewer-streamer-initials;
+                    tint: Bridge.viewer-streamer-tint;
+                    label: Bridge.viewer-streamer;
+                }
+            }
+            VerticalLayout {
+                alignment: start;
+                horizontal-stretch: 1;
+                spacing: 1px;
+                Text {
+                    text: Bridge.viewer-streamer;
+                    color: Theme.name-text;
+                    font-size: Theme.font-md;
+                    font-weight: Theme.weight-semibold;
+                    overflow: elide;
+                }
+                Text {
+                    text: Bridge.viewer-title;
+                    color: #ffffff;
+                    font-size: Theme.font-md;
+                    overflow: elide;
+                }
+                Text {
+                    text: Bridge.viewer-count > 0 ? @tr("{} watching", Bridge.viewer-count) : "";
+                    color: #ffffffb8;
+                    font-size: Theme.font-sm;
+                    overflow: elide;
+                }
+            }
+            if !Bridge.viewer-ended: VerticalLayout {
+                alignment: start;
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    LiveBadge {
+                        large: true;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    if Bridge.viewer-qualities.length > 1 || Bridge.viewer-has-frame: StreamQuality {
+                        on-picture: true;
+                        y: (parent.height - self.height) / 2;
+                    }
                 }
             }
         }
-        VerticalLayout {
-            alignment: start;
-            horizontal-stretch: 1;
-            spacing: 1px;
-            Text {
-                text: Bridge.viewer-streamer;
-                color: Theme.name-text;
-                font-size: Theme.font-md;
-                font-weight: Theme.weight-semibold;
-                overflow: elide;
+        // Controls. Their tooltips go with them: a bubble is a popup, which
+        // the fade does not reach, and it would stay over the picture.
+        HorizontalLayout {
+            y: parent.height - self.height;
+            height: 56px;
+            padding-left: Theme.space-3;
+            padding-right: Theme.space-3;
+            spacing: Theme.space-2;
+            IconButton {
+                icon: Bridge.viewer-volume > 0 ? Icons.volume-2 : Icons.volume-x;
+                label: Bridge.viewer-volume > 0 ? @tr("Mute") : @tr("Unmute");
+                tooltip: root.up ? self.label : "";
+                tint: #ffffff;
+                y: (parent.height - self.height) / 2;
+                clicked => { Bridge.set-stream-volume(Bridge.viewer-volume > 0 ? 0 : 100); }
             }
-            Text {
-                text: Bridge.viewer-title;
-                color: #ffffff;
-                font-size: Theme.font-md;
-                overflow: elide;
+            Slider {
+                width: 110px;
+                horizontal-stretch: 0;
+                y: (parent.height - self.height) / 2;
+                minimum: 0;
+                maximum: 200;
+                step: 5;
+                value <=> Bridge.viewer-volume;
+                enabled: !Bridge.viewer-ended;
+                label: @tr("Stream volume");
+                changed(v) => { Bridge.set-stream-volume(v); }
             }
-            Text {
-                text: Bridge.viewer-count > 0 ? @tr("{} watching", Bridge.viewer-count) : "";
-                color: #ffffffb8;
-                font-size: Theme.font-sm;
-                overflow: elide;
-            }
-        }
-        if !Bridge.viewer-ended: VerticalLayout {
-            alignment: start;
-            HorizontalLayout {
+            if !Bridge.viewer-ended: HorizontalLayout {
+                padding-left: Theme.space-3;
                 spacing: Theme.space-2;
-                LiveBadge {
-                    large: true;
+                horizontal-stretch: 0;
+                Rectangle {
+                    width: 8px;
+                    height: 8px;
                     y: (parent.height - self.height) / 2;
+                    border-radius: 4px;
+                    background: Theme.live;
                 }
-                // Simulcast layers the streamer offers; "Auto" follows the
-                // bandwidth estimate.
-                if Bridge.viewer-qualities.length > 1: Select {
-                    width: 150px;
-                    horizontal-stretch: 0;
-                    icon: Icons.sliders-horizontal;
-                    label: @tr("Quality");
-                    model: Bridge.viewer-qualities;
-                    current-index <=> Bridge.viewer-quality;
-                    selected(_) => { Bridge.set-stream-quality(Bridge.viewer-quality); }
+                Text {
+                    text: @tr("LIVE");
+                    color: #ffffff;
+                    font-size: Theme.font-sm;
+                    font-weight: Theme.weight-semibold;
+                    vertical-alignment: center;
                 }
-                // What arrives: the decoded picture's height.
-                if Bridge.viewer-qualities.length <= 1 && Bridge.viewer-has-frame: Chip {
-                    text: @tr("{}p", Bridge.viewer-frame.height);
-                    tint: #ffffff;
-                    fill: #060a18b0;
-                    outlined: true;
-                    height: 26px;
-                    y: (parent.height - self.height) / 2;
+                Text {
+                    text: Bridge.viewer-elapsed;
+                    color: #ffffffa0;
+                    font-size: Theme.font-sm;
+                    vertical-alignment: center;
                 }
             }
+            // What arrives: codec, size, frame rate, bitrate.
+            Text {
+                horizontal-stretch: 1;
+                text: Bridge.viewer-quality-detail;
+                color: #ffffff80;
+                font-size: Theme.font-xs;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            if !Bridge.viewer-fullscreen && !Nav.narrow && !Bridge.viewer-popped: IconButton {
+                icon: Icons.minimize-2;
+                label: @tr("Back to the chat (keeps watching)");
+                tooltip: root.up ? self.label : "";
+                tint: #ffffff;
+                y: (parent.height - self.height) / 2;
+                clicked => { Bridge.hide-viewer(); }
+            }
+            // Theatre mode: the window without the shell. Checked, it has
+            // the accent's colours, as elsewhere (white would not show on
+            // the light theme's).
+            if !Bridge.viewer-fullscreen && !Nav.narrow && !Bridge.viewer-popped: IconButton {
+                icon: Icons.rectangle-horizontal;
+                label: Nav.theatre ? @tr("Exit theatre mode") : @tr("Theatre mode");
+                tooltip: root.up ? self.label : "";
+                checked: Nav.theatre;
+                tint: Nav.theatre ? Theme.accent-text : #ffffff;
+                y: (parent.height - self.height) / 2;
+                clicked => { Nav.theatre = !Nav.theatre; }
+            }
+            // In a window of its own: over the other windows or not
+            // (picture in picture).
+            if Bridge.viewer-popped: IconButton {
+                icon: Icons.pin;
+                label: Bridge.viewer-on-top ? @tr("Stop keeping on top") : @tr("Keep on top");
+                tooltip: root.up ? self.label : "";
+                checked: Bridge.viewer-on-top;
+                tint: Bridge.viewer-on-top ? Theme.accent-text : #ffffff;
+                y: (parent.height - self.height) / 2;
+                clicked => { Bridge.viewer-on-top = !Bridge.viewer-on-top; }
+            }
+            // Into a window of its own and back (a phone has one window).
+            if Bridge.desktop && !Nav.narrow: IconButton {
+                icon: Icons.external-link;
+                label: Bridge.viewer-popped ? @tr("Back into the main window") : @tr("Pop out");
+                tooltip: root.up ? self.label : "";
+                checked: Bridge.viewer-popped;
+                tint: Bridge.viewer-popped ? Theme.accent-text : #ffffff;
+                y: (parent.height - self.height) / 2;
+                clicked => { Bridge.pop-out-viewer(!Bridge.viewer-popped); }
+            }
+            IconButton {
+                icon: Bridge.viewer-fullscreen ? Icons.minimize-2 : Icons.maximize;
+                label: Bridge.viewer-fullscreen ? @tr("Exit full screen") : @tr("Full screen");
+                tooltip: root.up ? self.label : "";
+                tint: #ffffff;
+                y: (parent.height - self.height) / 2;
+                clicked => { Bridge.toggle-fullscreen(); }
+            }
+            if root.compact: IconButton {
+                icon: Icons.log-out;
+                label: Bridge.viewer-ended ? @tr("Close") : @tr("Leave");
+                tooltip: root.up ? self.label : "";
+                tint: Theme.danger;
+                y: (parent.height - self.height) / 2;
+                clicked => { Bridge.leave-stream(); }
+            }
+        }
+        // While they are hidden a click only brings the controls back.
+        if !root.up: TouchArea {
+            clicked => { root.wake(); }
         }
     }
-    // Controls.
-    HorizontalLayout {
-        y: parent.height - self.height;
-        height: 56px;
-        padding-left: Theme.space-3;
-        padding-right: Theme.space-3;
-        spacing: Theme.space-2;
-        IconButton {
-            icon: Bridge.viewer-volume > 0 ? Icons.volume-2 : Icons.volume-x;
-            label: Bridge.viewer-volume > 0 ? @tr("Mute") : @tr("Unmute");
-            tint: #ffffff;
-            y: (parent.height - self.height) / 2;
-            clicked => { Bridge.set-stream-volume(Bridge.viewer-volume > 0 ? 0 : 100); }
-        }
-        Slider {
-            width: 110px;
-            horizontal-stretch: 0;
-            y: (parent.height - self.height) / 2;
-            minimum: 0;
-            maximum: 200;
-            step: 5;
-            value <=> Bridge.viewer-volume;
-            enabled: !Bridge.viewer-ended;
-            label: @tr("Stream volume");
-            changed(v) => { Bridge.set-stream-volume(v); }
-        }
-        if !Bridge.viewer-ended: HorizontalLayout {
-            padding-left: Theme.space-3;
-            spacing: Theme.space-2;
-            horizontal-stretch: 0;
-            Rectangle {
-                width: 8px;
-                height: 8px;
-                y: (parent.height - self.height) / 2;
-                border-radius: 4px;
-                background: Theme.live;
-            }
-            Text {
-                text: @tr("LIVE");
-                color: #ffffff;
-                font-size: Theme.font-sm;
-                font-weight: Theme.weight-semibold;
-                vertical-alignment: center;
-            }
-            Text {
-                text: Bridge.viewer-elapsed;
-                color: #ffffffa0;
-                font-size: Theme.font-sm;
-                vertical-alignment: center;
-            }
-        }
-        // What arrives: codec, size, frame rate, bitrate.
-        Text {
-            horizontal-stretch: 1;
-            text: Bridge.viewer-quality-detail;
-            color: #ffffff80;
-            font-size: Theme.font-xs;
-            horizontal-alignment: right;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-        if !Bridge.viewer-fullscreen && !Nav.narrow: IconButton {
-            icon: Icons.minimize-2;
-            label: @tr("Back to the chat (keeps watching)");
-            tint: #ffffff;
-            y: (parent.height - self.height) / 2;
-            clicked => { Bridge.hide-viewer(); }
-        }
-        if !Nav.narrow: IconButton {
-            icon: Icons.external-link;
-            label: Bridge.viewer-popped ? @tr("Back to the window") : @tr("Pop out");
-            checked: Bridge.viewer-popped;
-            tint: #ffffff;
-            y: (parent.height - self.height) / 2;
-            clicked => { Bridge.viewer-popped = !Bridge.viewer-popped; }
-        }
-        IconButton {
-            icon: Bridge.viewer-fullscreen ? Icons.minimize-2 : Icons.maximize;
-            label: Bridge.viewer-fullscreen ? @tr("Exit full screen") : @tr("Full screen");
-            tint: #ffffff;
-            y: (parent.height - self.height) / 2;
-            clicked => { Bridge.toggle-fullscreen(); }
-        }
-        if root.compact: IconButton {
-            icon: Icons.log-out;
-            label: Bridge.viewer-ended ? @tr("Close") : @tr("Leave");
-            tint: Theme.danger;
-            y: (parent.height - self.height) / 2;
-            clicked => { Bridge.leave-stream(); }
-        }
+    idle := Timer {
+        interval: 2500ms;
+        running: root.woken && root.shown && !root.pinned;
+        triggered => { root.shown = false; }
     }
 }
 
@@ -437,9 +544,11 @@ component StreamInfo inherits VerticalLayout {
     }
 }
 
-// The stream we watch. With the shell: the channel's header, the player,
-// a note on the channel the stream belongs to, and its chat below. In
-// full screen and on a phone: the player alone.
+// The stream we watch. With the shell, and in theatre mode without it: a
+// header with the streamer, the title and LIVE over our channel's
+// background, the player, a note on the channel the stream belongs to,
+// and our channel's chat below. In full screen and on a phone: the player
+// alone.
 export component StreamViewer inherits Rectangle {
     // Reading our own width here would loop through the layout, so the
     // phone breakpoint (a setting) decides.
@@ -453,14 +562,28 @@ export component StreamViewer inherits Rectangle {
         compact: true;
     }
     if !root.alone: VerticalLayout {
+        // The stream's facts are here, not over the picture, so nothing
+        // covers it while the controls are hidden.
         PageHeader {
             banner: Bridge.own-channel-banner;
-            icon: Icons.volume-2;
-            title: Bridge.own-channel != "" ? Bridge.own-channel : Bridge.viewer-title;
-            description: Bridge.own-channel-topic;
-            if Bridge.members.length > 0: Button {
+            person: Bridge.viewer-streamer;
+            avatar: Bridge.viewer-streamer-avatar;
+            initials: Bridge.viewer-streamer-initials;
+            tint: Bridge.viewer-streamer-tint;
+            title: Bridge.viewer-title != "" ? Bridge.viewer-title : Bridge.viewer-streamer;
+            description: Bridge.viewer-count > 0 ? @tr("{} · {} watching", Bridge.viewer-streamer, Bridge.viewer-count) : Bridge.viewer-streamer;
+            if !Bridge.viewer-ended: LiveBadge {
+                y: (parent.height - self.height) / 2;
+            }
+            if Bridge.viewer-qualities.length > 1 || Bridge.viewer-has-frame: StreamQuality {
+                y: (parent.height - self.height) / 2;
+            }
+            // In theatre mode the window has no members panel to open.
+            if Bridge.members.length > 0 && !Nav.theatre: IconButton {
                 icon: Icons.users;
-                text: @tr("{} in voice", Bridge.members.length);
+                label: @tr("Members");
+                checked: Nav.right-panel-open && !Nav.pins-open && !Nav.topics-open;
+                count: Bridge.members.length;
                 y: (parent.height - self.height) / 2;
                 clicked => { Nav.toggle-members(); }
             }

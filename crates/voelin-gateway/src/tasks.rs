@@ -81,8 +81,12 @@ pub async fn pump_relays(hub: Arc<Hub>, mut events: broadcast::Receiver<RelayEve
 					hub.publish_incoming(msg);
 				}
 			}
-			Ok(RelayEvent::Closed { channel, reason }) => {
-				warn!(channel, %reason, "relay closed");
+			// Logged by the pool.
+			Ok(RelayEvent::Closed { channel, .. }) => {
+				if hub.relay_wanted(channel) {
+					let hub = hub.clone();
+					tokio::spawn(async move { hub.reopen_relay(channel).await });
+				}
 			}
 			Err(RecvError::Lagged(_)) => {}
 			Err(RecvError::Closed) => return,
@@ -196,7 +200,7 @@ async fn apply_settings(hub: Arc<Hub>) {
 			hub.rebuild_relays(&new.relay.nickname).await;
 		}
 		if new.relay.pinned_channels != old.relay.pinned_channels {
-			hub.apply_pinned_channels(&old.relay.pinned_channels, &new.relay.pinned_channels).await;
+			hub.apply_pinned_channels(&old.relay.pinned_channels, &new.relay.pinned_channels);
 		}
 		let features_changed = Feature::ALL.iter().any(|f| f.enabled(&old) != f.enabled(&new));
 		if features_changed || new.perm.admin != old.perm.admin {

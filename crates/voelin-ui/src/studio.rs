@@ -36,7 +36,9 @@ use voelin_core::settings::{
 	STREAM_BITRATE_KBPS, STREAM_LAYERS, STUDIO_RECORDING_DIR, STUDIO_REPLAY_MEMORY_MB,
 	STUDIO_REPLAY_SECONDS, STUDIO_SCENES, Settings, layer_specs,
 };
-use voelin_core::stream::{EndReason, LayerSpec, StreamSetup, ViewerInfo, ViewerState};
+use voelin_core::stream::{
+	EndReason, LayerSpec, StreamInfo, StreamKind, StreamSetup, ViewerInfo, ViewerState,
+};
 use voelin_core::studio::scene::{
 	Align, Background, Colour, Crop, Fit, Scene, Scenes, Source, SourceKind, Transform,
 };
@@ -48,7 +50,7 @@ use voelin_store::MessageSource;
 use crate::app::{
 	App, ChatLine, Nav, Page, StudioAudio, StudioBridge, StudioForm, StudioLayer, StudioNav,
 	StudioPick, StudioScene, StudioSettingsForm, StudioSource, StudioSourceForm, StudioStatus,
-	StudioViewer, StudioWindow, Tab, Theme, later, with_app,
+	StudioViewer, StudioWindow, later, with_app,
 };
 use crate::settings::parse_positive;
 use crate::video::CaptureRequest;
@@ -168,7 +170,7 @@ pub(crate) struct StudioState {
 	/// The main window's globals have the models.
 	attached: bool,
 	/// The studio in a window of its own.
-	window: Option<StudioWindow>,
+	pub(crate) window: Option<StudioWindow>,
 	run: Option<Running>,
 	starting: bool,
 	/// Why it does not run or cannot stream.
@@ -874,7 +876,7 @@ impl App {
 			.state
 			.own_channel
 			.and_then(|c| view.presence.channels.get(&c))
-			.map(|c| c.name.clone())
+			.map(|c| vm::tree::channel_title(c).0.to_owned())
 			.unwrap_or_default();
 		let server = if view.presence.server_name.is_empty() {
 			self.bookmark(id).map(|b| b.name.clone()).unwrap_or_default()
@@ -929,10 +931,15 @@ impl App {
 				let target = ChatTarget::Channel(channel);
 				let demo = self.demo_ui;
 				let view = self.sessions.entry(id).or_default();
-				let name = view.presence.channels.get(&channel).map(|c| c.name.clone());
-				let name = name.unwrap_or_default();
+				let name = view
+					.presence
+					.channels
+					.get(&channel)
+					.map(|c| vm::tree::channel_title(c).0.to_owned())
+					.unwrap_or_default();
 				if !view.tabs.iter().any(|t| t.target == target) {
-					view.tabs.push(Tab::new(target.clone(), format!("#{name}")));
+					let tab = view.new_tab(target.clone(), name.clone());
+					view.tabs.push(tab);
 					if !demo {
 						self.engine.send(Command::OpenChat { session: id as u64, target });
 					}
@@ -955,7 +962,7 @@ impl App {
 			Some((view, tab))
 		});
 		let lines: Vec<ChatLine> = match tab {
-			Some((view, tab)) if view.has_history() => self.lines_of(view, tab, &tab.messages),
+			Some((view, tab)) if view.has_history() => self.lines_of(view, tab, true),
 			// Without stored history the tab's lines are pushed as they come.
 			Some((_, tab)) => tab.lines.iter().collect(),
 			None => Vec::new(),
@@ -1993,6 +2000,7 @@ impl App {
 	pub(crate) fn studio_end(&mut self) {
 		let Some(out) = &self.studio.stream else { return };
 		if self.demo_ui {
+			self.studio_demo_announce(false);
 			self.studio_ended(None);
 		} else {
 			self.engine.send(Command::StopStream { session: out.session as u64 });
@@ -2107,20 +2115,11 @@ impl App {
 				slint::CloseRequestResponse::HideWindow
 			});
 			self.studio.window = Some(window);
-			self.studio_theme();
-			// The main window closes the studio's with it.
-			if let Some(ui) = self.ui.upgrade() {
-				ui.window().on_close_requested(|| {
-					with_app(|app| {
-						if let Some(window) = app.studio.window.take() {
-							let _ = window.hide();
-						}
-					});
-					slint::CloseRequestResponse::HideWindow
-				});
-				if ui.global::<Nav>().get_page() == Page::Studio {
-					ui.global::<Nav>().set_page(Page::Server);
-				}
+			self.theme_windows();
+			if let Some(ui) = self.ui.upgrade()
+				&& ui.global::<Nav>().get_page() == Page::Studio
+			{
+				ui.global::<Nav>().set_page(Page::Server);
 			}
 		}
 		// The next picture goes to both windows with the flag.
@@ -2143,15 +2142,6 @@ impl App {
 		});
 	}
 
-	/// The studio window follows the main window's theme.
-	pub(crate) fn studio_theme(&self) {
-		let (Some(ui), Some(window)) = (self.ui.upgrade(), &self.studio.window) else { return };
-		let (from, to) = (ui.global::<Theme>(), window.global::<Theme>());
-		to.set_mode(from.get_mode());
-		to.set_font_scale(from.get_font_scale());
-		to.set_system_dark(from.get_system_dark());
-	}
-
 	/// A picture of the studio window (screenshots, dev.rs).
 	pub(crate) fn studio_snapshot(&self) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
 		self.studio.window.as_ref()?.window().take_snapshot().ok()
@@ -2165,6 +2155,12 @@ impl App {
 		match what {
 			"" => {}
 			"window" => self.studio_detach(),
+			// Started here: a screen opened after it (`studio:live,server`)
+			// leaves the studio page before it is drawn, which starts it.
+			"live" => {
+				self.studio.dev.push(what.into());
+				self.studio_open();
+			}
 			other => self.studio.dev.push(other.into()),
 		}
 	}
@@ -2240,6 +2236,30 @@ impl App {
 				viewer(6, ViewerState::Requested, 0),
 			];
 		}
+		self.studio_demo_announce(true);
 		self.studio_now_live();
+	}
+
+	/// VOELIN_DEMO_UI: the sample server announces our stream, or its end,
+	/// as a server would (the voice view shows its card).
+	fn studio_demo_announce(&mut self, live: bool) {
+		let Some(session) = self.studio.stream.as_ref().map(|s| s.session) else { return };
+		let name = stream_name(&self.studio.ui);
+		let audio = self.studio.ui.audio;
+		let Some(view) = self.sessions.get_mut(&session) else { return };
+		view.streams.retain(|s| s.id != "demo-studio");
+		if live && let Some(own) = view.state.own_client {
+			view.streams.push(StreamInfo {
+				id: "demo-studio".into(),
+				streamer: tsclientlib::ClientId(own),
+				name,
+				kind: StreamKind::Screen,
+				bitrate: 8000,
+				viewer_limit: 0,
+				audio,
+				viewers: Some(3),
+			});
+		}
+		self.refresh_streams();
 	}
 }

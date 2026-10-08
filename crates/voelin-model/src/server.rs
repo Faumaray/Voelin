@@ -184,6 +184,11 @@ pub struct ServerDetails {
 	pub version: String,
 	#[serde(default)]
 	pub max_clients: u16,
+	/// How much everyone else is dimmed while a priority speaker talks
+	/// (dB, e.g. -18; `virtualserver_priority_speaker_dimm_modificator`,
+	/// rounded).
+	#[serde(default)]
+	pub priority_speaker_dimm_db: i32,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub default_server_group: Option<u64>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]

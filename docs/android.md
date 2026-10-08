@@ -87,13 +87,13 @@ capture, NDK MediaCodec format queries); targetSdk and compileSdk 36.
   do not recreate it.
 - **Voice in the background**: while any session has a voice connection,
   `VoiceService` runs as a foreground service of type `microphone`. Its
-  notification reads like the app's voice card: the channel as the title,
-  the server and who is there ("Home · 3 in voice", "just you"), the time
-  in voice as a chronometer, and Mute, Deafen and Leave, which act on every
-  voice session; with several servers, "In voice on 2 servers" and their
-  names. Tapping it opens the voice channel screen (the activity hands the
-  request to Rust, which queues it until the window runs:
-  `voelin_ui::request`). Rust drives it from engine events (`foreground.rs`,
+  notification has the channel as the title, the server and who is there
+  ("Home · 3 in voice", "just you"), the time in voice as a chronometer,
+  and Mute, Deafen and Leave, which act on every voice session; with
+  several servers, "In voice on 2 servers" and their names. Tapping it
+  opens the voice channel screen (the activity hands the request to Rust,
+  which queues it until the window runs: `voelin_ui::request`). Rust
+  drives it from engine events (`foreground.rs`,
   `Bridge.setVoiceNotification`). Audio itself is cpal on AAudio, as on
   desktop.
 - **Sharing the screen**: `voelin_media::capture::default_screen_capture()`
@@ -230,7 +230,7 @@ Things to try there: the bottom navigation (Home, Servers, Chats,
 Activity, You), joining a voice channel and its screen from the top bar's
 voice button, the voice notification (pull down the shade: Mute, Deafen,
 Leave, tap it), Share from another app's share sheet (text, then a file),
-the voice screen's Share (the screen share dialog) with sound from the
-audio picker (app icons) and its gain and mute while live, and Go Live's
-Stream Studio with a camera source (Waydroid usually has no camera: the
-source then says why).
+the voice screen's Share menu: Share screen (the screen share dialog) with
+sound from the audio picker (app icons) and its gain and mute while live,
+and the Stream Studio with a camera source (Waydroid usually has no camera:
+the source then says why).

@@ -167,7 +167,7 @@ component EventCard inherits Rectangle {
                 HorizontalLayout {
                     spacing: Theme.space-2;
                     Icon {
-                        source: Icons.hash;
+                        source: Icons.channel;
                         size: 14px;
                         tint: Theme.text-muted;
                         y: (parent.height - self.height) / 2;
@@ -384,7 +384,7 @@ export component EventDialog inherits Modal {
                 Select {
                     model: Bridge.event-channels;
                     current-index <=> form.channel;
-                    icon: Icons.hash;
+                    icon: Icons.channel;
                     label: @tr("Channel");
                 }
             }

@@ -14,7 +14,7 @@ mod secrets;
 mod store;
 
 pub use chat::{
-	ChatCursor, ChatTarget, MessageSource, NewMessage, PageQuery, Reaction, RemoteInfo,
+	ChatCursor, ChatRead, ChatTarget, MessageSource, NewMessage, PageQuery, Reaction, RemoteInfo,
 	StoredMessage, SyncState, WriteOutcome, Written,
 };
 pub use contacts::{Contact, ContactSeen, Relation};

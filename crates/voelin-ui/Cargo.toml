@@ -23,7 +23,7 @@ dirs = "6"
 # Slint decodes pictures with `image`, which it builds with PNG and JPEG only;
 # avatars, icons and banners on TeamSpeak servers are GIF and WebP too (the
 # decoders are in the tree already, for SVG pictures).
-image = { version = "0.25", default-features = false, features = ["gif", "webp"] }
+image = { version = "0.25", default-features = false, features = ["gif", "webp", "bmp", "ico"] }
 # Twemoji archive blocks (raw deflate); already used by png.
 miniz_oxide = "0.8"
 png = "0.18"
@@ -50,7 +50,9 @@ tsclientlib = { path = "../proto/tsclientlib" }
 # and PipeWire, global hotkeys through the portal and X11.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 voelin-myts = { path = "../voelin-myts" }
-slint = { version = "1.18", features = ["renderer-software"] }
+# winit's focus events (an unstable API, so this minor version only):
+# messages are read only while the window has the focus (`app::watch_focus`).
+slint = { version = "~1.18", features = ["renderer-software", "unstable-winit-030"] }
 voelin-core = { path = "../voelin-core", default-features = false, features = ["media-desktop"] }
 voelin-platform = { path = "../voelin-platform" }
 voelin-store = { path = "../voelin-store", features = ["keyring"] }
@@ -66,6 +68,10 @@ voelin-core = { path = "../voelin-core", default-features = false, features = ["
 
 [build-dependencies]
 slint-build = "1.18"
+
+[dev-dependencies]
+# Certificates and signatures from a synthetic root for the account tests.
+voelin-myts = { path = "../voelin-myts", features = ["testing"] }
 
 [lints]
 workspace = true

@@ -7,36 +7,57 @@
 //!   `VOELIN_SCREENSHOT_DELAY` seconds (default 4) and exit.
 //! - `VOELIN_WINDOW_SIZE=<w>x<h>`: the window's size (e.g. `390x844` for the
 //!   phone layout).
-//! - `VOELIN_DEMO_UI=1`: sample servers, channels, chat and streams, no
-//!   server needed (nothing is stored).
+//! - `VOELIN_DEMO_UI=1`: sample servers, channels, chat (two pages of older
+//!   messages answer scrolling up) and streams, no server needed (nothing is
+//!   stored).
 //! - `VOELIN_DEMO_STREAM=1`: a local test stream in the viewer.
 //! - `VOELIN_OPEN=<what>[,<what>...]`: open screens on start: `home`,
-//!   `server`, `settings[:<section>]` (voice, keybinds, streaming, privacy,
-//!   appearance, or 0-4), `about`, `share`, `bookmark` (add a server;
+//!   `server` (`server:chat`: its server chat), `settings[:<section>]`
+//!   (voice, keybinds, streaming, privacy, appearance, or 0-4), `about`,
+//!   `share`, `bookmark` (add a server, also `join`;
 //!   `bookmark:edit` the current one, Advanced open),
 //!   `emoji` (the picker), `client` (the volume dialog of the first other
 //!   client once connected), `panel` / `no-panel` (the members panel),
-//!   `voice` (the voice channel view; on the phone its own screen),
+//!   `voice` (the voice channel view; on the phone its own screen;
+//!   `voice:compact` with the smaller stage, not stored),
+//!   `more` (after `voice` on the phone: the voice screen's More menu,
+//!   opened once the screen is laid out),
 //!   `members` (the phone's members page), `notification` (a tapped voice
 //!   notification), `shared:<text>` (text shared to the app on Android),
 //!   `pins`, `topics` (the drawers),
 //!   `topic:<id>` (a topic's messages), `member` (the member card of the
-//!   first other client), `watch` (the first stream; with sample data the
-//!   local test pattern in its place), `popout` (the same, popped out),
+//!   first other client), `poke` (the poke dialog: for the contact shown
+//!   after `friends`, else for the first other client, its card open),
+//!   `channel-password` (the password dialog of the first locked channel,
+//!   the sample's Officers; `channel-password:wrong` as after a refused
+//!   one), `actions` (the last message's actions, as if hovered),
+//!   `first-run` (home's banner as before the first server, over the
+//!   sample data),
+//!   `unread` (the current chat read up to five messages before its end:
+//!   the "New" divider, scrolled up to; `unread:end` ten messages before,
+//!   at the list's end, under the bar that counts the new messages),
+//!   `link-confirm[:<url>]` (the question before a masked link opens, by
+//!   default the sample's raid board), `link:<url>` (a TeamSpeak link
+//!   opened: the server dialog filled in from it, or in voice on its
+//!   server a move into its channel), `watch` (the first stream; with
+//!   sample data the local test pattern in its place), `theatre` (after
+//!   `watch`: in theatre mode), `popout` (`watch` in a window of its own),
 //!   `tab:<home|servers|chat|activity|you>` (phone layout); `friends[:<uid>]`,
 //!   `messages[:<uid>]` (a private chat), `inbox` (offline messages),
 //!   `library`, `events`, `event-form`, `search[:<text>]`,
-//!   `notifications` (the bell), `join` (join by address), `offline` (an
-//!   offline message), `picture` (a chat picture opened large), `camera`
-//!   (the settings' camera preview); settings sections also `account`,
+//!   `notifications` (the bell), `offline` (an offline message), `picture`
+//!   (a chat picture opened large), `camera` (the settings' camera
+//!   preview); settings sections also `account`,
 //!   `profiles` (also `identities`), `devices`, `notifications`,
 //!   `integrations`, `advanced` (5-10);
 //!   `studio[:<what>]`: the Stream Studio (with `VOELIN_DEMO_UI` a demo
 //!   studio from synthetic sources), `studio:window` in a window of its own,
-//!   `studio:live` going live, `studio:record`, or a dialog: `studio:source`,
+//!   `studio:live` going live (also with a screen opened after it:
+//!   `studio:live,server,voice` shows our stream's card with the studio's
+//!   picture), `studio:record`, or a dialog: `studio:source`,
 //!   `studio:audio`, `studio:camera`, `studio:scene`, `studio:settings`.
-//!   A screenshot also saves the studio's window (`<name>-window.png`) and
-//!   draws it over the main window.
+//!   A screenshot also saves the studio's window, or the stream's
+//!   (`<name>-window.png`), and draws it over the main window.
 //! - `VOELIN_AUTOWATCH=1`: watch the first stream that shows up.
 //! - `VOELIN_AUTOSHARE=test-pattern`: share the test pattern (accepting
 //!   everyone) once connected to a TeamSpeak 6 server.
@@ -49,8 +70,8 @@ use slint::{ComponentHandle, Rgba8Pixel, SharedPixelBuffer};
 use voelin_core::gateway::Pin;
 use voelin_core::stream::{StreamInfo, StreamKind};
 use voelin_core::{
-	Contact, Event, GatewayUpdate, HistoryMessage, HistorySource, ObserveState, OfflineMessageInfo,
-	Relation, SessionState, Source, VoiceState,
+	Contact, Event, GatewayUpdate, HistoryMessage, HistorySource, JoinFailure, ObserveState,
+	OfflineMessageInfo, Relation, SessionState, Source, VoiceState,
 };
 use voelin_gateway_proto::{
 	Action, Attendee, ConfigEntry, ConfigSource, EventInfo, EventKind, EventSpec, PermRule,
@@ -63,8 +84,10 @@ use voelin_model::{
 use voelin_store::{Bookmark, MessageSource};
 
 use crate::app::{
-	App, Bridge, MainWindow, MobileTab, Nav, Page, RecordingItem, SettingsSection, with_app,
+	App, Bridge, MainWindow, MobileTab, MytsBadge, Nav, Page, RecordingItem, SettingsSection,
+	with_app,
 };
+use crate::settings::LastVoice;
 
 /// The switches read at start.
 #[derive(Clone, Debug, Default)]
@@ -145,6 +168,8 @@ fn mobile_tab(name: &str) -> MobileTab {
 pub(crate) struct Running {
 	_screenshot: Option<slint::Timer>,
 	_resize: Option<slint::Timer>,
+	_scroll: Option<slint::Timer>,
+	_more: Option<slint::Timer>,
 }
 
 /// Apply the switches once the app is set up.
@@ -194,6 +219,17 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 						))
 					};
 					account.badges = strings(&["TeamSpeak 6 Beta", "Early supporter"]);
+					// Signed for servers: the first shown, the second not.
+					let badge = |name: &str, shown| MytsBadge {
+						name: name.into(),
+						shown,
+						can_change: true,
+					};
+					account.badge_choice = slint::ModelRc::new(slint::VecModel::from(vec![
+						badge("TeamSpeak 6 Beta", 1),
+						badge("Early supporter", 0),
+					]));
+					account.user_tag = "alex@myteamspeak.com".into();
 					account.devices =
 						strings(&["Voelin · EU · 2026-10-03", "TeamSpeak · EU · 2026-09-28"]);
 					nav.invoke_open_settings(SettingsSection::Account);
@@ -210,7 +246,13 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 				bridge.set_myts(account);
 			}
 			"home" => nav.invoke_show(Page::Home),
-			"server" => nav.invoke_show(Page::Server),
+			"server" => {
+				nav.invoke_show(Page::Server);
+				// The server chat, which starts with the welcome message.
+				if arg == "chat" {
+					with_app(|app| app.select_tab(0));
+				}
+			}
 			"settings" => nav.invoke_open_settings(section(arg)),
 			"about" => nav.invoke_open_about(),
 			"share" => {
@@ -226,13 +268,22 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 					nav.invoke_edit_server(id as i32);
 				}
 			}
-			"bookmark" => nav.invoke_add_server(),
+			// `join`: the same dialog (Join a server was one of its own).
+			"bookmark" | "join" => nav.invoke_add_server(),
 			"emoji" => nav.set_emoji_open(true),
 			"panel" => nav.set_right_panel_open(true),
 			"no-panel" => nav.set_right_panel_open(false),
 			"tab" => nav.set_mobile_tab(mobile_tab(arg)),
-			"voice" => nav.invoke_show_voice(true),
+			"voice" => {
+				nav.invoke_show_voice(true);
+				// The smaller stage, for this run only.
+				if arg == "compact" {
+					nav.set_voice_compact(true);
+				}
+			}
 			"pins" => nav.invoke_show_pins(true),
+			// Opened once laid out (below).
+			"more" => {}
 			// The phone's members page.
 			"members" => nav.set_members_open(true),
 			// What Android hands over: a tapped voice notification, text
@@ -255,12 +306,50 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 			"member" => {
 				with_app(|app| app.open_first_member());
 			}
+			// After `friends` the contact path (Kairo without a contact
+			// chosen), else the member card's.
+			"poke" => {
+				let friends = nav.get_page() == Page::Friends;
+				with_app(|app| {
+					if friends {
+						let uid = app.social.selected.clone().unwrap_or_else(|| "demo-3".into());
+						app.contact_action(&uid, "poke");
+					} else {
+						app.open_first_member();
+						app.member_action("poke");
+					}
+				});
+			}
+			"channel-password" => {
+				with_app(|app| open_channel_password(app, arg == "wrong"));
+			}
+			// A screenshot cannot hover.
+			"actions" => nav.set_show_actions(true),
+			// Home as before the first server, over the sample data.
+			"first-run" => nav.set_first_run(true),
+			// `end`: further back, so the divider is above the view.
+			"unread" => {
+				with_app(|app| open_unread(app, if arg == "end" { 10 } else { 5 }));
+			}
+			"link-confirm" => {
+				let url = if arg.is_empty() { DEMO_RAID_BOARD } else { arg };
+				with_app(|app| app.open_link_text(url, true));
+			}
+			// As a link from the platform comes.
+			"link" => crate::inbox::request(crate::inbox::Request::OpenLink(arg.to_owned())),
 			"watch" | "popout" => {
 				with_app(|app| {
-					if switches.demo_ui { app.demo_watch() } else { app.watch_first_stream() }
+					if switches.demo_ui {
+						app.demo_watch();
+					} else {
+						app.watch_first_stream();
+					}
+					if what == "popout" {
+						app.viewer_pop_out();
+					}
 				});
-				ui.global::<Bridge>().set_viewer_popped(what == "popout");
 			}
+			"theatre" => nav.set_theatre(true),
 			// Home, friends, messages, events, the bell, the search.
 			"friends" => {
 				with_app(|app| app.select_contact(arg.to_owned()));
@@ -281,7 +370,6 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 			"event-form" => nav.invoke_create_event(),
 			"search" => nav.invoke_open_search(arg.into()),
 			"notifications" => nav.set_notifications_open(true),
-			"join" => nav.invoke_join_server(),
 			"offline" => nav.invoke_write_offline("demo-ari".into(), "Ari".into()),
 			"picture" => {
 				let picture = demo_picture(1280, 720, 16);
@@ -324,6 +412,22 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 		);
 		timer
 	});
+	// `unread`: up to the divider once the list is laid out (after the
+	// resize above).
+	let scroll = switches.open.iter().any(|o| o == "unread").then(|| {
+		late(ui, switches, |ui| {
+			let bridge = ui.global::<Bridge>();
+			bridge.set_jump_index(bridge.get_unread_index());
+			bridge.set_jump_requests(bridge.get_jump_requests().wrapping_add(1));
+		})
+	});
+	// `more`: the phone voice screen's More menu (a screenshot cannot tap).
+	let more = switches.open.iter().any(|o| o == "more").then(|| {
+		late(ui, switches, |ui| {
+			let nav = ui.global::<Nav>();
+			nav.set_more_requests(nav.get_more_requests().wrapping_add(1));
+		})
+	});
 	let screenshot = switches.screenshot.clone().map(|path| {
 		let weak = ui.as_weak();
 		let timer = slint::Timer::default();
@@ -336,22 +440,65 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 						eprintln!("screenshot failed: {e}");
 					}
 					let _ = ui.hide();
-					// Also when the studio's own window is open.
+					// Also when the studio's or the stream's own window is
+					// open.
 					let _ = slint::quit_event_loop();
 				}
 			},
 		);
 		timer
 	});
-	Running { _screenshot: screenshot, _resize: resize }
+	Running { _screenshot: screenshot, _resize: resize, _scroll: scroll, _more: more }
+}
+
+/// A timer that runs `action` at three quarters of the screenshot delay, once
+/// the window has its size and the screens are laid out.
+fn late(
+	ui: &MainWindow,
+	switches: &Switches,
+	action: impl Fn(&MainWindow) + 'static,
+) -> slint::Timer {
+	let weak = ui.as_weak();
+	let timer = slint::Timer::default();
+	timer.start(
+		slint::TimerMode::SingleShot,
+		Duration::from_millis(switches.screenshot_delay * 1000 * 3 / 4),
+		move || {
+			if let Some(ui) = weak.upgrade() {
+				action(&ui);
+			}
+		},
+	);
+	timer
+}
+
+/// The current chat's read marker `back` messages before its end, as if
+/// they came while away, its "New" divider shown (`VOELIN_OPEN=unread`).
+fn open_unread(app: &mut App, back: usize) {
+	let Some(id) = app.current else { return };
+	let own_uids = app.social.own_uids.clone();
+	let Some(view) = app.sessions.get_mut(&id) else { return };
+	let own_client = view.state.own_client;
+	let own = |m: &ChatMessage| crate::social::own_message(&own_uids, own_client, m);
+	let index = view.current_tab;
+	let tab = &mut view.tabs[index];
+	let Some(at) = tab.messages.len().checked_sub(back + 1) else { return };
+	let read = &tab.messages[at].message;
+	tab.read = Some((read.message.ts_ms, read.id));
+	tab.divider = None;
+	tab.count_unread(own);
+	tab.enter(own);
+	app.refresh_chat();
+	app.refresh_servers();
 }
 
 fn save_screenshot(ui: &MainWindow, path: &std::path::Path) -> Result<()> {
 	let mut image = ui.window().take_snapshot()?;
-	if let Some(studio) = with_app(|app| app.studio_snapshot()).flatten() {
+	let window = with_app(|app| app.studio_snapshot().or_else(|| app.viewer_snapshot())).flatten();
+	if let Some(window) = window {
 		let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-		save_png(&studio, &path.with_file_name(format!("{stem}-window.png")))?;
-		paste(&mut image, &studio);
+		save_png(&window, &path.with_file_name(format!("{stem}-window.png")))?;
+		paste(&mut image, &window);
 	}
 	save_png(&image, path)
 }
@@ -382,6 +529,25 @@ fn save_png(image: &SharedPixelBuffer<Rgba8Pixel>, path: &std::path::Path) -> Re
 	Ok(())
 }
 
+/// `VOELIN_OPEN=channel-password`: join the current server's first locked
+/// channel, which asks for its password; `wrong` as if the server had
+/// refused one.
+fn open_channel_password(app: &mut App, wrong: bool) {
+	let Some(session) = app.current else { return };
+	let locked = app
+		.view()
+		.and_then(|v| v.presence.channels.values().filter(|c| c.has_password).map(|c| c.id).min());
+	let Some(channel) = locked else { return };
+	if wrong {
+		if let Some(view) = app.view_mut() {
+			view.channel_passwords.insert(channel, "guess".into());
+		}
+		app.join_failed(session, channel, JoinFailure::Password);
+	} else {
+		app.join_channel(session, channel);
+	}
+}
+
 const DEMO: i64 = 9001;
 
 fn channel(id: u64, parent: u64, order: u64, name: &str) -> ChannelInfo {
@@ -408,6 +574,7 @@ fn demo_ui(app: &mut App) {
 		identity: None,
 		default_channel: None,
 		gateway_url: None,
+		gateway_urls: Vec::new(),
 		query: None,
 		client_version: None,
 		cached_server_icon: None,
@@ -420,6 +587,13 @@ fn demo_ui(app: &mut App) {
 		bookmark(DEMO + 1, "Pixel Lounge", "pixel.example"),
 		bookmark(DEMO + 2, "Dev TS3", "127.0.0.1:9987"),
 	];
+	// Home's "Continue where you left off": a channel of a server without
+	// voice, so it shows Join.
+	app.settings.last_voice = Some(LastVoice {
+		bookmark: DEMO + 1,
+		address: "pixel.example".into(),
+		channel: vec!["Art Corner".into()],
+	});
 	app.current = Some(DEMO);
 	let session = DEMO as u64;
 
@@ -440,20 +614,26 @@ fn demo_ui(app: &mut App) {
 	let mut raid = channel(4, 3, 0, "Raid Night");
 	raid.banner_gfx_url = Some(DEMO_RAID_BANNER.into());
 	raid.banner_mode = BannerMode::KeepAspect;
+	// Only the raid leads speak there: Zeph cannot (the members panel's hand).
+	raid.needed_talk_power = 50;
 	let mut music = channel(5, 0, 3, "Music");
 	music.icon = DEMO_MUSIC_ICON;
 	music.banner_gfx_url = Some(DEMO_MUSIC_BANNER.into());
 	music.banner_mode = BannerMode::NoAdjust;
-	let mut locked = channel(7, 0, 6, "Officers");
+	let mut locked = channel(7, 0, 9, "Officers");
 	locked.has_password = true;
+	// Spacers as servers name them: a centred heading, one on the right and
+	// a line.
 	for c in [
 		channel(1, 0, 0, "Lobby"),
 		chill,
 		channel(3, 0, 2, "[cspacer0]Gaming"),
 		raid,
 		music,
-		channel(6, 0, 5, "AFK"),
+		channel(9, 0, 5, "[rspacer2]Staff"),
 		locked,
+		channel(8, 0, 7, "[*spacer1]---"),
+		channel(6, 0, 8, "AFK"),
 	] {
 		p.channels.insert(c.id, c);
 	}
@@ -492,6 +672,9 @@ fn demo_ui(app: &mut App) {
 	clients[5].server_groups = vec![GROUP_MEMBER];
 	clients[6].server_groups = vec![GROUP_GUEST];
 	clients[7].server_groups = vec![GROUP_GUEST];
+	// myTeamSpeak badges; their pictures arrive below.
+	clients[0].badges = DEMO_BADGES[..2].iter().map(|g| g.to_string()).collect();
+	clients[1].badges = DEMO_BADGES[2..].iter().map(|g| g.to_string()).collect();
 	for c in clients {
 		p.clients.insert(c.id, c);
 	}
@@ -539,6 +722,7 @@ fn demo_ui(app: &mut App) {
 		Event::Gateway {
 			session,
 			update: GatewayUpdate::Connected {
+				url: "wss://gw.nightfall.example/v1".into(),
 				gateway_id: "demo".into(),
 				server_uid: "demo-server".into(),
 				server_name: "Nightfall Guild".into(),
@@ -784,14 +968,19 @@ fn demo_social(app: &mut App) {
 	neon.message.author_id = None;
 	app.social.dm.stored.push(("demo-dev".into(), neon));
 	app.social.dm.bookmark_of.insert("demo-dev".into(), DEMO + 2);
-	// Unread: Mira's and Lumen's messages came while away.
-	if let Some(view) = app.sessions.get_mut(&DEMO) {
+	// The samples came one by one, as new ones do: all are read (no "New"
+	// line, which a gateway page on screen gets), but for Mira's and
+	// Lumen's messages, which came while away.
+	for view in app.sessions.values_mut() {
 		for tab in &mut view.tabs {
+			tab.divider = None;
+			tab.catch_up();
 			match &tab.target {
 				ChatTarget::Private(uid) if uid == "demo-4" => tab.unread = 1,
 				ChatTarget::Private(uid) if uid == "demo-2" => tab.unread = 2,
-				_ => {}
+				_ => continue,
 			}
+			tab.read = None;
 		}
 	}
 	// A poke from Kairo, shown among the messages and in the bell.
@@ -980,16 +1169,24 @@ fn demo_social(app: &mut App) {
 		},
 	});
 
-	// Notifications: a mention, a message, an event, a friend online (and
-	// the poke above).
+	// Notifications: two mentions (unread: home shows them), a message, an
+	// event, a friend online (and the poke above).
 	use crate::social::{NoticeKind, NoticeTarget};
 	app.notify(
 		NoticeKind::Mention,
 		"Talon mentioned you".into(),
-		"Nova, can you open the raid at 20:00? — #Chill Zone · Nightfall Guild".into(),
+		"Nova, can you open the raid at 20:00? — Chill Zone · Nightfall Guild".into(),
 		NoticeTarget::Chat(DEMO, ChatTarget::Channel(2)),
 		"Talon".into(),
 		Some("demo-6".into()),
+	);
+	app.notify(
+		NoticeKind::Mention,
+		"Zeph mentioned you".into(),
+		"Nova, are you healing tonight? — Raid Night · Nightfall Guild".into(),
+		NoticeTarget::Chat(DEMO, ChatTarget::Channel(4)),
+		"Zeph".into(),
+		Some("demo-7".into()),
 	);
 	app.notify(
 		NoticeKind::Event,
@@ -1002,7 +1199,7 @@ fn demo_social(app: &mut App) {
 	app.notify(
 		NoticeKind::Friend,
 		"Ivy is online".into(),
-		"on Pixel Lounge · #Art Corner".into(),
+		"on Pixel Lounge · Art Corner".into(),
 		NoticeTarget::Contact("demo-ivy".into()),
 		"Ivy".into(),
 		Some("demo-ivy".into()),
@@ -1017,7 +1214,7 @@ fn demo_social(app: &mut App) {
 	);
 	for (i, n) in app.social.notices.iter_mut().enumerate() {
 		n.ts_ms = now - (i as i64 * 9 + 2) * min;
-		n.unread = i < 3;
+		n.unread = i < 3 || n.kind == NoticeKind::Mention;
 	}
 	app.refresh_notices();
 
@@ -1047,13 +1244,26 @@ const DEMO_HOST_BANNER: &str = "https://nightfall.example/banner.png";
 const DEMO_CHILL_BANNER: &str = "https://nightfall.example/chill.png";
 const DEMO_MUSIC_BANNER: &str = "https://nightfall.example/music.png";
 const DEMO_RAID_BANNER: &str = "https://nightfall.example/raid.png";
+/// A picture a message shows (`[img]`).
+const DEMO_LOOT_PICTURE: &str = "https://nightfall.example/loot.png";
+/// The sample's masked link (`VOELIN_OPEN=link-confirm`).
+const DEMO_RAID_BOARD: &str = "https://nightfall.example/raids";
 const DEMO_SERVER_ICON: u32 = 3_120_211_001;
 const DEMO_ADMIN_ICON: u32 = 3_120_211_002;
 const DEMO_MOD_ICON: u32 = 3_120_211_003;
 const DEMO_MUSIC_ICON: u32 = 3_120_211_004;
+/// Real badge GUIDs: 20th Anniversary, TeamSpeak Jedi (Nova's), Gamescom
+/// 2019, Pride and Year of the Tiger 2022 (Lumen's).
+const DEMO_BADGES: [&str; 5] = [
+	"4b27be5a-b92a-4b30-8b2d-14b59653f427",
+	"64221fd1-706c-4bb2-ba55-996c39effa79",
+	"b82a45a5-b235-4926-be77-de102222e5eb",
+	"ceee2445-4fbf-4f06-9421-286f0f4e875a",
+	"92356386-0451-4a97-87d9-10ff4f43260c",
+];
 
-/// Avatars, icons and banners as the engine reports them once they are in
-/// its cache (here a folder of synthetic pictures in the temporary
+/// Avatars, icons, banners and badges as the engine reports them once they
+/// are in its cache (here a folder of synthetic pictures in the temporary
 /// directory).
 fn demo_pictures(app: &mut App) {
 	let session = DEMO as u64;
@@ -1077,6 +1287,7 @@ fn demo_pictures(app: &mut App) {
 		(DEMO_CHILL_BANNER, demo_picture(900, 120, 11)),
 		(DEMO_RAID_BANNER, demo_picture(240, 240, 5)),
 		(DEMO_MUSIC_BANNER, demo_picture(180, 36, 7)),
+		(DEMO_LOOT_PICTURE, demo_picture(640, 300, 9)),
 	] {
 		let path = save(url.rsplit('/').next().unwrap_or(url), picture);
 		events.push(Event::PictureReady { session, url: url.into(), path });
@@ -1089,6 +1300,19 @@ fn demo_pictures(app: &mut App) {
 	] {
 		let path = save(&icon.to_string(), demo_icon(color, shape));
 		events.push(Event::IconReady { session, icon, path });
+	}
+	// Stand-ins for the badges' pictures on TeamSpeak's server.
+	let badge_looks = [
+		([242, 178, 44], Shape::Ring),
+		([90, 170, 255], Shape::Moon),
+		([45, 196, 132], Shape::Diamond),
+		([240, 110, 160], Shape::Disc),
+		([255, 140, 90], Shape::Diamond),
+	];
+	for (guid, (color, shape)) in DEMO_BADGES.into_iter().zip(badge_looks) {
+		let Some(url) = voelin_model::badges::icon_url(guid) else { continue };
+		let path = save(&format!("badge-{guid}"), demo_icon(color, shape));
+		events.push(Event::PictureReady { session, url, path });
 	}
 	// Some people have pictures, the rest initials.
 	for (sample_session, uid, seed) in [
@@ -1370,6 +1594,45 @@ fn demo_chat(app: &mut App, session: u64) {
 			None,
 		),
 		(DEMO, "dex", 5, "🎉🎉".into(), 10, false, Vec::new(), false, None),
+		// Formatting as TeamSpeak clients send it (BBCode).
+		(
+			DEMO,
+			"Nova",
+			1,
+			format!(
+				"[b]Raid night[/b] moves from [s]20:00[/s] to [color=#ff8a3d]20:30[/color], \
+				 sign up on the [url={DEMO_RAID_BOARD}]raid board[/url]."
+			),
+			9,
+			false,
+			vec![react("👍", 4, true)],
+			true,
+			None,
+		),
+		(
+			DEMO,
+			"Kairo",
+			3,
+			"[quote=Nova]bring elixirs[/quote]\nAlready stocked up 🧪".into(),
+			8,
+			false,
+			Vec::new(),
+			false,
+			None,
+		),
+		(
+			DEMO,
+			"Mira",
+			4,
+			"Roles for tonight:\n[list]\n[*][b]Tank:[/b] Kairo\n[*][b]Healer:[/b] Mira\n\
+			 [*][i]Everyone else:[/i] damage[/list]\nPull timer: [code]/pull 10[/code]"
+				.into(),
+			7,
+			false,
+			Vec::new(),
+			false,
+			None,
+		),
 		(
 			DEMO,
 			"Ari",
@@ -1377,6 +1640,17 @@ fn demo_chat(app: &mut App, session: u64) {
 			"Anyone want to run some co-op later? 👀 Posting from the web.".into(),
 			5,
 			true,
+			Vec::new(),
+			false,
+			None,
+		),
+		(
+			DEMO,
+			"Talon",
+			6,
+			format!("Last week's loot [img]{DEMO_LOOT_PICTURE}[/img]"),
+			6,
+			false,
 			Vec::new(),
 			false,
 			None,
@@ -1581,4 +1855,123 @@ fn demo_topic(app: &mut App) {
 			has_more: false,
 		},
 	});
+}
+
+/// The sample messages before the sample chats' first ones: how many, how
+/// many a page, and their ids (the sample chats use ids below 500).
+const OLDER: i64 = 30;
+const OLDER_PAGE: i64 = 15;
+const OLDER_ID: i64 = 500;
+
+/// The page before `oldest` of a sample chat, as the engine answers
+/// `Command::LoadOlderHistory`: older small talk, a page at a time, the last
+/// one `complete`. The first page goes back from `oldest` (from `now_ms` in
+/// an empty chat), the next ones from the sample message before.
+pub(crate) fn demo_older(
+	target: &ChatTarget,
+	oldest: Option<&HistoryMessage>,
+	now_ms: i64,
+) -> (Vec<HistoryMessage>, bool) {
+	const PEOPLE: [(&str, u16); 6] =
+		[("Nova", 1), ("Kairo", 3), ("Mira", 4), ("dex", 5), ("Talon", 6), ("Lumen", 2)];
+	const TEXTS: [&str; 10] = [
+		"Anyone still around?",
+		"Patch notes are up, the healer changes look good.",
+		"Who has the key for the vault run?",
+		"I can do Thursday, not Friday.",
+		"Lag spike on my side, back in a sec.",
+		"gg everyone, that was close 😅",
+		"Is the new map in the rotation yet?",
+		"Uploading the clip from last night.",
+		"Coffee first, then raids ☕",
+		"Same time next week?",
+	];
+	let (first, from_ms) = match oldest {
+		Some(m) if m.id >= OLDER_ID => (m.id - OLDER_ID + 1, m.message.ts_ms),
+		Some(m) => (0, m.message.ts_ms),
+		None => (0, now_ms),
+	};
+	let last = (first + OLDER_PAGE).min(OLDER);
+	let messages = (first..last)
+		.map(|n| {
+			// Two in a row by each person.
+			let (author, client) = PEOPLE[(n / 2 % 6) as usize];
+			HistoryMessage {
+				id: OLDER_ID + n,
+				message: ChatMessage {
+					target: target.clone(),
+					author_name: author.into(),
+					author_uid: Some(format!("demo-{client}")),
+					author_id: Some(client),
+					text: TEXTS[(n % 10) as usize].into(),
+					ts_ms: from_ms - (n - first + 1) * 23 * 60_000,
+					via_relay: false,
+					blocked: false,
+				},
+				source: MessageSource::Voice,
+				remote_id: Some(OLDER_ID + n),
+				topic_id: None,
+				reactions: Vec::new(),
+				pinned: false,
+				rev: 1,
+			}
+		})
+		.collect();
+	(messages, last >= OLDER)
+}
+
+/// Answer [`App::load_older`] in demo mode (no engine runs) with
+/// [`demo_older`], a moment later as a server would.
+pub(crate) fn answer_older(session: i64, target: ChatTarget, oldest: Option<HistoryMessage>) {
+	slint::Timer::single_shot(Duration::from_millis(600), move || {
+		let now = chrono::Utc::now().timestamp_millis();
+		let (messages, complete) = demo_older(&target, oldest.as_ref(), now);
+		with_app(|app| {
+			app.handle_event(Event::ChatHistory {
+				session: session as u64,
+				target,
+				messages,
+				source: HistorySource::Gateway,
+				complete,
+			});
+		});
+	});
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Two pages back from the sample chat's first message, each older than
+	/// the one before, the second one the last.
+	#[test]
+	fn demo_older_pages_in_order_and_completes() {
+		let target = ChatTarget::Channel(2);
+		let (first, complete) = demo_older(&target, None, 1_000_000_000);
+		assert_eq!(first.len(), OLDER_PAGE as usize);
+		assert!(!complete, "a second page follows");
+		let ids: Vec<i64> = first.iter().map(|m| m.id).collect();
+		assert_eq!(ids, (OLDER_ID..OLDER_ID + OLDER_PAGE).collect::<Vec<_>>());
+		assert!(first.windows(2).all(|w| w[1].message.ts_ms < w[0].message.ts_ms));
+		assert!(
+			first.iter().all(|m| m.message.target == target && m.message.ts_ms < 1_000_000_000)
+		);
+
+		let oldest = first.last().unwrap();
+		let (second, complete) = demo_older(&target, Some(oldest), 0);
+		assert!(complete);
+		assert_eq!(second.len(), (OLDER - OLDER_PAGE) as usize);
+		assert_eq!(second[0].id, oldest.id + 1);
+		assert!(second.iter().all(|m| m.message.ts_ms < oldest.message.ts_ms));
+
+		// A sample chat's own message: back from it.
+		let sample = HistoryMessage { id: 3, ..oldest.clone() };
+		let (again, _) = demo_older(&target, Some(&sample), 0);
+		assert_eq!(again[0].id, OLDER_ID);
+		assert!(again[0].message.ts_ms < sample.message.ts_ms);
+
+		// Nothing after the last page.
+		let (rest, complete) = demo_older(&target, second.last(), 0);
+		assert!(rest.is_empty() && complete);
+	}
 }

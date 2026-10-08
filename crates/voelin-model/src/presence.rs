@@ -98,6 +98,11 @@ pub struct ClientInfo {
 	/// no avatar. A new hash means a new avatar.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub avatar: Option<String>,
+	/// The myTeamSpeak avatar's picture (TeamSpeak 6, an HTTPS link from
+	/// `client_myteamspeak_avatar`, [`myts_avatar_url`]): shown where the
+	/// server has no avatar for the client.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub myts_avatar: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub description: Option<String>,
 	#[serde(default, skip_serializing_if = "is_zero_i32")]
@@ -107,7 +112,7 @@ pub struct ClientInfo {
 	pub talker: bool,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub channel_group: Option<GroupId>,
-	/// Badge GUIDs (`client_badges`), in display order.
+	/// Badge GUIDs, in display order ([`shown_badges`]).
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub badges: Vec<String>,
 	/// Icon id (`client_icon_id`); 0: none.
@@ -134,6 +139,48 @@ pub fn parse_badges(value: &str) -> Vec<String> {
 		.filter(|g| !g.is_empty())
 		.map(str::to_owned)
 		.collect()
+}
+
+/// The badges a client shows: those a TeamSpeak 6 server verified
+/// (`client_signed_badges`, ids joined by `,`) first, then those of its
+/// `client_badges` ([`parse_badges`]), each once.
+pub fn shown_badges(badges: &str, signed: &str) -> Vec<String> {
+	let signed = signed.split(',').map(str::trim).filter(|g| !g.is_empty()).map(str::to_owned);
+	let mut shown: Vec<String> = Vec::new();
+	for guid in signed.chain(parse_badges(badges)) {
+		if !shown.iter().any(|g| g.eq_ignore_ascii_case(&guid)) {
+			shown.push(guid);
+		}
+	}
+	shown
+}
+
+/// The picture to show of a `client_myteamspeak_avatar` value (TeamSpeak
+/// 6): `<state>,<url>;<state>,<url>…`, states as myTeamSpeak's
+/// `AvatarState` (1 do not disturb, 2 online, 3 away, 4 offline). As the
+/// official client reads it: an entry that is not `<number>,<url>` (an
+/// empty one too, from a trailing `;`) makes the whole value no avatar;
+/// the "online" picture is shown whatever the client's state (an unknown
+/// state counts as online), else away, do not disturb, offline, the first
+/// of a kind. Only an HTTPS link of at most 4 KiB.
+pub fn myts_avatar_url(value: &str) -> Option<String> {
+	let mut best: Option<(u8, &str)> = None;
+	for entry in value.split(';') {
+		let mut parts = entry.split(',');
+		let state: u32 = parts.next()?.trim().parse().ok()?;
+		let url = parts.next()?.trim();
+		let rank = match state {
+			3 => 1,
+			1 => 2,
+			4 => 3,
+			_ => 0,
+		};
+		if best.is_none_or(|(r, _)| rank < r) {
+			best = Some((rank, url));
+		}
+	}
+	let url = best?.1;
+	(url.starts_with("https://") && url.len() <= 4096).then(|| url.to_owned())
 }
 
 /// How a group's name is shown next to its members.
@@ -349,6 +396,38 @@ mod tests {
 	}
 
 	#[test]
+	fn myts_avatars_as_the_official_client_reads_them() {
+		let on = "https://a.example.test/on.png";
+		assert_eq!(myts_avatar_url(&format!("3,https://a/away;2,{on}")).as_deref(), Some(on));
+		// Away before do not disturb before offline; the first of a kind.
+		assert_eq!(
+			myts_avatar_url("4,https://a/off;1,https://a/dnd;3,https://a/away;3,https://a/b")
+				.as_deref(),
+			Some("https://a/away")
+		);
+		assert_eq!(
+			myts_avatar_url("1,https://a/dnd;4,https://a/off").as_deref(),
+			Some("https://a/dnd")
+		);
+		// An unknown state counts as online.
+		assert_eq!(
+			myts_avatar_url("3,https://a/away;9,https://a/x").as_deref(),
+			Some("https://a/x")
+		);
+		// One bad entry spoils the value.
+		for bad in ["", "2", "x,https://a/on", "2,https://a/on;", "2,https://a/on;;3,https://a/b"] {
+			assert_eq!(myts_avatar_url(bad), None, "{bad:?}");
+		}
+		// Only HTTPS, and not endless.
+		assert_eq!(myts_avatar_url("2,http://a/on"), None);
+		assert_eq!(myts_avatar_url(&format!("2,https://a/{}", "x".repeat(4096))), None);
+		// Older JSON without the field still loads.
+		let client: ClientInfo =
+			serde_json::from_str(r#"{"id":1,"nickname":"a","channel":1}"#).unwrap();
+		assert_eq!(client.myts_avatar, None);
+	}
+
+	#[test]
 	fn badges_and_groups() {
 		assert_eq!(
 			parse_badges(
@@ -358,6 +437,19 @@ mod tests {
 		);
 		assert!(parse_badges("").is_empty());
 		assert!(parse_badges("Overwolf=1").is_empty());
+		// TeamSpeak 6's verified badges first, each once.
+		assert_eq!(
+			shown_badges(
+				"Overwolf=0:badges=c9e97536-5a2d-4c8e-a135-af404587a472,450f81c1-ab41-4211-a338-222fa94ed157",
+				"450F81C1-AB41-4211-A338-222FA94ED157,1cb07348-34a4-4741-b50f-c41e584370f7"
+			),
+			[
+				"450F81C1-AB41-4211-A338-222FA94ED157",
+				"1cb07348-34a4-4741-b50f-c41e584370f7",
+				"c9e97536-5a2d-4c8e-a135-af404587a472"
+			]
+		);
+		assert!(shown_badges("", "").is_empty());
 		let group = |id, sort_id| GroupInfo { id, sort_id, ..Default::default() };
 		let groups = BTreeMap::from([(1, group(1, 20)), (2, group(2, 10)), (3, group(3, 10))]);
 		let order: Vec<_> = Presence::sorted_groups(&groups).iter().map(|g| g.id).collect();

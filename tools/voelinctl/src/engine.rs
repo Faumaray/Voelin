@@ -99,7 +99,7 @@ pub async fn run(args: GatewayArgs) -> Result<()> {
 	}
 	engine.send(Command::ObserveGateway {
 		session: SESSION,
-		url: args.url.clone(),
+		urls: vec![args.url.clone()],
 		identity: Box::new(identity.clone()),
 	});
 	if let Some(addr) = &args.voice {

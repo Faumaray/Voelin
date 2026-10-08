@@ -6,7 +6,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, TreeItem } from "../bridge.slint";
 import { Nav } from "../nav.slint";
-import { Icon, Button, ButtonKind, IconButton, Avatar, LiveBadge, Chip, SectionHeader, SpeakingBars, PopupMenu, MenuEntry, ListView, BannerPicture } from "../components/index.slint";
+import { Icon, Button, ButtonKind, IconButton, Avatar, LiveBadge, Chip, BadgeIcons, SectionHeader, SpeakingBars, PopupMenu, MenuEntry, ListView, BannerPicture } from "../components/index.slint";
 
 // The banner at the top of the sidebar: server name, counts, a menu.
 export component ServerHeader inherits Rectangle {
@@ -83,7 +83,7 @@ export component ServerHeader inherits Rectangle {
     menu := PopupMenu {
         entries: [
             { text: @tr("Edit server"), icon: Icons.pencil, enabled: Bridge.current-server >= 0 },
-            { text: @tr("Add server"), icon: Icons.plus, enabled: true, separator: true },
+            { text: @tr("Add a server"), icon: Icons.plus, enabled: true, separator: true },
         ];
         activated(i) => {
             if i == 0 {
@@ -126,6 +126,8 @@ component TreeRow inherits Rectangle {
     in property <TreeItem> item;
     callback client-clicked(int);
     property <length> indent: item.depth * 14px;
+    // A spacer that only separates: a line, or no text.
+    property <bool> separator: item.is-channel && (item.spacer == 4 || (item.spacer != 0 && item.name == ""));
     height: item.is-channel ? 34px * Theme.font-scale : 30px * Theme.font-scale;
     clip: true;
     border-radius: Theme.radius-md;
@@ -133,7 +135,7 @@ component TreeRow inherits Rectangle {
     border-width: item.is-channel && item.own ? 1px : 0px;
     border-color: Theme.accent;
     accessible-role: AccessibleRole.list-item;
-    accessible-label: item.is-channel ? @tr("Channel {}", item.name) : item.name;
+    accessible-label: !item.is-channel ? item.name : root.separator ? @tr("Separator") : @tr("Channel {}", item.name);
     accessible-description: (item.talking ? @tr("talking") + " " : "") + (item.streaming ? @tr("streaming") + " " : "") + (item.muted ? @tr("microphone off") + " " : "") + (item.local-muted ? @tr("muted for you") : "");
     accessible-action-default => {
         if item.is-channel {
@@ -177,35 +179,39 @@ component TreeRow inherits Rectangle {
         padding-left: Theme.space-2 + root.indent;
         padding-right: Theme.space-3;
         spacing: Theme.space-2;
-        if item.centered-spacer: Rectangle { width: 18px; }
-        if !item.centered-spacer && item.icon.width > 0: RowIcon {
+        // Spacers have no icon; a centred one is balanced against the
+        // chevron.
+        if item.spacer == 2: Rectangle { width: 18px; }
+        if item.spacer == 0 && item.icon.width > 0: RowIcon {
             source: item.icon;
         }
-        if !item.centered-spacer && item.icon.width == 0: Icon {
-            source: item.locked ? Icons.lock : Icons.volume-2;
+        if item.spacer == 0 && item.icon.width == 0: Icon {
+            source: item.locked ? Icons.lock : Icons.channel;
             size: 18px;
             tint: item.banner.width > 0 || item.own ? Theme.text : Theme.icon;
             y: (parent.height - self.height) / 2;
         }
         Text {
             text: item.name;
-            horizontal-alignment: item.centered-spacer ? center : left;
+            horizontal-alignment: item.spacer == 2 ? center : item.spacer == 3 ? right : left;
             // Full contrast over a banner.
             color: item.own || item.banner.width > 0 ? Theme.text : Theme.text-secondary;
             font-weight: item.own || item.banner.width > 0 ? Theme.weight-semibold : Theme.weight-medium;
             vertical-alignment: center;
             horizontal-stretch: 1;
-            overflow: elide;
+            // A line is cut where the row ends; it must not widen the list.
+            overflow: item.spacer == 4 ? clip : elide;
+            min-width: 0px;
         }
         // At the end where the start shows the channel's icon, or nothing
-        // (a centred spacer).
-        if item.locked && (item.icon.width > 0 || item.centered-spacer): Icon {
+        // (a spacer).
+        if item.locked && (item.icon.width > 0 || item.spacer != 0): Icon {
             source: Icons.lock;
             size: 14px;
             tint: item.banner.width > 0 ? Theme.text : Theme.icon;
             y: (parent.height - self.height) / 2;
         }
-        if !item.centered-spacer && (item.members > 0 || item.max-members >= 0): HorizontalLayout {
+        if item.spacer == 0 && (item.members > 0 || item.max-members >= 0): HorizontalLayout {
             spacing: 3px;
             if item.own: Icon {
                 source: Icons.users;
@@ -251,13 +257,21 @@ component TreeRow inherits Rectangle {
                 label: item.name;
             }
         }
+        // The name elides first; its badges follow it, then the free room.
         Text {
             text: item.name;
             color: item.away ? Theme.text-muted : item.myself ? Theme.accent-text : Theme.text-secondary;
             font-weight: item.myself ? Theme.weight-semibold : Theme.weight-regular;
             vertical-alignment: center;
-            horizontal-stretch: 1;
+            horizontal-stretch: 0;
             overflow: elide;
+        }
+        BadgeIcons {
+            horizontal-stretch: 1;
+            alignment: start;
+            first: item.badge;
+            second: item.badge-2;
+            third: item.badge-3;
         }
         if item.talking: VerticalLayout {
             alignment: center;
@@ -339,7 +353,7 @@ export component ChannelTree inherits VerticalLayout {
     spacing: Theme.space-2;
     SectionHeader {
         text: @tr("Channels");
-        icon: Icons.volume-2;
+        icon: Icons.channel;
         small: true;
     }
     if Bridge.tree.length == 0: Text {

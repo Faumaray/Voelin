@@ -33,7 +33,7 @@ use crate::cache;
 use crate::files::{self, FileEntry, Report, RequestId, Sink, TransferId, TransferState};
 use crate::offline::{OfflineMessage, OfflineMessageInfo};
 use crate::settings::{FILES_PROGRESS_MS, SharedSettings};
-use crate::{Event, SessionId};
+use crate::{Event, JoinFailure, POKE_MESSAGE_MAX, SessionId};
 
 #[derive(Clone, Debug)]
 pub struct VoiceOptions {
@@ -43,8 +43,12 @@ pub struct VoiceOptions {
 	/// Signed compatibility version; `None` selects the native platform's tuple.
 	pub client_version: Option<Version>,
 	pub server_password: Option<String>,
-	/// Channel path to join, e.g. `Lobby/Sub`.
+	/// Channel path to join, e.g. `Lobby/Sub`, or `/<id>`.
 	pub channel: Option<String>,
+	/// The password of `channel`.
+	pub channel_password: Option<String>,
+	/// A privilege key to use when connecting.
+	pub token: Option<String>,
 	/// Open the audio devices (capture and playback).
 	pub audio: bool,
 	/// Network settings for stream peer connections (TeamSpeak 6).
@@ -60,6 +64,8 @@ impl VoiceOptions {
 			client_version: None,
 			server_password: None,
 			channel: None,
+			channel_password: None,
+			token: None,
 			audio: false,
 			stream_peer: PeerConfig::default(),
 		}
@@ -70,6 +76,8 @@ impl VoiceOptions {
 #[derive(Clone)]
 pub(crate) struct VoiceLink {
 	pub myts_identity: watch::Receiver<Option<Arc<tsproto::myts::Identity>>>,
+	/// What the server is shown of the account ([`crate::Command::SetMytsData`]).
+	pub myts_data: watch::Receiver<Option<Arc<tsclientlib::MytsData>>>,
 	pub session: SessionId,
 	pub events: broadcast::Sender<Event>,
 	pub settings: SharedSettings,
@@ -225,8 +233,35 @@ fn now_ms() -> i64 {
 		.unwrap_or_default()
 }
 
+/// What `client_user_tag` is to be set to, if anything: on servers that
+/// know it (`user_tags`), the tag `wanted` where `shown` is another (or
+/// none), or `again` after a new account proof; empty (cleared) where one
+/// is shown that is no longer wanted.
+fn user_tag_update(
+	wanted: Option<&tsclientlib::UserTag>,
+	shown: Option<&tsclientlib::UserTag>,
+	user_tags: bool,
+	again: bool,
+	now_ms: i64,
+) -> Option<String> {
+	match (wanted, shown) {
+		_ if !user_tags => None,
+		(Some(tag), shown) if again || shown != Some(tag) => Some(tag.value(now_ms)),
+		(None, Some(_)) => Some(String::new()),
+		_ => None,
+	}
+}
+
+/// Which of the badges sent (`sent`, their ids) the server does not
+/// publish (`client_signed_badges`: the ids that verified, joined by `,`).
+fn badges_dropped<'a>(sent: &'a [String], published: &str) -> Vec<&'a str> {
+	let published: Vec<&str> = published.split(',').collect();
+	sent.iter().map(String::as_str).filter(|id| !published.contains(id)).collect()
+}
+
 enum Input {
 	MytsIdentityChanged,
+	MytsDataChanged,
 	AccountSourceClosed,
 	Item(Option<Result<StreamItem, tsclientlib::Error>>),
 	Cmd(Option<VoiceCmd>),
@@ -236,6 +271,16 @@ enum Input {
 /// A command waiting for the server's answer.
 enum Pending {
 	MytsIdentity(Instant),
+	/// `updatemytsdata`: whether it showed the avatar and the badges (else
+	/// it cleared them), and the ids of the badges shown; what the server
+	/// published is only logged.
+	MytsData {
+		avatar: Option<bool>,
+		badges: Option<bool>,
+		badge_ids: Vec<String>,
+	},
+	/// `clientupdate client_user_tag`: the value (empty: cleared); only logged.
+	UserTag(String),
 	Stream(Request),
 	FileList {
 		request: RequestId,
@@ -252,6 +297,10 @@ enum Pending {
 		request: RequestId,
 		id: u32,
 		message: Option<OfflineMessage>,
+	},
+	/// Moving ourselves; refusals are reported as [`Event::JoinFailed`].
+	Move {
+		channel: ChannelId,
 	},
 	/// Failures are reported as [`VoiceEvent::Error`] with this label.
 	Report(&'static str),
@@ -290,17 +339,21 @@ impl Job {
 	}
 }
 
-/// How long a picture of `size` bytes may take to arrive: half a minute,
-/// plus its size at [`cache::MIN_PICTURE_RATE`], so large banners arrive on
-/// slow links while a stalled transfer still ends.
+/// How long a picture of `size` bytes may take to arrive: a minute, plus
+/// its size at [`cache::MIN_PICTURE_RATE`], so large banners arrive on slow
+/// links while a stalled transfer still ends.
 fn image_download_time(size: u64) -> Duration {
-	Duration::from_secs(30 + size / cache::MIN_PICTURE_RATE)
+	Duration::from_secs(60 + size / cache::MIN_PICTURE_RATE)
 }
+
+/// How long the server may take to start an image transfer (a busy server
+/// answers the requests of a large channel tree in turn).
+const IMAGE_NEGOTIATION: Duration = Duration::from_secs(30);
 
 /// Bound background image handshakes without imposing a deadline on user transfers.
 fn expire_image_jobs(jobs: &mut HashMap<FiletransferHandle, Job>, now: Instant) {
 	jobs.retain(|_, job| {
-		if matches!(job, Job::Download { transfer: None, started, .. } if now.duration_since(*started) >= Duration::from_secs(15)) {
+		if matches!(job, Job::Download { transfer: None, started, .. } if now.duration_since(*started) >= IMAGE_NEGOTIATION) {
 			job.report()(TransferState::Failed("image transfer negotiation timed out".into()));
 			false
 		} else {
@@ -340,6 +393,12 @@ struct Voice {
 	pending: HashMap<MessageHandle, Pending>,
 	jobs: HashMap<FiletransferHandle, Job>,
 	transfers: HashMap<TransferId, Slot>,
+	/// `updatemytsdata` is to be sent once connected again: a reconnect
+	/// (tsclientlib's own) leaves the server without it.
+	myts_data_due: bool,
+	/// What this connection has shown the server of the account (avatar,
+	/// badges, User Tag): what changes, and what a sign-out clears.
+	myts_shown: tsclientlib::MytsData,
 }
 
 async fn run_inner(
@@ -365,7 +424,14 @@ async fn run_inner(
 	if let Some(channel) = &options.channel {
 		builder = builder.channel(channel.clone());
 	}
+	if let Some(pw) = options.channel_password.as_ref().filter(|p| !p.is_empty()) {
+		builder = builder.channel_password(pw.clone());
+	}
+	if let Some(token) = &options.token {
+		builder = builder.default_token(token.clone());
+	}
 	let mut identity = link.myts_identity.clone();
+	let mut data = link.myts_data.clone();
 	// A changed account invalidates an in-flight handshake. Drop that connection
 	// and take a fresh snapshot before publishing any connected state.
 	let mut con = timeout(Duration::from_secs(30), async {
@@ -433,8 +499,14 @@ async fn run_inner(
 		pending: HashMap::new(),
 		jobs: HashMap::new(),
 		transfers: HashMap::new(),
+		myts_data_due: false,
+		myts_shown: tsclientlib::MytsData::default(),
 	};
 	voice.publish_state()?;
+	// The account's avatar, badges and User Tag, for everyone on the
+	// server (as the official client, once connected).
+	data.borrow_and_update();
+	voice.send_myts_data(true);
 
 	let mut tick = tokio::time::interval(Duration::from_millis(250));
 	let result = loop {
@@ -445,7 +517,9 @@ async fn run_inner(
 		}) {
 			break Err(anyhow::anyhow!("myTeamSpeak account update timed out"));
 		}
-		let input = next_input(&mut voice.con.events(), commands, &mut tick, &mut identity).await;
+		let input =
+			next_input(&mut voice.con.events(), commands, &mut tick, &mut identity, &mut data)
+				.await;
 		match input {
 			Input::AccountSourceClosed => break Err(anyhow::anyhow!("account source closed")),
 			Input::MytsIdentityChanged => {
@@ -456,6 +530,15 @@ async fn run_inner(
 					}
 					Err(e) => break Err(anyhow::anyhow!("myTeamSpeak account update: {e}")),
 				}
+				// After the proof, what is shown of the account (a sign-in):
+				// its change, if any, is in this one. All of it again: the
+				// server checks it for the myTS ID it holds when it comes.
+				data.borrow_and_update();
+				voice.send_myts_data(true);
+			}
+			Input::MytsDataChanged => {
+				data.borrow_and_update();
+				voice.send_myts_data(false);
 			}
 			Input::Item(None) => break Err(anyhow::anyhow!("connection closed")),
 			Input::Item(Some(Err(e))) => break Err(e.into()),
@@ -488,11 +571,17 @@ async fn next_input(
 	commands: &mut mpsc::UnboundedReceiver<VoiceCmd>,
 	tick: &mut tokio::time::Interval,
 	identity: &mut watch::Receiver<Option<Arc<tsproto::myts::Identity>>>,
+	data: &mut watch::Receiver<Option<Arc<tsclientlib::MytsData>>>,
 ) -> Input {
 	tokio::select! {
 		biased;
 		changed = identity.changed() => if changed.is_ok() {
 			Input::MytsIdentityChanged
+		} else {
+			Input::AccountSourceClosed
+		},
+		changed = data.changed() => if changed.is_ok() {
+			Input::MytsDataChanged
 		} else {
 			Input::AccountSourceClosed
 		},
@@ -561,6 +650,10 @@ impl Voice {
 					if let BookEvent::Message { target, invoker, message } = e {
 						self.message(target, invoker, message);
 					}
+				}
+				// Connected again after a reconnect.
+				if self.myts_data_due {
+					self.send_myts_data(true);
 				}
 				self.publish_state()?;
 			}
@@ -644,6 +737,9 @@ impl Voice {
 			}
 			StreamItem::DisconnectedTemporarily(reason) => {
 				warn!(?reason, "voice connection interrupted, reconnecting");
+				// A new client on the server: it shows nothing of the account.
+				self.myts_data_due = true;
+				self.myts_shown = tsclientlib::MytsData::default();
 			}
 			_ => {}
 		}
@@ -801,12 +897,166 @@ impl Voice {
 				};
 				self.link.emit(Event::OfflineMessage { session, request, result });
 			}
+			Pending::Move { channel } => {
+				if let Err(e) = result
+					&& let Some(reason) = join_failure(e)
+				{
+					self.link.emit(Event::JoinFailed { session, channel, reason });
+				}
+			}
 			Pending::Quiet | Pending::MytsIdentity(_) => {}
+			Pending::MytsData { avatar, badges, badge_ids } => match result {
+				Ok(()) => self.myts_published(avatar, badges, &badge_ids),
+				Err(TsError::ParameterInvalid) => warn!(
+					"the server refused the account's myTeamSpeak certificate (error 1538): it \
+					 is expired, revoked or not a myTeamSpeak signing certificate, or the \
+					 server could not load myTeamSpeak's revocation list"
+				),
+				Err(e) => warn!(error = %e, "the server refused the account's avatar or badges"),
+			},
+			Pending::UserTag(value) => match result {
+				Ok(()) => {
+					let own = self.con.get_state().ok().and_then(|state| {
+						state.clients.get(&state.own_client).and_then(|c| c.user_tag.clone())
+					});
+					if value.is_empty() {
+						info!("the server no longer shows a User Tag for the account");
+					} else if own.as_deref() == Some(value.as_str()) {
+						info!("the server shows the account's User Tag");
+					} else {
+						warn!("the server took the account's User Tag but shows another value");
+					}
+				}
+				Err(e) => warn!(error = %e, "the server refused the account's User Tag"),
+			},
 			Pending::Report(what) => {
 				if let Err(e) = result {
 					let _ = self.events.send(VoiceEvent::Error(format!("{what}: {e}")));
 				}
 			}
+		}
+	}
+
+	/// What is to be shown of the account on this connection: what the UI
+	/// gave, when it is for the myTS ID this connection presents; nothing
+	/// without one (signed out).
+	fn myts_wanted(&self) -> tsclientlib::MytsData {
+		let identity = self.link.myts_identity.borrow();
+		let data = self.link.myts_data.borrow();
+		match (identity.as_deref(), data.as_deref()) {
+			(Some(identity), Some(data)) if data.myts_id == identity.id_bytes() => data.clone(),
+			_ => tsclientlib::MytsData::default(),
+		}
+	}
+
+	/// Whether the server knows the User Tag (TeamSpeak 6: it names
+	/// `client_user_tag` for our client, protocol 8 on).
+	fn has_user_tags(&self) -> bool {
+		self.con.get_state().is_ok_and(|state| {
+			state.server.protocol_version >= 8
+				|| state.clients.get(&state.own_client).is_some_and(|c| c.user_tag.is_some())
+		})
+	}
+
+	/// Show the server the account's avatar, badges and User Tag where it
+	/// shows something else (`updatemytsdata`, `clientupdate`), or clear
+	/// them; `again`: all of it, after a new account proof. While
+	/// reconnecting, once connected again.
+	fn send_myts_data(&mut self, again: bool) {
+		self.myts_data_due = false;
+		if self.con.get_state().is_err() {
+			self.myts_data_due = true;
+			return;
+		}
+		let mut wanted = self.myts_wanted();
+		let user_tags = self.has_user_tags();
+		if !user_tags {
+			wanted.user_tag = None;
+		}
+		for update in wanted.updates(&self.myts_shown, again) {
+			let shows = |part: &Option<Vec<u8>>| part.as_ref().map(|data| !data.is_empty());
+			let (avatar, badges) = (shows(&update.avatar), shows(&update.badges));
+			let badge_ids =
+				if badges == Some(true) { wanted.badge_ids.clone() } else { Vec::new() };
+			info!(
+				avatar = ?avatar.map(|shown| if shown { "shown" } else { "cleared" }),
+				badges = ?badges.map(|shown| if shown { "shown" } else { "cleared" }),
+				?badge_ids,
+				"telling the server what to show of the account (updatemytsdata)"
+			);
+			match self.con.send_myts_update(&update) {
+				Ok(handle) => {
+					let pending = Pending::MytsData { avatar, badges, badge_ids };
+					self.pending.insert(handle, pending);
+				}
+				Err(tsclientlib::Error::NotConnected) => {
+					self.myts_data_due = true;
+					return;
+				}
+				Err(e) => warn!(error = %e, "the account's avatar or badges were not sent"),
+			}
+		}
+		let shown = self.myts_shown.user_tag.as_ref();
+		if let Some(value) =
+			user_tag_update(wanted.user_tag.as_ref(), shown, user_tags, again, now_ms())
+		{
+			match &wanted.user_tag {
+				Some(tag) if !value.is_empty() => {
+					info!(tag = %tag.tag, "setting the account's User Tag")
+				}
+				_ => info!("clearing the account's User Tag"),
+			}
+			match self.con.send_user_tag(&value) {
+				Ok(handle) => {
+					self.pending.insert(handle, Pending::UserTag(value));
+				}
+				Err(tsclientlib::Error::NotConnected) => {
+					self.myts_data_due = true;
+					return;
+				}
+				Err(e) => warn!(error = %e, "the account's User Tag was not sent"),
+			}
+		}
+		self.myts_shown = wanted;
+	}
+
+	/// What the server published of an `updatemytsdata` it took: it says so
+	/// for our client before its answer, and shows nothing of what does not
+	/// verify, without an error.
+	fn myts_published(&self, avatar: Option<bool>, badges: Option<bool>, badge_ids: &[String]) {
+		let Ok(state) = self.con.get_state() else { return };
+		let Some(own) = state.clients.get(&state.own_client) else { return };
+		let has_id = own.my_team_speak_id.as_deref().is_some_and(|id| !id.is_empty());
+		let why = if has_id {
+			"its signature does not verify with the certificate for the account's myTS ID"
+		} else {
+			"the server holds no myTS ID for this client (the account proof was not accepted)"
+		};
+		match avatar {
+			Some(true) if own.my_team_speak_avatar.as_deref().is_some_and(|a| !a.is_empty()) => {
+				info!("the server shows the account's avatar")
+			}
+			Some(true) => warn!(why, "the server took the account's avatar but shows none"),
+			Some(false) => info!("the server no longer shows an avatar for the account"),
+			None => {}
+		}
+		let published = own.signed_badges.as_deref().unwrap_or_default();
+		let dropped = badges_dropped(badge_ids, published);
+		match badges {
+			Some(true) if published.is_empty() => {
+				warn!(why, "the server took the account's badges but shows none")
+			}
+			Some(true) if dropped.is_empty() => {
+				info!(published, "the server shows the account's badges")
+			}
+			Some(true) => warn!(
+				published,
+				?dropped,
+				"the server shows only some of the account's badges: the others' signatures do \
+				 not verify for the account's myTS ID"
+			),
+			Some(false) => info!("the server no longer shows badges for the account"),
+			None => {}
 		}
 	}
 
@@ -840,13 +1090,15 @@ impl Voice {
 				self.send(out, Pending::Report("message"))?;
 			}
 			VoiceCmd::Move(channel, password) => {
-				let state = self.con.get_state()?;
-				let own = &state.clients[&state.own_client];
-				let mut part = own.client_move(tsclientlib::ChannelId(channel));
-				if let Some(pw) = &password {
-					part = part.set_password(pw);
-				}
-				part.send(&mut self.con)?;
+				let own = self.con.get_state()?.own_client;
+				let cpw = encode_password(password.as_deref());
+				let cmd =
+					c2s::OutClientMoveMessage::new(&mut std::iter::once(c2s::OutClientMovePart {
+						client_id: own,
+						channel_id: tsclientlib::ChannelId(channel),
+						channel_password: (!cpw.is_empty()).then_some(cpw.as_str().into()),
+					}));
+				self.send(cmd, Pending::Move { channel })?;
 			}
 			VoiceCmd::SetInputMuted(muted) => {
 				self.con.get_state()?.client_update().set_input_muted(muted).send(&mut self.con)?;
@@ -864,7 +1116,7 @@ impl Voice {
 				let cmd = c2s::OutClientPokeRequestMessage::new(&mut std::iter::once(
 					c2s::OutClientPokeRequestPart {
 						client_id: tsclientlib::ClientId(client),
-						message: message.as_str().into(),
+						message: poke_message(&message).into(),
 					},
 				));
 				self.send(cmd, Pending::Report("poke"))?;
@@ -1053,6 +1305,48 @@ impl Voice {
 	}
 }
 
+/// Why a move into a channel failed, for the user; `None` when there is
+/// nothing to tell (we are in that channel already).
+fn join_failure(error: TsError) -> Option<JoinFailure> {
+	let text = match error {
+		TsError::ChannelAlreadyIn => return None,
+		TsError::ChannelInvalidPassword => return Some(JoinFailure::Password),
+		TsError::ChannelMaxclientsReached | TsError::ChannelMaxfamilyReached => {
+			return Some(JoinFailure::Full);
+		}
+		TsError::ChannelInvalidId => "The channel does not exist any more.".to_owned(),
+		TsError::PermissionsClientInsufficient | TsError::Permissions => {
+			"You are not allowed to join this channel.".to_owned()
+		}
+		TsError::ClientIsFlooding => "Too many requests: try again in a moment.".to_owned(),
+		// The error's name in words (its Display is the name).
+		e => format!("The server refused to move you: {}.", error_words(e)),
+	};
+	Some(JoinFailure::Other(text))
+}
+
+/// A poke's message as servers take it: its first [`POKE_MESSAGE_MAX`]
+/// characters (not bytes, so a letter is never cut in half).
+fn poke_message(message: &str) -> &str {
+	match message.char_indices().nth(POKE_MESSAGE_MAX) {
+		Some((end, _)) => &message[..end],
+		None => message,
+	}
+}
+
+/// A TeamSpeak error's name in lowercase words:
+/// `ChannelIsPrivateChannel` is "channel is private channel".
+fn error_words(error: TsError) -> String {
+	let mut words = String::new();
+	for c in format!("{error:?}").chars() {
+		if c.is_ascii_uppercase() && !words.is_empty() {
+			words.push(' ');
+		}
+		words.push(c.to_ascii_lowercase());
+	}
+	words
+}
+
 /// A failed transfer, for the user.
 fn transfer_error(error: &tsclientlib::Error) -> String {
 	match error {
@@ -1060,6 +1354,47 @@ fn transfer_error(error: &tsclientlib::Error) -> String {
 			"file not found".into()
 		}
 		e => e.to_string(),
+	}
+}
+
+#[cfg(test)]
+mod join_tests {
+	use super::*;
+
+	#[test]
+	fn refused_moves_say_why() {
+		assert_eq!(join_failure(TsError::ChannelInvalidPassword), Some(JoinFailure::Password));
+		assert_eq!(join_failure(TsError::ChannelMaxclientsReached), Some(JoinFailure::Full));
+		assert_eq!(join_failure(TsError::ChannelMaxfamilyReached), Some(JoinFailure::Full));
+		// Moving to the channel we are in.
+		assert_eq!(join_failure(TsError::ChannelAlreadyIn), None);
+		let other = |text: &str| Some(JoinFailure::Other(text.into()));
+		assert_eq!(
+			join_failure(TsError::PermissionsClientInsufficient),
+			other("You are not allowed to join this channel.")
+		);
+		// The rest in words, not the error's name.
+		assert_eq!(
+			join_failure(TsError::ChannelIsPrivateChannel),
+			other("The server refused to move you: channel is private channel.")
+		);
+	}
+}
+
+#[cfg(test)]
+mod poke_tests {
+	use super::*;
+
+	#[test]
+	fn long_pokes_are_cut_by_characters() {
+		assert_eq!(poke_message("hi"), "hi");
+		assert_eq!(poke_message(""), "");
+		let exact = "x".repeat(POKE_MESSAGE_MAX);
+		assert_eq!(poke_message(&exact), exact);
+		// Two bytes each: cut after 100 letters, not 100 bytes.
+		let long = "ä".repeat(150);
+		assert_eq!(poke_message(&long), "ä".repeat(POKE_MESSAGE_MAX));
+		assert_eq!(poke_message(&"🙂".repeat(101)).chars().count(), POKE_MESSAGE_MAX);
 	}
 }
 
@@ -1087,10 +1422,10 @@ mod image_download_tests {
 				},
 			);
 		}
-		expire_image_jobs(&mut jobs, started + Duration::from_secs(14));
+		expire_image_jobs(&mut jobs, started + IMAGE_NEGOTIATION - Duration::from_secs(1));
 		assert_eq!(jobs.len(), 2);
 		assert!(reports.lock().unwrap().is_empty());
-		expire_image_jobs(&mut jobs, started + Duration::from_secs(15));
+		expire_image_jobs(&mut jobs, started + IMAGE_NEGOTIATION);
 		assert_eq!(jobs.len(), 1);
 		assert!(jobs.contains_key(&FiletransferHandle(2)));
 		assert!(
@@ -1102,10 +1437,10 @@ mod image_download_tests {
 
 	#[test]
 	fn large_pictures_get_time_to_arrive() {
-		assert_eq!(image_download_time(0), Duration::from_secs(30));
-		assert_eq!(image_download_time(100 << 10), Duration::from_secs(33));
+		assert_eq!(image_download_time(0), Duration::from_secs(60));
+		assert_eq!(image_download_time(100 << 10), Duration::from_secs(72));
 		// The largest picture, at the slowest rate allowed.
-		assert_eq!(image_download_time(cache::MAX_PICTURE_BYTES), Duration::from_secs(30 + 2048));
+		assert_eq!(image_download_time(cache::MAX_PICTURE_BYTES), Duration::from_secs(60 + 16384));
 	}
 }
 
@@ -1116,6 +1451,7 @@ mod account_tests {
 	#[tokio::test(start_paused = true)]
 	async fn account_priority_preserves_ready_network_and_timer_progress() {
 		let (account, mut identity) = watch::channel(None);
+		let (account_data, mut data) = watch::channel(None);
 		let (commands, mut receiver) = mpsc::unbounded_channel();
 		for _ in 0..512 {
 			commands.send(VoiceCmd::SetInputMuted(false)).unwrap();
@@ -1126,14 +1462,22 @@ mod account_tests {
 		let mut tick = tokio::time::interval(Duration::from_millis(1));
 		account.send_replace(None);
 		assert!(matches!(
-			next_input(&mut stream, &mut receiver, &mut tick, &mut identity).await,
+			next_input(&mut stream, &mut receiver, &mut tick, &mut identity, &mut data).await,
 			Input::MytsIdentityChanged
 		));
 		identity.borrow_and_update();
+		// What is shown of the account changes too, ahead of the rest.
+		account_data.send_replace(Some(Arc::new(tsclientlib::MytsData::default())));
+		assert!(matches!(
+			next_input(&mut stream, &mut receiver, &mut tick, &mut identity, &mut data).await,
+			Input::MytsDataChanged
+		));
+		data.borrow_and_update();
 		let (mut network, mut timers, mut audio) = (0, 0, 0);
 		for _ in 0..512 {
 			tokio::time::advance(Duration::from_millis(1)).await;
-			match next_input(&mut stream, &mut receiver, &mut tick, &mut identity).await {
+			match next_input(&mut stream, &mut receiver, &mut tick, &mut identity, &mut data).await
+			{
 				Input::Item(_) => network += 1,
 				Input::Tick => timers += 1,
 				Input::Cmd(_) => audio += 1,
@@ -1141,6 +1485,130 @@ mod account_tests {
 			}
 		}
 		assert!(network > 0 && timers > 0 && audio > 0);
+	}
+
+	fn account_data(myts_id: &[u8]) -> tsclientlib::MytsData {
+		let signed = |data: &[u8]| tsclientlib::Signed { certificate: vec![1], data: data.into() };
+		tsclientlib::MytsData {
+			myts_id: myts_id.to_vec(),
+			avatar: signed(b"avatar"),
+			badges: signed(b"badges"),
+			badge_ids: vec!["b1".into()],
+			user_tag: Some(tsclientlib::UserTag {
+				tag: "a@myteamspeak.com".into(),
+				token: vec![2],
+			}),
+		}
+	}
+
+	/// The User Tag is set where it is not shown yet, or after a new account
+	/// proof, and cleared where it is no longer wanted: on TeamSpeak 6
+	/// servers only.
+	#[test]
+	fn the_user_tag_is_set_where_it_changed() {
+		let tag = |tag: &str| tsclientlib::UserTag { tag: tag.into(), token: vec![2] };
+		let (a, b) = (tag("a@myteamspeak.com"), tag("b@myteamspeak.com"));
+		let update =
+			|wanted, shown, user_tags, again| user_tag_update(wanted, shown, user_tags, again, 5);
+		let set = Some(a.value(5));
+		assert!(set.as_deref().unwrap().starts_with(r#"{"myts_token":"Ag==","tag":"a@"#));
+		assert_eq!(update(Some(&a), None, true, false), set);
+		assert_eq!(update(Some(&a), Some(&a), true, false), None, "unchanged");
+		assert_eq!(update(Some(&a), Some(&a), true, true), set, "after a new account proof");
+		assert_eq!(update(Some(&a), Some(&b), true, false), set, "another tag");
+		assert_eq!(update(None, Some(&a), true, false).as_deref(), Some(""), "cleared");
+		assert_eq!(update(None, Some(&a), true, true).as_deref(), Some(""));
+		assert_eq!(update(None, None, true, true), None, "nothing to clear");
+		// Not a TeamSpeak 6 server: nothing, set or cleared.
+		assert_eq!(update(Some(&a), None, false, true), None);
+		assert_eq!(update(None, Some(&a), false, false), None);
+	}
+
+	/// The server publishes the ids of the badges that verified.
+	#[test]
+	fn badges_the_server_dropped_are_named() {
+		let sent: Vec<String> = ["b1", "b2", "b3"].map(String::from).to_vec();
+		assert!(badges_dropped(&sent, "b1,b2,b3").is_empty());
+		assert!(badges_dropped(&sent, "b3,b1,b2").is_empty());
+		assert_eq!(badges_dropped(&sent, "b1,b3"), ["b2"]);
+		assert_eq!(badges_dropped(&sent, ""), ["b1", "b2", "b3"]);
+		assert!(badges_dropped(&[], "b1").is_empty());
+	}
+
+	/// A voice source that never connects (a silent UDP peer) presenting
+	/// the account with myTS ID `[1; 33]`, told to show `data`.
+	fn unconnected(server: &tokio::net::UdpSocket, data: tsclientlib::MytsData) -> Voice {
+		// Scalar one and the standard compressed Edwards base point.
+		let mut private = [0; 32];
+		private[0] = 1;
+		let mut public = [0x66; 32];
+		public[0] = 0x58;
+		let identity =
+			tsproto::myts::Identity::new(vec![1; 33], 42, public, private, vec![2; 65]).unwrap();
+		let (events, _) = broadcast::channel(8);
+		let link = VoiceLink {
+			session: 1,
+			events,
+			settings: SharedSettings::new(crate::settings::Settings::default()),
+			myts_identity: watch::channel(Some(Arc::new(identity))).1,
+			myts_data: watch::channel(Some(Arc::new(data))).1,
+		};
+		Voice {
+			con: Connection::build(server.local_addr().unwrap().to_string()).connect().unwrap(),
+			link,
+			events: mpsc::unbounded_channel().0,
+			server_uid: String::new(),
+			talking: HashMap::new(),
+			pending: HashMap::new(),
+			jobs: HashMap::new(),
+			transfers: HashMap::new(),
+			myts_data_due: false,
+			myts_shown: tsclientlib::MytsData::default(),
+		}
+	}
+
+	/// A reconnect (tsclientlib's own) leaves the server without the
+	/// account's avatar: it goes again once connected, not before.
+	#[tokio::test]
+	async fn account_data_waits_for_the_connection() {
+		let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let mut voice = unconnected(&server, account_data(&[1; 33]));
+		voice.send_myts_data(true);
+		assert!(voice.myts_data_due && voice.pending.is_empty());
+		assert_eq!(voice.myts_shown, tsclientlib::MytsData::default(), "nothing shown yet");
+		voice.myts_data_due = false;
+		voice.myts_shown = account_data(&[1; 33]);
+		let reconnecting = tsclientlib::TemporaryDisconnectReason::Timeout("test");
+		voice.item(StreamItem::DisconnectedTemporarily(reconnecting)).unwrap();
+		assert!(voice.myts_data_due);
+		assert_eq!(
+			voice.myts_shown,
+			tsclientlib::MytsData::default(),
+			"a new client shows nothing"
+		);
+		// Not connected yet: still due.
+		let _ = voice.item(StreamItem::BookEvents(Vec::new()));
+		assert!(voice.myts_data_due && voice.pending.is_empty());
+		timeout(Duration::from_millis(100), shutdown_connection(voice.con)).await.unwrap().unwrap();
+	}
+
+	/// Only what is signed for the myTS ID the connection presents is shown.
+	#[tokio::test]
+	async fn account_data_is_for_the_presented_myts_id() {
+		let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let voice = unconnected(&server, account_data(&[1; 33]));
+		assert_eq!(voice.myts_wanted(), account_data(&[1; 33]));
+		let other = unconnected(&server, account_data(&[2; 33]));
+		assert_eq!(other.myts_wanted(), tsclientlib::MytsData::default());
+		let mut signed_out = unconnected(&server, account_data(&[1; 33]));
+		signed_out.link.myts_identity = watch::channel(None).1;
+		assert_eq!(signed_out.myts_wanted(), tsclientlib::MytsData::default());
+		for voice in [voice, other, signed_out] {
+			timeout(Duration::from_millis(100), shutdown_connection(voice.con))
+				.await
+				.unwrap()
+				.unwrap();
+		}
 	}
 
 	#[tokio::test]
@@ -1168,6 +1636,7 @@ mod account_tests {
 			events,
 			settings: SharedSettings::new(crate::settings::Settings::default()),
 			myts_identity: identity,
+			myts_data: watch::channel(None).1,
 		};
 		let (_commands, commands) = mpsc::unbounded_channel();
 		let (events, mut received) = mpsc::unbounded_channel();

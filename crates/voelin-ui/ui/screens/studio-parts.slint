@@ -8,7 +8,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { ChatLine } from "../bridge.slint";
 import { StudioBridge, StudioNav, StudioScene, StudioSource, StudioAudio, StudioLayer, StudioPick, StudioSourceForm, StudioSettingsForm } from "../studio-bridge.slint";
-import { Icon, Button, ButtonKind, IconButton, Avatar, LiveBadge, Chip, Toggle, ToggleRow, TextField, Field, Select, Slider, Meter, SegmentedTabs, Divider, Spinner, PopupMenu, MenuEntry, Modal, Tooltip, RichText, ListView, ScrollView } from "../components/index.slint";
+import { Icon, Button, ButtonKind, IconButton, Avatar, LiveBadge, Chip, Toggle, ToggleRow, TextField, Field, Select, Slider, Meter, SegmentedTabs, Divider, Spinner, PopupMenu, MenuEntry, Modal, Tooltip, MessageText, ListView, ScrollView } from "../components/index.slint";
 
 // Icons of source and audio kinds.
 export global StudioKinds {
@@ -710,7 +710,6 @@ export component StudioHeader inherits HorizontalLayout {
             }
             Tooltip {
                 text: StudioBridge.status.details;
-                below: true;
                 width: 20px;
                 height: 20px;
                 Icon {
@@ -954,15 +953,9 @@ component ChatRow inherits Rectangle {
                     vertical-alignment: center;
                 }
             }
-            if !line.rich: Text {
-                text: line.text;
-                color: Theme.text;
-                font-size: Theme.font-body;
-                wrap: word-wrap;
-            }
-            if line.rich: RichText {
-                runs: line.runs;
-                emoji-size: line.jumbo ? 32px : Theme.font-body * 1.35;
+            MessageText {
+                line: line;
+                jumbo-size: 32px;
             }
         }
     }
@@ -1148,7 +1141,7 @@ export component DestinationSelect inherits Rectangle {
             border-radius: Theme.radius-md;
             background: Theme.surface-3;
             border-width: 1px;
-            border-color: Theme.border-strong;
+            border-color: Theme.border-popup;
             VerticalLayout {
                 padding: Theme.space-2;
                 for item[i] in StudioBridge.destinations: Rectangle {

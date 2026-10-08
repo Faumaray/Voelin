@@ -11,7 +11,7 @@ import { ServerHeader, ConnectActions, ChannelTree } from "channels.slint";
 import { StreamsPanel } from "streams.slint";
 import { PinsDrawer, TopicsDrawer } from "drawers.slint";
 import { MembersPanel } from "members.slint";
-import { VoiceCard, VoiceButtons } from "../shells/common.slint";
+import { VoiceCard } from "../shells/common.slint";
 import { StudioBridge } from "../studio-bridge.slint";
 import { ShareMenu } from "../share-menu.slint";
 
@@ -60,7 +60,7 @@ export component MobileServers inherits VerticalLayout {
             }
             IconButton {
                 icon: Icons.plus;
-                label: @tr("Add server");
+                label: @tr("Add a server");
                 round: true;
                 filled: true;
                 size: 46px;
@@ -236,7 +236,8 @@ export component PhoneSheet inherits Rectangle {
     if Nav.pins-open: PinsDrawer { }
     if Nav.topics-open && !Nav.pins-open: TopicsDrawer { }
     if Nav.members-open && !Nav.pins-open && !Nav.topics-open: VerticalLayout {
-        HorizontalLayout {
+        // The voice screen's top bar has Back.
+        if !Nav.phone-voice: HorizontalLayout {
             padding-left: Theme.space-3;
             padding-top: Theme.space-3;
             spacing: Theme.space-2;

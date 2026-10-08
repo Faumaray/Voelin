@@ -4,9 +4,12 @@
 //! [`list::sync`], so a small change redraws only what changed.
 
 pub mod avatar;
+pub mod bbcode;
 pub mod chat;
+pub mod home;
 pub mod list;
 pub mod servers;
 pub mod social;
+pub mod streams;
 pub mod studio;
 pub mod tree;

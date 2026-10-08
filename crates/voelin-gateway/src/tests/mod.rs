@@ -26,6 +26,7 @@ const LOBBY: ChatTarget = ChatTarget::Channel(1);
 
 struct Fixture {
 	fake: FakeServer,
+	boot: crate::config::Bootstrap,
 	hub: Arc<Hub>,
 	url: String,
 	dir: std::path::PathBuf,
@@ -80,6 +81,7 @@ impl Fixture {
 			});
 		}
 		let layers = Layers { file: file_values(&toml).unwrap(), ..Default::default() };
+		let boot = layers.bootstrap().unwrap();
 		let hub = Hub::start(layers).await.unwrap();
 		// Wait for the observer's first snapshot.
 		for _ in 0..100 {
@@ -90,9 +92,10 @@ impl Fixture {
 		}
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let url = format!("ws://{}/v1", listener.local_addr().unwrap());
-		let app = crate::router(hub.clone());
+		let app = crate::router(crate::App::started(boot.clone(), hub.clone()))
+			.into_make_service_with_connect_info::<std::net::SocketAddr>();
 		tokio::spawn(async move { axum::serve(listener, app).await });
-		Self { fake, hub, url, dir, people }
+		Self { fake, boot, hub, url, dir, people }
 	}
 
 	fn people(&self) -> (&Person, &Person, &Person) {
@@ -582,4 +585,101 @@ async fn tells_apps_where_it_is() {
 	let public = "[listen]\npublic_url = \"wss://gw.example.test/v1\"\n";
 	let fx = Fixture::start("well-known-public", public).await;
 	assert_eq!(well_known(&fx).await, "wss://gw.example.test/v1");
+}
+
+/// The TeamSpeak server drops the gateway's query connections (a restart):
+/// logins go on working, through a new lookup connection.
+#[tokio::test(flavor = "multi_thread")]
+async fn logins_work_after_the_server_dropped_the_gateway() {
+	let fx = Fixture::start("reconnect", "").await;
+	let (alice, bob, _) = fx.people();
+	let (b, mut b_rx) = bob.connect(&fx).await;
+	b.open_chat(LOBBY).await.unwrap();
+	b.open_chat(ChatTarget::Server).await.unwrap();
+	assert!(fx.hub.lookup.is_up());
+	let old_id = fx.hub.lookup.own_id().unwrap();
+	fx.fake.drop_connections();
+	// At once: the login waits for the new connection.
+	let (a, _a_rx) = alice.connect(&fx).await;
+	assert!(a.has(feature::ADMIN));
+	assert!(fx.hub.lookup.is_up());
+	a.post(ChatTarget::Server, "back again".into(), None).await.unwrap();
+	assert!(fx.fake.posted().contains(&(3, 1, "back again".into())));
+
+	// Bob still reads the lobby: its relay comes back.
+	for _ in 0..100 {
+		if fx.fake.relayed_channels().contains(&1) {
+			break;
+		}
+		tokio::time::sleep(Duration::from_millis(50)).await;
+	}
+	fx.fake.say_in_channel(1, "Dave", "dave", "after the restart");
+	expect(
+		&mut b_rx,
+		"relayed after the restart",
+		|p| matches!(p, Push::Chat { message, .. } if message.text == "after the restart"),
+	)
+	.await;
+
+	// A restarted server hands out client ids from 1 again: a user may get
+	// the one the gateway had. Their server chat is not the gateway's own.
+	assert_ne!(fx.hub.lookup.own_id(), Some(old_id));
+	for _ in 0..100 {
+		if fx.fake.observed() {
+			break;
+		}
+		tokio::time::sleep(Duration::from_millis(50)).await;
+	}
+	fx.fake.notify_observers(&format!(
+		"notifytextmessage targetmode=3 msg=hi\\sall invokerid={old_id} invokername=Erin \
+		 invokeruid=erin"
+	));
+	expect(
+		&mut b_rx,
+		"server chat from the gateway's old id",
+		|p| matches!(p, Push::Chat { message, .. } if message.text == "hi all"),
+	)
+	.await;
+}
+
+/// The server's flood protection refuses looking up an optional permission,
+/// also when asked again after the wait: the gateway asks for no more, which
+/// would get it banned for 10 minutes.
+#[tokio::test(flavor = "multi_thread")]
+async fn optional_permissions_stop_at_the_flood_protection() {
+	let fake = FakeServer::start().await;
+	fake.refuse("b_channel_modify_name", 2);
+	let connect = voelin_query::Connect {
+		transport: voelin_query::Transport::Raw,
+		addr: fake.addr.to_string(),
+		user: "serveradmin".into(),
+		secret: None,
+		server_port: None,
+		server_id: None,
+		// Taken to be on the allowlist.
+		line: voelin_query::LineOptions { rate_limit: None, ..Default::default() },
+	};
+	let lookup = crate::lookup::Lookup::open(connect, "Gateway".into()).await;
+	let ids = crate::perms::PermIds::load(&lookup).await.unwrap();
+	assert_eq!(ids.subscribe_power, fake::SUBSCRIBE_POWER);
+	assert_eq!((ids.channel_modify_name, ids.server_modify_name), (0, 0));
+	let asked = fake.commands();
+	let count =
+		|name: &str| asked.iter().filter(|c| c.ends_with(&format!("permsid={name}"))).count();
+	assert_eq!(count("b_channel_modify_name"), 2, "{asked:?}");
+	assert_eq!(count("b_virtualserver_modify_name"), 0, "{asked:?}");
+}
+
+/// `/health` says what is missing until the gateway is logged in.
+#[tokio::test(flavor = "multi_thread")]
+async fn health_tells_whether_the_gateway_is_up() {
+	use axum::extract::State;
+	use axum::http::StatusCode;
+	let fx = Fixture::start("health", "").await;
+	let app = crate::App::started(fx.boot.clone(), fx.hub.clone());
+	assert_eq!(crate::health(State(app)).await, (StatusCode::OK, "ok".to_string()));
+	let starting = crate::App::new(fx.boot.clone());
+	let (status, text) = crate::health(State(starting)).await;
+	assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+	assert!(text.starts_with("starting"), "{text}");
 }

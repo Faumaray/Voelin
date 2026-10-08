@@ -4,7 +4,7 @@ use slint::ComponentHandle;
 use voelin_core::Command;
 use voelin_model::ChannelId;
 
-use crate::app::{Bridge, MainWindow, with_app};
+use crate::app::{App, Bridge, MainWindow, with_app};
 
 pub(super) fn wire(ui: &MainWindow) {
 	let bridge = ui.global::<Bridge>();
@@ -25,12 +25,13 @@ pub(super) fn wire(ui: &MainWindow) {
 	});
 	bridge.on_join_channel(|cid| {
 		with_app(|app| {
-			app.command(|session| Command::MoveToChannel {
-				session,
-				channel: cid as ChannelId,
-				password: None,
-			})
+			if let Some(session) = app.current {
+				app.join_channel(session, cid as ChannelId);
+			}
 		});
+	});
+	bridge.on_join_with_password(|password| {
+		with_app(|app| app.join_with_password(password.to_string()));
 	});
 	bridge.on_toggle_collapse(|cid| {
 		with_app(|app| app.toggle_collapse(cid as ChannelId));
@@ -46,8 +47,9 @@ pub(super) fn wire(ui: &MainWindow) {
 	});
 	bridge.on_edit_bookmark(|id| with_app(|app| app.bookmark_form(id as i64)).unwrap_or_default());
 	bridge.on_save_bookmark(|form| {
-		with_app(|app| app.save_bookmark(form));
+		with_app(|app| app.save_bookmark(&form));
 	});
+	bridge.on_save_and_connect(|form| with_app(|app| app.save_and_connect(&form)).unwrap_or(false));
 	bridge.on_delete_bookmark(|id| {
 		with_app(|app| app.delete_bookmark(id as i64));
 	});
@@ -56,4 +58,8 @@ pub(super) fn wire(ui: &MainWindow) {
 		with_app(|app| app.client_playback_changed(&form));
 	});
 	bridge.on_invite(|| with_app(|app| app.invite_link()).unwrap_or_default().into());
+	// Nav.copy, from any screen.
+	bridge.on_copied(|| {
+		with_app(App::copied);
+	});
 }

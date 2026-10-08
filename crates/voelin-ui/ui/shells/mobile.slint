@@ -107,17 +107,30 @@ export component MobileShell inherits Rectangle {
     in property <string> title;
     in property <string> subtitle;
     in property <image> banner;
-    // Total unread messages (the Chat tab's badge).
+    // Unread messages in the server's chats (the Chat tab's badge).
     in property <int> unread;
-    // Show a back arrow (sub-pages such as the settings).
+    // Show a back arrow (sub-pages such as the settings, and the voice
+    // channel screen).
     in property <bool> back;
     // The bottom navigation; pages with their own controls there (the
     // voice channel, the Stream Studio) go without.
     in property <bool> navigation: true;
     // The voice channel screen's buttons in the top bar: the people, the
-    // chats and a menu.
+    // chats and a menu (pinned messages, topics, the Stream Studio, the
+    // voice settings, activity).
     in property <bool> voice;
     callback go-back();
+    // VOELIN_OPEN=more opens the menu (a screenshot cannot tap).
+    property <int> more-requests: Nav.more-requests;
+    changed more-requests => {
+        if root.voice {
+            root.open-more();
+        }
+    }
+    // Under the More button, at the right of the top bar.
+    function open-more() {
+        more.show(root.width - Theme.space-3 - more.menu-width, (60px + Theme.control-height) / 2 + 4px);
+    }
     background: Theme.backdrop;
     VerticalLayout {
         // Top bar.
@@ -171,7 +184,7 @@ export component MobileShell inherits Rectangle {
                 }
                 // The voice channel we are in, from any page.
                 if !root.voice && Bridge.voice-connected: IconButton {
-                    icon: Icons.volume-2;
+                    icon: Icons.channel;
                     label: @tr("Voice channel");
                     round: true;
                     filled: true;
@@ -195,7 +208,12 @@ export component MobileShell inherits Rectangle {
                 }
                 if root.voice: PeoplePill {
                     y: (parent.height - self.height) / 2;
-                    clicked => { Nav.members-open = true; }
+                    // In front of the pins or the topics, which show first.
+                    clicked => {
+                        Nav.pins-open = false;
+                        Nav.topics-open = false;
+                        Nav.members-open = true;
+                    }
                 }
                 if root.voice: Rectangle {
                     width: 40px;
@@ -224,27 +242,35 @@ export component MobileShell inherits Rectangle {
                     round: true;
                     filled: true;
                     y: (parent.height - self.height) / 2;
-                    clicked => { more.show(self.x + self.width - 220px, self.y + self.height + 4px); }
+                    clicked => { root.open-more(); }
                 }
             }
+            // Not in a layout, so Slint would centre it in the bar: `show`
+            // is relative to its corner.
             more := PopupMenu {
+                x: 0;
+                y: 0;
                 entries: [
-                    { text: @tr("Stream Studio"), icon: Icons.radio, enabled: Bridge.streams-available },
+                    { text: @tr("Pinned Messages"), icon: Icons.pin, enabled: Bridge.has-pins },
+                    { text: @tr("Topics"), icon: Icons.book-open, enabled: Bridge.has-topics },
+                    { text: @tr("Stream Studio"), icon: Icons.radio, enabled: Bridge.streams-available, separator: true },
                     { text: @tr("Voice Settings"), icon: Icons.settings, enabled: true },
                     { text: @tr("Activity"), icon: Icons.activity, enabled: true },
-                    { text: @tr("Leave Voice"), icon: Icons.phone-off, danger: true, enabled: true, separator: true },
                 ];
                 activated(i) => {
                     if i == 0 {
-                        Nav.open-studio();
+                        Nav.members-open = false;
+                        Nav.show-pins(true);
                     } else if i == 1 {
-                        Nav.open-settings(SettingsSection.voice);
+                        Nav.members-open = false;
+                        Nav.show-topics(true);
                     } else if i == 2 {
-                        PhoneVoice.close();
-                        Nav.mobile-tab = MobileTab.activity;
+                        Nav.open-studio();
+                    } else if i == 3 {
+                        Nav.open-settings(SettingsSection.voice);
                     } else {
                         PhoneVoice.close();
-                        Bridge.disconnect-voice();
+                        Nav.mobile-tab = MobileTab.activity;
                     }
                 }
             }
@@ -264,10 +290,12 @@ export component MobileShell inherits Rectangle {
             HorizontalLayout {
                 padding-left: Theme.space-2;
                 padding-right: Theme.space-2;
+                // The direct messages are on Home: their unread count.
                 NavTab {
                     icon: Icons.home;
                     text: @tr("Home");
                     selected: Nav.page == Page.home || Nav.page == Page.friends || Nav.page == Page.messages || Nav.page == Page.library || (Nav.mobile-tab == MobileTab.home && Nav.page == Page.server);
+                    badge: Bridge.dm-unread + Bridge.inbox-unread;
                     clicked => { Nav.show-tab(MobileTab.home); }
                 }
                 NavTab {

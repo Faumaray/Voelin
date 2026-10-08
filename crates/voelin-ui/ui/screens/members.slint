@@ -6,7 +6,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, MemberItem } from "../bridge.slint";
 import { Nav } from "../nav.slint";
-import { Icon, IconButton, Button, ButtonKind, Avatar, Status, LiveBadge, Chip, Divider, Slider, SpeakingBars, Tooltip, SearchBox, ListView } from "../components/index.slint";
+import { Icon, IconButton, Button, ButtonKind, Avatar, Status, LiveBadge, Chip, BadgeIcons, Divider, Slider, SpeakingBars, Tooltip, SearchBox, ListView } from "../components/index.slint";
 
 // Crown, priority speaker, channel commander, recording.
 component MemberBadges inherits HorizontalLayout {
@@ -118,6 +118,11 @@ export component MemberRow inherits Rectangle {
                     member: member;
                     y: (parent.height - self.height) / 2;
                 }
+                BadgeIcons {
+                    first: member.badge;
+                    second: member.badge-2;
+                    third: member.badge-3;
+                }
             }
             HorizontalLayout {
                 spacing: Theme.space-2;
@@ -169,12 +174,19 @@ export component MemberRow inherits Rectangle {
             tint: Theme.danger;
             y: (parent.height - self.height) / 2;
         }
-        if member.talk-power > 0: Text {
-            text: member.talk-power;
-            color: Theme.text-disabled;
-            font-size: Theme.font-xs;
-            vertical-alignment: center;
-            accessible-label: @tr("talk power {}", member.talk-power);
+        // A hand, as TeamSpeak asks for talk power; the card has the number.
+        if member.cannot-talk: Tooltip {
+            text: @tr("Needs talk power to speak");
+            width: hand.width;
+            height: hand.height;
+            y: (parent.height - self.height) / 2;
+            hand := Icon {
+                source: Icons.hand;
+                size: 16px;
+                tint: Theme.text-muted;
+                accessible-role: AccessibleRole.image;
+                accessible-label: @tr("Needs talk power to speak");
+            }
         }
     }
 }
@@ -187,7 +199,7 @@ export component MemberCardPopup inherits Rectangle {
     background: Theme.surface-3;
     border-radius: Theme.radius-lg;
     border-width: 1px;
-    border-color: Theme.border-strong;
+    border-color: Theme.border-popup;
     accessible-role: AccessibleRole.groupbox;
     accessible-label: Bridge.member-card.name;
     // Clicks inside stay inside.
@@ -249,6 +261,30 @@ export component MemberCardPopup inherits Rectangle {
                 color: Theme.text-secondary;
                 font-size: Theme.font-sm;
                 overflow: elide;
+            }
+        }
+        // myTeamSpeak badges; each tells what it is for on hover.
+        if Bridge.member-card.badges.length > 0: VerticalLayout {
+            spacing: Theme.space-2;
+            Text {
+                text: @tr("Badges");
+                color: Theme.text-muted;
+                font-size: Theme.font-xs;
+                font-weight: Theme.weight-semibold;
+            }
+            // Chips that do not fit go on the next line.
+            FlexboxLayout {
+                spacing: Theme.space-2;
+                for badge in Bridge.member-card.badges: Tooltip {
+                    text: badge.description;
+                    width: chip.width;
+                    height: chip.height;
+                    chip := Chip {
+                        text: badge.name;
+                        picture: badge.icon;
+                        outlined: true;
+                    }
+                }
             }
         }
         HorizontalLayout {

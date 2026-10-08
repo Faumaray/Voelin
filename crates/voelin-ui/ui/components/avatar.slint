@@ -1,5 +1,6 @@
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
+import { Images } from "../bridge.slint";
 import { Icon } from "icon.slint";
 
 // Presence shown in the avatar's status dot.
@@ -13,8 +14,11 @@ export enum Status {
     info,
 }
 
-// A round avatar: a picture, or initials on a colour; a status dot, a crown
-// badge, and a green ring while speaking.
+// A round avatar: a picture, or initials on a colour (one letter under
+// 28 px); a status dot, a crown badge, and a green ring while speaking. A
+// server icon (`square`) at most half as wide as the avatar (TeamSpeak's
+// are often 16 px) is drawn at twice its size, sharp, on the colour; a
+// person's picture always fills the circle.
 export component Avatar inherits Rectangle {
     in property <image> image;
     in property <string> initials;
@@ -26,6 +30,8 @@ export component Avatar inherits Rectangle {
     // Squircle instead of a circle (server icons).
     in property <bool> square;
     in property <string> label;
+    property <bool> small: root.size < 28px;
+    property <bool> small-picture: root.square && root.image.width > 0 && root.image.width * 2px <= root.size;
 
     width: size;
     height: size;
@@ -44,18 +50,21 @@ export component Avatar inherits Rectangle {
     }
     face := Rectangle {
         border-radius: root.square ? Theme.radius-lg : root.size / 2;
-        background: root.image.width > 0 ? Theme.surface-3 : root.tint;
+        background: root.image.width > 0 && !root.small-picture ? Theme.surface-3 : root.tint;
         clip: true;
         if root.image.width > 0: Image {
-            width: 100%;
-            height: 100%;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: root.small-picture ? root.image.width * 2px : parent.width;
+            height: root.small-picture ? root.image.height * 2px : parent.height;
             source: root.image;
-            image-fit: cover;
+            image-fit: root.small-picture ? ImageFit.fill : ImageFit.cover;
+            image-rendering: root.small-picture ? ImageRendering.pixelated : ImageRendering.smooth;
         }
         if root.image.width == 0: Text {
-            text: root.initials;
+            text: root.small ? Images.first-letter(root.initials) : root.initials;
             color: #ffffff;
-            font-size: root.size * 0.38;
+            font-size: root.size * (root.small ? 0.5 : 0.38);
             font-weight: Theme.weight-semibold;
             horizontal-alignment: center;
             vertical-alignment: center;

@@ -1,4 +1,5 @@
-//! Flatten presence into display rows in TeamSpeak's channel order.
+//! Flatten presence into display rows in TeamSpeak's channel order, and
+//! read the names of spacer channels.
 
 use std::collections::HashMap;
 
@@ -64,6 +65,51 @@ fn add_level<'a>(
 	}
 }
 
+/// How a TeamSpeak spacer channel draws its text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Spacer {
+	Left,
+	Center,
+	Right,
+	/// The text repeated across the row: a line such as `---`.
+	Fill,
+}
+
+impl Spacer {
+	/// Whether a spacer with this text only separates the rows around it
+	/// (a line, or no text): nothing to search for or pick.
+	pub fn separates(self, text: &str) -> bool {
+		self == Spacer::Fill || text.trim().is_empty()
+	}
+}
+
+/// A spacer name split into its kind and its text: `[cspacer]Games` is a
+/// centred "Games", `[*spacer1]-=` repeats "-=", plain `[spacer3]` is an
+/// empty row. The part between `spacer` and `]` only keeps the names
+/// unique, so anything goes there. Anything else is not a spacer.
+pub fn parse_spacer(name: &str) -> Option<(Spacer, &str)> {
+	let (inside, text) = name.strip_prefix('[')?.split_once(']')?;
+	let (kind, _suffix) = inside.split_once("spacer")?;
+	let kind = match kind {
+		"" | "l" => Spacer::Left,
+		"c" => Spacer::Center,
+		"r" => Spacer::Right,
+		"*" => Spacer::Fill,
+		_ => return None,
+	};
+	Some((kind, text))
+}
+
+/// A channel's name as shown, and its spacer kind. Only top-level channels
+/// are spacers, as in TeamSpeak: a sub-channel keeps its name as it is.
+/// Names sent to the server (joining by name, invite links) stay raw.
+pub fn channel_title(channel: &ChannelInfo) -> (&str, Option<Spacer>) {
+	match parse_spacer(&channel.name).filter(|_| channel.parent == 0) {
+		Some((kind, text)) => (text, Some(kind)),
+		None => (&channel.name, None),
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -112,5 +158,35 @@ mod tests {
 			describe(tree_rows(&p, &|c| c == 2)),
 			["0#Lobby", "1-Alice", "1-zed", "0#Games"]
 		);
+	}
+
+	#[test]
+	fn spacer_names() {
+		use Spacer::*;
+		for (name, spacer) in [
+			("[spacer0]", Some((Left, ""))),
+			("[spacer3]Hi", Some((Left, "Hi"))),
+			("[lspacer]Hi", Some((Left, "Hi"))),
+			("[rspacer9]Hi", Some((Right, "Hi"))),
+			("[cspacer]Hi", Some((Center, "Hi"))),
+			("[cspacerx]Hi", Some((Center, "Hi"))),
+			("[cspacer12]Гамесы [1]", Some((Center, "Гамесы [1]"))),
+			("[*spacer1]-=", Some((Fill, "-="))),
+			("[*spacer]", Some((Fill, ""))),
+			("[cspacer2Games", None),
+			("Games", None),
+			("[Spacer]x", None),
+			("[xspacer]x", None),
+			("[spacr]x", None),
+			("x[spacer]", None),
+		] {
+			assert_eq!(parse_spacer(name), spacer, "{name}");
+		}
+		assert!(Fill.separates("-=") && Left.separates("") && Center.separates(" "));
+		assert!(!Left.separates("Hi"));
+		// Only top-level channels are spacers: a sub-channel keeps its name.
+		assert_eq!(channel_title(&ch(1, 0, 0, "[rspacer]Staff")), ("Staff", Some(Right)));
+		assert_eq!(channel_title(&ch(2, 1, 0, "[rspacer]Staff")), ("[rspacer]Staff", None));
+		assert_eq!(channel_title(&ch(3, 0, 0, "Lobby")), ("Lobby", None));
 	}
 }

@@ -5,6 +5,88 @@ use crate::Error;
 use schema_api::SessionToken;
 use schema_api::api::{self, user};
 
+/// `LoginSession.user_avatar`, the account's avatar as myTeamSpeak signed
+/// it.
+pub(crate) const USER_AVATAR: u32 = 11;
+
+/// What voice servers show of the account (TeamSpeak 6): sent to each
+/// server once connected (`updatemytsdata`), as the official client does.
+/// Public data, as myTeamSpeak signed it; empty without it.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Presentation {
+	/// The account's certificate (`LoginSession.mytsid_user_cert.cert`).
+	pub certificate: Vec<u8>,
+	/// The avatar (`LoginSession.user_avatar`, an `AvatarData`: its
+	/// pictures' links, a timestamp and myTeamSpeak's signature), the bytes
+	/// exactly as they came: the signature covers them, and fields this
+	/// version does not know would be lost by encoding them again.
+	pub avatar: Vec<u8>,
+}
+
+impl Presentation {
+	/// Whether there is anything to show (a certificate, without which a
+	/// server takes nothing).
+	pub fn is_empty(&self) -> bool {
+		self.certificate.is_empty()
+	}
+}
+
+impl std::fmt::Debug for Presentation {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Presentation")
+			.field("certificate", &self.certificate.len())
+			.field("avatar", &self.avatar.len())
+			.finish()
+	}
+}
+
+/// The bytes of the last length-delimited field `number` at the top level
+/// of a protobuf message, as they are; `None` without one or for a message
+/// that does not parse.
+pub(crate) fn raw_field(message: &[u8], number: u32) -> Option<&[u8]> {
+	raw_fields(message, number)?.pop()
+}
+
+/// The bytes of every length-delimited field `number` at the top level of
+/// a protobuf message (a repeated field), as they are; `None` for a message
+/// that does not parse.
+pub(crate) fn raw_fields(message: &[u8], number: u32) -> Option<Vec<&[u8]>> {
+	fn varint(data: &[u8], at: &mut usize) -> Option<u64> {
+		let mut value = 0u64;
+		for shift in (0..64).step_by(7) {
+			let byte = *data.get(*at)?;
+			*at += 1;
+			value |= u64::from(byte & 0x7f) << shift;
+			if byte & 0x80 == 0 {
+				return Some(value);
+			}
+		}
+		None
+	}
+	let mut at = 0;
+	let mut found = Vec::new();
+	while at < message.len() {
+		let key = varint(message, &mut at)?;
+		let skip = match key & 7 {
+			0 => {
+				varint(message, &mut at)?;
+				0
+			}
+			1 => 8,
+			2 => usize::try_from(varint(message, &mut at)?).ok()?,
+			5 => 4,
+			// Groups are not used by myTeamSpeak.
+			_ => return None,
+		};
+		let end = at.checked_add(skip).filter(|end| *end <= message.len())?;
+		if key & 7 == 2 && key >> 3 == u64::from(number) {
+			found.push(&message[at..end]);
+		}
+		at = end;
+	}
+	Some(found)
+}
+
 /// `ERROR_SESSION_EXPIRED` of the `/user` service.
 pub(crate) const SESSION_EXPIRED: i32 = user::ErrorReturnCode::ErrorSessionExpired as i32;
 /// Avatars are small pictures; anything larger is not one.
@@ -112,7 +194,7 @@ pub(crate) fn avatar_link(name: &str) -> Result<&str, Error> {
 
 /// A refusal: `success` unset with an error code. (A reply without a return
 /// code is taken as it is: the service sets one when it refuses.)
-fn check(code: Option<&user::ReturnCode>) -> Result<(), Error> {
+pub(crate) fn check(code: Option<&user::ReturnCode>) -> Result<(), Error> {
 	match code {
 		Some(code) if !code.success && code.error_code != 0 => Err(Error::Refused(code.error_code)),
 		_ => Ok(()),
@@ -140,6 +222,36 @@ fn unix_seconds(value: i64) -> i64 {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn the_avatar_is_kept_as_it_came() {
+		let avatar = api::AvatarData {
+			info: Some(api::AvatarInfo { map: vec![map(api::AvatarState::Online, "https://a/o")] }),
+			timestamp: 1_760_000_000,
+			sign: vec![7; 64],
+			..Default::default()
+		};
+		// A field this version does not know, inside the avatar.
+		let mut raw = schema_api::wire::encode(&avatar);
+		raw.extend_from_slice(&[0x78, 0x01]);
+		let mut message = schema_api::wire::encode(&api::LoginSession {
+			session: "s".into(),
+			username: "u".into(),
+			..Default::default()
+		});
+		message.push(((USER_AVATAR << 3) | 2) as u8);
+		message.push(raw.len() as u8);
+		message.extend_from_slice(&raw);
+		message.extend_from_slice(&schema_api::wire::encode(&api::LoginSession {
+			push_token: "after".into(),
+			..Default::default()
+		}));
+		assert_eq!(raw_field(&message, USER_AVATAR), Some(raw.as_slice()));
+		assert_eq!(raw_field(&message, 13), None);
+		// Cut short: nothing rather than a part.
+		assert_eq!(raw_field(&message[..message.len() - 3], USER_AVATAR), None);
+		assert!(Presentation::default().is_empty());
+	}
 
 	fn map(state: api::AvatarState, name: &str) -> api::avatar_info::AvatarMap {
 		api::avatar_info::AvatarMap { state: state as i32, name: name.into() }

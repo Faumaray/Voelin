@@ -136,6 +136,17 @@ impl App {
 		bridge.set_crash_reports(self.settings.crash_reports);
 	}
 
+	/// The transmit mode for the voice controls (Hold to talk shows for
+	/// push-to-talk) before the settings page fills the whole form: only
+	/// `transmit` changes, as the device lists are not read yet.
+	pub(crate) fn refresh_transmit(&self) {
+		let Some(ui) = self.ui.upgrade() else { return };
+		let bridge = ui.global::<Bridge>();
+		let mut form = bridge.get_audio();
+		form.transmit = settings::transmit_index(self.audio.transmit);
+		bridge.set_audio(form);
+	}
+
 	pub(crate) fn set_crash_reports(&mut self, enabled: bool) {
 		self.settings.crash_reports = enabled;
 		// Also in the blob, for older versions.

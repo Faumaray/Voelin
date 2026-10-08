@@ -39,9 +39,9 @@
 //! [`Event::Poke`]), private messages to any client (a
 //! [`ChatTarget::Private`] chat, stored under the peer's unique id), the
 //! channels' file browsers, avatars and icons ([`files`], cached in
-//! [`cache`]) and offline messages ([`offline`]). The host banner and
-//! channel banners are pictures on the web, fetched into the same cache
-//! ([`Event::PictureReady`]). Contacts (friends, blocked people, per-person
+//! [`cache`]) and offline messages ([`offline`]). The host banner, channel
+//! banners and the clients' badges are pictures on the web, fetched into the
+//! same cache ([`Event::PictureReady`]). Contacts (friends, blocked people, per-person
 //! volume) are engine-wide ([`contacts`]).
 
 mod audio;
@@ -96,14 +96,27 @@ use voelin_stream::{
 	EncodedFrame, LayerId, LayerSpec, SrtpProfile, StreamInfo, StreamSetup, ViewerInfo,
 };
 pub use voice::VoiceOptions;
+/// Banners are downloaded and shown by the same rule.
+pub use web::is_svg;
+/// Pictures from the web go through the desktop's proxy (set at startup).
+pub use web::set_proxy_resolver;
 
 pub type SessionId = u64;
+
+/// The longest poke message servers take, in characters; a longer one is
+/// cut ([`Command::Poke`]).
+pub const POKE_MESSAGE_MAX: usize = 100;
 
 /// What the UI asks for.
 #[derive(Clone, Debug)]
 pub enum Command {
 	/// Main account proof for every current and future voice connection.
 	SetMytsIdentity(Option<Arc<tsproto::myts::Identity>>),
+	/// What voice servers are shown of the main account (its avatar and
+	/// badges with their certificates, its User Tag; TeamSpeak 6): sent to
+	/// every connection that presents the account's myTS ID, once connected
+	/// and when it changes; cleared on a sign-out.
+	SetMytsData(Option<Arc<tsclientlib::MytsData>>),
 	ConnectVoice {
 		session: SessionId,
 		options: Box<VoiceOptions>,
@@ -111,10 +124,14 @@ pub enum Command {
 	DisconnectVoice {
 		session: SessionId,
 	},
-	/// Invisible presence and relay chat through a `tsgw` gateway.
+	/// Invisible presence and relay chat through a `tsgw` gateway: the first
+	/// of `urls` (best first, [`discover::gateways`]) that logs in, tried in
+	/// turn again whenever it is lost. Sent again with the same `urls` and
+	/// identity while it runs, it is not started over; while still
+	/// connecting, it tries again at once (at most every 5 s).
 	ObserveGateway {
 		session: SessionId,
-		url: String,
+		urls: Vec<String>,
 		identity: Box<tsclientlib::Identity>,
 	},
 	/// Invisible presence and relay chat with own ServerQuery credentials.
@@ -153,6 +170,7 @@ pub enum Command {
 		session: SessionId,
 		request: GatewayRequest,
 	},
+	/// Refusals come as [`Event::JoinFailed`].
 	MoveToChannel {
 		session: SessionId,
 		channel: ChannelId,
@@ -273,7 +291,8 @@ pub enum Command {
 		volume: f32,
 	},
 	/// Poke a client (voice): the server shows it a notification with
-	/// `message`. Failures come as [`Event::Error`].
+	/// `message`, cut to [`POKE_MESSAGE_MAX`] characters. Failures come as
+	/// [`Event::Error`].
 	Poke {
 		session: SessionId,
 		client: u16,
@@ -364,6 +383,14 @@ pub enum Command {
 	FetchAvatar {
 		session: SessionId,
 		client_uid: String,
+	},
+	/// Get a picture on the web that a chat message shows (`[img]`) into
+	/// the cache ([`Event::PictureReady`]) while `cache.fetch_images` is on;
+	/// one larger than `max_bytes` is not reported.
+	FetchPicture {
+		session: SessionId,
+		url: String,
+		max_bytes: u64,
 	},
 	/// Our offline messages ([`Event::OfflineMessages`]); see [`offline`].
 	ListOfflineMessages {
@@ -469,6 +496,17 @@ pub struct SessionState {
 	pub server_uid: Option<String>,
 }
 
+/// Why the server did not let us into a channel ([`Event::JoinFailed`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JoinFailure {
+	/// The channel's password is missing or wrong.
+	Password,
+	/// The channel, or the channel with its subchannels, is full.
+	Full,
+	/// Anything else, as a sentence for the user.
+	Other(String),
+}
+
 /// What the engine reports.
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -533,6 +571,12 @@ pub enum Event {
 	Error {
 		session: SessionId,
 		message: String,
+	},
+	/// The server refused [`Command::MoveToChannel`] into `channel`.
+	JoinFailed {
+		session: SessionId,
+		channel: ChannelId,
+		reason: JoinFailure,
 	},
 	/// The streams in our channel (TeamSpeak 6), full list.
 	StreamsChanged {
@@ -640,9 +684,10 @@ pub enum Event {
 		request: RequestId,
 		result: Result<(), String>,
 	},
-	/// A client's avatar is in the cache: `path`, its MD5 `hash`
-	/// ([`voelin_model::ClientInfo::avatar`]). Comes when the client appears
-	/// with an avatar and when it changes.
+	/// A client's avatar is in the cache: `path`, and `hash`: the MD5 of a
+	/// server avatar ([`voelin_model::ClientInfo::avatar`]), or the address
+	/// of a myTeamSpeak avatar ([`voelin_model::ClientInfo::myts_avatar`]).
+	/// Comes when the client appears with an avatar and when it changes.
 	AvatarReady {
 		session: SessionId,
 		client_uid: String,
@@ -656,9 +701,11 @@ pub enum Event {
 		path: PathBuf,
 	},
 	/// A picture on the web is in the cache: the host banner
-	/// ([`ServerDetails::banner_gfx_url`]) or a channel's
-	/// ([`voelin_model::ChannelInfo::banner_gfx_url`]) at `url` (setting
-	/// `cache.fetch_images`). Comes again when the host banner was reloaded
+	/// ([`ServerDetails::banner_gfx_url`]), a channel's
+	/// ([`voelin_model::ChannelInfo::banner_gfx_url`]), a badge's
+	/// ([`voelin_model::badges::icon_url`]) or one a chat message shows
+	/// ([`Command::FetchPicture`]) at `url` (setting `cache.fetch_images`).
+	/// Comes again when the host banner was reloaded
 	/// (`banner_gfx_interval_s`, at least a minute): the file at `path`
 	/// changed.
 	PictureReady {
@@ -816,6 +863,7 @@ async fn run(
 	contacts.load().await;
 	let mut sessions: HashMap<SessionId, session::SessionHandle> = HashMap::new();
 	let (myts_identity, _) = watch::channel(None);
+	let (myts_data, _) = watch::channel(None);
 	let mut current = shared.current();
 	// Pruning: at start, then hourly (and when the setting changes).
 	let mut prune = tokio::time::interval(std::time::Duration::from_secs(3600));
@@ -869,6 +917,16 @@ async fn run(
 						return false;
 					}
 					*current = identity;
+					true
+				});
+				continue;
+			}
+			Command::SetMytsData(data) => {
+				myts_data.send_if_modified(|current| {
+					if *current == data {
+						return false;
+					}
+					*current = data;
 					true
 				});
 				continue;
@@ -949,6 +1007,7 @@ async fn run(
 					settings.clone(),
 					engine.clone(),
 					myts_identity.subscribe(),
+					myts_data.subscribe(),
 				);
 				if let Some(profiles) = &srtp_profiles {
 					s.send(Command::SetSrtpProfiles(profiles.clone()));
@@ -1020,6 +1079,7 @@ fn command_session(command: &Command) -> SessionId {
 		| Command::CreateDirectory { session, .. }
 		| Command::SetAvatar { session, .. }
 		| Command::FetchAvatar { session, .. }
+		| Command::FetchPicture { session, .. }
 		| Command::ListOfflineMessages { session, .. }
 		| Command::GetOfflineMessage { session, .. }
 		| Command::SendOfflineMessage { session, .. }
@@ -1027,6 +1087,7 @@ fn command_session(command: &Command) -> SessionId {
 		| Command::SetOfflineMessageRead { session, .. }
 		| Command::CloseSession { session } => *session,
 		Command::SetMytsIdentity(_)
+		| Command::SetMytsData(_)
 		| Command::SetAudioSettings(_)
 		| Command::SetSrtpProfiles(_)
 		| Command::TestMicrophone { .. }

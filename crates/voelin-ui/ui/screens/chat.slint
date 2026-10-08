@@ -6,11 +6,17 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, ChatLine, ReactionItem, FileItem, Images } from "../bridge.slint";
 import { Nav } from "../nav.slint";
-import { Icon, IconButton, Avatar, Chip, TabItem, TextField, RichText, Banner, Button, ButtonKind, Spinner, Tooltip, ListView, BannerPicture } from "../components/index.slint";
+import { Icon, IconButton, Avatar, Chip, TabItem, TextField, MessageText, Banner, Button, ButtonKind, Spinner, Tooltip, ListView, BannerPicture, PopupMenu, MenuEntry } from "../components/index.slint";
 
 // A compact title and actions over the optional channel background.
 export component PageHeader inherits Rectangle {
-    in property <image> icon: Icons.hash;
+    in property <image> icon: Icons.channel;
+    // A person in place of the icon (the streamer, in the stream viewer):
+    // their picture, else their initials on their colour.
+    in property <string> person;
+    in property <image> avatar;
+    in property <string> initials;
+    in property <color> tint;
     in property <image> banner;
     in property <string> title;
     in property <string> description;
@@ -22,10 +28,18 @@ export component PageHeader inherits Rectangle {
         padding-left: Theme.space-6;
         padding-right: Theme.space-4;
         spacing: Theme.space-4;
-        Icon {
+        if root.person == "": Icon {
             source: root.icon;
             size: 26px;
             tint: Theme.text-secondary;
+            y: (parent.height - self.height) / 2;
+        }
+        if root.person != "": Avatar {
+            size: 36px;
+            image: root.avatar;
+            initials: root.initials;
+            tint: root.tint;
+            label: root.person;
             y: (parent.height - self.height) / 2;
         }
         Text {
@@ -237,62 +251,112 @@ component ImageCard inherits Rectangle {
     }
 }
 
-// Quick reactions, pin and "start a topic" on a hovered message.
+// What can be done with a hovered message: with a gateway quick reactions,
+// pin and "start a topic"; quote it into the composer and copy its text.
+// Every row has one, its buttons made only while `shown`. It reaches above
+// its row, where the row's own hover ends: `hovered` keeps it shown there.
 component MessageActions inherits Rectangle {
-    in property <int> key;
-    in property <bool> pinned;
+    in property <ChatLine> line;
+    in property <bool> shown;
+    out property <bool> hovered: area.has-hover;
+    visible: shown;
     width: row.preferred-width;
     height: 30px;
     border-radius: Theme.radius-md;
     background: Theme.surface-3;
     border-width: 1px;
     border-color: Theme.border-strong;
-    row := HorizontalLayout {
-        padding-left: 2px;
-        padding-right: 2px;
-        spacing: 0px;
-        if Bridge.has-reactions: HorizontalLayout {
+    // An ancestor of the buttons, so it stays hovered over them.
+    area := TouchArea {
+        row := HorizontalLayout {
+            padding-left: 2px;
+            padding-right: 2px;
             spacing: 0px;
-            for quick in ["1f44d", "2764", "1f389", "1f602", "1f440"]: Rectangle {
-                width: 26px;
-                accessible-role: AccessibleRole.button;
-                accessible-label: @tr("React");
-                accessible-action-default => { Bridge.react(root.key, Images.emoji-text(quick)); }
-                Image {
-                    width: 16px;
-                    height: 16px;
-                    source: Images.emoji(quick);
-                }
-                TouchArea {
-                    mouse-cursor: MouseCursor.pointer;
-                    clicked => { Bridge.react(root.key, Images.emoji-text(quick)); }
+            if root.shown && root.line.remote && Bridge.has-reactions: HorizontalLayout {
+                spacing: 0px;
+                for quick in ["1f44d", "2764", "1f389", "1f602", "1f440"]: Rectangle {
+                    width: 26px;
+                    accessible-role: AccessibleRole.button;
+                    accessible-label: @tr("React");
+                    accessible-action-default => { Bridge.react(root.line.key, Images.emoji-text(quick)); }
+                    Image {
+                        width: 16px;
+                        height: 16px;
+                        source: Images.emoji(quick);
+                    }
+                    TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => { Bridge.react(root.line.key, Images.emoji-text(quick)); }
+                    }
                 }
             }
-        }
-        if Bridge.has-reactions: IconButton {
-            icon: Icons.smile-plus;
-            label: @tr("More emoji");
-            size: 26px;
-            icon-size: Theme.icon-sm;
-            clicked => {
-                Nav.react-key = root.key;
-                Nav.emoji-open = true;
+            if root.shown && root.line.remote && Bridge.has-reactions: IconButton {
+                icon: Icons.smile-plus;
+                label: @tr("More emoji");
+                size: 26px;
+                icon-size: Theme.icon-sm;
+                clicked => {
+                    Nav.react-key = root.line.key;
+                    Nav.emoji-open = true;
+                }
+            }
+            if root.shown && root.line.remote && Bridge.has-pins: IconButton {
+                icon: Icons.pin;
+                label: root.line.pinned ? @tr("Unpin") : @tr("Pin");
+                checked: root.line.pinned;
+                size: 26px;
+                icon-size: Theme.icon-sm;
+                clicked => { Bridge.pin(root.line.key, !root.line.pinned); }
+            }
+            if root.shown && root.line.remote && Bridge.has-topics: IconButton {
+                icon: Icons.messages-square;
+                label: @tr("Start a topic");
+                size: 26px;
+                icon-size: Theme.icon-sm;
+                clicked => { Nav.start-topic(root.line.key); }
+            }
+            if root.shown && root.line.text != "": IconButton {
+                icon: Icons.quote;
+                label: @tr("Quote");
+                size: 26px;
+                icon-size: Theme.icon-sm;
+                clicked => { Nav.quote(root.line.author, root.line.text); }
+            }
+            if root.shown && root.line.text != "": IconButton {
+                icon: Icons.copy;
+                label: @tr("Copy text");
+                size: 26px;
+                icon-size: Theme.icon-sm;
+                clicked => { Nav.copy(root.line.text); }
             }
         }
-        if Bridge.has-pins: IconButton {
-            icon: Icons.pin;
-            label: root.pinned ? @tr("Unpin") : @tr("Pin");
-            checked: root.pinned;
-            size: 26px;
-            icon-size: Theme.icon-sm;
-            clicked => { Bridge.pin(root.key, !root.pinned); }
+    }
+}
+
+// Where the messages not read yet start: a red line with "New" at its end.
+component NewDivider inherits HorizontalLayout {
+    padding-left: Theme.space-6;
+    padding-right: Theme.space-6;
+    padding-top: Theme.space-3;
+    Rectangle {
+        horizontal-stretch: 1;
+        Rectangle {
+            height: 1px;
+            background: Theme.danger;
         }
-        if Bridge.has-topics: IconButton {
-            icon: Icons.messages-square;
-            label: @tr("Start a topic");
-            size: 26px;
-            icon-size: Theme.icon-sm;
-            clicked => { Nav.start-topic(root.key); }
+    }
+    Rectangle {
+        width: new.preferred-width + 2 * Theme.space-2;
+        height: 16px;
+        border-radius: Theme.radius-xs;
+        background: Theme.danger;
+        accessible-role: AccessibleRole.text;
+        accessible-label: @tr("New messages");
+        new := Text {
+            text: @tr("New");
+            color: Theme.on-accent;
+            font-size: Theme.font-xs;
+            font-weight: Theme.weight-bold;
         }
     }
 }
@@ -302,147 +366,336 @@ export component MessageRow inherits Rectangle {
     in property <ChatLine> line;
     // The pins and topic lists show messages without their actions.
     in property <bool> actions: true;
+    // The actions as if hovered (VOELIN_OPEN=actions).
+    in property <bool> show-actions;
+    // The list's first row: its actions go inside it, not above, where the
+    // list ends.
+    in property <bool> first;
     property <length> avatar: 44px;
-    min-height: body.preferred-height;
-    background: line.marked ? Theme.accent-soft : hover.has-hover ? Theme.surface-2.transparentize(0.6) : transparent;
+    // Something to do: text to copy and quote, or what a gateway adds.
+    property <bool> can-act: root.actions && !line.blocked && (line.text != "" || line.remote);
+    // The pointer on the message or on its actions (above its top).
+    property <bool> active: hover.has-hover || bar.hovered;
+    min-height: column.preferred-height;
+    background: line.marked ? Theme.accent-soft : root.active ? Theme.surface-2.transparentize(0.6) : transparent;
     accessible-role: AccessibleRole.list-item;
     accessible-label: line.author + ": " + line.text;
     accessible-description: line.time;
+    // The message's own buttons (links, reactions, files) are inside it,
+    // so it stays hovered over them and the actions stay shown.
     hover := TouchArea {
-        // Let clicks through to the buttons inside.
         mouse-cursor: MouseCursor.default;
-    }
-    body := HorizontalLayout {
-        padding-left: Theme.space-6;
-        padding-right: Theme.space-6;
-        padding-top: line.continued ? 2px : Theme.space-5;
-        padding-bottom: 2px;
-        spacing: Theme.space-4;
-        VerticalLayout {
-            width: root.avatar;
-            alignment: start;
-            if !line.continued: Avatar {
-                size: root.avatar;
-                initials: line.initials;
-                tint: line.tint;
-                image: line.avatar;
-                label: line.author;
+        // A right-click: the message's menu.
+        pointer-event(e) => {
+            if root.can-act && e.button == PointerEventButton.right && e.kind == PointerEventKind.up {
+                menu.show(self.mouse-x, self.mouse-y);
             }
         }
-        VerticalLayout {
-            horizontal-stretch: 1;
-            spacing: 2px;
-            if !line.continued: HorizontalLayout {
-                spacing: Theme.space-3;
-                alignment: start;
-                Text {
-                    text: line.author;
-                    color: Theme.name-text;
-                    font-size: Theme.font-lg;
-                    font-weight: Theme.weight-medium;
-                    vertical-alignment: center;
-                }
-                Text {
-                    text: line.time;
-                    color: Theme.text-muted;
-                    font-size: Theme.font-sm;
-                    vertical-alignment: center;
-                }
-                if line.pinned: Chip {
-                    text: @tr("pinned");
-                    icon: Icons.pin;
-                    tint: Theme.warning;
-                    y: (parent.height - self.height) / 2;
-                }
-                if line.topic != "": Chip {
-                    text: line.topic;
-                    icon: Icons.messages-square;
-                    tint: Theme.accent-text;
-                    y: (parent.height - self.height) / 2;
-                }
-            }
-            if line.blocked: Text {
-                text: @tr("Message from a blocked contact.");
-                color: Theme.text-disabled;
-                font-size: Theme.font-sm;
-                font-italic: true;
-            }
-            if !line.blocked && !line.rich && line.text != "": Text {
-                text: line.text;
-                color: Theme.text;
-                font-size: Theme.font-md;
-                wrap: word-wrap;
-            }
-            if !line.blocked && line.rich: RichText {
-                runs: line.runs;
-                font-size: Theme.font-md;
-                emoji-size: line.jumbo ? 44px : Theme.font-md * 1.4;
-            }
-            if line.files.length > 0 && !line.blocked: VerticalLayout {
-                padding-top: Theme.space-2;
-                padding-bottom: Theme.space-1;
-                spacing: Theme.space-2;
-                for file in line.files: HorizontalLayout {
+        column := VerticalLayout {
+            if line.unread-start: NewDivider { }
+            HorizontalLayout {
+                padding-left: Theme.space-6;
+                padding-right: Theme.space-6;
+                padding-top: line.continued ? 2px : line.unread-start ? Theme.space-3 : Theme.space-5;
+                padding-bottom: 2px;
+                spacing: Theme.space-4;
+                VerticalLayout {
+                    width: root.avatar;
                     alignment: start;
-                    if file.preview.width > 0: ImageCard {
-                        key: line.key;
-                        file: file;
-                    }
-                    if file.preview.width == 0: FileCard {
-                        key: line.key;
-                        file: file;
-                        max-width: 440px;
+                    if !line.continued: Avatar {
+                        size: root.avatar;
+                        initials: line.initials;
+                        tint: line.tint;
+                        image: line.avatar;
+                        label: line.author;
                     }
                 }
-            }
-            if line.reactions.length > 0: VerticalLayout {
-                padding-top: Theme.space-2;
-                padding-bottom: Theme.space-1;
-                Reactions {
-                    key: line.key;
-                    model: line.reactions;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 2px;
+                    if !line.continued: HorizontalLayout {
+                        spacing: Theme.space-3;
+                        alignment: start;
+                        Text {
+                            text: line.author;
+                            color: Theme.name-text;
+                            font-size: Theme.font-lg;
+                            font-weight: Theme.weight-medium;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: line.time;
+                            color: Theme.text-muted;
+                            font-size: Theme.font-sm;
+                            vertical-alignment: center;
+                        }
+                        if line.pinned: Chip {
+                            text: @tr("pinned");
+                            icon: Icons.pin;
+                            tint: Theme.warning;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        if line.topic != "": Chip {
+                            text: line.topic;
+                            icon: Icons.messages-square;
+                            tint: Theme.accent-text;
+                            y: (parent.height - self.height) / 2;
+                        }
+                    }
+                    MessageText {
+                        line: line;
+                        font-size: Theme.font-md;
+                    }
+                    if line.files.length > 0 && !line.blocked: VerticalLayout {
+                        padding-top: Theme.space-2;
+                        padding-bottom: Theme.space-1;
+                        spacing: Theme.space-2;
+                        for file in line.files: HorizontalLayout {
+                            alignment: start;
+                            if file.preview.width > 0: ImageCard {
+                                key: line.key;
+                                file: file;
+                            }
+                            if file.preview.width == 0: FileCard {
+                                key: line.key;
+                                file: file;
+                                max-width: 440px;
+                            }
+                        }
+                    }
+                    if line.reactions.length > 0: VerticalLayout {
+                        padding-top: Theme.space-2;
+                        padding-bottom: Theme.space-1;
+                        Reactions {
+                            key: line.key;
+                            model: line.reactions;
+                        }
+                    }
                 }
             }
         }
     }
-    if root.actions && line.remote && hover.has-hover: MessageActions {
+    // Below the "New" divider (`NewDivider`) when the message has one.
+    bar := MessageActions {
         x: parent.width - self.width - Theme.space-6;
-        y: -12px;
-        key: line.key;
-        pinned: line.pinned;
+        y: root.first || line.unread-start ? (line.unread-start ? Theme.space-3 + 16px : 0px) + 2px : -12px;
+        line: line;
+        shown: root.can-act && (root.active || root.show-actions);
+    }
+    // The menu's entries: Copy link only with a link, react and pin only
+    // with a gateway (`activated` counts as if all were there).
+    property <MenuEntry> copy-entry: { text: @tr("Copy text"), icon: Icons.copy, enabled: line.text != "" };
+    property <MenuEntry> link-entry: { text: @tr("Copy link"), icon: Icons.link, enabled: true };
+    property <MenuEntry> quote-entry: { text: @tr("Quote"), icon: Icons.quote, enabled: line.text != "" };
+    property <MenuEntry> react-entry: { text: @tr("React…"), icon: Icons.smile-plus, enabled: Bridge.has-reactions, separator: true };
+    property <MenuEntry> pin-entry: { text: line.pinned ? @tr("Unpin") : @tr("Pin"), icon: Icons.pin, enabled: Bridge.has-pins };
+    menu := PopupMenu {
+        x: 0;
+        y: 0;
+        entries: line.remote
+            ? (line.link != "" ? [root.copy-entry, root.link-entry, root.quote-entry, root.react-entry, root.pin-entry] : [root.copy-entry, root.quote-entry, root.react-entry, root.pin-entry])
+            : (line.link != "" ? [root.copy-entry, root.link-entry, root.quote-entry] : [root.copy-entry, root.quote-entry]);
+        activated(i) => {
+            let entry = i >= 1 && line.link == "" ? i + 1 : i;
+            if entry == 0 {
+                Nav.copy(line.text);
+            } else if entry == 1 {
+                Nav.copy(line.link);
+            } else if entry == 2 {
+                Nav.quote(line.author, line.text);
+            } else if entry == 3 {
+                Nav.react-key = line.key;
+                Nav.emoji-open = true;
+            } else {
+                Bridge.pin(line.key, !line.pinned);
+            }
+        }
+    }
+}
+
+// Over a chat whose "New" divider is above the view: how many messages
+// are new and since when, a jump to the first, and Mark as read.
+component UnreadBar inherits Rectangle {
+    callback jump();
+    height: 36px;
+    border-radius: Theme.radius-pill;
+    background: Theme.surface-3;
+    border-width: 1px;
+    border-color: Theme.border-popup;
+    HorizontalLayout {
+        padding-left: Theme.space-5;
+        padding-right: Theme.space-2;
+        spacing: Theme.space-3;
+        Rectangle {
+            width: 8px;
+            height: 8px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 4px;
+            background: Theme.danger;
+        }
+        Text {
+            text: @tr("{n} new message since {}" | "{n} new messages since {}" % Bridge.unread-count, Bridge.unread-since);
+            color: Theme.text;
+            font-size: Theme.font-sm;
+            font-weight: Theme.weight-semibold;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        Button {
+            small: true;
+            kind: ButtonKind.primary;
+            icon: Icons.arrow-up;
+            text: @tr("Jump");
+            y: (parent.height - self.height) / 2;
+            clicked => { root.jump(); }
+        }
+        IconButton {
+            icon: Icons.x;
+            label: @tr("Mark as read");
+            size: 28px;
+            icon-size: Theme.icon-sm;
+            y: (parent.height - self.height) / 2;
+            clicked => { Bridge.mark-read(); }
+        }
+    }
+}
+
+// The top of a chat with older messages: the button that loads them, or a
+// spinner while they load.
+component OlderRow inherits HorizontalLayout {
+    callback load();
+    height: 40px;
+    alignment: center;
+    if Bridge.loading-history: Spinner {
+        y: (parent.height - self.height) / 2;
+    }
+    if !Bridge.loading-history: Button {
+        small: true;
+        icon: Icons.chevron-up;
+        text: @tr("Older messages");
+        y: (parent.height - self.height) / 2;
+        clicked => { root.load(); }
     }
 }
 
 // The messages of the current chat (or of an open topic). The list starts
 // at the newest message and follows new ones while it is at the end;
-// scrolling up stops that until the end is reached again.
+// scrolling up stops that until the end is reached again. With `older`,
+// scrolling to within a screen of the top loads the page before, and the
+// rows on screen stay where they are while it comes in above them. The
+// button above the oldest message is for a chat too short to scroll, and
+// for after a page that brought nothing. While the "New" divider is above
+// the view, a bar over the list says how many messages are new.
 export component MessageList inherits VerticalLayout {
     in property <[ChatLine]> model;
     in property <bool> older;
     property <bool> follow: true;
     property <length> end: min(0px, list.visible-height - list.content-height);
     property <length> scrolled: list.content-y;
+    // While a page of older messages loads: how many rows there are from
+    // the top of the view to the end (rows, not pixels: the list places
+    // rows by their average height), and the row count then (-1: no page
+    // to make room for).
+    property <float> keep;
+    property <int> kept-rows: -1;
+    // The page came in and the view went back to `keep` (`restored`). The
+    // list then places the rows by their real heights, a little off: the
+    // view goes back up to twice more (`settle`), until it stays put.
+    property <int> settle;
+    property <length> restored;
+    // A page brought nothing (the gateway may be away): no more loading by
+    // scrolling until the list is a screen away from where that was.
+    property <bool> paused;
+    property <length> paused-at;
+    function rows-to-end() -> float {
+        return list.content-height > 0 ? root.model.length * (list.content-y + list.content-height) / list.content-height : 0;
+    }
+    function restore() {
+        root.restored = max(root.end, min(0px, list.content-height * (root.keep / root.model.length - 1)));
+        list.content-y = root.restored;
+    }
+    function load() {
+        root.keep = root.rows-to-end();
+        root.kept-rows = root.follow ? -1 : root.model.length;
+        Bridge.load-older();
+    }
+    // Scrolled up to within a screen of the top, and no page on its way or
+    // still to be placed.
+    function load-near-top() {
+        if root.older && Bridge.more-history && !Bridge.loading-history && !root.paused && !root.follow && root.kept-rows < 0 && list.content-y > -list.visible-height {
+            root.load();
+        }
+    }
     changed end => {
         if root.follow {
             list.content-y = root.end;
+        } else if root.kept-rows >= 0 && root.model.length != root.kept-rows && root.model.length > 0 {
+            // Older rows came in above: back to the rows that were shown.
+            root.restore();
+            root.settle = 2;
+            root.kept-rows = Bridge.loading-history ? root.model.length : -1;
+            root.load-near-top();
         }
     }
-    changed scrolled => { root.follow = root.scrolled <= root.end + 2px; }
-    // Another chat: start at its end.
-    property <int> tab: Bridge.current-tab;
-    changed tab => {
+    changed scrolled => {
+        // After a longer chat the list can leave a short one's first rows
+        // above the view (it places rows by their estimated heights).
+        if root.scrolled < root.end - 1px {
+            list.content-y = root.end;
+        }
+        root.follow = root.scrolled <= root.end + 2px;
+        if root.settle > 0 && root.scrolled != root.restored {
+            root.settle -= 1;
+            root.restore();
+        } else if root.follow {
+            root.kept-rows = -1;
+        } else if root.kept-rows >= 0 && root.model.length == root.kept-rows {
+            // Scrolled while the page loads: keep this place instead.
+            root.keep = root.rows-to-end();
+        }
+        if root.paused && abs(root.scrolled - root.paused-at) > list.visible-height {
+            root.paused = false;
+        }
+        root.load-near-top();
+    }
+    property <bool> loading: Bridge.loading-history;
+    changed loading => {
+        if !root.loading && root.kept-rows >= 0 && root.model.length == root.kept-rows {
+            root.paused = true;
+            root.paused-at = list.content-y;
+            root.kept-rows = -1;
+        }
+    }
+    // Another chat (another tab or private chat, or another server's chat
+    // at the same place): start at its end, with nothing of the last one's
+    // loading.
+    function reset() {
         root.follow = true;
+        root.kept-rows = -1;
+        root.settle = 0;
+        root.paused = false;
         list.content-y = root.end;
     }
-    // A pinned message was jumped to: scroll to where its row is. Rows
-    // differ in height, so this is the place of an average row (as the
-    // standard list estimates it); the row itself is highlighted.
-    property <int> jumps: Bridge.jump-requests;
-    changed jumps => {
+    property <int> chat: Bridge.current-chat;
+    changed chat => { root.reset(); }
+    property <int> server: Bridge.current-server;
+    changed server => { root.reset(); }
+    // Scroll to where row `index` is, a third down the view. Rows differ in
+    // height, so this is the place of an average row (as the standard list
+    // estimates it).
+    function jump-to(index: int) {
         if root.older && root.model.length > 0 {
-            list.content-y = max(root.end, min(0px, list.visible-height / 3 - Bridge.jump-index * list.content-height / root.model.length));
+            root.settle = 0;
+            list.content-y = max(root.end, min(0px, list.visible-height / 3 - index * list.content-height / root.model.length));
         }
     }
+    // A pinned message was jumped to (the row is highlighted).
+    property <int> jumps: Bridge.jump-requests;
+    changed jumps => { root.jump-to(Bridge.jump-index); }
+    // The "New" divider is above the view (as estimated for a jump).
+    property <bool> new-above: root.older && Bridge.unread-index >= 0 && root.model.length > 0
+        && list.content-y + Bridge.unread-index * list.content-height / root.model.length < 0;
     if Bridge.local-history: Rectangle {
         height: 30px;
         background: Theme.warning-soft;
@@ -463,27 +716,36 @@ export component MessageList inherits VerticalLayout {
             }
         }
     }
-    if root.older && Bridge.more-history: Rectangle {
-        height: 40px;
-        HorizontalLayout {
-            alignment: center;
-            Button {
-                small: true;
-                icon: Icons.chevron-up;
-                text: Bridge.loading-history ? @tr("Loading…") : @tr("Older messages");
-                enabled: !Bridge.loading-history;
-                y: (parent.height - self.height) / 2;
-                clicked => { Bridge.load-older(); }
-            }
-        }
+    // An empty chat: the button on its own.
+    if root.older && Bridge.more-history && root.model.length == 0: OlderRow {
+        load => { root.load(); }
     }
-    list := ListView {
+    Rectangle {
         vertical-stretch: 1;
         // A long chat must not make the window taller: the list scrolls.
         preferred-height: 0px;
-        accessible-label: @tr("Messages");
-        for line in root.model: MessageRow {
-            line: line;
+        list := ListView {
+            width: parent.width;
+            height: parent.height;
+            accessible-label: @tr("Messages");
+            // Scrolled by hand: the view is where the user put it.
+            scrolled => { root.settle = 0; }
+            for line[i] in root.model: VerticalLayout {
+                if i == 0 && root.older && Bridge.more-history: OlderRow {
+                    load => { root.load(); }
+                }
+                MessageRow {
+                    line: line;
+                    show-actions: Nav.show-actions && i == root.model.length - 1;
+                    first: i == 0;
+                }
+            }
+        }
+        if root.new-above: UnreadBar {
+            x: Theme.space-5;
+            y: Theme.space-3;
+            width: parent.width - 2 * Theme.space-5;
+            jump => { root.jump-to(Bridge.unread-index); }
         }
     }
 }
@@ -500,6 +762,9 @@ export component Composer inherits HorizontalLayout {
     padding-left: Theme.space-5;
     padding-right: Theme.space-5;
     spacing: Theme.space-3;
+    // A message was quoted (Nav.quote): write the answer below it.
+    property <int> requests: Nav.compose-requests;
+    changed requests => { input.focus-end(); }
     // Files go to the channel's file browser and a link into the chat.
     if !root.topic && root.attach: IconButton {
         icon: Icons.plus;
@@ -512,7 +777,8 @@ export component Composer inherits HorizontalLayout {
     }
     Rectangle {
         horizontal-stretch: 1;
-        min-height: 48px;
+        // A quote's lines all show, up to about eight.
+        min-height: max(48px, min(input.text-height + Theme.space-5, 160px));
         border-radius: Theme.radius-lg;
         background: Theme.surface-2;
         border-width: 1px;
@@ -583,7 +849,7 @@ export component ChatView inherits VerticalLayout {
 
     if root.header: PageHeader {
         banner: root.tab-banner;
-        icon: root.tab-kind == 1 ? Icons.hash : root.tab-kind == 2 ? Icons.at-sign : Icons.message-square;
+        icon: root.tab-kind == 1 ? Icons.channel : root.tab-kind == 2 ? Icons.at-sign : Icons.message-square;
         title: root.tab-name;
         description: root.tab-topic != "" ? root.tab-topic : Bridge.server-title;
         // Only when the chat does not come through our voice connection
@@ -594,23 +860,26 @@ export component ChatView inherits VerticalLayout {
             tint: Theme.accent-text;
             y: (parent.height - self.height) / 2;
         }
-        if Bridge.has-pins: Button {
+        // Icons with a count, so the channel's topic has the room.
+        if Bridge.has-pins: IconButton {
             icon: Icons.pin;
-            text: @tr("Pinned Messages");
+            label: @tr("Pinned messages");
             checked: Nav.pins-open;
+            count: Bridge.pins-count;
             y: (parent.height - self.height) / 2;
             clicked => { Nav.show-pins(!Nav.pins-open); }
         }
-        if Bridge.has-topics: Button {
+        if Bridge.has-topics: IconButton {
             icon: Icons.book-open;
-            text: @tr("Topics");
+            label: @tr("Topics");
             checked: Nav.topics-open;
+            count: Bridge.topics-count;
             y: (parent.height - self.height) / 2;
             clicked => { Nav.show-topics(!Nav.topics-open); }
         }
         // The voice channel we are in, with the people and the streams.
         if Bridge.voice-connected: IconButton {
-            icon: Icons.volume-2;
+            icon: Icons.channel;
             label: @tr("Voice channel");
             y: (parent.height - self.height) / 2;
             clicked => { Nav.show-voice(true); }
@@ -653,7 +922,8 @@ export component ChatView inherits VerticalLayout {
             }
         }
     }
-    // Chat tabs: server chat, channel chats, private chats.
+    // Chat tabs: the server chat and channel chats (private chats are on
+    // the messages page).
     Rectangle {
         height: Theme.control-height + 4px;
         accessible-role: AccessibleRole.tab-list;

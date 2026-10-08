@@ -7,18 +7,18 @@ mod pages;
 mod servers;
 mod settings;
 mod social;
-mod streams;
+pub(crate) mod streams;
 pub(crate) mod studio;
 
 use slint::ComponentHandle;
 
-use crate::app::{MainWindow, StudioBridge};
+use crate::app::{Bridge, MainWindow, StudioBridge};
 
 /// Connect every callback of the window.
 pub(crate) fn wire(ui: &MainWindow) {
 	servers::wire(ui);
 	chat::wire(ui);
-	streams::wire(ui);
+	streams::wire(&ui.global::<Bridge>());
 	settings::wire(ui);
 	emoji::wire(ui);
 	social::wire(ui);

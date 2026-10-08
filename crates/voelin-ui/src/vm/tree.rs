@@ -4,11 +4,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+pub use voelin_model::channel_title;
 use voelin_model::{
-	BannerMode, ChannelId, ChannelInfo, ClientInfo, GroupInfo, Presence, TreeRow, tree_rows,
+	BannerMode, ChannelId, ChannelInfo, ClientInfo, GroupInfo, Presence, Spacer, TreeRow, badges,
+	tree_rows,
 };
 
-use crate::app::{MemberItem, TreeItem};
+use crate::app::{BadgeItem, MemberItem, TreeItem};
 use crate::settings::ClientPlaybackMap;
 use crate::vm::avatar;
 
@@ -24,6 +26,31 @@ pub fn banner_mode(mode: BannerMode) -> i32 {
 /// The picture of a banner address, if the engine fetched it.
 pub fn banner(pictures: &HashMap<String, PathBuf>, url: Option<&str>) -> slint::Image {
 	avatar::image(url.and_then(|u| pictures.get(u)))
+}
+
+/// A badge's picture, if the engine fetched it.
+fn badge_icon(pictures: &HashMap<String, PathBuf>, guid: &str) -> slint::Image {
+	avatar::image(badges::icon_url(guid).and_then(|url| pictures.get(&url)))
+}
+
+/// A client's badges for the member card: the first three in its order.
+/// One the app does not know is "Badge", with its GUID as description.
+pub fn badge_items(guids: &[String], pictures: &HashMap<String, PathBuf>) -> Vec<BadgeItem> {
+	guids
+		.iter()
+		.take(badges::SHOWN)
+		.map(|guid| {
+			let (name, description) = match badges::info(guid) {
+				Some(info) => (info.name.as_str(), info.description.as_str()),
+				None => ("Badge", guid.as_str()),
+			};
+			BadgeItem {
+				name: name.into(),
+				description: description.into(),
+				icon: badge_icon(pictures, guid),
+			}
+		})
+		.collect()
 }
 
 /// What the tree shows besides the presence.
@@ -42,7 +69,7 @@ pub struct TreeInput<'a> {
 	/// Icons in the engine's cache, by icon id (channel, group and client
 	/// icons).
 	pub icons: &'a HashMap<u32, PathBuf>,
-	/// Banner pictures in the engine's cache, by address.
+	/// Banners and badges in the engine's cache, by address.
 	pub pictures: &'a HashMap<String, PathBuf>,
 	/// The server groups in display order; members are grouped by the
 	/// first one each client is in.
@@ -76,6 +103,18 @@ impl TreeInput<'_> {
 			.collect()
 	}
 
+	/// The pictures of the badges a client shows that arrived, in its
+	/// order; empty slots last.
+	fn badges(&self, client: &ClientInfo) -> [slint::Image; badges::SHOWN] {
+		let mut icons = client
+			.badges
+			.iter()
+			.take(badges::SHOWN)
+			.map(|guid| badge_icon(self.pictures, guid))
+			.filter(|i| i.size().width > 0);
+		std::array::from_fn(|_| icons.next().unwrap_or_default())
+	}
+
 	/// The group a client is sorted under: the first of its server groups
 	/// in display order.
 	fn group_of(&self, client: &ClientInfo) -> Option<&GroupInfo> {
@@ -104,22 +143,58 @@ fn talking(input: &TreeInput, client: &ClientInfo) -> bool {
 	input.talking.contains(&client.id) || client.talking == Some(true)
 }
 
-/// Centered spacer prefixes are presentation metadata, not part of the title.
-/// Leave other names untouched rather than guessing at the full spacer syntax.
-fn channel_label(name: &str) -> (&str, bool) {
-	if let Some((suffix, label)) = name.strip_prefix("[cspacer").and_then(|s| s.split_once(']'))
-		&& suffix.bytes().all(|b| b.is_ascii_digit())
-	{
-		return (label, true);
+/// A spacer kind as the UI takes it (`TreeItem.spacer`, 0: no spacer).
+fn spacer_index(kind: Spacer) -> i32 {
+	match kind {
+		Spacer::Left => 1,
+		Spacer::Center => 2,
+		Spacer::Right => 3,
+		Spacer::Fill => 4,
 	}
-	(name, false)
 }
 
-/// A channel's name as shown, and whether it is a centred spacer. Only
-/// top-level channels are spacers, as in TeamSpeak: a sub-channel keeps its
-/// name as it is.
-pub fn channel_title(channel: &ChannelInfo) -> (&str, bool) {
-	if channel.parent == 0 { channel_label(&channel.name) } else { (&channel.name, false) }
+/// A channel's title for lists and pickers (the search, the event form);
+/// none for a spacer that only separates.
+pub fn listed_title(channel: &ChannelInfo) -> Option<&str> {
+	match channel_title(channel) {
+		(text, Some(kind)) if kind.separates(text) => None,
+		(text, _) => Some(text),
+	}
+}
+
+/// Channels deeper than this are not followed up (a broken presence could
+/// loop).
+const PATH_DEPTH: usize = 64;
+
+/// The path of a channel, its names from the top as the server has them
+/// (what an invite link names, what connecting into it takes); empty for a
+/// channel the presence does not know.
+pub fn channel_path(presence: &Presence, channel: ChannelId) -> Vec<String> {
+	let mut names = Vec::new();
+	let mut next = presence.channels.get(&channel);
+	while let Some(c) = next.filter(|_| names.len() < PATH_DEPTH) {
+		names.push(c.name.clone());
+		next = presence.channels.get(&c.parent).filter(|_| c.parent != 0);
+	}
+	names.reverse();
+	names
+}
+
+/// About as many characters as a fill spacer's row holds: more than the
+/// widest tree shows.
+const FILL_CHARS: usize = 200;
+
+/// A spacer's text as its row shows it: a fill pattern repeated across the
+/// row, a blank text empty.
+fn spacer_text(kind: Spacer, text: &str) -> String {
+	match kind {
+		Spacer::Fill => match text.chars().count() {
+			0 => String::new(),
+			n => text.repeat((FILL_CHARS / n).max(1)),
+		},
+		_ if text.trim().is_empty() => String::new(),
+		_ => text.to_owned(),
+	}
 }
 
 /// The rows of the tree, channels with their clients below.
@@ -129,9 +204,12 @@ pub fn rows(input: &TreeInput) -> Vec<TreeItem> {
 		.into_iter()
 		.map(|row| match row {
 			TreeRow::Channel { depth, channel } => {
-				let (name, centered_spacer) = channel_title(channel);
+				let (name, spacer) = match channel_title(channel) {
+					(text, Some(kind)) => (spacer_text(kind, text), spacer_index(kind)),
+					(name, None) => (name.to_owned(), 0),
+				};
 				TreeItem {
-					centered_spacer,
+					spacer,
 					is_channel: true,
 					depth: depth as i32,
 					id: channel.id as i32,
@@ -156,6 +234,7 @@ pub fn rows(input: &TreeInput) -> Vec<TreeItem> {
 					.copied()
 					.unwrap_or_default();
 				let mut icons = input.client_icons(client).into_iter();
+				let [badge, badge_2, badge_3] = input.badges(client);
 				TreeItem {
 					is_channel: false,
 					depth: depth as i32,
@@ -175,6 +254,9 @@ pub fn rows(input: &TreeInput) -> Vec<TreeItem> {
 					icon: icons.next().unwrap_or_default(),
 					icon_2: icons.next().unwrap_or_default(),
 					icon_3: icons.next().unwrap_or_default(),
+					badge,
+					badge_2,
+					badge_3,
 					..Default::default()
 				}
 			}
@@ -183,14 +265,24 @@ pub fn rows(input: &TreeInput) -> Vec<TreeItem> {
 	filter(rows, input.filter)
 }
 
-/// Rows that match `query`, and the channels above them.
+/// A spacer row that only separates: a line, or no text.
+fn separator(row: &TreeItem) -> bool {
+	row.is_channel
+		&& (row.spacer == spacer_index(Spacer::Fill) || (row.spacer != 0 && row.name.is_empty()))
+}
+
+/// Rows that match `query`, and the channels above them. A separator
+/// never matches (`---` is no channel to look for), but stays above what
+/// does.
 fn filter(rows: Vec<TreeItem>, query: &str) -> Vec<TreeItem> {
 	let query = query.trim().to_lowercase();
 	if query.is_empty() {
 		return rows;
 	}
-	let matches: Vec<bool> =
-		rows.iter().map(|r| r.name.to_lowercase().contains(query.as_str())).collect();
+	let matches: Vec<bool> = rows
+		.iter()
+		.map(|r| !separator(r) && r.name.to_lowercase().contains(query.as_str()))
+		.collect();
 	let mut keep = matches.clone();
 	// A channel stays if anything below it matches.
 	for i in 0..rows.len() {
@@ -226,6 +318,14 @@ fn is_moderator_group(name: &str) -> bool {
 	name.to_lowercase().contains("mod")
 }
 
+/// Whether a client cannot speak in its channel: the channel needs more
+/// talk power than it has, and it was not made a talker.
+pub fn cannot_talk(channel: Option<&ChannelInfo>, client: &ClientInfo) -> bool {
+	channel.is_some_and(|c| {
+		c.needed_talk_power > 0 && client.talk_power < c.needed_talk_power && !client.talker
+	})
+}
+
 impl TreeInput<'_> {
 	/// The position of a client's group in display order (no group last).
 	fn group_rank(&self, client: &ClientInfo) -> usize {
@@ -243,10 +343,12 @@ impl TreeInput<'_> {
 			&& !talking
 			&& c.streaming != Some(true)
 			&& c.away.is_none();
-		let status = match self.presence.channels.get(&c.channel) {
+		let channel = self.presence.channels.get(&c.channel);
+		let status = match channel {
 			Some(channel) if elsewhere => format!("In {}", channel_title(channel).0),
 			_ => status_of(c, talking),
 		};
+		let [badge, badge_2, badge_3] = self.badges(c);
 		MemberItem {
 			id: c.id as i32,
 			name: c.nickname.clone().into(),
@@ -270,7 +372,10 @@ impl TreeInput<'_> {
 			priority: c.priority_speaker,
 			commander: c.channel_commander,
 			recording: c.recording,
-			talk_power: c.talk_power,
+			cannot_talk: cannot_talk(channel, c),
+			badge,
+			badge_2,
+			badge_3,
 		}
 	}
 }
@@ -504,29 +609,126 @@ mod tests {
 		std::fs::remove_dir_all(dir).unwrap();
 	}
 
+	/// A client's badges: the first three in its order, on the card by name
+	/// ("Badge" for one the app does not know), in the rows the pictures
+	/// that arrived.
 	#[test]
-	fn centered_spacer_titles_keep_tree_identity_and_search() {
+	fn badges_on_the_card_and_in_rows() {
+		let dir = std::env::temp_dir().join(format!("voelin-tree-badges-{}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		let guids: Vec<String> = [
+			"4b27be5a-b92a-4b30-8b2d-14b59653f427",
+			"00000000-0000-0000-0000-000000000000",
+			"05114019-6b46-4b13-b5a1-e5179ef69fb5",
+			"2bf80270-8efe-46dc-a472-3280a0479145",
+		]
+		.map(String::from)
+		.into();
+		let picture = |i: usize, width| {
+			(badges::icon_url(&guids[i]).unwrap(), picture_file(&dir, &format!("badge-{i}"), width))
+		};
+		let e = Extras {
+			pictures: HashMap::from([picture(0, 3), picture(2, 5), picture(3, 7)]),
+			..Default::default()
+		};
+		let width = |i: &slint::Image| i.size().width;
+		let card = badge_items(&guids, &e.pictures);
+		let names: Vec<_> = card.iter().map(|b| b.name.as_str()).collect();
+		assert_eq!(names, ["20th Anniversary", "Badge", "April Fools!"]);
+		assert_eq!(card[1].description.as_str(), guids[1]);
+		assert_eq!(card.iter().map(|b| width(&b.icon)).collect::<Vec<_>>(), [3, 0, 5]);
+
+		let mut p = presence();
+		p.clients.get_mut(&11).unwrap().badges = guids;
+		let (t, c, pb) = (HashSet::new(), HashSet::new(), ClientPlaybackMap::new());
+		let tree = input(&p, &t, &c, &pb, "", &e);
+		let bob = rows(&tree).into_iter().find(|r| !r.is_channel && r.id == 11).unwrap();
+		assert_eq!([&bob.badge, &bob.badge_2, &bob.badge_3].map(width), [3, 5, 0]);
+		let bob = members(&tree).into_iter().find(|m| m.id == 11).unwrap();
+		assert_eq!([&bob.badge, &bob.badge_2, &bob.badge_3].map(width), [3, 5, 0]);
+		std::fs::remove_dir_all(dir).unwrap();
+	}
+
+	#[test]
+	fn spacer_rows_keep_tree_identity() {
 		let mut p = presence();
 		p.channels.get_mut(&2).unwrap().name = "[cspacer12]Гамесы".into();
+		let more = |id, order, name: &str| ChannelInfo {
+			id,
+			order,
+			name: name.into(),
+			has_password: id == 5,
+			..Default::default()
+		};
+		for c in
+			[more(4, 2, "[*spacer1]-="), more(5, 4, "[rspacer2]Staff"), more(6, 5, "[spacer3]")]
+		{
+			p.channels.insert(c.id, c);
+		}
 		let (t, c, pb) = (HashSet::new(), HashSet::from([2]), ClientPlaybackMap::new());
 		let e = Extras::default();
-		let rows = rows(&input(&p, &t, &c, &pb, "Гамесы", &e));
-		assert_eq!(rows.len(), 1);
-		assert_eq!(rows[0].name, "Гамесы");
-		assert!(rows[0].centered_spacer && rows[0].collapsed);
-		assert_eq!(rows[0].id, 2);
-		assert_eq!(channel_label("[cspacer]Games"), ("Games", true));
-		for name in ["[cspacerx]Games", "[cspacer2Games", "Games", "[spacer0]Games"] {
-			assert_eq!(channel_label(name), (name, false));
-		}
+		let rows = rows(&input(&p, &t, &c, &pb, "", &e));
+		let channels: Vec<_> = rows
+			.iter()
+			.filter(|r| r.is_channel)
+			.map(|r| (r.id, r.spacer, r.name.chars().take(6).collect::<String>()))
+			.collect();
+		let row = |id, spacer, name: &str| (id, spacer, name.to_owned());
+		assert_eq!(
+			channels,
+			[
+				row(1, 0, "Lobby"),
+				row(2, 2, "Гамесы"),
+				row(4, 4, "-=-=-="),
+				row(5, 3, "Staff"),
+				row(6, 1, ""),
+			]
+		);
+		// A fill line repeats its pattern across the row.
+		let fill = &rows.iter().find(|r| r.id == 4 && r.is_channel).unwrap().name;
+		assert_eq!(fill.chars().count(), FILL_CHARS);
+		assert_eq!(spacer_text(Spacer::Fill, ""), "");
+		assert_eq!(spacer_text(Spacer::Fill, "x".repeat(300).as_str()).len(), 300);
+		let games = rows.iter().find(|r| r.id == 2 && r.is_channel).unwrap();
+		assert!(games.collapsed && games.members == 1);
+		assert!(rows.iter().any(|r| r.id == 5 && r.is_channel && r.locked));
 		// Only top-level channels are spacers: a sub-channel keeps its name.
 		p.channels.get_mut(&3).unwrap().name = "[cspacer1]Chess".into();
-		let (t, c) = (HashSet::new(), HashSet::new());
-		let found = super::rows(&input(&p, &t, &c, &pb, "Chess", &e));
-		let chess = found.iter().find(|r| r.is_channel && r.id == 3).unwrap();
-		assert_eq!((chess.name.as_str(), chess.centered_spacer), ("[cspacer1]Chess", false));
-		assert_eq!(channel_title(&p.channels[&2]), ("Гамесы", true));
-		assert_eq!(channel_title(&p.channels[&3]), ("[cspacer1]Chess", false));
+		let c = HashSet::new();
+		let rows = super::rows(&input(&p, &t, &c, &pb, "", &e));
+		let chess = rows.iter().find(|r| r.is_channel && r.id == 3).unwrap();
+		assert_eq!((chess.name.as_str(), chess.spacer), ("[cspacer1]Chess", 0));
+		assert_eq!(channel_title(&p.channels[&2]), ("Гамесы", Some(Spacer::Center)));
+		assert_eq!(channel_title(&p.channels[&3]), ("[cspacer1]Chess", None));
+		// Lists and pickers leave out what only separates.
+		let listed: Vec<_> = p.channels.values().filter_map(listed_title).collect();
+		assert_eq!(listed, ["Lobby", "Гамесы", "[cspacer1]Chess", "Staff"]);
+	}
+
+	/// The search finds a spacer by its text, never a separator, but keeps
+	/// separators above what it finds.
+	#[test]
+	fn search_skips_separators() {
+		let mut p = presence();
+		p.channels.get_mut(&2).unwrap().name = "[*spacer1]---".into();
+		p.channels.get_mut(&1).unwrap().name = "[cspacer]Lobby".into();
+		p.channels.insert(
+			4,
+			ChannelInfo { id: 4, order: 2, name: "[spacer4]".into(), ..Default::default() },
+		);
+		let (t, c, pb) = (HashSet::new(), HashSet::new(), ClientPlaybackMap::new());
+		let e = Extras::default();
+		let names = |filter| {
+			super::rows(&input(&p, &t, &c, &pb, filter, &e))
+				.iter()
+				.map(|r| r.name.chars().take(3).collect::<String>())
+				.collect::<Vec<_>>()
+		};
+		assert!(names("-").is_empty());
+		assert!(names("spacer").is_empty());
+		assert_eq!(names("lob"), ["Lob"]);
+		// The line stays as the parent of Chess.
+		assert_eq!(names("chess"), ["---", "Che"]);
 	}
 
 	#[test]
@@ -594,6 +796,43 @@ mod tests {
 	}
 
 	#[test]
+	fn members_who_cannot_talk() {
+		let channel = |needed| ChannelInfo { needed_talk_power: needed, ..Default::default() };
+		let client = |talk_power, talker| ClientInfo { talk_power, talker, ..Default::default() };
+		for (needed, power, talker, cannot) in [
+			(50, 75, false, false),
+			(50, 50, false, false),
+			(50, 0, false, true),
+			(50, 49, false, true),
+			// A talker speaks without talk power.
+			(50, 0, true, false),
+			// The channel needs none.
+			(0, 0, false, false),
+		] {
+			let case = format!("needed {needed}, power {power}, talker {talker}");
+			assert_eq!(
+				cannot_talk(Some(&channel(needed)), &client(power, talker)),
+				cannot,
+				"{case}"
+			);
+		}
+		assert!(!cannot_talk(None, &client(0, false)));
+		// In the members panel: bob (talk power 75) speaks in Games, which
+		// needs 50; Carol (none) cannot.
+		let mut p = presence();
+		p.channels.get_mut(&2).unwrap().needed_talk_power = 50;
+		p.clients.get_mut(&11).unwrap().talk_power = 75;
+		p.clients.get_mut(&12).unwrap().channel = 2;
+		let (t, c, pb) = (HashSet::new(), HashSet::new(), ClientPlaybackMap::new());
+		let e = Extras::default();
+		let rows: Vec<_> = members(&input(&p, &t, &c, &pb, "", &e))
+			.iter()
+			.map(|m| (m.name.to_string(), m.cannot_talk))
+			.collect();
+		assert_eq!(rows, [("bob".to_owned(), false), ("Carol".to_owned(), true)]);
+	}
+
+	#[test]
 	fn everyone_in_sections() {
 		let mut p = presence();
 		p.clients.get_mut(&10).unwrap().server_groups = vec![7];
@@ -651,5 +890,16 @@ mod tests {
 		let found = matching(all, "al");
 		assert_eq!(found.len(), 1);
 		assert!(found[0].first_in_group && found[0].group == "Guest" && found[0].group_count == 1);
+	}
+
+	#[test]
+	fn channel_paths() {
+		let mut p = presence();
+		assert_eq!(channel_path(&p, 1), ["Lobby"], "a channel at the top");
+		assert_eq!(channel_path(&p, 3), ["Games", "Chess"], "the names from the top");
+		assert!(channel_path(&p, 99).is_empty(), "an unknown channel");
+		// Two channels each other's parent: the path stops.
+		p.channels.get_mut(&2).unwrap().parent = 3;
+		assert_eq!(channel_path(&p, 3).len(), PATH_DEPTH);
 	}
 }

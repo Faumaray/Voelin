@@ -20,6 +20,12 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "0"
+  # GitHub's runners have 16 GB: the generated UI library does not fit
+  # in that next to other crates, and the runner is killed. The Gitea
+  # workflow keeps Cargo's default job count. The Flatpak job sets it in
+  # the manifest too.
+  CARGO_BUILD_JOBS: "1"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   package-linux:
@@ -108,6 +114,13 @@ jobs:
           python3 -m venv /tmp/venv
           /tmp/venv/bin/pip install --quiet "aiohttp>=3.9.5,<4" "tomlkit>=0.13.3,<1" "PyYAML>=6.0.2,<7"
           /tmp/venv/bin/python /tmp/flatpak-cargo-generator.py Cargo.lock -o packaging/flatpak/cargo-sources.json
+      # flatpak-builder does not pass the job's environment into its sandbox,
+      # and the manifest keeps Cargo's default job count for Gitea: one job
+      # here, as for the other packages.
+      - name: One Cargo job
+        run: |
+          sed -i 's/^    CARGO_NET_OFFLINE: "true"$/&\n    CARGO_BUILD_JOBS: "1"/' packaging/flatpak/io.github.faumaray.Voelin.yml
+          grep -q '^    CARGO_BUILD_JOBS: "1"$' packaging/flatpak/io.github.faumaray.Voelin.yml
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: voelin.flatpak

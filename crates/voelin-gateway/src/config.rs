@@ -131,6 +131,18 @@ pub static KEYS: &[KeyDef] = &[
 		"URL clients use, e.g. wss://gw.example.org/v1",
 	),
 	boot(
+		"log.level",
+		Kind::OptStr,
+		"null",
+		"What to log, e.g. \"debug\" or \"info,voelin_query=trace\"; default: RUST_LOG, else \"info\"",
+	),
+	boot(
+		"log.file",
+		Kind::OptStr,
+		"null",
+		"Also write the log to this file (appended; at 20 MB it moves to <name>.1.log, 5 files kept)",
+	),
+	boot(
 		"history.path",
 		Kind::Str,
 		"\"tsgw.db\"",
@@ -493,6 +505,10 @@ impl Layers {
 			bind: self.get::<String>("listen.bind")?.parse().context("listen.bind")?,
 			public_url: self.get("listen.public_url")?,
 			db_path: self.get("history.path")?,
+			log_level: self.get::<Option<String>>("log.level")?.filter(|l| !l.trim().is_empty()),
+			log_file: self
+				.get::<Option<PathBuf>>("log.file")?
+				.filter(|p| !p.as_os_str().is_empty()),
 		})
 	}
 }
@@ -514,6 +530,10 @@ pub struct Bootstrap {
 	pub bind: SocketAddr,
 	pub public_url: Option<String>,
 	pub db_path: PathBuf,
+	/// Log filter (`log.level`); `None`: `RUST_LOG`, else the default.
+	pub log_level: Option<String>,
+	/// Log file (`log.file`), on top of standard output.
+	pub log_file: Option<PathBuf>,
 }
 
 impl Bootstrap {
@@ -524,6 +544,8 @@ impl Bootstrap {
 			.unwrap_or_else(|| format!("tsgw@{}", self.addr))
 	}
 
+	/// How to open query connections. Connections opened with clones of
+	/// the result share one flood count, as the server counts them.
 	pub fn query_connect(&self) -> voelin_query::Connect {
 		voelin_query::Connect {
 			transport: self.transport,
@@ -750,5 +772,22 @@ mod tests {
 		assert_eq!(cli["relay.nickname"], "Bot");
 		assert!(cli_values(&["nope=1".into()]).is_err());
 		assert!(cli_values(&["history.retention_days=-1".into()]).is_err());
+	}
+
+	#[test]
+	fn log_settings_are_bootstrap_keys() {
+		let file = file_values(
+			"[query]\ntransport = \"ssh\"\naddr = \"127.0.0.1:10022\"\n\
+			 [log]\nfile = \"logs/tsgw.log\"\n",
+		)
+		.unwrap();
+		let env = env_values(|name| (name == "TSGW_LOG_LEVEL").then(|| "debug".into())).unwrap();
+		let boot = Layers { file, env, ..Default::default() }.bootstrap().unwrap();
+		assert_eq!(boot.log_level.as_deref(), Some("debug"));
+		assert_eq!(boot.log_file, Some(PathBuf::from("logs/tsgw.log")));
+		assert!(key_def("log.level").unwrap().bootstrap);
+		let none = file_values("[query]\ntransport = \"raw\"\naddr = \"h:1\"\n").unwrap();
+		let boot = Layers { file: none, ..Default::default() }.bootstrap().unwrap();
+		assert_eq!((boot.log_level, boot.log_file), (None, None));
 	}
 }

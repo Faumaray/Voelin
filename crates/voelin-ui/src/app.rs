@@ -24,9 +24,10 @@ use voelin_core::settings::{
 };
 use voelin_core::stream::StreamInfo;
 use voelin_core::{
-	AudioSettings, Command, Engine, Event, History, HistoryMessage, SessionState, VoiceState,
+	AudioSettings, Command, Engine, Event, History, HistoryMessage, ObserveState, SessionState,
+	VoiceState,
 };
-use voelin_model::{Capabilities, ChannelId, ChatTarget, GroupInfo, Presence};
+use voelin_model::{Capabilities, ChannelId, ChatMessage, ChatTarget, GroupInfo, Presence};
 use voelin_platform::crash;
 use voelin_store::{Bookmark, MemorySecrets, Secrets, Store};
 
@@ -144,7 +145,17 @@ pub(crate) struct Tab {
 	/// Live messages of a session that keeps no history (no server unique
 	/// id yet): grouped from the message before, without ids.
 	pub last: Option<Previous>,
+	/// Messages not read, not ours: those after `read` (without stored
+	/// history, those that came while the tab was not on screen).
 	pub unread: i32,
+	/// The newest message read, by `(ts_ms, id)`: kept in the store
+	/// (`chat_reads`) when the tab is left, the session closes and on exit
+	/// (`App::save_read`). `stored_read` is what the store has.
+	pub read: Option<(i64, i64)>,
+	pub stored_read: Option<(i64, i64)>,
+	/// The message the "New" divider is above: the first that was new when
+	/// the tab came on screen. It stays until the tab is left.
+	pub divider: Option<i64>,
 	/// Nothing older exists as far as the engine can tell.
 	pub complete: bool,
 	/// A gateway page arrived: the chat is not only what we saw.
@@ -163,6 +174,8 @@ pub(crate) struct Tab {
 	pub topic_messages: Vec<Msg>,
 	/// The message jumped to from the pins.
 	pub marked: Option<i64>,
+	/// What the lines of `messages` were built from.
+	pub cache: crate::vm::chat::LineCache,
 }
 
 impl Tab {
@@ -174,6 +187,9 @@ impl Tab {
 			messages: Vec::new(),
 			last: None,
 			unread: 0,
+			read: None,
+			stored_read: None,
+			divider: None,
 			complete: false,
 			synced: false,
 			loading: false,
@@ -185,7 +201,13 @@ impl Tab {
 			topic: None,
 			topic_messages: Vec::new(),
 			marked: None,
+			cache: Default::default(),
 		}
+	}
+
+	/// A private chat (on the Direct Messages page, not in the chat strip).
+	pub fn is_private(&self) -> bool {
+		matches!(self.target, ChatTarget::Private(_))
 	}
 
 	/// A handle for a message that has none yet.
@@ -196,6 +218,50 @@ impl Tab {
 
 	pub fn message(&self, key: i32) -> Option<&HistoryMessage> {
 		self.messages.iter().chain(&self.topic_messages).find(|m| m.key == key).map(|m| &m.message)
+	}
+
+	/// Where each message is and whether it is ours (`own`), for the read
+	/// markers ([`crate::vm::chat::first_unread`]).
+	pub fn positions(&self, own: impl Fn(&ChatMessage) -> bool) -> Vec<(i64, i64, bool)> {
+		self.messages
+			.iter()
+			.map(|m| (m.message.message.ts_ms, m.message.id, own(&m.message.message)))
+			.collect()
+	}
+
+	/// Where the newest message is.
+	pub fn newest(&self) -> Option<(i64, i64)> {
+		self.messages.last().map(|m| (m.message.message.ts_ms, m.message.id))
+	}
+
+	/// The tab came on screen: the first new message gets the divider
+	/// (unless one shows), and everything is read.
+	pub fn enter(&mut self, own: impl Fn(&ChatMessage) -> bool) {
+		if self.unread > 0 && self.divider.is_none() {
+			let first = crate::vm::chat::first_unread(&self.positions(own), self.read);
+			self.divider = first.map(|i| self.messages[i].message.id);
+		}
+		self.catch_up();
+	}
+
+	/// Everything in the tab is read (it is on screen).
+	pub fn catch_up(&mut self) {
+		self.read = self.read.max(self.newest());
+		self.unread = 0;
+	}
+
+	/// Count what is not read: what came after `read`, not ours.
+	pub fn count_unread(&mut self, own: impl Fn(&ChatMessage) -> bool) {
+		self.unread = crate::vm::chat::unread_count(&self.positions(own), self.read);
+	}
+
+	/// Start from where the store says the chat was read (`reads`: by the
+	/// store's name of the chat).
+	pub fn read_from(&mut self, reads: &HashMap<String, (i64, i64)>) {
+		if let Some(&read) = reads.get(&crate::chat::store_target(&self.target).key()) {
+			self.read = self.read.max(Some(read));
+			self.stored_read = Some(read);
+		}
 	}
 }
 
@@ -208,6 +274,10 @@ pub(crate) struct SessionView {
 	pub talking: HashSet<u16>,
 	pub tabs: Vec<Tab>,
 	pub current_tab: usize,
+	/// The chat strip's chat last current (the server's or a channel's): a
+	/// private chat is current only on the Direct Messages page, and this
+	/// one is current again when that page is left.
+	pub channel_tab: ChatTarget,
 	/// The own channel's tab was focused for this voice connection.
 	pub focused_own_channel: bool,
 	/// The streams in our channel (TeamSpeak 6).
@@ -219,7 +289,8 @@ pub(crate) struct SessionView {
 	pub avatars: HashMap<String, PathBuf>,
 	/// Icons in the engine's cache, by icon id ([`Event::IconReady`]).
 	pub icons: HashMap<u32, PathBuf>,
-	/// Banners in the engine's cache, by address ([`Event::PictureReady`]).
+	/// Banners and badges in the engine's cache, by address
+	/// ([`Event::PictureReady`]).
 	pub pictures: HashMap<String, PathBuf>,
 	/// The server's icon id as its voice connection last told it
 	/// ([`Event::ServerDetails`]); kept while disconnected, for the rail.
@@ -234,6 +305,11 @@ pub(crate) struct SessionView {
 	pub gateway_caps: Vec<String>,
 	/// The client whose member card is open.
 	pub member_card: Option<u16>,
+	/// Passwords given for locked channels, until voice disconnects.
+	pub channel_passwords: HashMap<ChannelId, String>,
+	/// The channel a voice connection was asked into, until it is joined
+	/// or joined again (`App::join_after_connect`).
+	pub join_after_connect: Option<ChannelId>,
 	/// Viewers of the streams in the gateway's directory, by stream id.
 	pub stream_viewers: HashMap<String, u32>,
 	/// Downloads started from chat, by transfer id.
@@ -242,6 +318,10 @@ pub(crate) struct SessionView {
 	pub next_transfer: u64,
 	/// What the home, messages and events screens keep of the session.
 	pub extra: crate::social::SessionExtra,
+	/// Where its chats were read, from the store (by the store's name of
+	/// the chat), for the server unique id `reads_of`.
+	pub reads: HashMap<String, (i64, i64)>,
+	pub reads_of: Option<String>,
 }
 
 impl Default for SessionView {
@@ -254,6 +334,7 @@ impl Default for SessionView {
 			talking: HashSet::new(),
 			tabs: vec![Tab::new(ChatTarget::Server, "Server".into())],
 			current_tab: 0,
+			channel_tab: ChatTarget::Server,
 			focused_own_channel: false,
 			streams: Vec::new(),
 			applied_playback: HashSet::new(),
@@ -266,10 +347,14 @@ impl Default for SessionView {
 			channel_groups: Vec::new(),
 			gateway_caps: Vec::new(),
 			member_card: None,
+			channel_passwords: HashMap::new(),
+			join_after_connect: None,
 			stream_viewers: HashMap::new(),
 			downloads: HashMap::new(),
 			next_transfer: 1,
 			extra: Default::default(),
+			reads: HashMap::new(),
+			reads_of: None,
 		}
 	}
 }
@@ -290,7 +375,7 @@ impl SessionView {
 		self.channel_of(client)
 			.filter(|c| Some(*c) != self.state.own_channel)
 			.and_then(|c| self.presence.channels.get(&c))
-			.map_or_else(String::new, |c| c.name.clone())
+			.map_or_else(String::new, |c| crate::vm::tree::channel_title(c).0.to_owned())
 	}
 
 	/// A client's nickname, or its id.
@@ -301,9 +386,69 @@ impl SessionView {
 			.map_or_else(|| format!("client {client}"), |c| c.nickname.clone())
 	}
 
-	/// Unread messages in all chats.
-	pub fn unread(&self) -> i32 {
-		self.tabs.iter().map(|t| t.unread).sum()
+	/// Unread messages in the server's and the channels' chats (the rail and
+	/// the chat strip count them; private chats count on the Direct
+	/// Messages page).
+	pub fn channel_unread(&self) -> i32 {
+		self.tabs.iter().filter(|t| !t.is_private()).map(|t| t.unread).sum()
+	}
+
+	/// Unread messages in private chats.
+	pub fn private_unread(&self) -> i32 {
+		self.tabs.iter().filter(|t| t.is_private()).map(|t| t.unread).sum()
+	}
+
+	/// Make tab `index` the current one; the chat strip remembers it unless
+	/// it is a private chat.
+	pub fn set_current_tab(&mut self, index: usize) {
+		self.current_tab = index;
+		if let Some(tab) = self.tabs.get(index).filter(|t| !t.is_private()) {
+			self.channel_tab = tab.target.clone();
+		}
+	}
+
+	/// Focus tab `index`. While a private chat is current (the Direct
+	/// Messages page shows it, and its composer sends there), a chat of the
+	/// strip does not take its place: it is the strip's chat, current once
+	/// that page is left (voice connecting focuses its channel's chat).
+	pub fn focus_tab(&mut self, index: usize) {
+		let Some(tab) = self.tabs.get(index) else { return };
+		if !tab.is_private() && self.tabs.get(self.current_tab).is_some_and(Tab::is_private) {
+			self.channel_tab = tab.target.clone();
+		} else {
+			self.set_current_tab(index);
+		}
+	}
+
+	/// Remove tab `index`. The current tab stays; when it is this one, the
+	/// chat strip's next tab takes its place, else its last.
+	pub fn remove_tab(&mut self, index: usize) -> Tab {
+		let tab = self.tabs.remove(index);
+		if self.current_tab > index {
+			self.current_tab -= 1;
+		} else if self.current_tab == index {
+			let (strip, _) = crate::vm::chat::strip(self.tabs.iter().map(|t| &t.target), 0);
+			let next = strip.iter().find(|&&i| i >= index).or(strip.last()).copied();
+			self.set_current_tab(next.unwrap_or(0));
+		}
+		tab
+	}
+
+	/// Leave a current private chat for the chat strip's last one (the
+	/// Direct Messages page was left); `true` if the current tab changed.
+	pub fn leave_private(&mut self) -> bool {
+		if !self.tabs.get(self.current_tab).is_some_and(Tab::is_private) {
+			return false;
+		}
+		self.current_tab = self.tabs.iter().position(|t| t.target == self.channel_tab).unwrap_or(0);
+		true
+	}
+
+	/// A new tab for `target`, read as far as the store says.
+	pub fn new_tab(&self, target: ChatTarget, title: String) -> Tab {
+		let mut tab = Tab::new(target, title);
+		tab.read_from(&self.reads);
+		tab
 	}
 
 	/// The session's gateway offers this feature
@@ -349,7 +494,10 @@ pub(crate) struct Models {
 	pub tree: Rc<VecModel<TreeItem>>,
 	pub members: Rc<VecModel<MemberItem>>,
 	pub server_members: Rc<VecModel<MemberItem>>,
+	/// The chat strip: the current session's tabs without its private chats.
 	pub tabs: Rc<VecModel<ChatTab>>,
+	/// Which of the session's tabs each of `tabs` is ([`crate::vm::chat::strip`]).
+	pub strip: RefCell<Vec<usize>>,
 	pub streams: Rc<VecModel<StreamItem>>,
 	pub viewers: Rc<VecModel<ViewerItem>>,
 	pub pins: Rc<VecModel<PinItem>>,
@@ -378,6 +526,7 @@ impl Models {
 			members: Rc::default(),
 			server_members: Rc::default(),
 			tabs: Rc::default(),
+			strip: RefCell::new(vec![0]),
 			streams: Rc::default(),
 			viewers: Rc::default(),
 			pins: Rc::default(),
@@ -393,25 +542,31 @@ impl Models {
 			gateway_perms: Rc::default(),
 			all_settings: Rc::default(),
 		};
-		bridge.set_servers(ModelRc::from(models.servers.clone()));
-		bridge.set_tree(ModelRc::from(models.tree.clone()));
-		bridge.set_members(ModelRc::from(models.members.clone()));
-		bridge.set_server_members(ModelRc::from(models.server_members.clone()));
-		bridge.set_tabs(ModelRc::from(models.tabs.clone()));
-		bridge.set_streams(ModelRc::from(models.streams.clone()));
-		bridge.set_share_viewers(ModelRc::from(models.viewers.clone()));
-		bridge.set_pins(ModelRc::from(models.pins.clone()));
-		bridge.set_topics(ModelRc::from(models.topics.clone()));
-		bridge.set_topic_messages(ModelRc::from(models.topic_messages.clone()));
-		bridge.set_viewer_qualities(ModelRc::from(models.qualities.clone()));
-		bridge.set_messages(ModelRc::from(models.no_chat.clone()));
-		bridge.set_layers(ModelRc::from(models.layers.clone()));
-		bridge.set_audio_sources(ModelRc::from(models.audio_sources.clone()));
-		bridge.set_identities(ModelRc::from(models.identities.clone()));
-		bridge.set_gateway_config(ModelRc::from(models.gateway_config.clone()));
-		bridge.set_gateway_perms(ModelRc::from(models.gateway_perms.clone()));
-		bridge.set_all_settings(ModelRc::from(models.all_settings.clone()));
+		models.attach(bridge);
 		models
+	}
+
+	/// Show the models in `bridge`: the main window's, and the viewer's own
+	/// window's (its player reads the stream's qualities).
+	pub(crate) fn attach(&self, bridge: &Bridge) {
+		bridge.set_servers(ModelRc::from(self.servers.clone()));
+		bridge.set_tree(ModelRc::from(self.tree.clone()));
+		bridge.set_members(ModelRc::from(self.members.clone()));
+		bridge.set_server_members(ModelRc::from(self.server_members.clone()));
+		bridge.set_tabs(ModelRc::from(self.tabs.clone()));
+		bridge.set_streams(ModelRc::from(self.streams.clone()));
+		bridge.set_share_viewers(ModelRc::from(self.viewers.clone()));
+		bridge.set_pins(ModelRc::from(self.pins.clone()));
+		bridge.set_topics(ModelRc::from(self.topics.clone()));
+		bridge.set_topic_messages(ModelRc::from(self.topic_messages.clone()));
+		bridge.set_viewer_qualities(ModelRc::from(self.qualities.clone()));
+		bridge.set_messages(ModelRc::from(self.no_chat.clone()));
+		bridge.set_layers(ModelRc::from(self.layers.clone()));
+		bridge.set_audio_sources(ModelRc::from(self.audio_sources.clone()));
+		bridge.set_identities(ModelRc::from(self.identities.clone()));
+		bridge.set_gateway_config(ModelRc::from(self.gateway_config.clone()));
+		bridge.set_gateway_perms(ModelRc::from(self.gateway_perms.clone()));
+		bridge.set_all_settings(ModelRc::from(self.all_settings.clone()));
 	}
 }
 
@@ -430,6 +585,9 @@ pub(crate) struct App {
 	pub sessions: HashMap<i64, SessionView>,
 	pub models: Models,
 	pub status: String,
+	/// What the toast of the next copy says instead of "Copied" (an invite
+	/// names its channel and link).
+	pub copy_note: Option<String>,
 	/// The members panel's search.
 	pub member_filter: String,
 	/// The topics drawer's search.
@@ -451,6 +609,16 @@ pub(crate) struct App {
 	pub contacts: HashMap<String, voelin_core::Contact>,
 	/// The client in the volume dialog: session, client id, unique id.
 	pub playback_dialog: Option<(i64, u16, Option<String>)>,
+	/// The locked channel the password dialog is for: session, channel.
+	pub join_target: Option<(i64, ChannelId)>,
+	/// Who the poke dialog pokes: session, client, nickname.
+	pub poke_target: Option<(i64, u16, String)>,
+	/// The window has the focus (desktop: winit tells; elsewhere assumed):
+	/// messages are read only then.
+	pub focused: bool,
+	/// The chat whose messages are on screen (session, target): when it is
+	/// left, it is stored and loses its divider (`App::track_reading`).
+	pub reading: Option<(i64, ChatTarget)>,
 	pub mic_test: bool,
 	pub ptt: GlobalPtt,
 	pub video: Video,
@@ -487,6 +655,8 @@ pub(crate) struct App {
 	pub pages: crate::settings_pages::Pages,
 	/// The Stream Studio (studio.rs).
 	pub studio: crate::studio::StudioState,
+	/// The stream's own window (popout.rs).
+	pub popout: crate::popout::Popout,
 }
 
 thread_local! {
@@ -643,6 +813,9 @@ pub fn run(options: RunOptions) -> Result<()> {
 	let bridge = ui.global::<Bridge>();
 	bridge.set_app_name(voelin_platform::APP_NAME.into());
 	bridge.set_app_version(env!("CARGO_PKG_VERSION").into());
+	bridge.set_desktop(cfg!(not(target_os = "android")));
+	#[cfg(not(target_os = "android"))]
+	watch_focus(&ui);
 	let models = Models::new(&bridge);
 	// Wayland and X11 find the desktop file (and icon) by this id.
 	#[cfg(not(target_os = "android"))]
@@ -678,6 +851,7 @@ pub fn run(options: RunOptions) -> Result<()> {
 		sessions: HashMap::new(),
 		models,
 		status: String::new(),
+		copy_note: None,
 		member_filter: String::new(),
 		topic_filter: String::new(),
 		voice_view: false,
@@ -690,6 +864,10 @@ pub fn run(options: RunOptions) -> Result<()> {
 		playback,
 		contacts: HashMap::new(),
 		playback_dialog: None,
+		join_target: None,
+		poke_target: None,
+		focused: true,
+		reading: None,
 		mic_test: false,
 		ptt,
 		video,
@@ -709,15 +887,23 @@ pub fn run(options: RunOptions) -> Result<()> {
 		social: Default::default(),
 		pages: Default::default(),
 		studio: Default::default(),
+		popout: Default::default(),
 	};
 	APP.with(|a| *a.borrow_mut() = Some(app));
 	crate::bind::wire(&ui);
+	// The studio's and the stream's windows close with the main window,
+	// so the app ends.
+	ui.window().on_close_requested(|| {
+		with_app(App::close_windows);
+		slint::CloseRequestResponse::HideWindow
+	});
 	with_app(|app| {
 		app.apply_appearance();
 		app.load_own_uids();
 		app.apply_srtp();
 		app.refresh_all();
 		app.refresh_settings_flags();
+		app.refresh_transmit();
 		app.refresh_crash_notice();
 		app.load_recent_chats();
 		app.refresh_people();
@@ -764,6 +950,10 @@ pub fn run(options: RunOptions) -> Result<()> {
 		if let Err(e) = app.prefs.flush() {
 			warn!(%e, "could not store settings");
 		}
+		let ids: Vec<i64> = app.sessions.keys().copied().collect();
+		for id in ids {
+			app.save_reads(id);
+		}
 		app.watch = None;
 		app.share = None;
 		if own && !app.demo_ui {
@@ -781,6 +971,20 @@ pub fn run(options: RunOptions) -> Result<()> {
 		runtime.shutdown_timeout(Duration::from_secs(2));
 	}
 	Ok(())
+}
+
+/// Tell the app when the window gains or loses the focus: messages are read
+/// only while it has it. (winit's focus events; without them, as on
+/// Android, the window counts as focused.)
+#[cfg(not(target_os = "android"))]
+fn watch_focus(ui: &MainWindow) {
+	use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEvent};
+	ui.window().on_winit_window_event(|_, event| {
+		if let WindowEvent::Focused(focused) = *event {
+			later(move |app| app.window_focused(focused));
+		}
+		EventResult::Propagate
+	});
 }
 
 /// Open a file or folder with the desktop's default application.
@@ -843,6 +1047,19 @@ impl App {
 		}
 	}
 
+	/// Open a page on the web in the browser. Pages open through here, so
+	/// a platform without a desktop opener (Android) can open them its own
+	/// way.
+	pub(crate) fn open_url(&self, url: &str) -> std::io::Result<()> {
+		open_target(std::ffi::OsStr::new(url))
+	}
+
+	/// Nav.copy put text on the clipboard: one toast says so.
+	pub fn copied(&mut self) {
+		let text = self.copy_note.take().unwrap_or_else(|| "Copied".to_owned());
+		self.set_status(text);
+	}
+
 	pub fn store_settings(&self) {
 		if let Err(e) = self.prefs.set(&UI, self.settings.clone()) {
 			warn!(%e, "could not store settings");
@@ -855,6 +1072,8 @@ impl App {
 	fn setting_changed(&mut self, key: &str) {
 		if key == AUDIO.name() && !self.audio_dirty {
 			self.audio = self.prefs.get(&AUDIO);
+			// The voice controls follow the transmit mode.
+			self.refresh_transmit();
 		} else if key == CRASH_REPORTS.name() {
 			let enabled = self.prefs.get(&CRASH_REPORTS);
 			if enabled != self.settings.crash_reports {
@@ -887,25 +1106,51 @@ impl App {
 				let id = session as i64;
 				let view = self.sessions.entry(id).or_default();
 				let was_voice = view.state.voice;
+				let was_observe = view.state.observe;
+				let was_channel = view.state.own_channel;
 				view.state = state.clone();
 				if state.voice != VoiceState::Connected {
 					view.focused_own_channel = false;
+				}
+				if state.voice == VoiceState::Disconnected && was_voice != VoiceState::Disconnected
+				{
+					view.channel_passwords.clear();
+					view.join_after_connect = None;
 				}
 				if state.voice == VoiceState::Connected && was_voice != VoiceState::Connected {
 					// A new connection: volumes are sent again.
 					view.applied_playback.clear();
 				}
+				// Where its chats were read, once the server is known; kept
+				// when the session ends.
+				self.load_reads(id);
+				let off = |voice: VoiceState, observe: ObserveState| {
+					voice == VoiceState::Disconnected && observe == ObserveState::Off
+				};
+				if off(state.voice, state.observe) && !off(was_voice, was_observe) {
+					self.save_reads(id);
+				}
+				let view = self.sessions.entry(id).or_default();
 				let focus = !view.focused_own_channel;
 				if state.voice == VoiceState::Connected && was_voice != VoiceState::Connected {
 					self.set_status("Connected");
 				}
 				if self.current == Some(id) {
+					if self.track_reading() {
+						self.refresh_chat();
+					}
 					// The voice channel's chat is always at hand, and focused
 					// once per connection.
 					if let (Some(cid), VoiceState::Connected) = (state.own_channel, state.voice) {
 						self.open_chat(ChatTarget::Channel(cid), focus);
 						self.sessions.entry(id).or_default().focused_own_channel = true;
 					}
+				}
+				// Where we are with voice, when it changed here: home's last
+				// place, which `refresh_servers` shows (voice on another
+				// server does not take it back at each of its events).
+				if (state.voice, state.own_channel) != (was_voice, was_channel) {
+					self.remember_voice(id);
 				}
 				self.refresh_servers();
 				self.refresh_toolbar();
@@ -915,6 +1160,7 @@ impl App {
 				if self.open_client_pending && self.current == Some(id) {
 					self.open_first_client();
 				}
+				self.join_after_connect(id);
 			}
 			Event::ServerInfo { session, name, flavor, capabilities } => {
 				self.sessions.entry(session as i64).or_default().capabilities = capabilities;
@@ -931,9 +1177,28 @@ impl App {
 				self.autoshare();
 			}
 			Event::Presence { session, presence } => {
-				self.sessions.entry(session as i64).or_default().presence = presence;
+				let view = self.sessions.entry(session as i64).or_default();
+				// The server chat shows its welcome and host message, with
+				// their pictures.
+				let said = crate::chat::server_texts(&view.presence.server)
+					!= crate::chat::server_texts(&presence.server);
+				// Our channel's path: known only now (a new connection),
+				// or renamed.
+				let path = |v: &SessionView| {
+					v.state.own_channel.map(|c| crate::vm::tree::channel_path(&v.presence, c))
+				};
+				let path_before = path(view);
+				view.presence = presence;
+				let renamed = path(view) != path_before;
 				self.apply_client_playback(session as i64);
+				self.join_after_connect(session as i64);
+				if renamed && self.remember_voice(session as i64) {
+					self.refresh_servers();
+				}
 				if self.current == Some(session as i64) {
+					if said {
+						self.fetch_previews(session as i64);
+					}
 					self.refresh_toolbar();
 					self.refresh_tree();
 					self.refresh_chat();
@@ -980,6 +1245,9 @@ impl App {
 				self.history_batch(session as i64, &target, messages, source, complete);
 			}
 			Event::Gateway { session, update } => {
+				if let voelin_core::gateway::GatewayUpdate::Connected { url, .. } = &update {
+					self.gateway_in_use(session as i64, url);
+				}
 				self.gateway_extra(session as i64, &update);
 				self.gateway_update(session as i64, update);
 			}
@@ -1001,8 +1269,8 @@ impl App {
 			// Pictures can arrive after the rows were built: draw them again.
 			Event::AvatarReady { session, client_uid, path, .. } => {
 				let view = self.sessions.entry(session as i64).or_default();
-				// A file that arrives again is decoded again.
-				crate::images::forget(&path);
+				// A file that arrives again is decoded again if it changed.
+				crate::images::reloaded(&path);
 				view.avatars.insert(client_uid, path);
 				if self.current == Some(session as i64) {
 					self.refresh_tree();
@@ -1014,7 +1282,7 @@ impl App {
 			}
 			Event::IconReady { session, icon, path } => {
 				let view = self.sessions.entry(session as i64).or_default();
-				crate::images::forget(&path);
+				crate::images::reloaded(&path);
 				view.icons.insert(icon, path);
 				self.refresh_servers();
 				if self.current == Some(session as i64) {
@@ -1025,12 +1293,13 @@ impl App {
 			Event::PictureReady { session, url, path } => {
 				let view = self.sessions.entry(session as i64).or_default();
 				// The host banner reloads into the same file.
-				crate::images::forget(&path);
+				crate::images::reloaded(&path);
 				view.pictures.insert(url, path);
 				if self.current == Some(session as i64) {
 					self.refresh_toolbar();
 					self.refresh_tree();
 					self.refresh_chat();
+					self.refresh_member_card();
 				}
 			}
 			Event::Transfer { session, transfer, state } => {
@@ -1045,6 +1314,9 @@ impl App {
 			// The sample sessions of VOELIN_DEMO_UI are unknown to the engine.
 			Event::Error { .. } if self.demo_ui => {}
 			Event::Error { message, .. } => self.set_status(message),
+			Event::JoinFailed { session, channel, reason } => {
+				self.join_failed(session as i64, channel, reason);
+			}
 			Event::SettingChanged { key } => self.setting_changed(&key),
 			Event::SettingRejected { key, message } => {
 				self.set_status(format!("Setting {key}: {message}"));
@@ -1075,5 +1347,94 @@ impl App {
 		self.refresh_tree();
 		self.refresh_chat();
 		self.refresh_streams();
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn channel_unread_ignores_private_tabs() {
+		let mut view = SessionView::default();
+		view.tabs.push(Tab::new(ChatTarget::Channel(1), "Lobby".into()));
+		view.tabs.push(Tab::new(ChatTarget::Private("a".into()), "@Nova".into()));
+		for (tab, unread) in view.tabs.iter_mut().zip([1, 2, 4]) {
+			tab.unread = unread;
+		}
+		assert_eq!(view.channel_unread(), 3);
+		assert_eq!(view.private_unread(), 4);
+	}
+
+	/// Closing a tab keeps the current chat, or selects the strip's next
+	/// one (never a private chat).
+	#[test]
+	fn closing_a_tab_keeps_the_current_chat() {
+		let mut view = SessionView::default();
+		for target in [
+			ChatTarget::Channel(1),
+			ChatTarget::Channel(2),
+			ChatTarget::Private("a".into()),
+			ChatTarget::Channel(3),
+		] {
+			view.tabs.push(Tab::new(target, String::new()));
+		}
+		let current = |v: &SessionView| v.tabs[v.current_tab].target.clone();
+		view.set_current_tab(2);
+		view.remove_tab(1);
+		assert_eq!(current(&view), ChatTarget::Channel(2));
+		// [Server, 2, @a, 3]: the next tab of the strip, past the private chat.
+		view.remove_tab(1);
+		assert_eq!(current(&view), ChatTarget::Channel(3));
+		assert_eq!(view.channel_tab, ChatTarget::Channel(3));
+		// The last one: the strip's last, the server chat.
+		view.remove_tab(2);
+		assert_eq!(current(&view), ChatTarget::Server);
+	}
+
+	/// A private chat is current only on the Direct Messages page: leaving
+	/// it goes back to the strip's last chat.
+	#[test]
+	fn leaving_a_private_chat_restores_the_strip_tab() {
+		let mut view = SessionView::default();
+		view.tabs.push(Tab::new(ChatTarget::Channel(1), "Lobby".into()));
+		view.tabs.push(Tab::new(ChatTarget::Private("a".into()), "@Nova".into()));
+		view.set_current_tab(1);
+		assert!(!view.leave_private());
+		view.set_current_tab(2);
+		assert_eq!(view.channel_tab, ChatTarget::Channel(1));
+		assert!(view.leave_private());
+		assert_eq!(view.current_tab, 1);
+		// The strip's chat was closed meanwhile: the server chat.
+		view.set_current_tab(2);
+		view.tabs.remove(1);
+		view.current_tab = 1;
+		assert!(view.leave_private());
+		assert_eq!(view.current_tab, 0);
+	}
+
+	/// A channel's chat focused while a private chat is current (voice
+	/// connecting on the Direct Messages page) waits for the page to be
+	/// left: the conversation and its composer stay the private chat's.
+	#[test]
+	fn a_strip_chat_does_not_replace_a_current_private_chat() {
+		let mut view = SessionView::default();
+		view.tabs.push(Tab::new(ChatTarget::Channel(1), "Lobby".into()));
+		view.tabs.push(Tab::new(ChatTarget::Private("a".into()), "@Nova".into()));
+		view.tabs.push(Tab::new(ChatTarget::Private("b".into()), "@Ivy".into()));
+		view.focus_tab(2);
+		assert_eq!(view.current_tab, 2);
+		view.focus_tab(1);
+		assert_eq!((view.current_tab, &view.channel_tab), (2, &ChatTarget::Channel(1)));
+		// Another private chat does.
+		view.focus_tab(3);
+		assert_eq!(view.current_tab, 3);
+		assert!(view.leave_private());
+		assert_eq!(view.current_tab, 1);
+		// Without a private chat current, any chat.
+		view.focus_tab(0);
+		assert_eq!((view.current_tab, &view.channel_tab), (0, &ChatTarget::Server));
+		view.focus_tab(9);
+		assert_eq!(view.current_tab, 0);
 	}
 }
