@@ -129,7 +129,21 @@ against or offered back to upstream.
     Tests cover an independent signature vector, persistence validation/redaction,
     wire field names, clearing and reconnect snapshot replacement. The account
     UUID and the ordinary server identity remain separate.
-15. **Privilege key when connecting** (`tsclientlib/src/lib.rs`, "Voelin patch").
+15. **myTeamSpeak presentation, TeamSpeak 6** (`tsproto/src/license.rs`,
+    `tsproto/src/myts.rs`, `tsclientlib/src/myts.rs`, `tsclientlib/src/lib.rs`,
+    `tsproto-packets/src/packets.rs`, `tsproto-structs/declarations/Book.toml`).
+    License block types 4–7 (Token, License_Sign, MyTsId_Sign, Updater), which
+    carry nothing after the header. `myts::Certificate` checks a myTeamSpeak
+    certificate chain as a TeamSpeak 6 server does: leaf type, validity window,
+    key derived from a given root, cofactorless Ed25519 with a reduced S;
+    `Identity::id_bytes` and `public_signature_certificate`. `MytsData` holds the
+    avatar and the badges, each with the certificate that verifies it, and the
+    User Tag; `MytsData::updates` builds `updatemytsdata` (split by certificate,
+    bare parameters to clear) and `clientupdate client_user_tag`, which
+    `Connection::send_myts_update` and `send_user_tag` send. The escaped writer
+    also escapes `\a` and `\b`, as TeamSpeak does for binary values. Book:
+    `Client::my_team_speak_avatar`, `my_team_speak_id` and `signed_badges`.
+16. **Privilege key when connecting** (`tsclientlib/src/lib.rs`, "Voelin patch").
     `ConnectOptions::default_token` sets `client_default_token` of `clientinit`,
     which upstream always sent empty, so a privilege key (a bookmark's, or the
     `token=` of a `ts3server://` link) can be used on connect.

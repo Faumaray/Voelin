@@ -10,8 +10,8 @@ publish.workspace = true
 
 [features]
 default = ["portal", "x11"]
-# Wayland global shortcuts and the file chooser through xdg-desktop-portal
-# (Linux).
+# Wayland global shortcuts, the file chooser and the desktop's proxy settings
+# through xdg-desktop-portal (Linux).
 portal = ["dep:ashpd", "dep:futures-util"]
 # X11 global hotkeys through XInput2 raw events (Linux).
 x11 = ["dep:x11rb"]
@@ -20,11 +20,11 @@ x11 = ["dep:x11rb"]
 dirs = "6"
 serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "sync"] }
+tokio = { version = "1", features = ["rt", "sync", "time"] }
 tracing = "0.1"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
-ashpd = { version = "0.13", default-features = false, features = ["tokio", "global_shortcuts", "file_chooser"], optional = true }
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "global_shortcuts", "file_chooser", "proxy_resolver"], optional = true }
 futures-util = { version = "0.3", optional = true }
 notify-rust = { version = "4.18", default-features = false, features = ["z-with-tokio"] }
 x11rb = { version = "0.13", features = ["xinput"], optional = true }
@@ -45,6 +45,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dev-dependencies]
 x11rb = { version = "0.13", features = ["xinput", "xtest"] }
+# A stand-in desktop portal on a private session bus (tests/proxy.rs); the
+# zbus ashpd uses.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [lints]
 workspace = true

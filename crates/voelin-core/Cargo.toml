@@ -29,8 +29,15 @@ futures = "0.3"
 # Finding a server's gateway in DNS (the voice resolver's version).
 hickory-resolver = "0.26"
 md5 = "0.8"
+# A stalled HTTP/2 connection's error, told apart (the version reqwest's hyper
+# uses).
+h2 = "0.4"
+# Retry-After dates (already in the tree through hyper).
+httpdate = "1"
 # Banners on the web; the client the workspace has (voelin-query, voelin-media).
-reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
+# `system-proxy`: the proxy settings of Windows and macOS; `socks`: SOCKS
+# proxies (from the desktop's settings or ALL_PROXY).
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "socks", "system-proxy"] }
 # Reading the official clients' settings.db when importing identities.
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -57,6 +64,9 @@ tsproto-packets = { path = "../proto/tsproto-packets" }
 tsproto-types = { path = "../proto/tsproto-types" }
 
 [dev-dependencies]
+# An HTTP/2 connection in a test (both already in the tree through h2).
+bytes = "1"
+http = "1"
 # Already in the app's graph (reqwest); for one_rustls_crypto_provider.
 rustls = { version = "0.23", default-features = false }
 voelin-myts = { path = "../voelin-myts" }

@@ -87,8 +87,8 @@ pub static UI_NARROW_BREAKPOINT: Key<u32> = Key::new(
 pub static UI_IMAGE_CACHE_MB: Key<u32> = Key::new(
 	"ui.image_cache_mb",
 	Kind::UInt { min: 0 },
-	"Memory in MB for decoded images (avatars, icons, emoji); 0 keeps none.",
-	|| 64,
+	"Memory in MB for decoded images (avatars, icons, banners, emoji); 0 keeps none.",
+	|| 256,
 );
 
 /// `ui.members_width`: how wide the members and streams panel is, in

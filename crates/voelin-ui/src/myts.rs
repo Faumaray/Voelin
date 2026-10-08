@@ -1,12 +1,16 @@
 //! Desktop account state. Only the UI thread mutates state or persists credentials.
 use serde::{Deserialize, Serialize};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use voelin_myts::{Client, Login, Profile, ServerIdentity, SessionToken};
+use std::time::Duration;
+use voelin_myts::{
+	Client, Login, OwnAvatar, Presentation, Profile, ServerIdentity, SessionToken, SignedBadge,
+};
 use voelin_store::Secrets;
 
-use crate::app::{App, Bridge, MytsForm, later};
+use crate::app::{App, Bridge, MytsBadge, MytsForm, later};
 
 // One keyring item makes session replacement atomic: a failed write cannot
 // combine a new session with another account's renewal material.
@@ -50,6 +54,85 @@ struct SavedProfile {
 
 /// The account's avatar picture, in the account directory.
 const AVATAR_FILE: &str = "avatar";
+/// What servers are shown of the account ([`SavedPresentation`]), in the
+/// account directory: public data, so not in the keyring (whose items are
+/// small on some systems).
+const PRESENTATION_FILE: &str = "presentation.json";
+/// The badges chosen to show on servers, per account (`{account: [badge
+/// id]}`), in the account directory: kept across sign-outs.
+const BADGES_FILE: &str = "badges.json";
+/// Servers are shown at most this many badges, as the official client
+/// shows them.
+const MAX_SHOWN_BADGES: usize = 3;
+/// A User Tag's token is asked for again when it holds for less than this.
+const USER_TAG_MARGIN: i64 = 3 * 86_400;
+/// While signed in, what servers are shown is asked for again this often
+/// (certificates and tokens expire; the avatar may change elsewhere).
+const PRESENTATION_REFRESH: Duration = Duration::from_secs(86_400);
+
+/// [`PRESENTATION_FILE`]: whose it is, and what myTeamSpeak handed out for
+/// it, as it came (public data: certificates, signatures, links, ids).
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct SavedPresentation {
+	uuid: String,
+	/// What the last password sign-in brought ([`Presentation`]).
+	certificate: Vec<u8>,
+	avatar: Vec<u8>,
+	/// What myTeamSpeak's avatar service hands out for the account's myTS
+	/// ID ([`OwnAvatar`]): no password needed.
+	#[serde(default)]
+	service_certificate: Vec<u8>,
+	#[serde(default)]
+	service_avatar: Vec<u8>,
+	/// The account's badges as signed for its myTS ID (`SignedUserBadge`s).
+	#[serde(default)]
+	badges: Vec<Vec<u8>>,
+	/// The primary User Tag, and the token that proves it.
+	#[serde(default)]
+	user_tag: String,
+	#[serde(default)]
+	user_tag_token: Vec<u8>,
+}
+
+/// What asking myTeamSpeak again learned; `None`: nothing (an empty or
+/// failed answer), and what was known stays.
+#[derive(Default)]
+struct Fetched {
+	avatar: Option<OwnAvatar>,
+	badges: Option<Vec<SignedBadge>>,
+	user_tag: Option<String>,
+	/// Checked for the tag before it is taken.
+	user_tag_token: Option<Vec<u8>>,
+}
+
+impl SavedPresentation {
+	fn merge(&mut self, fetched: Fetched) {
+		if let Some(own) = fetched.avatar {
+			self.service_certificate = own.certificate;
+			self.service_avatar = own.avatar;
+		}
+		if let Some(badges) = fetched.badges {
+			self.badges = badges.iter().map(|b| b.raw().to_vec()).collect();
+		}
+		if let Some(tag) = fetched.user_tag {
+			self.user_tag = tag;
+		}
+		if let Some(token) = fetched.user_tag_token {
+			self.user_tag_token = token;
+		}
+	}
+
+	fn signed_badges(&self) -> Vec<SignedBadge> {
+		self.badges.iter().filter_map(|raw| SignedBadge::parse(raw)).collect()
+	}
+}
+
+/// Now, Unix seconds.
+fn unix_now() -> i64 {
+	std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.map_or(0, |d| d.as_secs() as i64)
+}
 
 /// A date (Unix seconds) as the profile shows it; empty when not known.
 fn date(seconds: i64) -> String {
@@ -97,6 +180,11 @@ pub(crate) struct Account {
 	/// The avatar, decoded.
 	avatar: slint::Image,
 	saved: Option<Saved>,
+	/// What servers can be shown of the account: from a password sign-in,
+	/// and from myTeamSpeak with the session alone.
+	presentation: Option<SavedPresentation>,
+	/// The ids of the badges chosen to show on servers, in order.
+	shown_badges: Vec<String>,
 	signed_in: bool,
 	busy: bool,
 	/// The saved session is being checked (not a password sign-in).
@@ -119,6 +207,223 @@ impl Account {
 
 	fn avatar_path(&self) -> Option<PathBuf> {
 		self.dir.as_ref().map(|dir| dir.join(AVATAR_FILE))
+	}
+
+	fn presentation_path(&self) -> Option<PathBuf> {
+		self.dir.as_ref().map(|dir| dir.join(PRESENTATION_FILE))
+	}
+
+	fn badges_path(&self) -> Option<PathBuf> {
+		self.dir.as_ref().map(|dir| dir.join(BADGES_FILE))
+	}
+
+	/// The kept presentation and badge choice, if they are the saved
+	/// account's.
+	fn load_presentation(&mut self) {
+		let uuid = self.saved.as_ref().map(|s| s.uuid.clone()).unwrap_or_default();
+		self.presentation = self
+			.presentation_path()
+			.and_then(|path| std::fs::read(path).ok())
+			.and_then(|bytes| serde_json::from_slice::<SavedPresentation>(&bytes).ok())
+			.filter(|kept| !uuid.is_empty() && kept.uuid == uuid);
+		self.load_badge_choice(&uuid);
+	}
+
+	fn save_presentation(&self) {
+		let (Some(path), Some(kept)) = (self.presentation_path(), self.presentation.as_ref())
+		else {
+			return;
+		};
+		let written = serde_json::to_vec(kept).map_err(std::io::Error::other).and_then(|json| {
+			path.parent().map_or(Ok(()), std::fs::create_dir_all)?;
+			std::fs::write(&path, json)
+		});
+		if let Err(error) = written {
+			tracing::warn!(%error, "could not keep what servers are shown of the account");
+		}
+	}
+
+	/// The kept presentation if it is `uuid`'s, else a new one.
+	fn presentation_for(&mut self, uuid: &str) -> &mut SavedPresentation {
+		if self.presentation.as_ref().is_none_or(|kept| kept.uuid != uuid) {
+			self.presentation =
+				Some(SavedPresentation { uuid: uuid.to_owned(), ..Default::default() });
+		}
+		self.presentation.as_mut().expect("just set")
+	}
+
+	/// A sign-in's presentation, kept for the next start.
+	fn set_presentation(&mut self, uuid: &str, presentation: Presentation) {
+		let kept = self.presentation_for(uuid);
+		kept.certificate = presentation.certificate;
+		kept.avatar = presentation.avatar;
+		self.save_presentation();
+	}
+
+	/// What asking myTeamSpeak again learned for the account `uuid`; what
+	/// it did not learn stays as known.
+	fn take_fetched(&mut self, uuid: &str, fetched: Fetched) {
+		self.presentation_for(uuid).merge(fetched);
+		self.save_presentation();
+	}
+
+	fn forget_presentation(&mut self) {
+		self.presentation = None;
+		self.shown_badges.clear();
+		if let Some(path) = self.presentation_path() {
+			let _ = std::fs::remove_file(path);
+		}
+	}
+
+	fn badge_choices(&self) -> HashMap<String, Vec<String>> {
+		self.badges_path()
+			.and_then(|path| std::fs::read(path).ok())
+			.and_then(|bytes| serde_json::from_slice(&bytes).ok())
+			.unwrap_or_default()
+	}
+
+	fn load_badge_choice(&mut self, uuid: &str) {
+		self.shown_badges = self.badge_choices().remove(uuid).unwrap_or_default();
+	}
+
+	/// Show the badge at `index` (of the signed badges) on servers, or not:
+	/// at most [`MAX_SHOWN_BADGES`], in the order chosen, kept per account.
+	/// The choice kept is then what the list shows: a chosen badge
+	/// myTeamSpeak no longer lists is dropped from it.
+	fn choose_badge(&mut self, index: usize, on: bool) -> bool {
+		let Some(account) = self.saved.as_ref().map(|s| s.uuid.clone()) else { return false };
+		let badges = self.presentation.as_ref().map(SavedPresentation::signed_badges);
+		let Some(badge) = badges.unwrap_or_default().into_iter().nth(index) else {
+			return false;
+		};
+		let mut chosen: Vec<String> = self.chosen_badges().into_iter().map(|b| b.uuid).collect();
+		let shown = chosen.contains(&badge.uuid);
+		if on == shown || (on && chosen.len() >= MAX_SHOWN_BADGES) {
+			return false;
+		}
+		if on {
+			chosen.push(badge.uuid);
+		} else {
+			chosen.retain(|uuid| *uuid != badge.uuid);
+		}
+		self.shown_badges = chosen;
+		if let Some(path) = self.badges_path() {
+			let mut choices = self.badge_choices();
+			choices.insert(account, self.shown_badges.clone());
+			let written =
+				serde_json::to_vec(&choices).map_err(std::io::Error::other).and_then(|json| {
+					path.parent().map_or(Ok(()), std::fs::create_dir_all)?;
+					std::fs::write(&path, json)
+				});
+			if let Err(error) = written {
+				tracing::warn!(%error, "could not keep which badges servers are shown");
+			}
+		}
+		true
+	}
+
+	/// The chosen badges myTeamSpeak lists, in the order chosen, as it
+	/// signed them: one it no longer lists takes no place (and no place of
+	/// the [`MAX_SHOWN_BADGES`]).
+	fn chosen_badges(&self) -> Vec<SignedBadge> {
+		let signed = self.presentation.as_ref().map(SavedPresentation::signed_badges);
+		let signed = signed.unwrap_or_default();
+		self.shown_badges
+			.iter()
+			.filter_map(|uuid| signed.iter().find(|b| b.uuid == *uuid).cloned())
+			.take(MAX_SHOWN_BADGES)
+			.collect()
+	}
+
+	/// What voice servers are shown of the signed-in account at `now`
+	/// (Unix seconds), checked as a TeamSpeak 6 server and its viewers check
+	/// it: the newest avatar a certificate at hand verifies, the chosen
+	/// badges if one certificate verifies them all, the User Tag if its
+	/// token holds. Each with the certificate that verifies it, since the
+	/// server shows nothing of what it cannot verify.
+	fn myts_data(&self, now: i64) -> Option<tsclientlib::MytsData> {
+		self.myts_data_from(&voelin_myts::ROOT_KEY, now)
+	}
+
+	/// [`Self::myts_data`] with certificates from `root` (tests).
+	fn myts_data_from(&self, root: &[u8; 32], now: i64) -> Option<tsclientlib::MytsData> {
+		let identity = self.identity()?;
+		let kept = self.presentation.as_ref()?;
+		let id = identity.id_bytes();
+		// The certificates at hand, and where they came from (for the log).
+		let sources = ["the sign-in's", "the avatar service's", "the myTS ID's"];
+		let certificates = [
+			kept.certificate.as_slice(),
+			kept.service_certificate.as_slice(),
+			identity.public_signature_certificate(),
+		];
+		let avatars = [kept.avatar.as_slice(), kept.service_avatar.as_slice()];
+		let mut data = tsclientlib::MytsData { myts_id: id.to_vec(), ..Default::default() };
+		match voelin_myts::choose_avatar_from(root, &avatars, &certificates, id, now) {
+			// The newest avatar has no pictures: the account has none now.
+			Some((avatar, _)) if !voelin_myts::avatar_has_pictures(avatars[avatar]) => {
+				tracing::info!("servers are shown no avatar: the account has none")
+			}
+			Some((avatar, certificate)) => {
+				tracing::info!(
+					avatar = ["from the sign-in", "from the avatar service"][avatar],
+					certificate = sources[certificate],
+					"servers are shown the account's avatar"
+				);
+				data.avatar = tsclientlib::Signed {
+					certificate: certificates[certificate].to_vec(),
+					data: avatars[avatar].to_vec(),
+				};
+			}
+			None if avatars.iter().all(|a| a.is_empty()) => {
+				tracing::info!("servers are shown no avatar: myTeamSpeak has not handed one out")
+			}
+			None => tracing::info!(
+				"servers are shown no avatar: no certificate at hand verifies it (expired, or \
+				 another key)"
+			),
+		}
+		let badges = self.chosen_badges();
+		let badges: Vec<&SignedBadge> = badges.iter().collect();
+		if !badges.is_empty() {
+			match voelin_myts::choose_badges_certificate_from(root, &badges, &certificates, id, now)
+			{
+				Some(certificate) => {
+					data.badge_ids = badges.iter().map(|b| b.uuid.clone()).collect();
+					tracing::info!(
+						badges = ?data.badge_ids,
+						certificate = sources[certificate],
+						"servers are shown the chosen badges"
+					);
+					data.badges = tsclientlib::Signed {
+						certificate: certificates[certificate].to_vec(),
+						data: voelin_myts::badge_list(badges),
+					};
+				}
+				None => tracing::info!(
+					"servers are shown no badges: no certificate at hand verifies all the chosen \
+					 ones"
+				),
+			}
+		}
+		if !kept.user_tag.is_empty() {
+			if kept.user_tag_token.is_empty() {
+				tracing::info!("servers are shown no User Tag: myTeamSpeak has not sent its token");
+			} else {
+				let token = &kept.user_tag_token;
+				match voelin_myts::check_user_tag_from(root, token, &kept.user_tag, id, now) {
+					Ok(_) => {
+						tracing::info!(tag = %kept.user_tag, "servers are shown the account's User Tag");
+						data.user_tag = Some(tsclientlib::UserTag {
+							tag: kept.user_tag.clone(),
+							token: kept.user_tag_token.clone(),
+						});
+					}
+					Err(error) => tracing::info!(%error, "servers are shown no User Tag"),
+				}
+			}
+		}
+		Some(data)
 	}
 
 	/// The kept picture, shown while the session is checked.
@@ -163,6 +468,7 @@ impl Account {
 				if self.saved.is_some() {
 					self.load_avatar();
 				}
+				self.load_presentation();
 				self.can_forget = false;
 				self.status = 0;
 				self.persistence_status = 0;
@@ -202,6 +508,12 @@ impl Account {
 			if same_account { self.saved.take().unwrap().profile } else { SavedProfile::default() };
 		if !same_account {
 			self.forget_avatar();
+			self.forget_presentation();
+			self.load_badge_choice(&login.uuid);
+		}
+		// A sign-in without it keeps the same account's known one.
+		if !login.presentation.is_empty() {
+			self.set_presentation(&login.uuid, login.presentation);
 		}
 		profile.update(&login.profile);
 		let saved = Saved {
@@ -258,6 +570,21 @@ impl Account {
 				items.into_iter().map(SharedString::from).collect::<Vec<_>>(),
 			))
 		};
+		let signed = self.presentation.as_ref().map(SavedPresentation::signed_badges);
+		let chosen: Vec<String> = self.chosen_badges().into_iter().map(|b| b.uuid).collect();
+		let full = chosen.len() >= MAX_SHOWN_BADGES;
+		let badge_choice = signed
+			.unwrap_or_default()
+			.into_iter()
+			.map(|badge| {
+				let place = chosen.iter().position(|uuid| *uuid == badge.uuid);
+				MytsBadge {
+					name: badge.name.into(),
+					shown: place.map_or(0, |place| place as i32 + 1),
+					can_change: place.is_some() || !full,
+				}
+			})
+			.collect::<Vec<_>>();
 		MytsForm {
 			available: true,
 			prompt: self.prompt,
@@ -270,6 +597,13 @@ impl Account {
 			member_since: date(profile.registered).into(),
 			last_login: date(profile.last_login).into(),
 			badges: strings(profile.badges),
+			badge_choice: ModelRc::new(VecModel::from(badge_choice)),
+			user_tag: self
+				.presentation
+				.as_ref()
+				.map(|p| p.user_tag.as_str())
+				.unwrap_or_default()
+				.into(),
 			devices: strings(profile.devices),
 			email: self.saved.as_ref().map(|s| s.email.as_str()).unwrap_or_default().into(),
 			username: self.saved.as_ref().map(|s| s.username.as_str()).unwrap_or_default().into(),
@@ -327,6 +661,7 @@ impl Account {
 		self.persistence_status = if cleared { 0 } else { 8 };
 		self.can_forget = !cleared;
 		self.forget_avatar();
+		self.forget_presentation();
 		cleared
 	}
 }
@@ -381,6 +716,150 @@ impl App {
 		self.engine.send(voelin_core::Command::SetMytsIdentity(
 			self.myts.identity().cloned().map(Arc::new),
 		));
+		// What servers are shown of it, after the proof.
+		self.publish_myts_data();
+	}
+
+	/// What servers are shown of the account (avatar, badges, User Tag):
+	/// only what changed goes to them.
+	fn publish_myts_data(&self) {
+		let data = self.myts.myts_data(unix_now());
+		if data.is_none() && self.myts.identity().is_some() {
+			tracing::info!(
+				"servers are shown nothing of the account but its myTS ID until myTeamSpeak \
+				 answers"
+			);
+		}
+		self.engine.send(voelin_core::Command::SetMytsData(data.map(Arc::new)));
+	}
+
+	/// Ask myTeamSpeak, with the session alone, for what servers are shown
+	/// of the account: its avatar and a certificate (the avatar service's
+	/// answer for its own myTS ID), its signed badges, its User Tag and the
+	/// token that proves it. After a password sign-in, a checked saved
+	/// session, and then daily. An empty or failed answer changes nothing.
+	fn refresh_myts_presentation(&self) {
+		let Some(saved) = self.myts.saved.as_ref().filter(|_| self.myts.signed_in) else {
+			return;
+		};
+		let (Some(identity), Ok(token)) =
+			(self.myts.identity(), SessionToken::new(saved.session.clone()))
+		else {
+			return;
+		};
+		if saved.uuid.is_empty() {
+			return;
+		}
+		let uuid = saved.uuid.clone();
+		let id = identity.id_bytes().to_vec();
+		let kept_token = self
+			.myts
+			.presentation
+			.as_ref()
+			.filter(|kept| kept.uuid == uuid)
+			.map(|kept| kept.user_tag_token.clone())
+			.unwrap_or_default();
+		let generation = self.myts.generation;
+		self.runtime.spawn(async move {
+			let client = match Client::new() {
+				Ok(client) => client,
+				Err(error) => return tracing::debug!(%error, "no account client"),
+			};
+			let (avatar, badges, tag) = tokio::join!(
+				client.own_avatar(&token, &id),
+				client.signed_badges(&token),
+				client.user_tag(&token)
+			);
+			let mut fetched = Fetched::default();
+			match avatar {
+				Ok(Some(own)) => {
+					tracing::info!(
+						"myTeamSpeak's avatar service sent the account's avatar and certificate"
+					);
+					fetched.avatar = Some(own);
+				}
+				Ok(None) => tracing::info!(
+					"myTeamSpeak's avatar service sent nothing for the account; what was known \
+					 is kept"
+				),
+				Err(error) => {
+					tracing::info!(%error, "the account's avatar for servers was not fetched")
+				}
+			}
+			match badges {
+				Ok(Some(badges)) => {
+					tracing::info!(
+						count = badges.len(),
+						"myTeamSpeak sent the account's signed badges"
+					);
+					fetched.badges = Some(badges);
+				}
+				Ok(None) => {
+					tracing::info!("myTeamSpeak sent no badge list; what was known is kept")
+				}
+				Err(error) => {
+					tracing::info!(%error, "the account's signed badges were not fetched")
+				}
+			}
+			match tag {
+				Ok(Some(tag)) => {
+					tracing::info!(%tag, "the account's primary User Tag");
+					// The token proves all the account's tags; asked for again
+					// when it would not prove this one in a few days.
+					let at = unix_now() + USER_TAG_MARGIN;
+					if voelin_myts::check_user_tag(&kept_token, &tag, &id, at).is_err() {
+						match client.user_tag_token(&token).await {
+							Ok(token) => {
+								match voelin_myts::check_user_tag(&token, &tag, &id, unix_now()) {
+									Ok(until) => {
+										tracing::info!(
+											valid_until = until,
+											"myTeamSpeak sent the token for the User Tag"
+										);
+										fetched.user_tag_token = Some(token);
+									}
+									Err(error) => tracing::info!(
+										%error,
+										"myTeamSpeak sent a token for the User Tag that viewers would not accept"
+									),
+								}
+							}
+							Err(error) => {
+								tracing::info!(%error, "the User Tag's token was not fetched")
+							}
+						}
+					}
+					fetched.user_tag = Some(tag);
+				}
+				Ok(None) => tracing::info!("myTeamSpeak names no User Tag for the account"),
+				Err(error) => tracing::info!(%error, "the account's User Tag was not fetched"),
+			}
+			later(move |app| {
+				if app.myts.generation != generation || !app.myts.signed_in {
+					return;
+				}
+				if app.myts.saved.as_ref().is_some_and(|s| s.uuid == uuid) {
+					app.myts.take_fetched(&uuid, fetched);
+					app.publish_myts_data();
+					app.refresh_myts();
+				}
+			});
+			tokio::time::sleep(PRESENTATION_REFRESH).await;
+			later(move |app| {
+				if app.myts.generation == generation {
+					app.refresh_myts_presentation();
+				}
+			});
+		});
+	}
+
+	/// Show a badge on servers, or not (Settings → My Account).
+	pub(crate) fn myts_badge(&mut self, index: i32, on: bool) {
+		let changed = usize::try_from(index).is_ok_and(|index| self.myts.choose_badge(index, on));
+		if changed {
+			self.publish_myts_data();
+		}
+		self.refresh_myts();
 	}
 
 	pub(crate) fn refresh_myts(&self) {
@@ -498,6 +977,7 @@ impl App {
 					Ok(()) => {
 						app.myts.restored();
 						app.refresh_myts_profile();
+						app.refresh_myts_presentation();
 					}
 					Err(error) => {
 						app.myts.otp_required =
@@ -556,6 +1036,7 @@ impl App {
 							app.store_settings();
 						}
 						app.refresh_myts_profile();
+						app.refresh_myts_presentation();
 					}
 					Err(error) => {
 						app.myts.otp_required =
@@ -642,15 +1123,288 @@ mod tests {
 				otp_token: format!("{name}-otp"),
 				device_id: format!("{name}-device"),
 			}),
+			presentation: Presentation {
+				certificate: format!("{name}-cert").into_bytes(),
+				avatar: format!("{name}-avatar").into_bytes(),
+			},
 		}
 	}
 
+	/// What servers are shown of the account is kept for it, told once its
+	/// session is valid again, and never shown for another account.
+	#[test]
+	fn what_servers_are_shown_is_kept_per_account() {
+		let dir = std::env::temp_dir().join(format!("voelin-presentation-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&dir);
+		let secrets = MemorySecrets::default();
+		let mut account = Account::new(dir.clone());
+		account.accept(&secrets, login("Alice"), "alice@example.test".into());
+		assert_eq!(account.presentation.as_ref().unwrap().certificate, b"Alice-cert");
+		let data = account.myts_data(NOW).unwrap();
+		assert_eq!(data.myts_id, [1; 33]);
+		// Nothing a server would verify: nothing shown.
+		assert!(data.avatar.is_empty() && data.badges.is_empty() && data.user_tag.is_none());
+		let mut restarted = Account::new(dir.clone());
+		restarted.load(&secrets);
+		assert!(restarted.myts_data(NOW).is_none(), "not before the session is checked");
+		assert!(restarted.presentation == account.presentation);
+		restarted.restored();
+		assert!(restarted.myts_data(NOW).is_some());
+		restarted.forget(&secrets);
+		assert!(!dir.join(PRESENTATION_FILE).exists());
+		let mut bob = login("Bob");
+		bob.presentation = Presentation::default();
+		restarted.accept(&secrets, bob, "bob@example.test".into());
+		assert!(restarted.presentation.is_none());
+		// What myTeamSpeak hands out with the session alone is Bob's.
+		restarted.take_fetched("Bob-uuid", fetched_tag("bob@myteamspeak.com"));
+		let mut again = Account::new(dir.clone());
+		again.load(&secrets);
+		assert_eq!(again.presentation.as_ref().unwrap().uuid, "Bob-uuid");
+		assert_eq!(again.form().user_tag, "bob@myteamspeak.com");
+		let _ = std::fs::remove_dir_all(dir);
+	}
+
+	use voelin_myts::testing::NOW;
+
+	fn fetched_tag(tag: &str) -> Fetched {
+		Fetched { user_tag: Some(tag.into()), ..Default::default() }
+	}
+
+	/// A `SignedUserBadge` as myTeamSpeak sends it (protobuf by hand).
+	fn signed_badge(uuid: &str, name: &str) -> Vec<u8> {
+		let mut badge = vec![0x0a, uuid.len() as u8];
+		badge.extend_from_slice(uuid.as_bytes());
+		badge.extend_from_slice(&[0x1a, name.len() as u8]);
+		badge.extend_from_slice(name.as_bytes());
+		let mut signed = vec![0x0a, badge.len() as u8];
+		signed.extend_from_slice(&badge);
+		signed.extend_from_slice(&[0x12, 64]);
+		signed.extend_from_slice(&[7; 64]);
+		signed
+	}
+
+	/// An empty or failed answer changes nothing; an answer replaces only
+	/// what it is about.
+	#[test]
+	fn what_myteamspeak_did_not_tell_stays() {
+		let mut kept = SavedPresentation {
+			uuid: "a".into(),
+			certificate: b"login".to_vec(),
+			avatar: b"login avatar".to_vec(),
+			service_certificate: b"service".to_vec(),
+			service_avatar: b"service avatar".to_vec(),
+			badges: vec![signed_badge("b1", "One")],
+			user_tag: "alex@myteamspeak.com".into(),
+			user_tag_token: b"token".to_vec(),
+		};
+		let before = kept.clone();
+		kept.merge(Fetched::default());
+		assert!(kept == before);
+		kept.merge(Fetched {
+			avatar: Some(OwnAvatar { certificate: b"new".to_vec(), avatar: b"newer".to_vec() }),
+			..Default::default()
+		});
+		assert_eq!(
+			(kept.service_certificate.as_slice(), kept.service_avatar.as_slice()),
+			(&b"new"[..], &b"newer"[..])
+		);
+		assert_eq!(kept.certificate, b"login", "the sign-in's stays");
+		assert_eq!(kept.badges, before.badges);
+		// A list is the list, even an empty one.
+		kept.merge(Fetched { badges: Some(Vec::new()), ..Default::default() });
+		assert!(kept.badges.is_empty());
+		kept.merge(fetched_tag("alex@tschat-1.teamspeak.com"));
+		assert_eq!(kept.user_tag, "alex@tschat-1.teamspeak.com");
+		assert_eq!(kept.user_tag_token, b"token", "the token proves all the tags");
+		kept.merge(Fetched { user_tag_token: Some(b"fresh".to_vec()), ..Default::default() });
+		assert_eq!(kept.user_tag_token, b"fresh");
+	}
+
+	/// Up to three badges, in the order chosen, kept per account (across
+	/// sign-outs); none chosen at first.
+	#[test]
+	fn badges_shown_on_servers_are_chosen_per_account() {
+		let dir = std::env::temp_dir().join(format!("voelin-badges-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&dir);
+		let secrets = MemorySecrets::default();
+		let mut account = Account::new(dir.clone());
+		account.accept(&secrets, login("Alice"), "alice@example.test".into());
+		let badges = ["One", "Two", "Three", "Four"]
+			.iter()
+			.enumerate()
+			.map(|(i, name)| SignedBadge::parse(&signed_badge(&format!("b{i}"), name)).unwrap())
+			.collect();
+		account.take_fetched("Alice-uuid", Fetched { badges: Some(badges), ..Default::default() });
+		assert!(account.shown_badges.is_empty(), "none chosen at first");
+		assert!(account.chosen_badges().is_empty());
+		for index in [2, 0, 3] {
+			assert!(account.choose_badge(index, true));
+		}
+		assert!(!account.choose_badge(1, true), "three at most");
+		assert!(!account.choose_badge(0, true), "already shown");
+		assert!(!account.choose_badge(9, true));
+		let names = |account: &Account| {
+			account.chosen_badges().into_iter().map(|b| b.name).collect::<Vec<_>>()
+		};
+		assert_eq!(names(&account), ["Three", "One", "Four"]);
+		let form = account.form();
+		let choice: Vec<_> = form.badge_choice.iter().map(|b| (b.shown, b.can_change)).collect();
+		assert_eq!(choice, [(2, true), (0, false), (1, true), (3, true)]);
+		assert!(account.choose_badge(0, false));
+		assert!(account.choose_badge(1, true));
+		assert_eq!(names(&account), ["Three", "Four", "Two"]);
+		// Kept for the account, also after signing out and in again.
+		account.forget(&secrets);
+		assert!(account.shown_badges.is_empty());
+		account.accept(&secrets, login("Bob"), "bob@example.test".into());
+		assert!(account.shown_badges.is_empty(), "Bob chose none");
+		account.forget(&secrets);
+		account.accept(&secrets, login("Alice"), "alice@example.test".into());
+		assert_eq!(account.shown_badges, ["b2", "b3", "b1"]);
+		let _ = std::fs::remove_dir_all(dir);
+	}
+
+	/// A chosen badge myTeamSpeak no longer lists takes no place: the others
+	/// move up, another can be chosen, and the choice kept is then what the
+	/// list shows.
+	#[test]
+	fn a_badge_no_longer_listed_takes_no_place() {
+		let secrets = MemorySecrets::default();
+		let mut account = Account::default();
+		account.accept(&secrets, login("Alice"), "alice@example.test".into());
+		let listed = |names: &[&str]| Fetched {
+			badges: Some(
+				names.iter().map(|n| SignedBadge::parse(&signed_badge(n, n)).unwrap()).collect(),
+			),
+			..Default::default()
+		};
+		account.take_fetched("Alice-uuid", listed(&["b0", "b1", "b2", "b3"]));
+		for index in [0, 1, 2] {
+			assert!(account.choose_badge(index, true));
+		}
+		// b1 is gone.
+		account.take_fetched("Alice-uuid", listed(&["b0", "b2", "b3"]));
+		let names = |account: &Account| {
+			account.chosen_badges().into_iter().map(|b| b.name).collect::<Vec<_>>()
+		};
+		assert_eq!(names(&account), ["b0", "b2"]);
+		let choice = |account: &Account| {
+			account.form().badge_choice.iter().map(|b| (b.shown, b.can_change)).collect::<Vec<_>>()
+		};
+		assert_eq!(choice(&account), [(1, true), (2, true), (0, true)]);
+		assert!(account.choose_badge(2, true), "a place is free");
+		assert_eq!(account.shown_badges, ["b0", "b2", "b3"]);
+		assert_eq!(choice(&account), [(1, true), (2, true), (3, true)]);
+		// Back again, b1 is not chosen: the choice is what the list showed.
+		account.take_fetched("Alice-uuid", listed(&["b0", "b1", "b2", "b3"]));
+		assert_eq!(names(&account), ["b0", "b2", "b3"]);
+		// A choice kept from before (badges.json) with more than three listed:
+		// three are shown.
+		account.shown_badges = ["b3", "b1", "b0", "b2"].map(String::from).to_vec();
+		assert_eq!(names(&account), ["b3", "b1", "b0"]);
+		assert_eq!(choice(&account)[2], (0, false));
+	}
+
+	/// Servers are shown what verifies, each part with the certificate that
+	/// verifies it: here the avatar service's newer avatar with its own
+	/// certificate, the chosen badges with the sign-in's, the User Tag with
+	/// its token. (Certificates from a synthetic root: TeamSpeak's verifies
+	/// none of it.)
+	#[test]
+	fn servers_are_shown_what_verifies_with_its_certificate() {
+		use voelin_myts::testing::Chain;
+		let secrets = MemorySecrets::default();
+		let mut account = Account::default();
+		account.accept(&secrets, login("Alice"), "alice@example.test".into());
+		let id = [1; 33];
+		let sign_in = Chain::signing(1);
+		// Valid for an hour only.
+		let service = Chain::new(2, 6, NOW - 3600, NOW + 3600);
+		let chat = Chain::new(3, 4, NOW - 3600, NOW + 86_400);
+		let root = sign_in.root;
+		let uuids = [
+			"a2a2a2a2-0000-4000-8000-000000000001",
+			"a2a2a2a2-0000-4000-8000-000000000002",
+			"a2a2a2a2-0000-4000-8000-000000000003",
+		];
+		let badges: Vec<SignedBadge> = uuids
+			.iter()
+			.zip(["One", "Two", "Three"])
+			.map(|(uuid, name)| SignedBadge::parse(&sign_in.badge(&id, uuid, name)).unwrap())
+			.collect();
+		account.set_presentation(
+			"Alice-uuid",
+			Presentation {
+				certificate: sign_in.certificate.clone(),
+				avatar: sign_in.avatar(&id, 100),
+			},
+		);
+		let tag = "alice@myteamspeak.com";
+		let token = chat.user_tag_token(&["alice@tschat-1.teamspeak.com", tag], &id);
+		account.take_fetched(
+			"Alice-uuid",
+			Fetched {
+				avatar: Some(OwnAvatar {
+					certificate: service.certificate.clone(),
+					avatar: service.avatar(&id, 200),
+				}),
+				badges: Some(badges),
+				user_tag: Some(tag.into()),
+				user_tag_token: Some(token.clone()),
+			},
+		);
+		assert!(account.choose_badge(2, true) && account.choose_badge(0, true));
+		let data = account.myts_data_from(&root, NOW).unwrap();
+		assert_eq!(data.myts_id, id);
+		assert!(
+			data.avatar
+				== tsclientlib::Signed {
+					certificate: service.certificate.clone(),
+					data: service.avatar(&id, 200),
+				}
+		);
+		assert_eq!(data.badges.certificate, sign_in.certificate);
+		let chosen = account.chosen_badges();
+		assert_eq!(data.badges.data, voelin_myts::badge_list(&chosen));
+		assert_eq!(data.badge_ids, [uuids[2], uuids[0]]);
+		assert!(data.user_tag == Some(tsclientlib::UserTag { tag: tag.into(), token }));
+		// The avatar and the badges with two certificates: two commands.
+		assert_eq!(data.updates(&tsclientlib::MytsData::default(), false).len(), 2);
+		// Two hours on, the avatar service's certificate has expired: the
+		// sign-in's avatar, with the sign-in's certificate, and one command.
+		let later = account.myts_data_from(&root, NOW + 7200).unwrap();
+		assert!(
+			later.avatar
+				== tsclientlib::Signed {
+					certificate: sign_in.certificate.clone(),
+					data: sign_in.avatar(&id, 100),
+				}
+		);
+		assert_eq!(later.updates(&tsclientlib::MytsData::default(), false).len(), 1);
+		// A day on, the User Tag's token no longer holds.
+		assert!(account.myts_data_from(&root, NOW + 86_400).unwrap().user_tag.is_none());
+		// For another myTS ID, nothing verifies.
+		account.saved.as_mut().unwrap().identity = Some(server_identity_for(2));
+		let other = account.myts_data_from(&root, NOW).unwrap();
+		assert!(other.avatar.is_empty() && other.badges.is_empty() && other.user_tag.is_none());
+		// TeamSpeak's root verifies none of it.
+		account.saved.as_mut().unwrap().identity = Some(server_identity());
+		let data = account.myts_data(NOW).unwrap();
+		assert!(data.avatar.is_empty() && data.badges.is_empty() && data.user_tag.is_none());
+	}
+
 	fn server_identity() -> ServerIdentity {
+		server_identity_for(1)
+	}
+
+	/// An identity with the myTS ID `[id; 33]`.
+	fn server_identity_for(id: u8) -> ServerIdentity {
 		let mut private = [0; 32];
 		private[0] = 1;
 		let mut public = [0x66; 32];
 		public[0] = 0x58; // Compressed Ed25519 basepoint for scalar one.
-		ServerIdentity::new(vec![1; 33], 1, public, private, vec![2; 65]).unwrap()
+		ServerIdentity::new(vec![id; 33], 1, public, private, vec![2; 65]).unwrap()
 	}
 
 	#[test]

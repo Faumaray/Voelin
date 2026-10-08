@@ -27,7 +27,9 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
   as the phone's Invite button does.
 - Other people's myTeamSpeak badges: up to three pictures after their name
   in the channel tree and the members panel, and their names on the member
-  card (what each is for on hover).
+  card (what each is for on hover). On TeamSpeak 6 the badges the server
+  verified come first, the ones you chose in Settings → My Account
+  included.
 - Links in chat open in the browser; one whose text is not its address
   first shows where it goes. A right-click on a link opens or copies it.
 - `ts3server://` and `teamspeak://` links in chat (and `tmspk.gg/s/…`)
@@ -42,6 +44,32 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
   counts the new messages with a jump to the first; unread counts survive
   restarts. Messages count as read only while their chat is on screen in
   the focused window.
+- Other users' myTeamSpeak avatars (TeamSpeak 6), as the official client
+  shows them: where the server has no avatar of them, its avatar could not
+  be downloaded, or the server is only observed.
+- Voice connections show servers the account's avatar, the badges chosen
+  in Settings → My Account (up to three) and its User Tag, as the official
+  client does, so other TeamSpeak 6 users see them; again after a
+  reconnect or an account change, and cleared on sign-out. A saved session
+  is enough: the avatar, its certificate, the signed badges and the User
+  Tag's token come from myTeamSpeak's services, and Voelin checks each
+  signature as the server does before sending it. The log says what the
+  server published.
+- Settings → My Account shows the account's User Tag and lets you choose the
+  badges servers show.
+- Pictures (banners, avatars) go through the desktop's proxy where the
+  desktop portal names one (Linux), and through the system proxy on
+  Windows and macOS; SOCKS proxies work too.
+- tsgw logs what it does: a startup summary, the address the TeamSpeak
+  server sees for its queries (with a hint when that address is not
+  allowlisted), every app connection with its logins and how long they
+  took, refused logins, slow requests, ServerQuery failures, relays and the
+  observer. `log.level` (`TSGW_LOG_LEVEL`) sets what is logged, `log.file`
+  (`TSGW_LOG_FILE`) also writes to a file that is rotated at 20 MB (five
+  kept); colour only on a terminal.
+- Every gateway a server publishes is tried in turn (TLS first, 20 seconds
+  each) before waiting to try again, so a TLS proxy that fails falls back to
+  the plain gateway published next to it.
 
 ### Changed
 
@@ -101,6 +129,31 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
 - Private chats live on the Direct Messages page, not in the server's chat
   tabs, and their unread messages count there (on the phone, on the Home
   tab) instead of on the server rail.
+- Banners: up to 128 MiB, more time on slow hosts, BMP and ICO too, and
+  SVG after a comment or DOCTYPE; pictures larger than 4096 pixels on a
+  side are scaled down. A banner that fails is tried again for as long as
+  it is shown (every 15 minutes at most), and the log says why it is
+  missing (HTTP status, an HTML page, a video, too large). The picture
+  cache defaults to 1 GiB, the decoded images to 256 MB.
+- Banners that fail: the log names the URL (without its query) the first
+  time, says when a connection stalled and after how much data, and when it
+  could not connect at all. A banner that is not there (HTTP 400, 404, 410)
+  is tried again after 15 minutes and then hourly; a host that asks to wait
+  (429, 503) is waited for. A banner shown again is only checked for
+  changes (ETag, Last-Modified), not downloaded again. At most 6 downloads
+  run per host, so a slow host cannot hold up the others.
+- The gateway: only a refused login stops observing; anything else is tried
+  again after 1, 2, 5, 10, 20, then every 30 seconds, and at once when voice
+  connects. A connection that stops answering is noticed within 90 seconds.
+  Finding a server's gateway asks DNS and the gateway at once instead of one
+  after the other. The log says what was found, which gateway was tried,
+  how long each step took and why one failed.
+- tsgw answers faster: each ServerQuery command takes under 2 ms instead of
+  about 45 ms (TCP_QUICKACK), so logins and startup take milliseconds.
+  TeamSpeak's flood protection is shared by all of tsgw's query
+  connections, so tsgw no longer earns a 600 second ban. It starts while
+  the TeamSpeak server is still down and connects once it is up, its
+  `/health` says what is missing, and it stops cleanly on SIGTERM.
 
 ### Fixed
 
@@ -131,6 +184,10 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
 - Connecting with voice from a private chat (Direct Messages) keeps that
   conversation open; it turned into the voice channel's chat, and the
   composer sent there.
+- Observing no longer stops for the whole run the first time a server is
+  joined with a new identity (the gateway did not know it yet).
+- tsgw reconnects its query connection for logins when the TeamSpeak server
+  restarts; before, every login was refused until tsgw was restarted.
 
 ## [0.0.1-alpha] - 2026-10-04
 

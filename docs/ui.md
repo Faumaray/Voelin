@@ -223,8 +223,10 @@ back. The signed-in username/email and the account's avatar become the
 primary app profile in the desktop user card and mobile You page; they do
 not replace server identities or bookmark nicknames. Settings → My Account
 shows the profile from the account service (avatar, name, email,
-description, member since, previous sign-in, badges, signed-in devices, the
-account and myTS ids) or the sign-in form, supports retry/OTP/sign-out, and
+description, member since, previous sign-in, badges with a toggle each to
+show up to three of them on servers, in the order picked, signed-in
+devices, the User Tag, the account and myTS ids) or the sign-in form,
+supports retry/OTP/sign-out, and
 opens official browser flows for registration, activation, recovery and
 account management. Account and renewal material live only in the keyring;
 passwords and one-time codes are cleared after submission. Expired sessions
@@ -404,7 +406,7 @@ live when they change (settings page, `--set`, another window):
 | `ui.theme` | dark / light / system | dark | colours |
 | `ui.font_scale` | number above 0 | 1.0 | every type size |
 | `ui.narrow_breakpoint` | pixels | 800 | below this width the phone layout |
-| `ui.image_cache_mb` | megabytes | 64 | decoded images kept in memory (0: none) |
+| `ui.image_cache_mb` | megabytes | 256 | decoded images kept in memory (0: none) |
 | `ui.members_width` | pixels | 280 | width of the members panel (dragging its edge sets it) |
 | `ui.image_preview_kb` | kilobytes | 8192 | pictures linked in chat (files and `[img]`) up to this size show as pictures (0: never) |
 | `notify.mentions`, `notify.private_messages`, `notify.pokes`, `notify.event_reminders`, `notify.friends_online` | off / app / desktop | desktop (friends: app) | what the bell and the desktop say about each kind |
@@ -606,7 +608,9 @@ profile requires account setup before the server list, so no fresh-profile
 network capture was obtained. These observations do not establish that every
 server or client version lacks a pre-login mechanism.
 
-Badges arrive as GUIDs (`client_badges`). Their names and descriptions come
+Badges arrive as GUIDs (`client_badges`; on TeamSpeak 6 also
+`client_signed_badges`, the myTeamSpeak badges the server verified, which
+come first: `voelin_model::shown_badges`). Their names and descriptions come
 from a table in `voelin-model` (`badges::info`, tsclientlib's list and the
 newer entries of TeamSpeak's own, `https://badges-content.teamspeak.com/list`,
 as of October 2026); newer badges show as "Badge". Their pictures are SVGs
@@ -627,28 +631,38 @@ server's own files, linked as `ts3image://` (TeamSpeak 5 and 6:
 `ts3image://<name>?channel=…&path=…`), come through the voice connection's
 file transfer, so they need voice and the server's file permissions. Their
 cache entry is named by the server too, as the same address names another
-file elsewhere. Up to eight distinct web banners download concurrently;
-duplicate URLs share a request. A picture may be up to 64 MiB, avatars and
-icons too, and goes to disk as it arrives. Web downloads have a 10-second
-connection timeout and fail after 20 seconds without data or when, after
-their first 30 seconds, they average less than 32 KiB/s; there is no
-fixed overall deadline, so large banners on slow hosts still arrive. Failed
-avatars, icons and banners receive up to three automatic retries after
-1, 4 and 16 seconds,
-without waiting for a presence update. Avatar/icon/banner file-transfer
-negotiation expires after 15 seconds, and the download after 30 seconds
-plus its size at 32 KiB/s. User file transfers retain their existing
-timing. Replaced images and closed sessions discard
-obsolete results. A host banner's reload interval is at least 60 seconds;
-failed refreshes preserve the previous cached picture. Closing the session
-stops its reload timer. `PictureReady` invalidates the decoded image before
-refreshing the visible models, including when the URL and cache path stay
-the same.
+file elsewhere. Up to 16 web downloads run at once, at most 6 per host (a
+redirect's target counts); duplicate URLs share a request. Pictures on the
+web go through the desktop's proxy (the portal's, on Linux) or the
+system's, SOCKS too. A picture may be up to 128 MiB (avatars and icons
+too; myTeamSpeak avatars 4 MiB, a chat's `[img]` up to
+`ui.image_preview_kb`), and goes to disk as it arrives. Web downloads
+connect within 20 seconds, and fail after 60 seconds without data or when,
+after their first 120 seconds, they average less than 8 KiB/s; there is
+no fixed overall deadline, so large banners on slow hosts still arrive.
+Failed banners and badges are tried again after 1, 4, 16, 60, 300 and 900
+seconds, then every 15 minutes while they are shown; one whose address is
+wrong or gone (HTTP 400, 404, 410) after 15 minutes, then hourly; one whose
+host asks to wait (429, 503) when it says (1 minute to 1 hour). Asked for
+again, a cached picture is downloaded only if its host says it changed
+(ETag, Last-Modified). Avatars, icons and chat pictures receive up to three
+automatic retries after 1, 4 and 16 seconds. Retries do not wait for a
+presence update. Avatar/icon/banner file-transfer negotiation expires
+after 30 seconds, and the download after 60 seconds plus its size at
+8 KiB/s. User file transfers retain their existing timing. Replaced images
+and closed sessions discard obsolete results. A host banner's reload
+interval is at least 60 seconds; failed refreshes preserve the previous
+cached picture. Closing the session stops its reload timer.
+`PictureReady` (and `AvatarReady`, `IconReady`) has a file that changed
+decoded again before the visible models refresh, also when the URL and
+cache path stay the same.
 
-PNG, JPEG, GIF, WebP and SVG are decoded by content, since cached files have
-no extension. Raster pictures larger than 16,384 pixels on either axis or
-64 MiB of decoded RGBA are refused before pixel allocation on the UI
-thread. SVG uses Slint's vector loader and the existing vector-cache cost.
+PNG, JPEG, GIF, WebP, BMP, ICO and SVG (also after a comment or DOCTYPE)
+are decoded by content, since cached files have no extension. Raster
+pictures whose decoded RGBA would exceed 128 MiB are refused before pixel
+allocation on the UI thread; those larger than 4096 pixels on a side are
+scaled down (an animation to its first frame). SVG uses Slint's vector
+loader and the existing vector-cache cost.
 Avatars and server, channel, client and group icons use the same image cache.
 
 The focused checks are the `voelin-core`, `voelin-model`, `voelin-observer`,

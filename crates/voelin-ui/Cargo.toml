@@ -23,7 +23,7 @@ dirs = "6"
 # Slint decodes pictures with `image`, which it builds with PNG and JPEG only;
 # avatars, icons and banners on TeamSpeak servers are GIF and WebP too (the
 # decoders are in the tree already, for SVG pictures).
-image = { version = "0.25", default-features = false, features = ["gif", "webp"] }
+image = { version = "0.25", default-features = false, features = ["gif", "webp", "bmp", "ico"] }
 # Twemoji archive blocks (raw deflate); already used by png.
 miniz_oxide = "0.8"
 png = "0.18"
@@ -68,6 +68,10 @@ voelin-core = { path = "../voelin-core", default-features = false, features = ["
 
 [build-dependencies]
 slint-build = "1.18"
+
+[dev-dependencies]
+# Certificates and signatures from a synthetic root for the account tests.
+voelin-myts = { path = "../voelin-myts", features = ["testing"] }
 
 [lints]
 workspace = true

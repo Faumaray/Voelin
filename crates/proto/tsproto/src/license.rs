@@ -102,8 +102,17 @@ pub enum LicenseBlockType {
 	/// Ts3_Server
 	Server,
 	Code,
-	// Not existing in the license parameter:
-	// 4: Token, 5: License_Sign, 6: MyTsId_Sign, 7: Updater
+	// Not existing in the license parameter. Like `Ephemeral`, these blocks
+	// carry nothing after the header.
+	/// 4, Token
+	Token,
+	/// 5, License_Sign
+	LicenseSign,
+	/// 6, MyTsId_Sign: the key that signs myTeamSpeak data (avatars, badges,
+	/// identifier tokens).
+	MytsIdSign,
+	/// 7, Updater
+	Updater,
 	/// Ts_Server_License
 	Ts5Server = 8,
 	/// 32, Ephemeral_Key
@@ -413,8 +422,12 @@ impl License {
 
 				(InnerLicense::Ts5Server { properties }, pos)
 			}
-			LicenseBlockType::Ephemeral => (InnerLicense::Other, 0),
-			_ => {
+			LicenseBlockType::Token
+			| LicenseBlockType::LicenseSign
+			| LicenseBlockType::MytsIdSign
+			| LicenseBlockType::Updater
+			| LicenseBlockType::Ephemeral => (InnerLicense::Other, 0),
+			LicenseBlockType::Website | LicenseBlockType::Code => {
 				return Err(Error::UnknownBlockType(typ_i));
 			}
 		};
@@ -710,7 +723,11 @@ impl fmt::Debug for DebugLicense<'_> {
 					d.field("properties", &"error");
 				}
 			}
-			LicenseBlockType::Ephemeral => {}
+			LicenseBlockType::Token
+			| LicenseBlockType::LicenseSign
+			| LicenseBlockType::MytsIdSign
+			| LicenseBlockType::Updater
+			| LicenseBlockType::Ephemeral => {}
 		}
 
 		d.finish()?;
@@ -727,7 +744,11 @@ impl LicenseBlockType {
 				Self::Website | Self::Code => 1,
 				Self::Server => 6,
 				Self::Ts5Server => 2,
-				Self::Ephemeral => 0,
+				Self::Token
+				| Self::LicenseSign
+				| Self::MytsIdSign
+				| Self::Updater
+				| Self::Ephemeral => 0,
 			}
 	}
 }
@@ -921,6 +942,27 @@ mod tests {
 		Licenses::parse_ignore_expired(BASE64_STANDARD.decode("AQAuio9ZxThXKE+hmzQyzBRedysp9\
 			79JBTv2xP3s2oCkiAgQI70AE+YkAAcBBgMBAAAABQBoazM313063zaipPTH06zrXc91ch3huB\
 			YrUET9sEbz1CATKgK8EyqrfA==").unwrap()).unwrap();
+	}
+
+	#[test]
+	fn parse_blocks_without_payload() {
+		// Token, License_Sign, MyTsId_Sign and Updater blocks end with their
+		// header, as Ephemeral blocks do.
+		for typ in [4, 5, 6, 7] {
+			let mut data = vec![1, 0];
+			data.extend_from_slice(&[0x58; 32]);
+			data.push(typ);
+			data.extend_from_slice(&[0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
+			let licenses = Licenses::parse_ignore_expired(data.clone()).unwrap();
+			assert_eq!(licenses.blocks.len(), 1);
+			assert_eq!(licenses.blocks[0].len, BLOCK_MIN_LEN);
+			let block = licenses.blocks[0].get_type(&data[1..]).unwrap();
+			assert_eq!(block.to_u8(), Some(typ));
+			// Anything after the header is the next block.
+			data.push(0);
+			assert!(Licenses::parse_ignore_expired(data).is_err());
+		}
+		assert_eq!(LicenseBlockType::from_u8(6), Some(LicenseBlockType::MytsIdSign));
 	}
 
 	#[test]

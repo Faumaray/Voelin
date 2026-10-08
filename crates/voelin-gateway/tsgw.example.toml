@@ -33,6 +33,14 @@ allowlisted = false
 bind = "0.0.0.0:7788"
 # public_url = "wss://gw.example.org/v1"
 
+# BOOTSTRAP. The log goes to standard output (journalctl -u tsgw, docker logs).
+# Uncomment to change it; tsgw versions before these keys refuse the section.
+# [log]
+# What to log (TSGW_LOG_LEVEL); default: RUST_LOG, else info.
+# level = "info,voelin_query=trace"
+# Also write it to this file: appended, moved aside at 20 MB, 5 files kept.
+# file = "logs/tsgw.log"
+
 [auth]
 # Only these server groups may use the gateway (empty: everyone known to the server).
 require_server_groups = []

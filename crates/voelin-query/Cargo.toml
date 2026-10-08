@@ -17,6 +17,10 @@ thiserror = "2.0.21"
 tokio = { version = "1.53.1", features = ["net", "io-util", "sync", "time", "rt", "macros"] }
 tracing = "0.1.44"
 
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+# TCP_QUICKACK on query connections (src/tcp.rs).
+socket2 = { version = "0.6", features = ["all"] }
+
 [lints]
 workspace = true
 

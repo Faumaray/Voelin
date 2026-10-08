@@ -10,7 +10,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use voelin_gateway_proto::PermRule;
-use voelin_query::{Command, QueryClient, Row};
+use voelin_query::{Command, Row};
+
+use crate::lookup::Lookup;
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
@@ -87,7 +89,8 @@ pub struct PermIds {
 }
 
 impl PermIds {
-	pub async fn load(client: &QueryClient) -> voelin_query::Result<Self> {
+	/// Look the ids up. Failures are logged here or by the caller.
+	pub async fn load(client: &Lookup) -> voelin_query::Result<Self> {
 		let names = [
 			"i_channel_join_power",
 			"i_channel_needed_join_power",
@@ -98,7 +101,8 @@ impl PermIds {
 		];
 		let mut ids = [0u32; 6];
 		for (i, name) in names.iter().enumerate() {
-			let rows = client.send(&Command::new("permidgetbyname").arg("permsid", name)).await?;
+			let rows =
+				client.send_quiet(&Command::new("permidgetbyname").arg("permsid", name)).await?;
 			ids[i] = rows.first().and_then(|r| r.parse("permid")).ok_or_else(|| {
 				voelin_query::Error::Protocol(format!("unknown permission {name}"))
 			})?;
@@ -108,8 +112,16 @@ impl PermIds {
 		let mut optional = [0u32; 2];
 		for (i, name) in ["b_channel_modify_name", "b_virtualserver_modify_name"].iter().enumerate()
 		{
-			match client.send(&Command::new("permidgetbyname").arg("permsid", name)).await {
+			match client.send_quiet(&Command::new("permidgetbyname").arg("permsid", name)).await {
 				Ok(rows) => optional[i] = rows.first().and_then(|r| r.parse("permid")).unwrap_or(0),
+				// More commands now would get the gateway banned.
+				Err(voelin_query::Error::Query(e)) if e.is_flood() => {
+					tracing::warn!(
+						name,
+						"the server's flood protection refused looking up a permission; its default grants nobody"
+					);
+					break;
+				}
 				Err(error) => tracing::warn!(%error, name, "unknown permission"),
 			}
 		}
@@ -160,7 +172,7 @@ pub struct GroupResolver {
 impl GroupResolver {
 	pub async fn server_groups(
 		&self,
-		client: &QueryClient,
+		client: &Lookup,
 		cldbid: u64,
 	) -> voelin_query::Result<Vec<u64>> {
 		if let Some((at, groups)) = self.server.lock().unwrap().get(&cldbid)
@@ -177,7 +189,7 @@ impl GroupResolver {
 
 	pub async fn channel_groups(
 		&self,
-		client: &QueryClient,
+		client: &Lookup,
 		cldbid: u64,
 		cid: u64,
 	) -> voelin_query::Result<Vec<u64>> {
@@ -231,7 +243,7 @@ impl PermResolver {
 
 	pub async fn entries(
 		&self,
-		client: &QueryClient,
+		client: &Lookup,
 		cldbid: u64,
 		cid: u64,
 	) -> voelin_query::Result<Vec<Entry>> {

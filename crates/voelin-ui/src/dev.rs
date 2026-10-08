@@ -79,7 +79,8 @@ use voelin_model::{
 use voelin_store::{Bookmark, MessageSource};
 
 use crate::app::{
-	App, Bridge, MainWindow, MobileTab, Nav, Page, RecordingItem, SettingsSection, with_app,
+	App, Bridge, MainWindow, MobileTab, MytsBadge, Nav, Page, RecordingItem, SettingsSection,
+	with_app,
 };
 use crate::settings::LastVoice;
 
@@ -212,6 +213,17 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 						))
 					};
 					account.badges = strings(&["TeamSpeak 6 Beta", "Early supporter"]);
+					// Signed for servers: the first shown, the second not.
+					let badge = |name: &str, shown| MytsBadge {
+						name: name.into(),
+						shown,
+						can_change: true,
+					};
+					account.badge_choice = slint::ModelRc::new(slint::VecModel::from(vec![
+						badge("TeamSpeak 6 Beta", 1),
+						badge("Early supporter", 0),
+					]));
+					account.user_tag = "alex@myteamspeak.com".into();
 					account.devices =
 						strings(&["Voelin · EU · 2026-10-03", "TeamSpeak · EU · 2026-09-28"]);
 					nav.invoke_open_settings(SettingsSection::Account);
@@ -520,6 +532,7 @@ fn demo_ui(app: &mut App) {
 		identity: None,
 		default_channel: None,
 		gateway_url: None,
+		gateway_urls: Vec::new(),
 		query: None,
 		client_version: None,
 		cached_server_icon: None,
@@ -667,6 +680,7 @@ fn demo_ui(app: &mut App) {
 		Event::Gateway {
 			session,
 			update: GatewayUpdate::Connected {
+				url: "wss://gw.nightfall.example/v1".into(),
 				gateway_id: "demo".into(),
 				server_uid: "demo-server".into(),
 				server_name: "Nightfall Guild".into(),

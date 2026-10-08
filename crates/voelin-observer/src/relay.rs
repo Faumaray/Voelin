@@ -7,6 +7,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -53,6 +55,7 @@ pub enum RelayEvent {
 
 struct Session {
 	client: QueryClient,
+	opened: Instant,
 	/// The relay's own nickname, taken back after each post.
 	nickname: String,
 	/// One post at a time: each borrows the author's nickname.
@@ -71,13 +74,29 @@ impl Drop for Session {
 pub struct RelayPool {
 	config: Arc<RelayConfig>,
 	sessions: Arc<Mutex<HashMap<ChannelId, Session>>>,
+	/// Held while a channel's relay opens or closes, so opening one channel
+	/// (a login and a few commands) holds up nobody in other channels.
+	gates: Arc<std::sync::Mutex<HashMap<ChannelId, Arc<Mutex<()>>>>>,
+	/// Set by [`RelayPool::close_all`]: the pool opens no more relays.
+	closed: Arc<AtomicBool>,
 	events: broadcast::Sender<RelayEvent>,
 }
 
 impl RelayPool {
 	pub fn new(config: RelayConfig) -> Self {
 		let (events, _) = broadcast::channel(1024);
-		Self { config: Arc::new(config), sessions: Default::default(), events }
+		Self {
+			config: Arc::new(config),
+			sessions: Default::default(),
+			gates: Default::default(),
+			closed: Default::default(),
+			events,
+		}
+	}
+
+	fn gate(&self, channel: ChannelId) -> Arc<Mutex<()>> {
+		let mut gates = self.gates.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		gates.entry(channel).or_default().clone()
 	}
 
 	pub fn subscribe(&self) -> broadcast::Receiver<RelayEvent> {
@@ -89,13 +108,38 @@ impl RelayPool {
 		self.sessions.lock().await.keys().copied().collect()
 	}
 
+	/// [`RelayPool::close_all`] was called: opening fails with
+	/// [`voelin_query::Error::Closed`].
+	pub fn is_closed(&self) -> bool {
+		self.closed.load(Ordering::Relaxed)
+	}
+
 	/// Start relaying a channel (no-op if already open).
 	pub async fn open(&self, channel: ChannelId) -> voelin_query::Result<()> {
-		let mut sessions = self.sessions.lock().await;
+		let gate = self.gate(channel);
+		let _opening = gate.lock().await;
+		if self.is_closed() {
+			return Err(voelin_query::Error::Closed);
+		}
+		let sessions = self.sessions.lock().await;
 		if sessions.get(&channel).is_some_and(|s| !s.task.is_finished()) {
 			return Ok(());
 		}
-		let (client, notifications) = QueryClient::connect(&self.config.connect).await?;
+		drop(sessions);
+		let started = Instant::now();
+		let session = self.connect(channel).await.inspect_err(|error| {
+			let elapsed_ms = started.elapsed().as_millis() as u64;
+			warn!(channel, elapsed_ms, %error, "relay could not be opened");
+		})?;
+		self.sessions.lock().await.insert(channel, session);
+		Ok(())
+	}
+
+	async fn connect(&self, channel: ChannelId) -> voelin_query::Result<Session> {
+		let started = Instant::now();
+		let mut connect = self.config.connect.clone();
+		connect.line.label = format!("relay {channel}");
+		let (client, notifications) = QueryClient::connect(&connect).await?;
 		let Some(notifications) = notifications else {
 			return Err(voelin_query::Error::Unsupported("relays need a transport with events"));
 		};
@@ -110,28 +154,46 @@ impl RelayPool {
 			}
 		}
 		client.send(&Command::new("servernotifyregister").arg("event", "textchannel")).await?;
-		info!(channel, own_id, "relay opened");
+		let elapsed_ms = started.elapsed().as_millis() as u64;
+		info!(channel, own_id, elapsed_ms, "relay opened");
 		let task = tokio::spawn(forward(channel, own_id, notifications, self.events.clone()));
-		sessions.insert(channel, Session { client, nickname, posting: Default::default(), task });
-		Ok(())
+		Ok(Session { client, opened: Instant::now(), nickname, posting: Default::default(), task })
 	}
 
 	/// Stop relaying a channel.
 	pub async fn close(&self, channel: ChannelId) {
-		let session = self.sessions.lock().await.remove(&channel);
-		if let Some(session) = session {
-			session.client.quit().await;
-			info!(channel, "relay closed");
-		}
+		self.close_one(channel).await;
 	}
 
-	/// Stop all relays.
-	pub async fn close_all(&self) {
-		let sessions: Vec<_> = self.sessions.lock().await.drain().collect();
-		for (channel, session) in sessions {
-			session.client.quit().await;
-			info!(channel, "relay closed");
+	/// Stop relaying a channel; whether it was relayed.
+	async fn close_one(&self, channel: ChannelId) -> bool {
+		// After an open in progress, which would otherwise come back with it.
+		let gate = self.gate(channel);
+		let _closing = gate.lock().await;
+		let Some(session) = self.sessions.lock().await.remove(&channel) else { return false };
+		// Not a lost connection: no `Closed` event for it.
+		session.task.abort();
+		session.client.quit().await;
+		info!(channel, open_for_s = session.opened.elapsed().as_secs(), "relay closed");
+		true
+	}
+
+	/// Stop all relays, after any opens in progress, and open no more.
+	/// Returns the channels that were relayed.
+	pub async fn close_all(&self) -> Vec<ChannelId> {
+		self.closed.store(true, Ordering::Relaxed);
+		// Every channel that has a relay or is opening one has a gate.
+		let channels: Vec<ChannelId> = {
+			let gates = self.gates.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+			gates.keys().copied().collect()
+		};
+		let mut closed = Vec::new();
+		for channel in channels {
+			if self.close_one(channel).await {
+				closed.push(channel);
+			}
 		}
+		closed
 	}
 
 	/// Post `text` in `channel` as `nick` wrote it ([`post_as`]), opening a
@@ -254,6 +316,7 @@ async fn forward(
 	mut notifications: mpsc::UnboundedReceiver<Notification>,
 	events: broadcast::Sender<RelayEvent>,
 ) {
+	let opened = Instant::now();
 	while let Some(n) = notifications.recv().await {
 		let now = std::time::SystemTime::now()
 			.duration_since(std::time::UNIX_EPOCH)
@@ -269,12 +332,33 @@ async fn forward(
 		debug!(channel, author = %msg.author_name, "relayed message");
 		let _ = events.send(RelayEvent::Message(msg));
 	}
+	// Closing a relay stops this task before it quits, so this is a loss.
+	warn!(channel, open_for_s = opened.elapsed().as_secs(), "relay connection lost");
 	let _ = events.send(RelayEvent::Closed { channel, reason: "connection closed".into() });
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[tokio::test]
+	async fn a_closed_pool_opens_no_relays() {
+		let connect = Connect {
+			transport: voelin_query::Transport::Raw,
+			addr: "127.0.0.1:9".into(),
+			user: "serveradmin".into(),
+			secret: None,
+			server_port: None,
+			server_id: None,
+			line: Default::default(),
+		};
+		let pool = RelayPool::new(RelayConfig::new(connect));
+		assert!(!pool.is_closed());
+		assert!(pool.close_all().await.is_empty());
+		assert!(pool.is_closed());
+		// Without trying to connect.
+		assert!(matches!(pool.open(1).await, Err(voelin_query::Error::Closed)));
+	}
 
 	#[test]
 	fn posts_go_out_under_the_authors_name_then_numbered_variants() {

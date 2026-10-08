@@ -96,6 +96,10 @@ use voelin_stream::{
 	EncodedFrame, LayerId, LayerSpec, SrtpProfile, StreamInfo, StreamSetup, ViewerInfo,
 };
 pub use voice::VoiceOptions;
+/// Banners are downloaded and shown by the same rule.
+pub use web::is_svg;
+/// Pictures from the web go through the desktop's proxy (set at startup).
+pub use web::set_proxy_resolver;
 
 pub type SessionId = u64;
 
@@ -108,6 +112,11 @@ pub const POKE_MESSAGE_MAX: usize = 100;
 pub enum Command {
 	/// Main account proof for every current and future voice connection.
 	SetMytsIdentity(Option<Arc<tsproto::myts::Identity>>),
+	/// What voice servers are shown of the main account (its avatar and
+	/// badges with their certificates, its User Tag; TeamSpeak 6): sent to
+	/// every connection that presents the account's myTS ID, once connected
+	/// and when it changes; cleared on a sign-out.
+	SetMytsData(Option<Arc<tsclientlib::MytsData>>),
 	ConnectVoice {
 		session: SessionId,
 		options: Box<VoiceOptions>,
@@ -115,10 +124,14 @@ pub enum Command {
 	DisconnectVoice {
 		session: SessionId,
 	},
-	/// Invisible presence and relay chat through a `tsgw` gateway.
+	/// Invisible presence and relay chat through a `tsgw` gateway: the first
+	/// of `urls` (best first, [`discover::gateways`]) that logs in, tried in
+	/// turn again whenever it is lost. Sent again with the same `urls` and
+	/// identity while it runs, it is not started over; while still
+	/// connecting, it tries again at once (at most every 5 s).
 	ObserveGateway {
 		session: SessionId,
-		url: String,
+		urls: Vec<String>,
 		identity: Box<tsclientlib::Identity>,
 	},
 	/// Invisible presence and relay chat with own ServerQuery credentials.
@@ -671,9 +684,10 @@ pub enum Event {
 		request: RequestId,
 		result: Result<(), String>,
 	},
-	/// A client's avatar is in the cache: `path`, its MD5 `hash`
-	/// ([`voelin_model::ClientInfo::avatar`]). Comes when the client appears
-	/// with an avatar and when it changes.
+	/// A client's avatar is in the cache: `path`, and `hash`: the MD5 of a
+	/// server avatar ([`voelin_model::ClientInfo::avatar`]), or the address
+	/// of a myTeamSpeak avatar ([`voelin_model::ClientInfo::myts_avatar`]).
+	/// Comes when the client appears with an avatar and when it changes.
 	AvatarReady {
 		session: SessionId,
 		client_uid: String,
@@ -849,6 +863,7 @@ async fn run(
 	contacts.load().await;
 	let mut sessions: HashMap<SessionId, session::SessionHandle> = HashMap::new();
 	let (myts_identity, _) = watch::channel(None);
+	let (myts_data, _) = watch::channel(None);
 	let mut current = shared.current();
 	// Pruning: at start, then hourly (and when the setting changes).
 	let mut prune = tokio::time::interval(std::time::Duration::from_secs(3600));
@@ -902,6 +917,16 @@ async fn run(
 						return false;
 					}
 					*current = identity;
+					true
+				});
+				continue;
+			}
+			Command::SetMytsData(data) => {
+				myts_data.send_if_modified(|current| {
+					if *current == data {
+						return false;
+					}
+					*current = data;
 					true
 				});
 				continue;
@@ -982,6 +1007,7 @@ async fn run(
 					settings.clone(),
 					engine.clone(),
 					myts_identity.subscribe(),
+					myts_data.subscribe(),
 				);
 				if let Some(profiles) = &srtp_profiles {
 					s.send(Command::SetSrtpProfiles(profiles.clone()));
@@ -1061,6 +1087,7 @@ fn command_session(command: &Command) -> SessionId {
 		| Command::SetOfflineMessageRead { session, .. }
 		| Command::CloseSession { session } => *session,
 		Command::SetMytsIdentity(_)
+		| Command::SetMytsData(_)
 		| Command::SetAudioSettings(_)
 		| Command::SetSrtpProfiles(_)
 		| Command::TestMicrophone { .. }

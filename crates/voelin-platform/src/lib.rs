@@ -9,6 +9,8 @@
 //! - [`crash`]: opt-in local crash reports (panic hook)
 //! - [`logs`]: the log file, with the previous runs' kept
 //! - [`notices`]: third-party notices for the About page
+//! - [`proxy`]: the proxy the desktop's network settings name for an address
+//!   (xdg-desktop-portal)
 
 pub mod crash;
 pub mod files;
@@ -17,6 +19,7 @@ pub mod logs;
 pub mod notices;
 pub mod notify;
 pub mod paths;
+pub mod proxy;
 
 pub use hotkey::{BackendKind, Hotkey, HotkeyEvent, HotkeyEvents, HotkeyManager, Key, Modifiers};
 pub use notify::{Notification, notify};

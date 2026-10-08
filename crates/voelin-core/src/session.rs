@@ -15,7 +15,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use tokio::sync::{broadcast, mpsc, watch};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use tsclientlib::ClientId;
 use voelin_audio::AudioSettings;
 use voelin_gateway_proto::{ErrorCode, HistoryEntry, StreamEntry, StreamSpec, feature};
@@ -23,7 +23,7 @@ use voelin_model::{ChatMessage, ChatTarget, GroupInfo, Presence, ServerDetails, 
 use voelin_stream::ClientState;
 
 use crate::audio::{self, AudioEvent, AudioHandle, AudioIn};
-use crate::cache::{self, Fetch, SharedCache, Waiter};
+use crate::cache::{self, Fetch, FetchError, RetryHint, SharedCache, Waiter};
 use crate::contacts::{Contacts, Relation};
 use crate::files::{self, DownloadTo, Report, RequestId, Sink, TransferId, TransferState};
 use crate::gateway::{
@@ -87,10 +87,12 @@ impl SessionHandle {
 		audio_settings: AudioSettings,
 		shared: Shared,
 		myts_identity: watch::Receiver<Option<Arc<tsproto::myts::Identity>>>,
+		myts_data: watch::Receiver<Option<Arc<tsclientlib::MytsData>>>,
 	) -> Self {
 		let (tx, rx) = mpsc::unbounded_channel();
 		tokio::spawn(
-			Session::new(id, events, frames, audio_settings, shared, myts_identity).run(rx),
+			Session::new(id, events, frames, audio_settings, shared, myts_identity, myts_data)
+				.run(rx),
 		);
 		Self { tx }
 	}
@@ -119,15 +121,26 @@ enum SourceEvent {
 	/// Time to fetch the host banner again (`banner_gfx_interval_s`).
 	ReloadBanner(String),
 	/// Image completion is checked against the current connection and presence.
-	ImageFinished(bool, u64, ImageRequest, Result<PathBuf, String>),
+	ImageFinished(bool, u64, ImageRequest, Result<PathBuf, FetchError>),
 }
 
 /// Identity of a wanted image, independent of its transport.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ImageRequest {
-	Avatar { uid: String, hash: String },
+	Avatar {
+		uid: String,
+		hash: String,
+	},
+	/// A client's myTeamSpeak avatar (TeamSpeak 6), on the web.
+	MytsAvatar {
+		uid: String,
+		url: String,
+	},
 	Icon(u32),
 	Picture(String),
+	/// A picture a chat message shows ([`Command::FetchPicture`]), on the
+	/// web.
+	ChatPicture(String),
 }
 
 /// An image download over the voice connection, finished in the cache
@@ -146,6 +159,7 @@ struct ImageDownload {
 impl ImageDownload {
 	fn finish(&self, result: Result<(), String>) {
 		if !self.done.swap(true, Ordering::AcqRel) {
+			let result = result.map_err(FetchError::from);
 			self.cache.finish(&self.key, &self.temp, result, max_cache_bytes(&self.settings));
 		}
 	}
@@ -157,11 +171,113 @@ impl Drop for ImageDownload {
 	}
 }
 
-/// At most three retries (after 1, 4 and 16 seconds) per image version.
-/// Keeping exhausted entries prevents presence traffic from causing a retry storm.
+/// Retries per image version ([`retry_delay`]). Keeping exhausted entries
+/// prevents presence traffic from causing a retry storm.
+#[derive(Default)]
 struct ImageRetry {
 	failures: u8,
 	due: Option<Instant>,
+	/// Its host asked to wait until `due` (`Retry-After`): the host
+	/// banner's reloads wait too.
+	busy: bool,
+	/// Its address was found wrong or gone (HTTP 400, 404, 410).
+	gone: bool,
+}
+
+/// When to try an image again after its `failures`-th failed download,
+/// which ended as `hint` says (`gone`: its address was found wrong or gone
+/// before). A banner after 1, 4, 16, 60, 300 and 900 seconds, then every
+/// 15 minutes while it is shown (its host may be away for a while); one
+/// whose address is wrong or gone after 15 minutes, then every hour; one
+/// whose host is busy when it says. Avatars, icons and chat pictures after
+/// 1, 4 and 16 seconds, then no more.
+fn retry_delay(
+	request: &ImageRequest,
+	failures: u8,
+	hint: RetryHint,
+	gone: bool,
+) -> Option<Duration> {
+	const BANNERS: [u64; 6] = [1, 4, 16, 60, 300, 900];
+	let failures = usize::from(failures.max(1));
+	match (request, hint) {
+		(ImageRequest::Picture(_), RetryHint::Permanent) => {
+			Some(Duration::from_secs(if gone { 3600 } else { 900 }))
+		}
+		(ImageRequest::Picture(_), RetryHint::After(wait)) => Some(wait),
+		(ImageRequest::Picture(_), RetryHint::Default) => {
+			Some(Duration::from_secs(BANNERS[(failures - 1).min(5)]))
+		}
+		_ if failures <= 3 => Some(Duration::from_secs(1 << (2 * (failures - 1)))),
+		_ => None,
+	}
+}
+
+/// A failed image download in the log, with what it was and why: banners
+/// at once, with the address the first time (its host, port and path: a
+/// query may be a signed link's secret) and the host after, and once when
+/// their address is found wrong or gone (`newly_gone`; `reload_s`: the
+/// host banner's reload interval); avatars and icons in the server's files
+/// when they give up (their files unreachable, a closed file transfer
+/// port).
+fn log_image_failure(
+	request: &ImageRequest,
+	failures: u8,
+	retry_in: Option<Duration>,
+	error: &FetchError,
+	newly_gone: bool,
+	reload_s: Option<u64>,
+) {
+	let retry_in_s = retry_in.map(|d| d.as_secs());
+	match request {
+		ImageRequest::Picture(url)
+			if newly_gone || (failures <= 6 && error.retry != RetryHint::Permanent) =>
+		{
+			let host = web::host_of(url);
+			let url = (failures == 1).then(|| web::loggable(url));
+			let what = match (newly_gone, reload_s) {
+				(false, _) => "banner not downloaded",
+				(true, None) => {
+					"banner not downloaded: its address is wrong or gone, so it is tried again only \
+					 after 15 minutes, then hourly"
+				}
+				(true, Some(_)) => {
+					"host banner not downloaded: its address is wrong or gone, so it is tried again \
+					 only at the server's reload interval, or hourly"
+				}
+			};
+			match url {
+				Some(url) => {
+					info!(%host, %url, failures, ?retry_in_s, ?reload_s, %error, "{what}");
+				}
+				None => info!(%host, failures, ?retry_in_s, ?reload_s, %error, "{what}"),
+			}
+		}
+		// Not the address: a query may be a signed link's secret.
+		ImageRequest::Picture(url) => {
+			let host = web::host_of(url);
+			debug!(%host, failures, ?retry_in_s, %error, "banner not downloaded");
+		}
+		ImageRequest::MytsAvatar { url, .. } if retry_in.is_none() => {
+			let host = web::host_of(url);
+			info!(%host, %error, "myTeamSpeak avatar not downloaded");
+		}
+		ImageRequest::Avatar { .. } | ImageRequest::Icon(_) if retry_in.is_none() => {
+			info!(?request, %error, "server file not downloaded (avatar or icon)");
+		}
+		// Not the address: someone's message gave it.
+		ImageRequest::ChatPicture(url) => {
+			let host = web::host_of(url);
+			debug!(%host, failures, ?retry_in_s, %error, "chat picture not downloaded");
+		}
+		_ => debug!(?request, failures, ?retry_in_s, %error, "image download failed"),
+	}
+}
+
+/// Whether an explicitly requested image belongs to the voice connection
+/// (downloaded over it, so dropped with it); a myTeamSpeak avatar is on the
+/// web.
+fn voice_bound(request: &ImageRequest) -> bool {
+	!matches!(request, ImageRequest::MytsAvatar { .. })
 }
 
 /// Our live stream, for the gateway's directory.
@@ -175,6 +291,7 @@ struct OwnStream {
 
 struct Session {
 	myts_identity: watch::Receiver<Option<Arc<tsproto::myts::Identity>>>,
+	myts_data: watch::Receiver<Option<Arc<tsclientlib::MytsData>>>,
 	id: SessionId,
 	events: broadcast::Sender<Event>,
 	state: SessionState,
@@ -187,6 +304,9 @@ struct Session {
 	gateway_presence: Option<Presence>,
 	/// The logged-in gateway, for requests.
 	gateway_client: Option<GatewayClient>,
+	/// What the running `gateway` observes with: asking again for the same
+	/// does not start it over.
+	gateway_observed: Option<gateway::Observed>,
 	query: Option<(u64, mpsc::UnboundedSender<QueryCmd>)>,
 	query_presence: Option<Presence>,
 	audio: Option<AudioHandle>,
@@ -222,6 +342,13 @@ struct Session {
 	contacts_rx: Option<watch::Receiver<u64>>,
 	/// Avatars reported per client unique id (their hash), voice only.
 	avatars: HashMap<String, String>,
+	/// myTeamSpeak avatars wanted per client unique id (their link), any
+	/// presence: where the server's avatar is not shown.
+	myts_avatars: HashMap<String, String>,
+	/// Server avatars that could not be downloaded (retries used up), per
+	/// client unique id (their hash): the client's myTeamSpeak avatar is
+	/// shown instead, until it sets another.
+	server_avatars_failed: HashMap<String, String>,
 	/// Icons reported or being fetched, voice only.
 	icons: HashSet<u32>,
 	/// Pictures on the web (banners, badges) reported or being fetched, by
@@ -231,6 +358,9 @@ struct Session {
 	/// fetched, by address, with the size they may have
 	/// ([`Command::FetchPicture`]).
 	chat_pictures: HashMap<String, u64>,
+	/// Banner addresses that cannot be fetched at all (another scheme),
+	/// logged once.
+	unfetchable: HashSet<String>,
 	image_epoch: u64,
 	images_enabled: bool,
 	image_retries: HashMap<ImageRequest, ImageRetry>,
@@ -257,19 +387,24 @@ impl Session {
 		audio_settings: AudioSettings,
 		shared: Shared,
 		myts_identity: watch::Receiver<Option<Arc<tsproto::myts::Identity>>>,
+		myts_data: watch::Receiver<Option<Arc<tsclientlib::MytsData>>>,
 	) -> Self {
 		let (sources_tx, sources_rx) = mpsc::unbounded_channel();
 		let Shared { settings, history, cache, contacts } = shared;
 		let contacts_rx = Some(contacts.watch());
 		Self {
 			myts_identity,
+			myts_data,
 			cache,
 			contacts,
 			contacts_rx,
 			avatars: HashMap::new(),
+			myts_avatars: HashMap::new(),
+			server_avatars_failed: HashMap::new(),
 			icons: HashSet::new(),
 			pictures: HashSet::new(),
 			chat_pictures: HashMap::new(),
+			unfetchable: HashSet::new(),
 			image_epoch: 0,
 			images_enabled: settings.current().get(&CACHE_FETCH_IMAGES),
 			image_retries: HashMap::new(),
@@ -290,6 +425,7 @@ impl Session {
 			gateway: None,
 			gateway_presence: None,
 			gateway_client: None,
+			gateway_observed: None,
 			query: None,
 			query_presence: None,
 			audio: None,
@@ -398,6 +534,7 @@ impl Session {
 				}
 				let link = VoiceLink {
 					myts_identity: self.myts_identity.clone(),
+					myts_data: self.myts_data.clone(),
 					session: self.id,
 					events: self.events.clone(),
 					settings: self.settings.clone(),
@@ -414,13 +551,32 @@ impl Session {
 					let _ = tx.send(VoiceCmd::Disconnect);
 				}
 			}
-			Command::ObserveGateway { url, identity, .. } => {
+			Command::ObserveGateway { urls, identity, .. } => {
+				// Asked again for the same (the server selected again): not
+				// started over; while still connecting, it tries again now
+				// (not every time: a struggling gateway is not hammered).
+				if let (Some((_, tx)), Some(observed)) = (&self.gateway, &mut self.gateway_observed)
+					&& observed.same(&urls, &identity)
+				{
+					if self.state.observe == ObserveState::Connecting && observed.nudge() {
+						let _ = tx.send(GatewayCmd::RetryNow);
+					}
+					return;
+				}
 				self.stop_observing();
+				if urls.is_empty() {
+					return;
+				}
 				let generation = self.next_generation();
-				self.known_server(format!("gateway:{url}"));
+				// Each is published for this server (history before its
+				// unique id is known).
+				for url in &urls {
+					self.known_server(format!("gateway:{url}"));
+				}
 				let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 				let (ev_tx, ev_rx) = mpsc::unbounded_channel();
-				tokio::spawn(gateway::run(url, *identity, cmd_rx, ev_tx));
+				self.gateway_observed = Some(gateway::Observed::new(&urls, &identity));
+				tokio::spawn(gateway::run(urls, *identity, cmd_rx, ev_tx));
 				self.forward(ev_rx, move |e| SourceEvent::Gateway(generation, e));
 				self.gateway = Some((generation, cmd_tx));
 				self.state.observe = ObserveState::Connecting;
@@ -676,9 +832,13 @@ impl Session {
 					.voice_presence
 					.as_ref()
 					.and_then(|p| p.client_by_uid(&client_uid))
-					.and_then(|c| c.avatar.clone());
-				if let Some(hash) = hash {
+					.and_then(|c| c.avatar.clone())
+					.filter(|hash| self.server_avatars_failed.get(&client_uid) != Some(hash));
+				let myts = self.shown_client(&client_uid).and_then(|c| c.myts_avatar.clone());
+				if let Some(hash) = hash.filter(|_| self.voice.is_some()) {
 					self.fetch_avatar(&client_uid, &hash, true);
+				} else if let Some(url) = myts {
+					self.fetch_myts_avatar(&client_uid, &url, true);
 				}
 			}
 			Command::FetchPicture { url, max_bytes, .. } => {
@@ -687,7 +847,7 @@ impl Session {
 					&& !self.chat_pictures.contains_key(&url)
 				{
 					self.chat_pictures.insert(url.clone(), max_bytes);
-					self.fetch_picture(&url, false);
+					self.fetch_chat_picture(&url);
 				}
 			}
 			Command::ListOfflineMessages { request, .. } => {
@@ -718,6 +878,7 @@ impl Session {
 			}
 			// Engine-wide.
 			Command::SetMytsIdentity(_)
+			| Command::SetMytsData(_)
 			| Command::CloseSession { .. }
 			| Command::TestMicrophone { .. }
 			| Command::SetSetting { .. }
@@ -840,9 +1001,12 @@ impl Session {
 		self.image_epoch += 1;
 		self.image_retries.clear();
 		self.avatars.clear();
+		self.myts_avatars.clear();
+		self.server_avatars_failed.clear();
 		self.icons.clear();
 		self.pictures.clear();
 		self.chat_pictures.clear();
+		self.unfetchable.clear();
 		self.contact_audio.clear();
 		self.priority_audio = Default::default();
 		self.stream_friends.clear();
@@ -880,7 +1044,7 @@ impl Session {
 	}
 
 	fn image_waiter(&self, request: ImageRequest, requested: bool) -> Waiter {
-		let epoch = if requested {
+		let epoch = if requested && voice_bound(&request) {
 			self.voice.as_ref().map_or(0, |(generation, _)| *generation)
 		} else {
 			self.image_epoch
@@ -898,6 +1062,45 @@ impl Session {
 		self.fetch_image(key, files::avatar_path(uid).map(|path| (0, path)), false, waiter);
 	}
 
+	/// The myTeamSpeak avatars of the presence shown (any source) where the
+	/// server's avatar is not shown: none set, no voice connection to
+	/// download it over, or its download gave up. As the official client:
+	/// the server's avatar first.
+	fn fetch_myts_avatars(&mut self, p: &Presence) {
+		if !self.settings.current().get(&CACHE_FETCH_IMAGES) {
+			return;
+		}
+		let mut wanted = HashMap::with_capacity(self.myts_avatars.len());
+		for c in p.clients.values() {
+			let (Some(uid), Some(url)) = (&c.uid, &c.myts_avatar) else { continue };
+			let server_avatar = c.avatar.is_some()
+				&& self.voice.is_some()
+				&& self.server_avatars_failed.get(uid) != c.avatar.as_ref();
+			if server_avatar {
+				continue;
+			}
+			if self.myts_avatars.get(uid) != Some(url) {
+				self.fetch_myts_avatar(uid, url, false);
+			}
+			wanted.insert(uid.clone(), url.clone());
+		}
+		self.myts_avatars = wanted;
+	}
+
+	fn fetch_myts_avatar(&self, uid: &str, url: &str, requested: bool) {
+		let request = ImageRequest::MytsAvatar { uid: uid.into(), url: url.into() };
+		let waiter = self.image_waiter(request, requested);
+		web::fetch_avatar(self.cache.current(), url, max_cache_bytes(&self.settings), waiter);
+	}
+
+	/// The client shown (any presence) with this unique id.
+	fn shown_client(&self, uid: &str) -> Option<&voelin_model::ClientInfo> {
+		[&self.voice_presence, &self.gateway_presence, &self.query_presence]
+			.into_iter()
+			.find_map(|p| p.as_ref())
+			.and_then(|p| p.client_by_uid(uid))
+	}
+
 	fn fetch_icon(&self, icon: u32) {
 		let waiter = self.image_waiter(ImageRequest::Icon(icon), false);
 		self.fetch_image(cache::icon_key(icon), Some((0, files::icon_path(icon))), false, waiter);
@@ -908,19 +1111,10 @@ impl Session {
 			ImageRequest::Avatar { uid, hash } => {
 				self.voice.is_some() && self.avatars.get(uid) == Some(hash)
 			}
+			ImageRequest::MytsAvatar { uid, url } => self.myts_avatars.get(uid) == Some(url),
 			ImageRequest::Icon(id) => self.voice.is_some() && self.icons.contains(id),
-			ImageRequest::Picture(url) => {
-				self.pictures.contains(url) || self.chat_pictures.contains_key(url)
-			}
-		}
-	}
-
-	/// How large the picture at `url` may be: a chat picture as large as
-	/// it was asked for, unless it is also a banner or badge.
-	fn picture_limit(&self, url: &str) -> u64 {
-		match self.chat_pictures.get(url) {
-			Some(max) if !self.pictures.contains(url) => (*max).min(cache::MAX_PICTURE_BYTES),
-			_ => cache::MAX_PICTURE_BYTES,
+			ImageRequest::Picture(url) => self.pictures.contains(url),
+			ImageRequest::ChatPicture(url) => self.chat_pictures.contains_key(url),
 		}
 	}
 
@@ -929,16 +1123,28 @@ impl Session {
 		requested: bool,
 		epoch: u64,
 		request: ImageRequest,
-		result: Result<PathBuf, String>,
+		result: Result<PathBuf, FetchError>,
 	) {
 		let wanted = if requested {
-			matches!(&request, ImageRequest::Avatar { uid, hash }
-				if self.voice.is_some() && self.voice_presence.as_ref()
-					.and_then(|p| p.client_by_uid(uid)).and_then(|c| c.avatar.as_ref()) == Some(hash))
+			match &request {
+				ImageRequest::Avatar { uid, hash } => {
+					self.voice.is_some()
+						&& self
+							.voice_presence
+							.as_ref()
+							.and_then(|p| p.client_by_uid(uid))
+							.and_then(|c| c.avatar.as_ref())
+							== Some(hash)
+				}
+				ImageRequest::MytsAvatar { uid, url } => {
+					self.shown_client(uid).and_then(|c| c.myts_avatar.as_ref()) == Some(url)
+				}
+				_ => false,
+			}
 		} else {
 			self.wants_image(&request)
 		};
-		let current = if requested {
+		let current = if requested && voice_bound(&request) {
 			self.is_current(Source::Voice, epoch)
 		} else {
 			epoch == self.image_epoch
@@ -949,13 +1155,24 @@ impl Session {
 		match result {
 			Ok(path) => {
 				self.image_retries.remove(&request);
+				// A server avatar given up on came after all (asked for
+				// again): it is shown again in place of the myTeamSpeak one.
+				if let ImageRequest::Avatar { uid, hash } = &request
+					&& self.server_avatars_failed.get(uid) == Some(hash)
+				{
+					self.server_avatars_failed.remove(uid);
+					if let Some(presence) = self.voice_presence.clone() {
+						self.fetch_myts_avatars(&presence);
+					}
+				}
 				if !requested && !self.settings.current().get(&CACHE_FETCH_IMAGES) {
 					return;
 				}
 				// A chat picture already in the cache may be larger than
 				// asked for now.
-				if let ImageRequest::Picture(url) = &request
-					&& std::fs::metadata(&path).is_ok_and(|m| m.len() > self.picture_limit(url))
+				if let ImageRequest::ChatPicture(url) = &request
+					&& let Some(max) = self.chat_pictures.get(url)
+					&& std::fs::metadata(&path).is_ok_and(|m| m.len() > *max)
 				{
 					return;
 				}
@@ -964,23 +1181,49 @@ impl Session {
 					ImageRequest::Avatar { uid: client_uid, hash } => {
 						Event::AvatarReady { session, client_uid, hash, path }
 					}
+					// The address in place of a hash: it changes with the
+					// picture.
+					ImageRequest::MytsAvatar { uid: client_uid, url } => {
+						Event::AvatarReady { session, client_uid, hash: url, path }
+					}
 					ImageRequest::Icon(icon) => Event::IconReady { session, icon, path },
-					ImageRequest::Picture(url) => Event::PictureReady { session, url, path },
+					ImageRequest::Picture(url) | ImageRequest::ChatPicture(url) => {
+						Event::PictureReady { session, url, path }
+					}
 				});
 			}
 			Err(error) => {
-				debug!(?request, %error, "image download failed");
-				let retry = self
-					.image_retries
-					.entry(request)
-					.or_insert(ImageRetry { failures: 0, due: None });
-				retry.failures = retry.failures.saturating_add(1);
-				retry.due = match retry.failures {
-					1..=3 => {
-						Some(Instant::now() + Duration::from_secs(1 << (2 * (retry.failures - 1))))
+				let avatar_of = match &request {
+					ImageRequest::Avatar { uid, hash } => Some((uid.clone(), hash.clone())),
+					_ => None,
+				};
+				// The host banner is asked for again at its reload interval too.
+				let reload_s = match (&request, &self.banner_reload) {
+					(ImageRequest::Picture(url), Some((reloaded, every_s, _)))
+						if url == reloaded =>
+					{
+						Some((*every_s).max(web::MIN_RELOAD.as_secs()))
 					}
 					_ => None,
 				};
+				let retry = self.image_retries.entry(request.clone()).or_default();
+				retry.failures = retry.failures.saturating_add(1);
+				let delay = retry_delay(&request, retry.failures, error.retry, retry.gone);
+				retry.due = delay.map(|delay| Instant::now() + delay);
+				retry.busy = matches!(error.retry, RetryHint::After(_));
+				let newly_gone = error.retry == RetryHint::Permanent && !retry.gone;
+				retry.gone |= newly_gone;
+				log_image_failure(&request, retry.failures, delay, &error, newly_gone, reload_s);
+				// The server's avatar gave up (its files unreachable): the
+				// myTeamSpeak one, if the client has one.
+				if let (None, Some((uid, hash))) = (retry.due, avatar_of)
+					&& self.server_avatars_failed.get(&uid) != Some(&hash)
+				{
+					self.server_avatars_failed.insert(uid, hash);
+					if let Some(presence) = self.voice_presence.clone() {
+						self.fetch_myts_avatars(&presence);
+					}
+				}
 			}
 		}
 	}
@@ -991,6 +1234,8 @@ impl Session {
 			self.images_enabled = enabled;
 			self.image_epoch += 1;
 			self.avatars.clear();
+			self.myts_avatars.clear();
+			self.server_avatars_failed.clear();
 			self.icons.clear();
 			self.pictures.clear();
 			self.chat_pictures.clear();
@@ -1029,8 +1274,10 @@ impl Session {
 		for request in ready {
 			match request {
 				ImageRequest::Avatar { uid, hash } => self.fetch_avatar(&uid, &hash, false),
+				ImageRequest::MytsAvatar { uid, url } => self.fetch_myts_avatar(&uid, &url, false),
 				ImageRequest::Icon(icon) => self.fetch_icon(icon),
 				ImageRequest::Picture(url) => self.fetch_picture(&url, true),
+				ImageRequest::ChatPicture(url) => self.fetch_chat_picture(&url),
 			}
 		}
 	}
@@ -1075,23 +1322,38 @@ impl Session {
 		if !enabled {
 			return;
 		}
+		let all = std::iter::once(&p.server.banner_gfx_url)
+			.chain(p.channels.values().filter_map(|c| c.banner_gfx_url.as_ref()))
+			.filter(|u| !u.is_empty());
+		let mut urls = HashSet::new();
+		for url in all {
+			if self.can_fetch_picture(url) {
+				urls.insert(url.clone());
+			} else if files::server_image(url).is_none() && self.unfetchable.insert(url.clone()) {
+				let scheme = url.split(':').next().unwrap_or_default();
+				info!(%scheme, "banner not downloaded: only http, https and ts3image addresses");
+			}
+		}
 		// The badges shown, from TeamSpeak's server.
 		let badge_urls = p
 			.clients
 			.values()
 			.flat_map(|c| c.badges.iter().take(badges::SHOWN))
 			.filter_map(|guid| badges::icon_url(guid));
-		let urls: HashSet<String> = std::iter::once(p.server.banner_gfx_url.clone())
-			.chain(p.channels.values().filter_map(|c| c.banner_gfx_url.clone()))
-			.chain(badge_urls)
-			.filter(|u| self.can_fetch_picture(u))
-			.collect();
+		urls.extend(badge_urls);
 		self.pictures.retain(|url| urls.contains(url));
 		for url in &urls {
 			if self.pictures.insert(url.clone()) {
 				self.fetch_picture(url, false);
 			}
 		}
+	}
+
+	/// Whether the host of the picture at `url` asked to wait
+	/// (`Retry-After`) and the wait is not over.
+	fn picture_host_busy(&self, url: &str) -> bool {
+		let retry = self.image_retries.get(&ImageRequest::Picture(url.into()));
+		retry.is_some_and(|r| r.busy && r.due.is_some_and(|due| due > Instant::now()))
 	}
 
 	/// Get the picture at `url` into the cache (again with `fresh`): from
@@ -1103,9 +1365,17 @@ impl Session {
 			let key = cache::server_picture_key(server, url);
 			self.fetch_image(key, Some(file), fresh, waiter);
 		} else {
-			let (max_cache, max) = (max_cache_bytes(&self.settings), self.picture_limit(url));
-			web::fetch(self.cache.current(), url, fresh, max_cache, max, waiter);
+			web::fetch(self.cache.current(), url, fresh, max_cache_bytes(&self.settings), waiter);
 		}
+	}
+
+	/// Get the picture a chat message shows at `url` into the cache, if it
+	/// is no larger than it was asked for ([`Command::FetchPicture`]).
+	fn fetch_chat_picture(&self, url: &str) {
+		let Some(&max_bytes) = self.chat_pictures.get(url) else { return };
+		let waiter = self.image_waiter(ImageRequest::ChatPicture(url.into()), false);
+		let max_cache = max_cache_bytes(&self.settings);
+		web::fetch_chat_picture(self.cache.current(), url, max_cache, max_bytes, waiter);
 	}
 
 	/// Get `key` from the cache, downloading `file` (channel and path) once
@@ -1531,6 +1801,7 @@ impl Session {
 		if let Some((_, tx)) = self.gateway.take() {
 			let _ = tx.send(GatewayCmd::Stop);
 		}
+		self.gateway_observed = None;
 		if let Some((_, tx)) = self.query.take() {
 			let _ = tx.send(QueryCmd::Stop);
 		}
@@ -1643,6 +1914,7 @@ impl Session {
 				if let Some((url, ..)) = &self.banner_reload
 					&& *url == address
 					&& self.settings.current().get(&CACHE_FETCH_IMAGES)
+					&& !self.picture_host_busy(url)
 				{
 					self.fetch_picture(url, true);
 				}
@@ -1661,6 +1933,13 @@ impl Session {
 				}
 				self.learn_server_uid(server_uid, Source::Voice);
 				self.emit_state();
+				// The server knows our identity now: a gateway that could not
+				// log us in before (on a server we never joined) tries at once.
+				if self.state.observe == ObserveState::Connecting
+					&& let Some((_, tx)) = &self.gateway
+				{
+					let _ = tx.send(GatewayCmd::RetryNow);
+				}
 				let capabilities = flavor.capabilities();
 				if capabilities.streams
 					&& let Some((generation, voice)) = &self.voice
@@ -1773,7 +2052,7 @@ impl Session {
 
 	fn gateway_event(&mut self, e: GatewayEvent) {
 		match e {
-			GatewayEvent::Connected(client) => {
+			GatewayEvent::Connected(client, url) => {
 				self.state.observe = ObserveState::Observing;
 				let info = client.info().clone();
 				self.gateway_client = Some(client.clone());
@@ -1783,6 +2062,7 @@ impl Session {
 				self.learn_server_uid(info.server_uid.clone(), Source::Gateway);
 				self.emit_state();
 				self.gateway_update(GatewayUpdate::Connected {
+					url,
 					gateway_id: info.gateway_id,
 					server_uid: info.server_uid,
 					server_name: info.server_name,
@@ -1809,6 +2089,7 @@ impl Session {
 			}
 			GatewayEvent::Disconnected(reason) => {
 				self.gateway = None;
+				self.gateway_observed = None;
 				self.gateway_gone(reason.clone());
 				self.gateway_presence = None;
 				self.state.observe = ObserveState::Off;
@@ -1981,6 +2262,7 @@ impl Session {
 			self.emit_state();
 		}
 		self.fetch_pictures(&presence);
+		self.fetch_myts_avatars(&presence);
 		let presence = Arc::new(presence);
 		self.contacts.presence(self.id, presence.clone());
 		self.emit(Event::Presence { session: self.id, presence });
@@ -2009,7 +2291,17 @@ mod banner_tests {
 		// No myTeamSpeak account; its source stays open, as the engine's does
 		// (a closed one ends voice connections).
 		let myts_identity = Box::leak(Box::new(watch::Sender::new(None))).subscribe();
-		(Session::new(1, events, frames, AudioSettings::default(), shared, myts_identity), receiver)
+		let myts_data = Box::leak(Box::new(watch::Sender::new(None))).subscribe();
+		let session = Session::new(
+			1,
+			events,
+			frames,
+			AudioSettings::default(),
+			shared,
+			myts_identity,
+			myts_data,
+		);
+		(session, receiver)
 	}
 
 	#[tokio::test]
@@ -2185,6 +2477,143 @@ mod banner_tests {
 		let _ = std::fs::remove_dir_all(cache.dir());
 	}
 
+	#[test]
+	fn banners_keep_trying_avatars_and_icons_give_up() {
+		let banner = ImageRequest::Picture("https://example.com/b.png".into());
+		let delay = |f, hint, gone| retry_delay(&banner, f, hint, gone).map(|d| d.as_secs());
+		let delays: Vec<_> =
+			(1..=8).map(|f| delay(f, RetryHint::Default, false).unwrap()).collect();
+		assert_eq!(delays, [1, 4, 16, 60, 300, 900, 900, 900]);
+		// An address wrong or gone: after 15 minutes, then every hour.
+		assert_eq!(delay(1, RetryHint::Permanent, false), Some(900));
+		assert_eq!(delay(2, RetryHint::Permanent, true), Some(3600));
+		// A busy host: when it says.
+		assert_eq!(delay(1, RetryHint::After(Duration::from_secs(120)), false), Some(120));
+		let icon = ImageRequest::Icon(1234);
+		let delays: Vec<_> = (1..=4)
+			.map(|f| retry_delay(&icon, f, RetryHint::Default, false).map(|d| d.as_secs()))
+			.collect();
+		assert_eq!(delays, [Some(1), Some(4), Some(16), None]);
+		// So does a chat picture, not shown as a banner.
+		let chat = ImageRequest::ChatPicture("https://example.com/b.png".into());
+		assert_eq!(retry_delay(&chat, 3, RetryHint::Default, false), Some(Duration::from_secs(16)));
+		assert_eq!(retry_delay(&chat, 4, RetryHint::Permanent, false), None);
+	}
+
+	/// A banner whose address is wrong or gone is tried again after 15
+	/// minutes, then every hour, until the connection is made again; a
+	/// busy host's banner waits as long as it asks, and so do its reloads.
+	#[tokio::test]
+	async fn banners_wait_as_their_hosts_say() {
+		let (mut session, _events) = session("hints");
+		let url = "https://example.com/gone.png";
+		let request = ImageRequest::Picture(url.into());
+		let wait = |session: &Session, request: &ImageRequest| {
+			let due = session.image_retries[request].due.unwrap();
+			due.saturating_duration_since(Instant::now()).as_secs_f64().round() as u64
+		};
+		let gone = || Err(FetchError::new("HTTP 404 Not Found", RetryHint::Permanent));
+		session.pictures.insert(url.into());
+		session.image_finished(false, session.image_epoch, request.clone(), gone());
+		assert_eq!(wait(&session, &request), 900);
+		assert!(session.image_retries[&request].gone);
+		session.image_finished(false, session.image_epoch, request.clone(), gone());
+		assert_eq!(wait(&session, &request), 3600);
+		// Something else in between: the usual schedule.
+		let failed = Err("timed out".into());
+		session.image_finished(false, session.image_epoch, request.clone(), failed);
+		assert_eq!(wait(&session, &request), 16);
+		// Connected again: from the start.
+		session.forget_images();
+		session.pictures.insert(url.into());
+		session.image_finished(false, session.image_epoch, request.clone(), gone());
+		assert_eq!(wait(&session, &request), 900);
+
+		// The host banner of a busy host: its reloads wait too.
+		let banner = "https://example.com/busy.png";
+		let request = ImageRequest::Picture(banner.into());
+		session.pictures.insert(banner.into());
+		let timer = tokio::spawn(async {}).abort_handle();
+		session.banner_reload = Some((banner.into(), 60, timer));
+		let busy = FetchError::new("HTTP 429", RetryHint::After(Duration::from_secs(600)));
+		session.image_finished(false, session.image_epoch, request.clone(), Err(busy));
+		assert_eq!(wait(&session, &request), 600);
+		let cache = session.cache.current();
+		let key = cache::picture_key(banner).unwrap();
+		// Downloaded here, so a fetch by the session waits for this one.
+		let reload = |session: &mut Session| {
+			let Fetch::Download(temp) = cache.fetch(&key, true, Box::new(|_| {})) else {
+				panic!("own download");
+			};
+			session.source_event(SourceEvent::ReloadBanner(banner.into()));
+			std::fs::create_dir_all(temp.parent().unwrap()).unwrap();
+			std::fs::write(&temp, b"picture").unwrap();
+			cache.finish(&key, &temp, Ok(()), 0);
+			session.sources_rx.as_mut().unwrap().try_recv().is_ok()
+		};
+		assert!(!reload(&mut session), "reloaded while its host is busy");
+		session.image_retries.get_mut(&request).unwrap().due = Some(Instant::now());
+		assert!(reload(&mut session), "not reloaded once the wait was over");
+		std::fs::remove_dir_all(cache.dir()).unwrap();
+	}
+
+	/// What a failed download of `request` logs at info.
+	fn failure_lines(
+		session: &mut Session,
+		request: &ImageRequest,
+		result: Result<PathBuf, FetchError>,
+	) -> Vec<String> {
+		let epoch = session.image_epoch;
+		let finish = || session.image_finished(false, epoch, request.clone(), result);
+		web::tests::info_lines(finish).1
+	}
+
+	/// A failing banner's address is logged on its first failure, without
+	/// its query; that it is wrong or gone, once.
+	#[tokio::test]
+	async fn a_failing_banner_is_logged_once_with_its_address() {
+		let (mut session, _events) = session("log-once");
+		let url = "https://example.com/gone.png?sig=secret";
+		let request = ImageRequest::Picture(url.into());
+		session.pictures.insert(url.into());
+		let gone = || Err(FetchError::new("HTTP 404 Not Found", RetryHint::Permanent));
+		let lines = failure_lines(&mut session, &request, gone());
+		assert_eq!(lines.len(), 1, "{lines:?}");
+		assert!(
+			lines[0].starts_with(
+				"banner not downloaded: its address is wrong or gone, so it is tried again only \
+				 after 15 minutes, then hourly host=example.com url=https://example.com/gone.png \
+				 failures=1 retry_in_s=Some(900)"
+			),
+			"{lines:?}"
+		);
+		assert!(!lines[0].contains("secret"), "{lines:?}");
+		assert_eq!(failure_lines(&mut session, &request, gone()), Vec::<String>::new());
+		// Something else meanwhile: by its host only.
+		let lines = failure_lines(&mut session, &request, Err("timed out".into()));
+		assert_eq!(lines.len(), 1, "{lines:?}");
+		assert!(lines[0].starts_with("banner not downloaded host=example.com failures=3"));
+		assert!(!lines[0].contains("url="), "{lines:?}");
+
+		// The host banner is asked for at the server's reload interval too.
+		let banner = "https://example.com/host.png";
+		let request = ImageRequest::Picture(banner.into());
+		session.pictures.insert(banner.into());
+		let timer = tokio::spawn(async {}).abort_handle();
+		session.banner_reload = Some((banner.into(), 30, timer));
+		let lines = failure_lines(&mut session, &request, gone());
+		assert_eq!(lines.len(), 1, "{lines:?}");
+		assert!(
+			lines[0].starts_with(
+				"host banner not downloaded: its address is wrong or gone, so it is tried again \
+				 only at the server's reload interval, or hourly"
+			),
+			"{lines:?}"
+		);
+		assert!(lines[0].contains(" reload_s=Some(60) "), "{lines:?}");
+		let _ = std::fs::remove_dir_all(session.cache.current().dir());
+	}
+
 	#[tokio::test]
 	async fn retries_are_bounded_and_obey_policy_presence_and_epoch() {
 		let (mut session, mut events) = session("retry-guards");
@@ -2200,7 +2629,8 @@ mod banner_tests {
 			);
 			let retry = &session.image_retries[&request];
 			assert_eq!(retry.failures, failure);
-			assert_eq!(retry.due.is_some(), failure <= 3);
+			// A banner is tried again while it is shown.
+			assert!(retry.due.is_some());
 		}
 		assert!(events.try_recv().is_err());
 		// Disabling fetch invalidates pending retries and completions.
@@ -2314,6 +2744,82 @@ mod banner_tests {
 		let completion = session.sources_rx.as_mut().unwrap().recv().await.unwrap();
 		session.source_event(completion);
 		assert!(!ready(&mut events));
+		std::fs::remove_dir_all(cache.dir()).unwrap();
+	}
+
+	/// myTeamSpeak avatars (TeamSpeak 6) come from the web where the
+	/// server's avatar is not shown: none set, no voice connection to get it
+	/// over (observing), or its download gave up.
+	#[tokio::test]
+	async fn myts_avatars_where_the_servers_is_not_shown() {
+		let (mut session, mut events) = session("myts-avatar");
+		let cache = session.cache.current();
+		let client = |id, uid: &str, avatar: Option<&str>, myts: &str| voelin_model::ClientInfo {
+			id,
+			uid: Some(uid.into()),
+			avatar: avatar.map(Into::into),
+			myts_avatar: Some(myts.into()),
+			..Default::default()
+		};
+		let (a, b) = ("https://a.example.test/a.png", "https://a.example.test/b.png");
+		let hash = "0123456789abcdef0123456789abcdef";
+		let mut presence = Presence::default();
+		presence.clients.insert(1, client(1, "A=", None, a));
+		presence.clients.insert(2, client(2, "B=", Some(hash), b));
+		// Owned here, so nothing goes to the network.
+		let temps: Vec<_> = [a, b]
+			.iter()
+			.map(|url| {
+				let key = cache::picture_key(url).unwrap();
+				let Fetch::Download(temp) = cache.fetch(&key, false, Box::new(|_| {})) else {
+					panic!("first download");
+				};
+				(key, temp)
+			})
+			.collect();
+		// Observing: both, even the one with a server avatar.
+		session.gateway_presence = Some(presence.clone());
+		session.publish_presence();
+		assert_eq!(session.myts_avatars.len(), 2);
+		for (key, temp) in &temps {
+			std::fs::create_dir_all(temp.parent().unwrap()).unwrap();
+			std::fs::write(temp, b"\x89PNG\r\n\x1a\npicture").unwrap();
+			cache.finish(key, temp, Ok(()), 0);
+			let done = session.sources_rx.as_mut().unwrap().recv().await.unwrap();
+			session.source_event(done);
+		}
+		let mut ready = Vec::new();
+		while let Ok(event) = events.try_recv() {
+			if let Event::AvatarReady { client_uid, hash, .. } = event {
+				ready.push((client_uid, hash));
+			}
+		}
+		ready.sort();
+		assert_eq!(ready, [("A=".to_owned(), a.to_owned()), ("B=".to_owned(), b.to_owned())]);
+		// With voice the server's avatar is shown where there is one.
+		let (tx, _rx) = mpsc::unbounded_channel();
+		session.voice = Some((1, tx));
+		session.voice_presence = Some(presence.clone());
+		session.publish_presence();
+		assert_eq!(session.myts_avatars.keys().collect::<Vec<_>>(), ["A="]);
+		// Until its download gives up (the server's files unreachable).
+		let request = ImageRequest::Avatar { uid: "B=".into(), hash: hash.into() };
+		session.avatars.insert("B=".into(), hash.into());
+		for _ in 0..4 {
+			session.image_finished(
+				false,
+				session.image_epoch,
+				request.clone(),
+				Err("refused".into()),
+			);
+		}
+		assert_eq!(session.myts_avatars.get("B=").map(String::as_str), Some(b));
+		// A new server avatar is tried again: the failure was that one's.
+		let presence = session.voice_presence.as_mut().unwrap();
+		presence.clients.get_mut(&2).unwrap().avatar =
+			Some("fedcba9876543210fedcba9876543210".into());
+		session.publish_presence();
+		assert_eq!(session.myts_avatars.keys().collect::<Vec<_>>(), ["A="]);
 		std::fs::remove_dir_all(cache.dir()).unwrap();
 	}
 
@@ -2462,5 +2968,27 @@ mod banner_tests {
 		session.apply_priority(&presence);
 		assert_eq!(sent(), [(vec![], -30.0)]);
 		session.stop_all();
+	}
+
+	#[tokio::test]
+	async fn voice_connected_wakes_a_gateway_still_connecting() {
+		let (mut session, _events) = session("gateway-wake");
+		let (tx, mut rx) = mpsc::unbounded_channel();
+		session.gateway = Some((session.next_generation(), tx));
+		let connected = || VoiceEvent::Connected {
+			name: "test".into(),
+			flavor: voelin_model::ServerFlavor::Unknown(String::new()),
+			own_client: 1,
+			server_uid: "server=".into(),
+			own_uid: None,
+		};
+		session.state.observe = ObserveState::Connecting;
+		session.voice_event(connected());
+		assert!(matches!(rx.try_recv(), Ok(GatewayCmd::RetryNow)));
+		assert!(rx.try_recv().is_err());
+		// Logged in already: nothing to hurry.
+		session.state.observe = ObserveState::Observing;
+		session.voice_event(connected());
+		assert!(rx.try_recv().is_err());
 	}
 }
