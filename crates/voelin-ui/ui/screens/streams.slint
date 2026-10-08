@@ -454,14 +454,28 @@ component StreamPlayer inherits Rectangle {
                 y: (parent.height - self.height) / 2;
                 clicked => { Bridge.hide-viewer(); }
             }
+            // Theatre mode: the window without the shell. Checked, it has
+            // the accent's colours, as elsewhere (white would not show on
+            // the light theme's).
+            if !Bridge.viewer-fullscreen && !Nav.narrow: IconButton {
+                icon: Icons.rectangle-horizontal;
+                label: Nav.theatre ? @tr("Exit theatre mode") : @tr("Theatre mode");
+                tooltip: root.up ? self.label : "";
+                checked: Nav.theatre;
+                tint: Nav.theatre ? Theme.accent-text : #ffffff;
+                y: (parent.height - self.height) / 2;
+                clicked => { Nav.theatre = !Nav.theatre; }
+            }
+            // Until the viewer has a window of its own, popping out is
+            // theatre mode.
             if !Nav.narrow: IconButton {
                 icon: Icons.external-link;
-                label: Bridge.viewer-popped ? @tr("Back to the window") : @tr("Pop out");
+                label: Nav.theatre ? @tr("Back to the window") : @tr("Pop out");
                 tooltip: root.up ? self.label : "";
-                checked: Bridge.viewer-popped;
-                tint: #ffffff;
+                checked: Nav.theatre;
+                tint: Nav.theatre ? Theme.accent-text : #ffffff;
                 y: (parent.height - self.height) / 2;
-                clicked => { Bridge.viewer-popped = !Bridge.viewer-popped; }
+                clicked => { Nav.theatre = !Nav.theatre; }
             }
             IconButton {
                 icon: Bridge.viewer-fullscreen ? Icons.minimize-2 : Icons.maximize;
@@ -519,10 +533,11 @@ component StreamInfo inherits VerticalLayout {
     }
 }
 
-// The stream we watch. With the shell: a header with the streamer, the
-// title and LIVE over our channel's background, the player, a note on the
-// channel the stream belongs to, and our channel's chat below. In full
-// screen and on a phone: the player alone.
+// The stream we watch. With the shell, and in theatre mode without it: a
+// header with the streamer, the title and LIVE over our channel's
+// background, the player, a note on the channel the stream belongs to,
+// and our channel's chat below. In full screen and on a phone: the player
+// alone.
 export component StreamViewer inherits Rectangle {
     // Reading our own width here would loop through the layout, so the
     // phone breakpoint (a setting) decides.
@@ -552,8 +567,8 @@ export component StreamViewer inherits Rectangle {
             if Bridge.viewer-qualities.length > 1 || Bridge.viewer-has-frame: StreamQuality {
                 y: (parent.height - self.height) / 2;
             }
-            // Popped out, the window has no members panel to open.
-            if Bridge.members.length > 0 && !Bridge.viewer-popped: IconButton {
+            // In theatre mode the window has no members panel to open.
+            if Bridge.members.length > 0 && !Nav.theatre: IconButton {
                 icon: Icons.users;
                 label: @tr("Members");
                 checked: Nav.right-panel-open && !Nav.pins-open && !Nav.topics-open;

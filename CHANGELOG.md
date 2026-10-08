@@ -75,6 +75,9 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
   and Leave left the header). A smaller stage, one row of people and the
   streams as rows, leaves about 200 px more for the chat; it is remembered,
   and windows under 800 px tall always have it.
+- A theatre mode for streams: the stream viewer's new button fills the
+  window with the stream and its chat, without the servers, the channels
+  and the members. Escape leaves it, and full screen too.
 
 ### Changed
 

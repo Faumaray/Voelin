@@ -68,6 +68,9 @@ export global Nav {
     // Its stage as a strip of people and stream rows, for a taller chat
     // (the setting `ui.voice_compact`; short windows show it anyway).
     in-out property <bool> voice-compact: false;
+    // Theatre mode: the stream viewer fills the window without the shell,
+    // its chat still under the picture. It ends with the viewer.
+    in-out property <bool> theatre: false;
     // Drawers in place of the members panel (gateway features).
     in-out property <bool> pins-open;
     in-out property <bool> topics-open;

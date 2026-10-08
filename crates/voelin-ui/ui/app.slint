@@ -76,8 +76,32 @@ export component MainWindow inherits Window {
         keyboard-inset = self.virtual-keyboard-size.height > 0 ? self.height - self.virtual-keyboard-position.y : 0;
     }
 
-    // The viewer takes the whole window in full screen and when popped out.
-    property <bool> chrome: !(Bridge.viewer-open && (Bridge.viewer-fullscreen || Bridge.viewer-popped));
+    // The viewer takes the whole window in full screen and in theatre mode
+    // (a narrow window keeps the phone layout).
+    property <bool> chrome: !(Bridge.viewer-open && (Bridge.viewer-fullscreen || (Nav.theatre && !Nav.narrow)));
+    // Theatre mode ends with the viewer.
+    property <bool> viewer-open: Bridge.viewer-open;
+    changed viewer-open => {
+        if !viewer-open {
+            Nav.theatre = false;
+        }
+    }
+    // The viewer moves to the whole window, or loses its chat for full
+    // screen, and what had the focus goes with it: the keys take it, so
+    // Escape works.
+    changed chrome => {
+        if !chrome {
+            keys.focus();
+        }
+    }
+    // Back from full screen to theatre mode, the player's button that was
+    // clicked goes as well.
+    property <bool> fullscreen: Bridge.viewer-fullscreen;
+    changed fullscreen => {
+        if fullscreen || !chrome {
+            keys.focus();
+        }
+    }
 
     // The standard widgets follow the theme. In "system" mode the palette
     // is left alone (it tracks the system) unless an explicit mode was
@@ -121,6 +145,19 @@ export component MainWindow inherits Window {
         capture-key-pressed(event) => {
             if event.modifiers.control && (event.text == "k" || event.text == "K") && root.chrome && !Bridge.myts.prompt {
                 Nav.open-search("");
+                return accept;
+            }
+            reject
+        }
+        // Escape leaves full screen, then theatre mode (after the focused
+        // field had its turn).
+        key-pressed(event) => {
+            if event.text == Key.Escape && Bridge.viewer-fullscreen {
+                Bridge.toggle-fullscreen();
+                return accept;
+            }
+            if event.text == Key.Escape && Nav.theatre && Bridge.viewer-open {
+                Nav.theatre = false;
                 return accept;
             }
             reject

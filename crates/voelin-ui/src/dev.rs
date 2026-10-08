@@ -38,8 +38,9 @@
 //!   default the sample's raid board), `link:<url>` (a TeamSpeak link
 //!   opened: the server dialog filled in from it, or in voice on its
 //!   server a move into its channel), `watch` (the first stream; with
-//!   sample data the local test pattern in its place), `popout` (the same,
-//!   popped out),
+//!   sample data the local test pattern in its place), `theatre` (after
+//!   `watch`: in theatre mode), `popout` (`watch` popped out; for now the
+//!   same as `watch,theatre`),
 //!   `tab:<home|servers|chat|activity|you>` (phone layout); `friends[:<uid>]`,
 //!   `messages[:<uid>]` (a private chat), `inbox` (offline messages),
 //!   `library`, `events`, `event-form`, `search[:<text>]`,
@@ -332,12 +333,17 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 			}
 			// As a link from the platform comes.
 			"link" => crate::inbox::request(crate::inbox::Request::OpenLink(arg.to_owned())),
+			// Until the viewer has a window of its own, `popout` is theatre
+			// mode too.
 			"watch" | "popout" => {
 				with_app(|app| {
 					if switches.demo_ui { app.demo_watch() } else { app.watch_first_stream() }
 				});
-				ui.global::<Bridge>().set_viewer_popped(what == "popout");
+				if what == "popout" {
+					nav.set_theatre(true);
+				}
 			}
+			"theatre" => nav.set_theatre(true),
 			// Home, friends, messages, events, the bell, the search.
 			"friends" => {
 				with_app(|app| app.select_contact(arg.to_owned()));
