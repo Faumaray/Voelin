@@ -5,10 +5,11 @@
 
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
-import { Bridge, MemberItem, StreamItem } from "../bridge.slint";
+import { Bridge } from "../bridge.slint";
 import { Nav, MobileTab } from "../nav.slint";
-import { Icon, IconButton, Button, ButtonKind, Avatar, LiveBadge, Select, Slider, SpeakingBars, ScrollView, BannerPicture } from "../components/index.slint";
+import { Icon, IconButton, Button, ButtonKind, ActionButton, LiveBadge, Select, Slider, ScrollView, BannerPicture } from "../components/index.slint";
 import { MessageList, Composer } from "chat.slint";
+import { Participant, StreamCard } from "voice-parts.slint";
 import { StudioBridge } from "../studio-bridge.slint";
 
 // Back to the navigation; a stream we watch goes on behind it.
@@ -262,142 +263,6 @@ component PhonePlayer inherits Rectangle {
     }
 }
 
-// A stream in the channel that we do not show: LIVE, the title, who, and
-// Watch (or Show, if we watch it already).
-component StreamPrompt inherits Rectangle {
-    in property <StreamItem> stream;
-    height: 76px;
-    border-radius: Theme.radius-lg;
-    clip: true;
-    background: @linear-gradient(160deg, #26237a 0%, #0c1430 100%);
-    border-width: 1px;
-    border-color: stream.watching ? Theme.accent : Theme.border-strong;
-    accessible-role: AccessibleRole.groupbox;
-    accessible-label: stream.name;
-    HorizontalLayout {
-        padding: Theme.space-3;
-        padding-left: Theme.space-4;
-        spacing: Theme.space-3;
-        VerticalLayout {
-            alignment: center;
-            horizontal-stretch: 1;
-            spacing: Theme.space-1;
-            HorizontalLayout {
-                spacing: Theme.space-2;
-                alignment: start;
-                if stream.id != "": LiveBadge {
-                    y: (parent.height - self.height) / 2;
-                }
-                Text {
-                    text: stream.id == "" ? @tr("{} is streaming", stream.streamer) : stream.name != "" ? stream.name : @tr("Untitled stream");
-                    color: #ffffff;
-                    font-weight: Theme.weight-semibold;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-            }
-            Text {
-                text: stream.id == "" ? (stream.channel == "" ? @tr("Looking it up…") : @tr("In {}; looking it up…", stream.channel))
-                    : stream.own ? @tr("Your stream")
-                    : stream.channel != "" ? @tr("{} · in {}", stream.streamer, stream.channel)
-                    : stream.viewers > 0 ? @tr("{} · {} watching", stream.streamer, stream.viewers)
-                    : stream.streamer;
-                color: #ffffffb0;
-                font-size: Theme.font-sm;
-                overflow: elide;
-            }
-        }
-        if stream.id != "" && !stream.own: Button {
-            kind: ButtonKind.primary;
-            small: true;
-            icon: stream.watching ? Icons.monitor : Icons.eye;
-            text: stream.watching ? @tr("Show") : @tr("Watch");
-            y: (parent.height - self.height) / 2;
-            clicked => {
-                if stream.watching {
-                    Bridge.show-viewer();
-                } else {
-                    Bridge.watch-stream(stream.id);
-                }
-            }
-        }
-    }
-}
-
-// One person: an avatar ringed green while talking (blue while
-// streaming), the muted mark, the name with the crown, LIVE below.
-component VoiceMember inherits VerticalLayout {
-    in property <MemberItem> member;
-    property <length> size: 54px;
-    width: 68px;
-    spacing: Theme.space-1;
-    accessible-role: AccessibleRole.list-item;
-    accessible-label: member.name;
-    accessible-description: member.status;
-    accessible-action-default => { Bridge.open-member(member.id); }
-    HorizontalLayout {
-        alignment: center;
-        Rectangle {
-            width: root.size + 8px;
-            height: root.size + 8px;
-            border-radius: self.width / 2;
-            border-width: member.talking || member.streaming ? 2px : 0px;
-            border-color: member.talking ? Theme.success : Theme.accent;
-            Avatar {
-                size: root.size;
-                initials: member.initials;
-                tint: member.tint;
-                image: member.avatar;
-                label: member.name;
-            }
-            if member.talking || member.muted || member.sound-off: Rectangle {
-                x: parent.width - self.width;
-                y: parent.height - self.height;
-                width: 22px;
-                height: 22px;
-                border-radius: 11px;
-                background: member.talking ? Theme.accent : Theme.surface;
-                border-width: 2px;
-                border-color: Theme.surface;
-                if member.talking: SpeakingBars {
-                    width: 12px;
-                    height: 12px;
-                    tint: #ffffff;
-                }
-                if !member.talking: Icon {
-                    source: member.sound-off ? Icons.headphone-off : Icons.mic-off;
-                    size: 12px;
-                    tint: Theme.danger;
-                }
-            }
-            TouchArea {
-                clicked => { Bridge.open-member(member.id); }
-            }
-        }
-    }
-    HorizontalLayout {
-        alignment: center;
-        spacing: Theme.space-1;
-        Text {
-            text: member.name;
-            color: member.myself ? Theme.accent-text : Theme.text;
-            font-size: Theme.font-sm;
-            overflow: elide;
-            max-width: root.width - (member.admin ? 16px : 0px);
-        }
-        if member.admin: Icon {
-            source: Icons.crown;
-            size: 13px;
-            tint: Theme.gold;
-            y: (parent.height - self.height) / 2;
-        }
-    }
-    if member.streaming: HorizontalLayout {
-        alignment: center;
-        LiveBadge { }
-    }
-}
-
 // "# Chill Zone Chat · Linked to this voice channel", with the pins, the
 // topics and the members.
 component ChatHeader inherits Rectangle {
@@ -464,55 +329,13 @@ component ChatHeader inherits Rectangle {
     }
 }
 
-// A round control with its caption, for the voice bar.
-component VoiceControl inherits VerticalLayout {
-    in property <image> icon;
-    in property <string> text;
-    in property <bool> checked;
-    in property <bool> danger;
-    in property <bool> enabled: true;
-    // Filled red (Leave).
-    in property <bool> alarm;
-    callback clicked();
+// The voice bar's controls: larger, on a stronger edge, sharing the width.
+component BarButton inherits ActionButton {
+    size: 48px;
+    icon-size: 22px;
+    edge: Theme.border-strong;
+    checkable: !root.alarm;
     horizontal-stretch: 1;
-    spacing: Theme.space-1;
-    alignment: center;
-    accessible-role: AccessibleRole.button;
-    accessible-label: text;
-    accessible-enabled: enabled;
-    accessible-checkable: !alarm;
-    accessible-checked: checked;
-    accessible-action-default => { if enabled { clicked(); } }
-    HorizontalLayout {
-        alignment: center;
-        Rectangle {
-            width: 48px;
-            height: 48px;
-            border-radius: 24px;
-            background: root.alarm ? (touch.pressed ? Theme.danger.darker(0.2) : Theme.danger)
-                : root.checked ? (root.danger ? Theme.danger-soft : Theme.accent-soft)
-                : touch.pressed ? Theme.surface-4 : Theme.surface-2;
-            border-width: root.alarm ? 0px : 1px;
-            border-color: root.checked ? (root.danger ? Theme.danger.transparentize(0.5) : Theme.accent) : Theme.border-strong;
-            opacity: root.enabled ? 1.0 : 0.45;
-            Icon {
-                source: root.icon;
-                size: 22px;
-                tint: root.alarm ? #ffffff : root.checked ? (root.danger ? Theme.danger : Theme.accent-text) : Theme.icon;
-            }
-            touch := TouchArea {
-                enabled: root.enabled;
-                clicked => { root.clicked(); }
-            }
-        }
-    }
-    Text {
-        text: root.text;
-        color: root.checked && root.danger ? Theme.danger : Theme.text-secondary;
-        font-size: Theme.font-xs;
-        horizontal-alignment: center;
-        accessible-role: AccessibleRole.none;
-    }
 }
 
 // Mute, Deafen, Go Live (the Stream Studio; "Live" while it or a share
@@ -529,14 +352,14 @@ component VoiceBar inherits Rectangle {
         padding-right: Theme.space-2;
         padding-top: Theme.space-3;
         padding-bottom: Theme.space-3;
-        VoiceControl {
+        BarButton {
             icon: Bridge.input-muted ? Icons.mic-off : Icons.mic;
             text: Bridge.input-muted ? @tr("Unmute") : @tr("Mute");
             checked: Bridge.input-muted;
             danger: true;
             clicked => { Bridge.set-input-muted(!Bridge.input-muted); }
         }
-        VoiceControl {
+        BarButton {
             icon: Bridge.output-muted ? Icons.headphone-off : Icons.headphones;
             text: Bridge.output-muted ? @tr("Undeafen") : @tr("Deafen");
             checked: Bridge.output-muted;
@@ -574,13 +397,13 @@ component VoiceBar inherits Rectangle {
                 horizontal-alignment: center;
             }
         }
-        if Bridge.streams-available && Bridge.can-share: VoiceControl {
+        if Bridge.streams-available && Bridge.can-share: BarButton {
             icon: Icons.screen-share;
             text: Bridge.share-state == "live" ? @tr("Sharing") : @tr("Share");
             checked: Bridge.share-state == "live";
             clicked => { Nav.open-share(); }
         }
-        VoiceControl {
+        BarButton {
             icon: Icons.phone-off;
             text: @tr("Leave");
             alarm: true;
@@ -647,8 +470,9 @@ export component MobileVoice inherits VerticalLayout {
             }
             if !Bridge.viewer-open: VerticalLayout {
                 spacing: Theme.space-2;
-                for stream in Bridge.streams: StreamPrompt {
+                for stream in Bridge.streams: StreamCard {
                     stream: stream;
+                    compact: true;
                 }
             }
             people := ScrollView {
@@ -657,8 +481,9 @@ export component MobileVoice inherits VerticalLayout {
                     padding-top: Theme.space-2;
                     spacing: Theme.space-2;
                     alignment: start;
-                    for member in Bridge.members: VoiceMember {
+                    for member in Bridge.members: Participant {
                         member: member;
+                        compact: true;
                     }
                     VerticalLayout {
                         width: 68px;

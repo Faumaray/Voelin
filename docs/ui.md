@@ -25,7 +25,8 @@ crates/voelin-ui/
     shells/              desktop.slint (rail, top bar, Sidebar), mobile.slint (bottom
                          navigation), common.slint (Panel, VoiceCard, UserCard, ...)
     screens/             channels, chat, members (panel, card), drawers (pins, topics),
-                         voice (the voice channel), streams (viewer; the phone's
+                         voice (the voice channel), voice-parts (its people and
+                         streams, also the phone's), streams (viewer; the phone's
                          panel), settings, settings-pages (its sections), home,
                          friends, messages (direct messages), events, overlays
                          (the bell, the search, a picture), dialogs, mobile and
@@ -94,8 +95,8 @@ puts them on an inner `face`).
 | `Icon` | icon.slint | `source` (an `Icons.*`), `size`, `tint` |
 | `Spinner` | icon.slint | `size`, `tint`, `running` |
 | `Button` | button.slint | `text`, `icon`, `kind` (`ButtonKind.primary/secondary/danger/ghost`), `enabled`, `checked`, `small`; `clicked` |
-| `IconButton` | button.slint | `icon`, `label` (screen readers), `tooltip` (default `label`, "" for none; on hover, also while disabled, desktop only), `checked`, `danger`, `round`, `filled`, `size`, `icon-size`, `tint`, `dot`, `count` (a neutral number at the top right, hidden at 0 or less); `clicked` |
-| `ActionButton` | button.slint | round button with a caption (Mute, Deafen, Go Live), no tooltip: `icon`, `text`, `checked`, `danger` |
+| `IconButton` | button.slint | `icon`, `label` (screen readers), `tooltip` (default `label`, "" for none; on hover, also while disabled, desktop only), `checked`, `danger`, `alarm` (filled red with a white icon: Leave), `round`, `filled`, `edge` (the border of a filled one while not checked), `size`, `icon-size`, `tint`, `dot`, `count` (a neutral number at the top right, hidden at 0 or less); `clicked` |
+| `ActionButton` | button.slint | round button with a caption (the phone's voice bar and You page: Mute, Deafen, Go Live, Leave), no tooltip: `icon`, `text`, `checked`, `danger`, `alarm`, `checkable` (screen readers hear `checked`), `size`, `icon-size`, `edge` |
 | `FocusRing` | button.slint | the accent ring of focused controls |
 | `TextField` | text-field.slint | `text`, `placeholder`, `input-type`, `icon`, `label`, `bare`, `read-only`; out `has-focus`, `text-height` (the height of its lines); `accepted`, `edited`, `key-pressed`; `clear()`, `select-all()`, `focus-end()` (the cursor after the text) |
 | `SearchBox` | text-field.slint | a TextField with a magnifier and the Ctrl K hint (`show-shortcut`) |
@@ -145,6 +146,12 @@ navigation), `VoiceCard`, `VoiceButtons` (mute, deafen, share; `gear` adds
 the voice settings), `UserCard` (its avatar and name open Settings → My
 Account), `HoldToTalk`. Pages bring their own title; About is in the
 settings (and on the phone's You page).
+
+Voice parts (ui/screens/voice-parts.slint), for the desktop's voice view and
+the phone's voice screen: `Participant` (`member`, `size`: the avatar's) and
+`StreamCard` (`stream`), both with `compact`, the phone's smaller look (a
+person ringed only while talking or streaming, LIVE below the name; a stream
+as a row).
 
 ## The server page
 

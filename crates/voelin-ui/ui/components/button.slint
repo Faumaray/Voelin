@@ -139,9 +139,13 @@ export component IconButton inherits Rectangle {
     in property <bool> filled;
     // Red while checked (muted microphone).
     in property <bool> danger;
+    // Filled red, with a white icon (Leave).
+    in property <bool> alarm;
+    // The edge while filled and not checked.
+    in property <color> edge: Theme.border;
     in property <length> size: Theme.control-height;
     in property <length> icon-size: Theme.icon-md;
-    in property <brush> tint: checked ? (danger ? Theme.danger : Theme.accent-text) : Theme.icon;
+    in property <brush> tint: alarm ? Theme.on-accent : checked ? (danger ? Theme.danger : Theme.accent-text) : Theme.icon;
     // A small dot at the top right (unread, live).
     in property <bool> dot;
     in property <color> dot-color: Theme.live;
@@ -159,12 +163,13 @@ export component IconButton inherits Rectangle {
 
     face := Rectangle {
         border-radius: root.round ? root.size / 2 : Theme.radius-md;
-        background: touch.pressed ? Theme.surface-4
+        background: root.alarm ? (touch.pressed ? Theme.danger.darker(0.2) : touch.has-hover ? Theme.danger.brighter(0.1) : Theme.danger)
+            : touch.pressed ? Theme.surface-4
             : root.checked ? (root.danger ? Theme.danger-soft : Theme.accent-soft)
             : touch.has-hover ? Theme.surface-3
             : root.filled ? Theme.surface-2 : transparent;
-        border-width: root.filled || root.checked ? 1px : 0px;
-        border-color: root.checked ? (root.danger ? Theme.danger.transparentize(50%) : Theme.accent) : Theme.border;
+        border-width: !root.alarm && (root.filled || root.checked) ? 1px : 0px;
+        border-color: root.checked ? (root.danger ? Theme.danger.transparentize(50%) : Theme.accent) : root.edge;
         opacity: root.enabled ? 1.0 : 0.45;
         animate background { duration: Theme.fast; }
 
@@ -222,14 +227,22 @@ export component IconButton inherits Rectangle {
     }
 }
 
-// A round control with a caption below (voice bar: Mute, Deafen, Go Live).
+// A round control with a caption below (the phone's voice bar and You page:
+// Mute, Deafen, Go Live, Leave).
 export component ActionButton inherits VerticalLayout {
     in property <image> icon;
     in property <string> text;
     in property <bool> checked;
     in property <bool> danger;
+    // Filled red (Leave).
+    in property <bool> alarm;
+    // A toggle for screen readers, which are told `checked`.
+    in property <bool> checkable;
     in property <bool> enabled: true;
     in property <length> size: 40px;
+    in property <length> icon-size: Theme.icon-md;
+    // The circle's edge while not checked.
+    in property <color> edge: Theme.border;
     callback clicked();
     spacing: Theme.space-1;
     alignment: center;
@@ -242,10 +255,15 @@ export component ActionButton inherits VerticalLayout {
             tooltip: "";
             checked: root.checked;
             danger: root.danger;
+            alarm: root.alarm;
             enabled: root.enabled;
             round: true;
             filled: true;
             size: root.size;
+            icon-size: root.icon-size;
+            edge: root.edge;
+            accessible-checkable: root.checkable;
+            accessible-checked: root.checked;
             clicked => { root.clicked(); }
         }
     }

@@ -1,0 +1,244 @@
+// The people and the streams of the voice channel we are in, shared by the
+// desktop's voice view (voice.slint) and the phone's voice screen
+// (mobile-voice.slint). `compact` is the phone's smaller look.
+
+import { Theme } from "../theme.slint";
+import { Icons } from "../icons.slint";
+import { Bridge, MemberItem, StreamItem } from "../bridge.slint";
+import { Icon, Button, ButtonKind, Avatar, LiveBadge, Chip, SpeakingBars } from "../components/index.slint";
+
+// One person: an avatar with a ring (green while talking, blue while
+// streaming), the muted mark, the name with the crown, and what they do.
+// Compact: ringed only while talking or streaming, LIVE below the name.
+export component Participant inherits VerticalLayout {
+    in property <MemberItem> member;
+    in property <bool> compact;
+    // The avatar's.
+    in property <length> size: compact ? 54px : 80px;
+    width: compact ? 68px : 120px;
+    spacing: compact ? Theme.space-1 : Theme.space-2;
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: member.name;
+    accessible-description: member.status;
+    accessible-action-default => { Bridge.open-member(member.id); }
+    HorizontalLayout {
+        alignment: center;
+        Rectangle {
+            width: root.size + 8px;
+            height: root.size + 8px;
+            border-radius: self.width / 2;
+            border-width: member.talking || member.streaming ? (root.compact ? 2px : 3px) : (root.compact ? 0px : 2px);
+            border-color: member.talking ? Theme.success : member.streaming ? Theme.accent : Theme.border-strong;
+            Avatar {
+                size: root.size;
+                initials: member.initials;
+                tint: member.tint;
+                image: member.avatar;
+                label: member.name;
+            }
+            // Talking, or the microphone off, at the bottom right.
+            if member.talking || member.muted || member.sound-off: Rectangle {
+                x: parent.width - self.width - (root.compact ? 0px : 2px);
+                y: parent.height - self.height - (root.compact ? 0px : 2px);
+                width: root.compact ? 22px : 26px;
+                height: self.width;
+                border-radius: self.width / 2;
+                background: root.compact && member.talking ? Theme.accent : Theme.surface;
+                border-width: 2px;
+                border-color: Theme.surface;
+                if member.talking: SpeakingBars {
+                    width: root.compact ? 12px : 14px;
+                    height: self.width;
+                    tint: root.compact ? Theme.on-accent : Theme.success;
+                }
+                if !member.talking: Icon {
+                    source: member.sound-off ? Icons.headphone-off : Icons.mic-off;
+                    size: root.compact ? 12px : 15px;
+                    tint: Theme.danger;
+                }
+            }
+            TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { Bridge.open-member(member.id); }
+            }
+        }
+    }
+    HorizontalLayout {
+        alignment: center;
+        spacing: root.compact ? Theme.space-1 : Theme.space-2;
+        Text {
+            text: member.name;
+            color: member.myself ? Theme.accent-text : Theme.text;
+            font-size: root.compact ? Theme.font-sm : Theme.font-md;
+            font-weight: root.compact ? Theme.weight-regular : Theme.weight-medium;
+            overflow: elide;
+            max-width: root.width - (member.admin ? 16px : 0px);
+        }
+        if member.admin: Icon {
+            source: Icons.crown;
+            size: root.compact ? 13px : 15px;
+            tint: Theme.gold;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+    if !root.compact: HorizontalLayout {
+        alignment: center;
+        spacing: Theme.space-2;
+        if member.talking: SpeakingBars {
+            width: 12px;
+            height: 12px;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: member.talking ? @tr("Speaking") : member.streaming ? @tr("Streaming") : member.away ? @tr("Away") : "";
+            color: member.talking ? Theme.success : Theme.text-secondary;
+            font-size: Theme.font-sm;
+            overflow: elide;
+        }
+        if member.streaming && !member.talking: Icon {
+            source: Icons.monitor;
+            size: 14px;
+            tint: Theme.text-secondary;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+    if root.compact && member.streaming: HorizontalLayout {
+        alignment: center;
+        LiveBadge { }
+    }
+}
+
+// A stream in the channel: LIVE, the title, who streams it, and Watch (or
+// Show, while we watch it). A large card with the picture while we watch
+// it, the viewers, the kind, the bitrate and the sound; compact, a row that
+// says where it is.
+export component StreamCard inherits Rectangle {
+    in property <StreamItem> stream;
+    in property <bool> compact;
+    height: compact ? 76px : 236px;
+    border-radius: Theme.radius-lg;
+    clip: true;
+    // Two stops: the software renderer draws a seam at a middle stop.
+    background: @linear-gradient(160deg, #26237a 0%, #0c1430 100%);
+    border-width: 1px;
+    border-color: stream.watching ? Theme.accent : Theme.border-strong;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: stream.name;
+    if !root.compact: Rectangle {
+        // The picture while we watch it (the viewer hidden behind the chat).
+        if stream.watching && Bridge.viewer-has-frame: Image {
+            width: parent.width;
+            height: parent.height;
+            source: Bridge.viewer-frame;
+            image-fit: cover;
+        }
+        if !(stream.watching && Bridge.viewer-has-frame): Icon {
+            source: stream.kind == "Camera" ? Icons.video : Icons.monitor-up;
+            size: 72px;
+            tint: #ffffff22;
+        }
+        // Darker at the bottom, for the text.
+        Rectangle {
+            y: parent.height * 0.4;
+            height: parent.height * 0.6;
+            background: @linear-gradient(180deg, #00000000 0%, #060a18e0 100%);
+        }
+        HorizontalLayout {
+            x: Theme.space-4;
+            y: Theme.space-4;
+            height: 28px;
+            spacing: Theme.space-3;
+            LiveBadge {
+                large: true;
+                y: (parent.height - self.height) / 2;
+            }
+            if stream.viewers > 0: Chip {
+                text: @tr("{} watching", stream.viewers);
+                icon: Icons.eye;
+                tint: #ffffff;
+                fill: #060a18a0;
+                y: (parent.height - self.height) / 2;
+            }
+        }
+    }
+    // Not conditional, so the card keeps its minimum size.
+    HorizontalLayout {
+        padding: root.compact ? Theme.space-3 : Theme.space-4;
+        padding-left: Theme.space-4;
+        padding-top: root.compact ? Theme.space-3 : 0px;
+        spacing: Theme.space-3;
+        VerticalLayout {
+            alignment: root.compact ? LayoutAlignment.center : LayoutAlignment.end;
+            horizontal-stretch: 1;
+            spacing: Theme.space-1;
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                alignment: start;
+                // The large card has LIVE at its top.
+                if root.compact && stream.id != "": LiveBadge {
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: stream.id == "" ? @tr("{} is streaming", stream.streamer) : stream.name != "" ? stream.name : @tr("Untitled stream");
+                    color: #ffffff;
+                    font-size: root.compact ? Theme.font-body : Theme.font-lg;
+                    font-weight: Theme.weight-semibold;
+                    // Beside LIVE in the row.
+                    vertical-alignment: root.compact ? TextVerticalAlignment.center : TextVerticalAlignment.top;
+                    overflow: elide;
+                }
+            }
+            // Who streams what; compact, where it is (or that it is ours).
+            Text {
+                text: !root.compact ? (stream.kind != "" ? stream.streamer + "  •  " + stream.kind : stream.streamer)
+                    : stream.id == "" ? (stream.channel == "" ? @tr("Looking it up…") : @tr("In {}; looking it up…", stream.channel))
+                    : stream.own ? @tr("Your stream")
+                    : stream.channel != "" ? @tr("{} · in {}", stream.streamer, stream.channel)
+                    : stream.viewers > 0 ? @tr("{} · {} watching", stream.streamer, stream.viewers)
+                    : stream.streamer;
+                color: root.compact ? #ffffffb0 : #ffffffc0;
+                font-size: root.compact ? Theme.font-sm : Theme.font-body;
+                overflow: elide;
+            }
+            if !root.compact: HorizontalLayout {
+                padding-top: Theme.space-2;
+                spacing: Theme.space-2;
+                alignment: start;
+                if stream.bitrate != "": Chip {
+                    text: stream.bitrate;
+                    tint: #ffffffe0;
+                    fill: #ffffff1a;
+                }
+                if stream.audio: Chip {
+                    text: @tr("Sound");
+                    icon: Icons.volume-2;
+                    tint: #ffffffe0;
+                    fill: #ffffff1a;
+                }
+                if stream.own: Chip {
+                    text: @tr("Your stream");
+                    tint: #ffffffe0;
+                    fill: #ffffff1a;
+                }
+            }
+        }
+        // At the top of the row, at the bottom of the card.
+        if stream.id != "" && !stream.own: VerticalLayout {
+            alignment: root.compact ? LayoutAlignment.start : LayoutAlignment.end;
+            Button {
+                kind: root.compact ? ButtonKind.primary : ButtonKind.secondary;
+                small: root.compact;
+                checked: !root.compact;
+                icon: stream.watching ? Icons.monitor : root.compact ? Icons.eye : Icons.external-link;
+                text: stream.watching ? (root.compact ? @tr("Show") : @tr("Show Stream")) : root.compact ? @tr("Watch") : @tr("Watch Stream");
+                clicked => {
+                    if stream.watching {
+                        Bridge.show-viewer();
+                    } else {
+                        Bridge.watch-stream(stream.id);
+                    }
+                }
+            }
+        }
+    }
+}
