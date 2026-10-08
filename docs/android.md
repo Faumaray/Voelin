@@ -230,7 +230,7 @@ Things to try there: the bottom navigation (Home, Servers, Chats,
 Activity, You), joining a voice channel and its screen from the top bar's
 voice button, the voice notification (pull down the shade: Mute, Deafen,
 Leave, tap it), Share from another app's share sheet (text, then a file),
-the voice screen's Share (the screen share dialog) with sound from the
-audio picker (app icons) and its gain and mute while live, and Go Live's
-Stream Studio with a camera source (Waydroid usually has no camera: the
-source then says why).
+the voice screen's Share menu: Share screen (the screen share dialog) with
+sound from the audio picker (app icons) and its gain and mute while live,
+and the Stream Studio with a camera source (Waydroid usually has no camera:
+the source then says why).

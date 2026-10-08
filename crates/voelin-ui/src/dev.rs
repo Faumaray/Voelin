@@ -20,6 +20,8 @@
 //!   client once connected), `panel` / `no-panel` (the members panel),
 //!   `voice` (the voice channel view; on the phone its own screen;
 //!   `voice:compact` with the smaller stage, not stored),
+//!   `more` (after `voice` on the phone: the voice screen's More menu,
+//!   opened once the screen is laid out),
 //!   `members` (the phone's members page), `notification` (a tapped voice
 //!   notification), `shared:<text>` (text shared to the app on Android),
 //!   `pins`, `topics` (the drawers),
@@ -167,6 +169,7 @@ pub(crate) struct Running {
 	_screenshot: Option<slint::Timer>,
 	_resize: Option<slint::Timer>,
 	_scroll: Option<slint::Timer>,
+	_more: Option<slint::Timer>,
 }
 
 /// Apply the switches once the app is set up.
@@ -279,6 +282,8 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 				}
 			}
 			"pins" => nav.invoke_show_pins(true),
+			// Opened once laid out (below).
+			"more" => {}
 			// The phone's members page.
 			"members" => nav.set_members_open(true),
 			// What Android hands over: a tapped voice notification, text
@@ -410,20 +415,18 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 	// `unread`: up to the divider once the list is laid out (after the
 	// resize above).
 	let scroll = switches.open.iter().any(|o| o == "unread").then(|| {
-		let weak = ui.as_weak();
-		let timer = slint::Timer::default();
-		timer.start(
-			slint::TimerMode::SingleShot,
-			Duration::from_millis(switches.screenshot_delay * 1000 * 3 / 4),
-			move || {
-				if let Some(ui) = weak.upgrade() {
-					let bridge = ui.global::<Bridge>();
-					bridge.set_jump_index(bridge.get_unread_index());
-					bridge.set_jump_requests(bridge.get_jump_requests().wrapping_add(1));
-				}
-			},
-		);
-		timer
+		late(ui, switches, |ui| {
+			let bridge = ui.global::<Bridge>();
+			bridge.set_jump_index(bridge.get_unread_index());
+			bridge.set_jump_requests(bridge.get_jump_requests().wrapping_add(1));
+		})
+	});
+	// `more`: the phone voice screen's More menu (a screenshot cannot tap).
+	let more = switches.open.iter().any(|o| o == "more").then(|| {
+		late(ui, switches, |ui| {
+			let nav = ui.global::<Nav>();
+			nav.set_more_requests(nav.get_more_requests().wrapping_add(1));
+		})
 	});
 	let screenshot = switches.screenshot.clone().map(|path| {
 		let weak = ui.as_weak();
@@ -445,7 +448,28 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 		);
 		timer
 	});
-	Running { _screenshot: screenshot, _resize: resize, _scroll: scroll }
+	Running { _screenshot: screenshot, _resize: resize, _scroll: scroll, _more: more }
+}
+
+/// A timer that runs `action` at three quarters of the screenshot delay, once
+/// the window has its size and the screens are laid out.
+fn late(
+	ui: &MainWindow,
+	switches: &Switches,
+	action: impl Fn(&MainWindow) + 'static,
+) -> slint::Timer {
+	let weak = ui.as_weak();
+	let timer = slint::Timer::default();
+	timer.start(
+		slint::TimerMode::SingleShot,
+		Duration::from_millis(switches.screenshot_delay * 1000 * 3 / 4),
+		move || {
+			if let Some(ui) = weak.upgrade() {
+				action(&ui);
+			}
+		},
+	);
+	timer
 }
 
 /// The current chat's read marker `back` messages before its end, as if

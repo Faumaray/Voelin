@@ -10,7 +10,8 @@ import { StudioBridge } from "studio-bridge.slint";
 import { Nav } from "nav.slint";
 
 export component ShareMenu inherits Rectangle {
-    // The menu's height, to open it above a button.
+    // The menu's size, to open it above a button.
+    out property <length> menu-width: 220px;
     out property <length> menu-height: 2 * Theme.control-height + 2 * Theme.space-2 + 2px;
     width: 0;
     height: 0;
@@ -25,7 +26,7 @@ export component ShareMenu inherits Rectangle {
     }
 
     menu := PopupMenu {
-        menu-width: 220px;
+        menu-width: root.menu-width;
         entries: [
             // The studio's stream takes the place of a simple share.
             { text: @tr("Share screen"), icon: Icons.monitor-up, enabled: !StudioBridge.status.live },

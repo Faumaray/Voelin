@@ -418,6 +418,23 @@ fn noise_level(index: i32) -> NoiseLevel {
 	}
 }
 
+/// The form's number for a transmit mode (`AudioForm.transmit`).
+pub fn transmit_index(mode: TransmitMode) -> i32 {
+	match mode {
+		TransmitMode::PushToTalk => 0,
+		TransmitMode::VoiceActivation => 1,
+		TransmitMode::Continuous => 2,
+	}
+}
+
+fn transmit_mode(index: i32) -> TransmitMode {
+	match index {
+		1 => TransmitMode::VoiceActivation,
+		2 => TransmitMode::Continuous,
+		_ => TransmitMode::PushToTalk,
+	}
+}
+
 /// The settings page's form for `settings`.
 pub fn audio_form(
 	settings: &AudioSettings,
@@ -428,11 +445,7 @@ pub fn audio_form(
 	AudioForm {
 		input_index: inputs.index_of(settings.input_device.as_deref()) as i32,
 		output_index: outputs.index_of(settings.output_device.as_deref()) as i32,
-		transmit: match settings.transmit {
-			TransmitMode::PushToTalk => 0,
-			TransmitMode::VoiceActivation => 1,
-			TransmitMode::Continuous => 2,
-		},
+		transmit: transmit_index(settings.transmit),
 		vad_threshold: settings.vad.threshold_db,
 		echo_cancellation: p.echo_cancellation,
 		noise_suppression: p.noise_suppression,
@@ -454,11 +467,7 @@ pub fn apply_audio_form(
 	let mut s = settings.clone();
 	s.input_device = inputs.id_at(form.input_index);
 	s.output_device = outputs.id_at(form.output_index);
-	s.transmit = match form.transmit {
-		1 => TransmitMode::VoiceActivation,
-		2 => TransmitMode::Continuous,
-		_ => TransmitMode::PushToTalk,
-	};
+	s.transmit = transmit_mode(form.transmit);
 	s.vad.threshold_db = form.vad_threshold;
 	s.processing.echo_cancellation = form.echo_cancellation;
 	s.processing.noise_suppression = form.noise_suppression;
@@ -520,6 +529,22 @@ mod tests {
 		assert_eq!(changed.transmit, TransmitMode::Continuous);
 		assert!(!changed.processing.echo_cancellation);
 		assert_eq!(changed.playback_buffer_ms, 180);
+	}
+
+	#[test]
+	fn transmit_modes() {
+		for (mode, index) in [
+			(TransmitMode::PushToTalk, 0),
+			(TransmitMode::VoiceActivation, 1),
+			(TransmitMode::Continuous, 2),
+		] {
+			assert_eq!(transmit_index(mode), index);
+			assert_eq!(transmit_mode(index), mode);
+		}
+		// Any other number is the default, push-to-talk (Hold to talk shows).
+		assert_eq!(transmit_mode(7), TransmitMode::PushToTalk);
+		assert_eq!(transmit_mode(-1), TransmitMode::PushToTalk);
+		assert_eq!(transmit_index(AudioSettings::default().transmit), 0);
 	}
 
 	#[test]

@@ -138,6 +138,9 @@ export global Nav {
     // The server's members as a page of their own (the desktop shows them
     // beside the chat).
     in-out property <bool> members-open;
+    // Counts requests to open the voice screen's More menu, which MobileShell
+    // opens (VOELIN_OPEN=more: a screenshot cannot tap).
+    in-out property <int> more-requests;
     // The voice channel screen (design mockup 02) instead of a tab: the
     // voice channel view, or a stream we watch.
     out property <bool> phone-voice: narrow && page == Page.server && Bridge.voice-connected && (voice-view || Bridge.viewer-open);

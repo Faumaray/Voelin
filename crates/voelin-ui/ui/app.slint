@@ -31,7 +31,7 @@ import { MessagesPage, ConversationList, Conversation, DmProfile, OfflineDialog 
 import { ServerLinks, EventsPage, EventDialog } from "screens/events.slint";
 import { NotificationsPanel, SearchPalette, Lightbox } from "screens/overlays.slint";
 import { MobileServers, ActivityPage, YouPage, PhoneSheet } from "screens/mobile.slint";
-import { MobileVoice } from "screens/mobile-voice.slint";
+import { MobileVoice, PhoneVoice } from "screens/mobile-voice.slint";
 import { BookmarkDialog, ShareDialog, ClientAudioDialog, ChannelPasswordDialog, PokeDialog, LinkDialog, AboutDialog } from "screens/dialogs.slint";
 import { StudioBridge } from "studio-bridge.slint";
 import { StudioPage, MobileStudio } from "screens/studio.slint";
@@ -266,13 +266,13 @@ export component MainWindow inherits Window {
                     && Nav.mobile-tab == MobileTab.chat && !Bridge.viewer-open
                     && Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length
                     && Bridge.tabs[Bridge.current-tab].kind == 1;
-                banner: self.channel-chat ? Bridge.tabs[Bridge.current-tab].banner : @image-url("");
+                banner: Nav.phone-voice ? Bridge.own-channel-banner : self.channel-chat ? Bridge.tabs[Bridge.current-tab].banner : @image-url("");
                 title: Nav.page == Page.settings ? @tr("Settings")
                     : Nav.page == Page.friends ? @tr("Friends")
                     : Nav.page == Page.messages ? @tr("Messages")
                     : Nav.page == Page.library ? @tr("Library")
                     : Nav.page == Page.events ? @tr("Events")
-                    : Nav.phone-voice ? Bridge.app-name
+                    : Nav.phone-voice ? Bridge.own-channel
                     : Nav.page == Page.home || Nav.mobile-tab == MobileTab.home ? Bridge.app-name
                     : Nav.mobile-tab == MobileTab.you ? @tr("You")
                     : Nav.mobile-tab == MobileTab.activity ? @tr("Activity")
@@ -282,13 +282,15 @@ export component MainWindow inherits Window {
                     : Nav.page == Page.home || Nav.mobile-tab == MobileTab.home ? ""
                     : Nav.mobile-tab == MobileTab.chat && Bridge.current-tab >= 0 && Bridge.current-tab < Bridge.tabs.length ? Bridge.tabs[Bridge.current-tab].title
                     : Nav.mobile-tab == MobileTab.servers ? Bridge.server-stats : "";
-                back: Nav.page == Page.settings || Nav.page == Page.friends || Nav.page == Page.messages || Nav.page == Page.library || Nav.page == Page.events;
+                back: Nav.phone-voice || Nav.page == Page.settings || Nav.page == Page.friends || Nav.page == Page.messages || Nav.page == Page.library || Nav.page == Page.events;
                 unread: Bridge.unread-total;
                 voice: Nav.phone-voice;
                 // The voice channel and the studio bring their own controls.
                 navigation: !Nav.phone-voice && Nav.page != Page.studio;
                 go-back => {
-                    if Nav.page == Page.messages && Bridge.dm.open {
+                    if Nav.phone-voice {
+                        PhoneVoice.back();
+                    } else if Nav.page == Page.messages && Bridge.dm.open {
                         Bridge.open-conversation(-1);
                     } else if Nav.page == Page.events || Nav.page == Page.settings {
                         Nav.show(Page.server);

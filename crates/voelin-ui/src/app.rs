@@ -903,6 +903,7 @@ pub fn run(options: RunOptions) -> Result<()> {
 		app.apply_srtp();
 		app.refresh_all();
 		app.refresh_settings_flags();
+		app.refresh_transmit();
 		app.refresh_crash_notice();
 		app.load_recent_chats();
 		app.refresh_people();
@@ -1071,6 +1072,8 @@ impl App {
 	fn setting_changed(&mut self, key: &str) {
 		if key == AUDIO.name() && !self.audio_dirty {
 			self.audio = self.prefs.get(&AUDIO);
+			// The voice controls follow the transmit mode.
+			self.refresh_transmit();
 		} else if key == CRASH_REPORTS.name() {
 			let enabled = self.prefs.get(&CRASH_REPORTS);
 			if enabled != self.settings.crash_reports {

@@ -148,6 +148,15 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
   pointer last moved over the picture (in full screen the cursor too; on a
   touch screen a tap shows or hides them), and the streamer, the title and
   LIVE are in the header above the picture instead of over it.
+- The phone's voice screen has one header: the top bar shows the channel on
+  its banner, the server below it instead of the channel's topic, and Back;
+  Leave is only in the bottom bar. Pinned messages and topics are in the
+  More menu and the row of people is smaller, so the chat has about 130 px
+  more room. With push-to-talk, Hold to talk is the bottom bar's middle
+  button instead of the microphone button by the composer; Go Live and
+  Share are one Share button that opens the share menu (a screen, or the
+  Stream Studio) as on desktop. The microphone button says Mic on or Mic
+  off.
 - Banners: up to 128 MiB, more time on slow hosts, BMP and ICO too, and
   SVG after a comment or DOCTYPE; pictures larger than 4096 pixels on a
   side are scaled down. A banner that fails is tried again for as long as
@@ -207,6 +216,8 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
   joined with a new identity (the gateway did not know it yet).
 - tsgw reconnects its query connection for logins when the TeamSpeak server
   restarts; before, every login was refused until tsgw was restarted.
+- Push-to-talk controls (Hold to talk) showed in voice activation and
+  continuous mode until the settings had been opened once.
 
 ## [0.0.1-alpha] - 2026-10-04
 

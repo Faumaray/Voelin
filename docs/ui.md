@@ -91,13 +91,17 @@ animations off its root element: Slint inlines such a component at every
 use, which grows the generated code and the compiler's memory (IconButton
 puts them on an inner `face`).
 
+A 0 × 0 element (`PopupMenu`, `ShareMenu`) inside a layout caps that layout's
+size across its direction at its minimum: put it outside the layout with
+`x: 0; y: 0`, as the phone's `ShareControl` does.
+
 | Component | File | Key properties |
 |---|---|---|
 | `Icon` | icon.slint | `source` (an `Icons.*`), `size`, `tint` |
 | `Spinner` | icon.slint | `size`, `tint`, `running` |
 | `Button` | button.slint | `text`, `icon`, `kind` (`ButtonKind.primary/secondary/danger/ghost`), `enabled`, `checked`, `small`; `clicked` |
 | `IconButton` | button.slint | `icon`, `label` (screen readers), `tooltip` (default `label`, "" for none; on hover, also while disabled, desktop only), `checked`, `danger`, `alarm` (filled red with a white icon: Leave), `round`, `filled`, `edge` (the border of a filled one while not checked), `size`, `icon-size`, `tint`, `dot`, `count` (a neutral number at the top right, hidden at 0 or less); `clicked` |
-| `ActionButton` | button.slint | round button with a caption (the phone's voice bar and You page: Mute, Deafen, Go Live, Leave), no tooltip: `icon`, `text`, `checked`, `danger`, `alarm`, `checkable` (screen readers hear `checked`), `size`, `icon-size`, `edge` |
+| `ActionButton` | button.slint | round button with a caption (the phone's voice bar: Mic on or off, Deafen, Share, Leave; the You page: Mute, Deafen, Go Live, Leave), no tooltip: `icon`, `text`, `checked`, `danger`, `alarm`, `checkable` (screen readers hear `checked`), `size`, `icon-size`, `edge` |
 | `FocusRing` | button.slint | the accent ring of focused controls |
 | `TextField` | text-field.slint | `text`, `placeholder`, `input-type`, `icon`, `label`, `bare`, `read-only`; out `has-focus`, `text-height` (the height of its lines); `accepted`, `edited`, `key-pressed`; `clear()`, `select-all()`, `focus-end()` (the cursor after the text) |
 | `SearchBox` | text-field.slint | a TextField with a magnifier and the Ctrl K hint (`show-shortcut`) |
@@ -125,7 +129,7 @@ puts them on an inner `face`).
 | `SpeakingBars` | meter.slint | animated "speaking" bars |
 | `NavItem` | list-item.slint | navigation entry: `icon`, `text`, `subtitle`, `selected`, `badge`, `chevron`; `clicked` |
 | `ListItem` | list-item.slint | row with a leading slot (@children), `title`, `subtitle`, `trailing`, `selected` |
-| `PopupMenu` | overlay.slint | themed menu: `entries` ([MenuEntry]), `show(x, y)`; `activated(int)` |
+| `PopupMenu` | overlay.slint | themed menu: `entries` ([MenuEntry]), `show(x, y)`, relative to the menu element (where that is not in a layout give it `x: 0; y: 0`, or Slint centres it in its parent); `activated(int)` |
 | `Tooltip` | overlay.slint | wraps @children; `text` shows at the pointer after a moment, until it leaves (desktop only: `Bridge.desktop`) |
 | `HoverTooltip` | tooltip.slint | the same, put last in an element (as IconButton does): `text`; `pressed` and `hovered` of the element's TouchArea (a press closes it until the pointer leaves) |
 | `TooltipBubble` | tooltip.slint | a tooltip's bubble: `text`, wrapping at `widest` (400px) |
@@ -143,7 +147,8 @@ Shell pieces (ui/shells/): `DesktopShell` (rail + top bar + panels as
 server shows its icon or its initials, on a colour no other server has while
 there are at most ten, kept when a server is added),
 `TopBar` (the search, starting over the main panel, opens the search like
-Ctrl+K; the bell at the right), `MobileShell` (top bar, page, bottom
+Ctrl+K; the bell at the right), `MobileShell` (top bar, on the voice screen
+with Back, the channel, the people, Chats and More; the page; bottom
 navigation), `VoiceCard`, `VoiceButtons` (mute, deafen, share; `gear` adds
 the voice settings; `round` and `filled` for the voice view's call bar),
 `UserCard` (its avatar and name open Settings → My Account), `HoldToTalk`.
@@ -183,6 +188,22 @@ phone the chat is the Chat tab and the members of our channel are on the
 Activity tab, with the streams (the streamer's avatar on their colour, Watch,
 Show and Leave). The Chat tab counts the server's unread chats; private chats
 count on the Home tab, where the direct messages are.
+
+The phone's voice screen (`voice` in a phone-sized window,
+`screens/mobile-voice.slint`) has one header, the shell's top bar: Back (it
+closes the pins, the topics or the members over the screen first, then the
+screen), the channel's name on its banner with the server below, the people
+in voice (the members page), Chats with the unread count, and More: Pinned
+Messages and Topics (with a gateway), Stream Studio, Voice Settings and
+Activity (`more` opens it). Below it come the stream we watch or the streams
+as rows, the people (44 px avatars, scrolling sideways) and Invite, the
+channel's chat and the composer. The stream and the people take at most
+45 % of the screen, so the chat keeps about 320 px at 390 × 844 while
+watching. The bottom bar has Mic on or Mic off and Deafen; with push-to-talk
+Hold to talk in the middle (green, Talking…, while held) and Share,
+otherwise Share in the middle; Share opens the share menu (Share screen,
+Stream Studio) as the desktop's call bar does; and Leave, the screen's only
+one. The transmit mode comes from the stored audio settings at start.
 
 ## Home, friends, messages and the settings pages
 
@@ -500,7 +521,8 @@ Environment variables (see `src/dev.rs`):
   scrolled up), and a stream, without a server (nothing is stored).
 - `VOELIN_OPEN=<what>[,<what>...]`: `home`, `server` (`server:chat`: the server chat), `settings[:voice|keybinds|streaming|privacy|appearance|profiles]` (`identities` is the same as `profiles`),
   `about`, `share[:live]`, `bookmark[:edit]`, `emoji`, `client`, `panel`, `no-panel`,
-  `voice` (`voice:compact`: the smaller stage, not stored), `pins`, `topics`, `topic:<id>`, `member`, `poke`,
+  `voice` (`voice:compact`: the smaller stage, not stored), `more` (after `voice` on the phone: the
+  voice screen's More menu), `pins`, `topics`, `topic:<id>`, `member`, `poke`,
   `channel-password[:wrong]`, `actions` (the last message's actions, as if
   hovered: a screenshot cannot hover), `first-run` (Home's banner as before
   the first server, over the sample data), `link-confirm[:<url>]` (the question
