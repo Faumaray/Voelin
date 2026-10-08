@@ -1004,11 +1004,14 @@ export global Bridge {
     in property <image> viewer-frame;
     in property <bool> viewer-has-frame;
     in property <string> viewer-title;
-    // Who streams it (their client id: -1 unknown).
+    // Who streams it, and their avatar as the members show it: their
+    // picture, else their initials on their colour.
     in property <string> viewer-streamer;
+    in property <image> viewer-streamer-avatar;
+    in property <string> viewer-streamer-initials;
+    in property <color> viewer-streamer-tint;
     // The voice channel the watched stream is in.
     in property <string> viewer-channel;
-    in property <int> viewer-streamer-id: -1;
     // Shown instead of (or over) the picture: waiting, ended, errors.
     in property <string> viewer-status;
     in property <string> viewer-info;
@@ -1135,6 +1138,9 @@ export global Bridge {
     callback leave-stream();
     callback set-stream-volume(float);
     callback toggle-fullscreen();
+    // Show or hide the pointer over the window: the player hides it with
+    // its controls in full screen.
+    callback show-cursor(bool);
     // A simulcast layer of the watched stream (0: Auto).
     callback set-stream-quality(int);
 

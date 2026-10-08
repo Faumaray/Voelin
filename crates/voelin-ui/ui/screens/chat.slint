@@ -11,6 +11,12 @@ import { Icon, IconButton, Avatar, Chip, TabItem, TextField, MessageText, Banner
 // A compact title and actions over the optional channel background.
 export component PageHeader inherits Rectangle {
     in property <image> icon: Icons.channel;
+    // A person in place of the icon (the streamer, in the stream viewer):
+    // their picture, else their initials on their colour.
+    in property <string> person;
+    in property <image> avatar;
+    in property <string> initials;
+    in property <color> tint;
     in property <image> banner;
     in property <string> title;
     in property <string> description;
@@ -22,10 +28,18 @@ export component PageHeader inherits Rectangle {
         padding-left: Theme.space-6;
         padding-right: Theme.space-4;
         spacing: Theme.space-4;
-        Icon {
+        if root.person == "": Icon {
             source: root.icon;
             size: 26px;
             tint: Theme.text-secondary;
+            y: (parent.height - self.height) / 2;
+        }
+        if root.person != "": Avatar {
+            size: 36px;
+            image: root.avatar;
+            initials: root.initials;
+            tint: root.tint;
+            label: root.person;
             y: (parent.height - self.height) / 2;
         }
         Text {

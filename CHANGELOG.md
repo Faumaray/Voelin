@@ -138,6 +138,10 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
   colour, with what they share, instead of a bare screen icon (TeamSpeak
   streams have no preview pictures). Your own stream from the Stream Studio
   shows its picture.
+- The stream viewer's controls hide while you watch, 2.5 s after the
+  pointer last moved over the picture (in full screen the cursor too; on a
+  touch screen a tap shows or hides them), and the streamer, the title and
+  LIVE are in the header above the picture instead of over it.
 - Banners: up to 128 MiB, more time on slow hosts, BMP and ICO too, and
   SVG after a comment or DOCTYPE; pictures larger than 4096 pixels on a
   side are scaled down. A banner that fails is tried again for as long as

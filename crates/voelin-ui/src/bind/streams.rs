@@ -42,6 +42,12 @@ pub(super) fn wire(ui: &MainWindow) {
 	bridge.on_toggle_fullscreen(|| {
 		with_app(|app| app.toggle_fullscreen());
 	});
+	let window = ui.as_weak();
+	bridge.on_show_cursor(move |shown| {
+		if let Some(ui) = window.upgrade() {
+			crate::streams::show_cursor(ui.window(), shown);
+		}
+	});
 	bridge.on_set_stream_quality(|index| {
 		with_app(|app| app.set_stream_quality(index));
 	});

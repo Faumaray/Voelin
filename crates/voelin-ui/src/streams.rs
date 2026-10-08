@@ -167,6 +167,19 @@ fn bitrate_text(kbps: u32) -> String {
 	}
 }
 
+/// Show or hide the pointer over `window`. In full screen the player hides
+/// it with its controls: Slint applies a TouchArea's cursor only when the
+/// pointer moves, so the window is told directly. (No pointer on Android.)
+pub(crate) fn show_cursor(window: &slint::Window, shown: bool) {
+	#[cfg(not(target_os = "android"))]
+	{
+		use slint::winit_030::WinitWindowAccessor;
+		window.with_winit_window(|w| w.set_cursor_visible(shown));
+	}
+	#[cfg(target_os = "android")]
+	let _ = (window, shown);
+}
+
 impl App {
 	pub(crate) fn stream_event(&mut self, event: Event) {
 		match event {
@@ -406,9 +419,12 @@ impl App {
 			bridge.set_viewer_frame(slint::Image::default());
 			return;
 		};
-		bridge.set_viewer_open(
-			watch.shown && (watch.session.is_none() || watch.session == self.current),
-		);
+		let open = watch.shown && (watch.session.is_none() || watch.session == self.current);
+		if !open && bridge.get_viewer_open() && bridge.get_viewer_fullscreen() {
+			// The player goes, still in full screen: it may have hidden the cursor.
+			show_cursor(ui.window(), true);
+		}
+		bridge.set_viewer_open(open);
 		bridge.set_viewer_title(watch.title.clone().into());
 		bridge.set_viewer_status(watch.status.clone().into());
 		bridge.set_viewer_ended(watch.ended);
@@ -426,7 +442,13 @@ impl App {
 			.view()
 			.and_then(|v| v.streams.iter().find(|s| s.id == watch.stream_id))
 			.map_or(-1, |s| i32::from(s.streamer.0));
-		bridge.set_viewer_streamer_id(streamer);
+		let face = crate::vm::streams::streamer(
+			&watch.streamer,
+			self.view().zip(u16::try_from(streamer).ok()).and_then(|(v, id)| v.avatar(id)),
+		);
+		bridge.set_viewer_streamer_avatar(face.avatar);
+		bridge.set_viewer_streamer_initials(face.initials);
+		bridge.set_viewer_streamer_tint(face.tint);
 		let members = &self.models.members;
 		bridge.set_viewer_streamer_admin(
 			(0..members.row_count())
@@ -944,6 +966,10 @@ impl App {
 		}
 		bridge.set_viewer_fullscreen(full);
 		ui.window().set_fullscreen(full);
+		if !full {
+			// The player that hid the cursor may be gone already.
+			show_cursor(ui.window(), true);
+		}
 	}
 }
 
