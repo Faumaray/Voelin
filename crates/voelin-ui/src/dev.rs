@@ -50,7 +50,9 @@
 //!   `integrations`, `advanced` (5-10);
 //!   `studio[:<what>]`: the Stream Studio (with `VOELIN_DEMO_UI` a demo
 //!   studio from synthetic sources), `studio:window` in a window of its own,
-//!   `studio:live` going live, `studio:record`, or a dialog: `studio:source`,
+//!   `studio:live` going live (also with a screen opened after it:
+//!   `studio:live,server,voice` shows our stream's card with the studio's
+//!   picture), `studio:record`, or a dialog: `studio:source`,
 //!   `studio:audio`, `studio:camera`, `studio:scene`, `studio:settings`.
 //!   A screenshot also saves the studio's window (`<name>-window.png`) and
 //!   draws it over the main window.

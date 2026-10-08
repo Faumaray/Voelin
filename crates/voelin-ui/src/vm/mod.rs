@@ -10,5 +10,6 @@ pub mod home;
 pub mod list;
 pub mod servers;
 pub mod social;
+pub mod streams;
 pub mod studio;
 pub mod tree;

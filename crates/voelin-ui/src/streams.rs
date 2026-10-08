@@ -11,7 +11,7 @@ use voelin_core::settings::{
 	AudioSourceSetting, STREAM_AUDIO_SOURCES, STREAM_BITRATE_KBPS, STREAM_FPS,
 };
 use voelin_core::stream::{
-	EndReason, LayerId, LayerSpec, LeaveReason, StreamKind, StreamSetup, ViewerInfo, ViewerState,
+	EndReason, LayerId, LayerSpec, LeaveReason, StreamSetup, ViewerInfo, ViewerState,
 };
 use voelin_core::{Command, Event, StreamState, WatchState};
 
@@ -295,29 +295,30 @@ impl App {
 			let own_channel = view.state.own_channel;
 			let mut streams: Vec<_> = view.streams.iter().collect();
 			streams.sort_by_key(|s| view.channel_of(s.streamer.0) != own_channel);
+			// Our own stream from the studio shows its preview.
+			let studio = current.is_some_and(|c| self.studio_streams_to(c));
 			for s in streams {
 				let watching = self
 					.watch
 					.as_ref()
 					.is_some_and(|w| w.session == current && w.stream_id == s.id && !w.ended);
+				let own = view.state.own_client == Some(s.streamer.0);
 				items.push(StreamItem {
 					id: s.id.clone().into(),
 					name: s.name.clone().into(),
-					streamer: view.nickname(s.streamer.0).into(),
 					channel: view.other_channel_name(s.streamer.0).into(),
 					streamer_id: i32::from(s.streamer.0),
 					viewers: viewer_count(view, &s.id).unwrap_or(0) as i32,
 					audio: s.audio,
 					watching,
-					own: view.state.own_client == Some(s.streamer.0),
-					kind: match s.kind {
-						StreamKind::Screen => "Screen",
-						StreamKind::Window => "Window",
-						StreamKind::Camera => "Camera",
-						StreamKind::Other(_) => "",
-					}
-					.into(),
+					own,
+					studio: own && studio,
+					kind: crate::vm::streams::kind_label(&s.kind).into(),
 					bitrate: bitrate_text(s.bitrate).into(),
+					..crate::vm::streams::streamer(
+						&view.nickname(s.streamer.0),
+						view.avatar(s.streamer.0),
+					)
 				});
 			}
 			// Streams that started before we joined, or in another channel:
@@ -329,10 +330,9 @@ impl App {
 				if c.streaming == Some(true) && !announced && view.state.own_client != Some(c.id) {
 					items.push(StreamItem {
 						name: c.nickname.clone().into(),
-						streamer: c.nickname.clone().into(),
 						channel: view.other_channel_name(c.id).into(),
 						streamer_id: i32::from(c.id),
-						..StreamItem::default()
+						..crate::vm::streams::streamer(&c.nickname, view.avatar(c.id))
 					});
 				}
 			}
@@ -341,11 +341,10 @@ impl App {
 			items.push(StreamItem {
 				id: "demo".into(),
 				name: "Test pattern".into(),
-				streamer: "local preview".into(),
 				audio: false,
 				watching: self.watch.as_ref().is_some_and(|w| w.session.is_none() && !w.ended),
 				own: false,
-				..StreamItem::default()
+				..crate::vm::streams::streamer("local preview", None)
 			});
 		}
 		bridge.set_streams_available(self.demo || view.is_some_and(|v| v.streams_available()));

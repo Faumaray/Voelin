@@ -134,6 +134,10 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
 - Private chats live on the Direct Messages page, not in the server's chat
   tabs, and their unread messages count there (on the phone, on the Home
   tab) instead of on the server rail.
+- Stream cards show the streamer: their avatar on a painted scene in their
+  colour, with what they share, instead of a bare screen icon (TeamSpeak
+  streams have no preview pictures). Your own stream from the Stream Studio
+  shows its picture.
 - Banners: up to 128 MiB, more time on slow hosts, BMP and ICO too, and
   SVG after a comment or DOCTYPE; pictures larger than 4096 pixels on a
   side are scaled down. A banner that fails is tried again for as long as

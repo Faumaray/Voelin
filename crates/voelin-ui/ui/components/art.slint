@@ -1,0 +1,17 @@
+// A painted picture (Icons.art-*) covering an area of the given size, cut
+// at the sides or at the bottom by the parent's clip. Drawn at its own
+// aspect ratio: with `image-fit: cover` the renderer would draw the SVG at
+// another size and stretch it, which looks jagged.
+export component Art inherits Image {
+    in property <length> cover-width;
+    in property <length> cover-height;
+    // 0: keep the left (top) edge, 1: the right (bottom) one.
+    in property <float> align-x: 0.5;
+    in property <float> align-y: 0.5;
+    property <float> ratio: self.source.width * 1.0 / max(1, self.source.height);
+    width: max(root.cover-width, root.cover-height * root.ratio);
+    height: self.width / root.ratio;
+    x: (root.cover-width - self.width) * root.align-x;
+    y: (root.cover-height - self.height) * root.align-y;
+    image-fit: fill;
+}

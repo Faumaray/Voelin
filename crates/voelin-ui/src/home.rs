@@ -24,12 +24,6 @@ pub(crate) enum Happening {
 	News(i64),
 }
 
-/// "screen" → "Screen".
-fn kind_label(kind: &str) -> String {
-	let mut chars = kind.chars();
-	chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
-}
-
 impl App {
 	/// Streams on our servers: those the server lists (any channel; we can
 	/// watch them at once), the gateways' directories, and clients flagged
@@ -75,13 +69,7 @@ impl App {
 					let mut room = item(s.id.clone(), title, Some(s.streamer.0), None, name);
 					room.channel = channel_of(view.channel_of(s.streamer.0)).into();
 					room.viewers = view.stream_viewers.get(&s.id).map_or(0, |v| *v as i32);
-					room.kind = match s.kind {
-						voelin_core::stream::StreamKind::Screen => "Screen",
-						voelin_core::stream::StreamKind::Window => "Window",
-						voelin_core::stream::StreamKind::Camera => "Camera",
-						voelin_core::stream::StreamKind::Other(_) => "",
-					}
-					.into();
+					room.kind = vm::streams::kind_label(&s.kind).into();
 					room.watchable = view.state.own_client != Some(s.streamer.0);
 					covered.push(s.streamer.0);
 					rooms.push(room);
@@ -105,7 +93,7 @@ impl App {
 				);
 				room.channel = channel_of(e.channel).into();
 				room.viewers = e.viewers.map_or(0, |v| v as i32);
-				room.kind = kind_label(&e.kind).into();
+				room.kind = vm::streams::directory_kind_label(&e.kind).into();
 				covered.extend(e.client_id);
 				rooms.push(room);
 			}
@@ -384,7 +372,5 @@ mod tests {
 		assert!(items.iter().any(|i| i.clip && i.detail.starts_with("2 B")));
 		assert!(recordings_in(&dir.join("missing")).is_empty());
 		std::fs::remove_dir_all(&dir).unwrap();
-		assert_eq!(kind_label("screen"), "Screen");
-		assert_eq!(kind_label(""), "");
 	}
 }

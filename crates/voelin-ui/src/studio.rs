@@ -36,7 +36,9 @@ use voelin_core::settings::{
 	STREAM_BITRATE_KBPS, STREAM_LAYERS, STUDIO_RECORDING_DIR, STUDIO_REPLAY_MEMORY_MB,
 	STUDIO_REPLAY_SECONDS, STUDIO_SCENES, Settings, layer_specs,
 };
-use voelin_core::stream::{EndReason, LayerSpec, StreamSetup, ViewerInfo, ViewerState};
+use voelin_core::stream::{
+	EndReason, LayerSpec, StreamInfo, StreamKind, StreamSetup, ViewerInfo, ViewerState,
+};
 use voelin_core::studio::scene::{
 	Align, Background, Colour, Crop, Fit, Scene, Scenes, Source, SourceKind, Transform,
 };
@@ -1998,6 +2000,7 @@ impl App {
 	pub(crate) fn studio_end(&mut self) {
 		let Some(out) = &self.studio.stream else { return };
 		if self.demo_ui {
+			self.studio_demo_announce(false);
 			self.studio_ended(None);
 		} else {
 			self.engine.send(Command::StopStream { session: out.session as u64 });
@@ -2170,6 +2173,12 @@ impl App {
 		match what {
 			"" => {}
 			"window" => self.studio_detach(),
+			// Started here: a screen opened after it (`studio:live,server`)
+			// leaves the studio page before it is drawn, which starts it.
+			"live" => {
+				self.studio.dev.push(what.into());
+				self.studio_open();
+			}
 			other => self.studio.dev.push(other.into()),
 		}
 	}
@@ -2245,6 +2254,30 @@ impl App {
 				viewer(6, ViewerState::Requested, 0),
 			];
 		}
+		self.studio_demo_announce(true);
 		self.studio_now_live();
+	}
+
+	/// VOELIN_DEMO_UI: the sample server announces our stream, or its end,
+	/// as a server would (the voice view shows its card).
+	fn studio_demo_announce(&mut self, live: bool) {
+		let Some(session) = self.studio.stream.as_ref().map(|s| s.session) else { return };
+		let name = stream_name(&self.studio.ui);
+		let audio = self.studio.ui.audio;
+		let Some(view) = self.sessions.get_mut(&session) else { return };
+		view.streams.retain(|s| s.id != "demo-studio");
+		if live && let Some(own) = view.state.own_client {
+			view.streams.push(StreamInfo {
+				id: "demo-studio".into(),
+				streamer: tsclientlib::ClientId(own),
+				name,
+				kind: StreamKind::Screen,
+				bitrate: 8000,
+				viewer_limit: 0,
+				audio,
+				viewers: Some(3),
+			});
+		}
+		self.refresh_streams();
 	}
 }

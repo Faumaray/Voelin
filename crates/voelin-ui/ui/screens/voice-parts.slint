@@ -5,7 +5,8 @@
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, MemberItem, StreamItem } from "../bridge.slint";
-import { Icon, Button, ButtonKind, Avatar, LiveBadge, Chip, SpeakingBars } from "../components/index.slint";
+import { StudioBridge } from "../studio-bridge.slint";
+import { Icon, Button, ButtonKind, Avatar, LiveBadge, Chip, SpeakingBars, Art } from "../components/index.slint";
 
 // One person: an avatar with a ring (green while talking, blue while
 // streaming), the muted mark, the name with the crown, and what they do.
@@ -110,11 +111,16 @@ export component Participant inherits VerticalLayout {
 
 // A stream in the channel: LIVE, the title, who streams it, and Watch (or
 // Show, while we watch it). A large card with the picture while we watch
-// it, the viewers, the kind, the bitrate and the sound; compact, a row that
+// it (else the streamer on a painted scene), the viewers, the kind, the
+// bitrate and the sound; compact, a row with the streamer's avatar that
 // says where it is.
 export component StreamCard inherits Rectangle {
     in property <StreamItem> stream;
     in property <bool> compact;
+    // The picture: the stream while we watch it (the viewer hidden behind
+    // the chat), or our own from the studio while it is live.
+    property <bool> watched: stream.watching && Bridge.viewer-has-frame;
+    property <bool> previewed: stream.studio && StudioBridge.status.live && StudioBridge.has-preview;
     height: compact ? 76px : 236px;
     border-radius: Theme.radius-lg;
     clip: true;
@@ -125,17 +131,58 @@ export component StreamCard inherits Rectangle {
     accessible-role: AccessibleRole.groupbox;
     accessible-label: stream.name;
     if !root.compact: Rectangle {
-        // The picture while we watch it (the viewer hidden behind the chat).
-        if stream.watching && Bridge.viewer-has-frame: Image {
+        if root.watched || root.previewed: Image {
             width: parent.width;
             height: parent.height;
-            source: Bridge.viewer-frame;
+            source: root.watched ? Bridge.viewer-frame : StudioBridge.preview;
             image-fit: cover;
         }
-        if !(stream.watching && Bridge.viewer-has-frame): Icon {
-            source: stream.kind == "Camera" ? Icons.video : Icons.monitor-up;
-            size: 72px;
-            tint: #ffffff22;
+        // Else (the protocol has no thumbnails: a picture means joining)
+        // a painted scene in the streamer's colour, their avatar ringed as
+        // streaming between LIVE and the title, and what they share.
+        if !root.watched && !root.previewed: scene := Rectangle {
+            // The ring: 80 px, less on a narrow card.
+            property <length> ring: max(32px, min(80px, self.width - 2 * Theme.space-3));
+            Art {
+                source: Icons.art-scenes[mod(root.stream.streamer-id, 3)];
+                cover-width: parent.width;
+                cover-height: parent.height;
+                align-y: 0.3;
+            }
+            Rectangle {
+                background: root.stream.tint.with-alpha(0.3);
+            }
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: 52px + (80px - self.height) / 2;
+                width: scene.ring;
+                height: self.width;
+                border-radius: self.width / 2;
+                border-width: 3px;
+                border-color: Theme.accent;
+                Avatar {
+                    size: parent.width - 8px;
+                    initials: root.stream.initials;
+                    tint: root.stream.tint;
+                    image: root.stream.avatar;
+                    label: root.stream.streamer;
+                }
+                Rectangle {
+                    x: parent.width - self.width + 2px;
+                    y: parent.height - self.height + 2px;
+                    width: max(20px, parent.width * 0.35);
+                    height: self.width;
+                    border-radius: self.width / 2;
+                    background: Theme.accent;
+                    border-width: 2px;
+                    border-color: Theme.surface;
+                    Icon {
+                        source: root.stream.kind == "Camera" ? Icons.video : root.stream.kind == "Window" ? Icons.app-window : Icons.monitor;
+                        size: parent.width / 2;
+                        tint: Theme.on-accent;
+                    }
+                }
+            }
         }
         // Darker at the bottom, for the text.
         Rectangle {
@@ -167,6 +214,18 @@ export component StreamCard inherits Rectangle {
         padding-left: Theme.space-4;
         padding-top: root.compact ? Theme.space-3 : 0px;
         spacing: Theme.space-3;
+        // Centred beside the text (with a `y` of its own it stayed at the
+        // top of the row).
+        if root.compact: VerticalLayout {
+            alignment: center;
+            Avatar {
+                size: 40px;
+                initials: root.stream.initials;
+                tint: root.stream.tint;
+                image: root.stream.avatar;
+                label: root.stream.streamer;
+            }
+        }
         VerticalLayout {
             alignment: root.compact ? LayoutAlignment.center : LayoutAlignment.end;
             horizontal-stretch: 1;

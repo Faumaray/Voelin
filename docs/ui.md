@@ -110,6 +110,7 @@ puts them on an inner `face`).
 | `SegmentedTabs` | tabs.slint | `model`, `current-index`, `label`; `selected(int)` |
 | `TabItem` | tabs.slint | underlined tab: `text`, `selected`, `badge`, `closable`; `clicked`, `close` |
 | `Avatar` | avatar.slint | `image` or `initials` + `tint` (one letter under 28 px, through `Images.first-letter`), `size`, `status` (`Status.online/idle/dnd/offline/info`), `speaking` (green ring), `crown`, `square` (server icons); a server icon at most half as wide (TeamSpeak's 16 px ones) is drawn at twice its size, sharp, on the tint (a person's picture always fills it) |
+| `Art` | art.slint | a painted picture (`Icons.art-*`) covering `cover-width` × `cover-height` at its own aspect ratio, cut by the parent's clip; `align-x`, `align-y` (0 keeps the left or top edge, 1 the other); home's banner and cards, the stream cards |
 | `CountBadge` | badge.slint | count bubble: `count`, `fill` (red), `ink` (the number) |
 | `LiveBadge` | badge.slint | `text` (LIVE), `large` |
 | `Chip` | badge.slint | tag: `text`, `icon`, `picture` (in its own colours, a badge's), `tint`, `fill`, `outlined` |
@@ -152,7 +153,11 @@ Voice parts (ui/screens/voice-parts.slint), for the desktop's voice view and
 the phone's voice screen: `Participant` (`member`, `size`: the avatar's) and
 `StreamCard` (`stream`), both with `compact`, the phone's smaller look (a
 person ringed only while talking or streaming, LIVE below the name; a stream
-as a row).
+as a row with the streamer's avatar). The protocol has no thumbnails (a
+picture means joining the stream, which the streamer sees as a request), so
+a stream card shows the stream only while we watch it, and our own from the
+Stream Studio its preview while live; otherwise the streamer's avatar,
+ringed, with what they share, on a painted scene in their colour.
 
 ## The server page
 
@@ -168,13 +173,14 @@ comes from the engine's events; what a gateway adds is hidden without it.
 | Channel password | `channel-password`, `channel-password:wrong` | Joining a channel (a double-click in the tree, joining a friend) moves there with voice, or connects into it (by its id) without; when the server puts us elsewhere on connecting, as it does for a wrong password, it is joined again, which says why. A locked channel first asks for its password in `ChannelPasswordDialog`, unless one was given since voice connected; a refused one asks again under "Wrong password". A full channel or another refusal is a toast | `Presence` (`has_password`), `JoinFailed`; `Command::MoveToChannel`, `ConnectVoice` (`channel_password`) |
 | Pinned messages | `pins` | In the members panel's place: cards with author, time, text, files and reactions; the pin unpins, a click jumps to the message | `Gateway` `Pins`, `Pinned`, `Unpinned`; `GatewayRequest::Pins`, `Unpin` |
 | Topics | `topics`, `topic:<id>` | In the members panel's place: search, cards with the message count, creator and last activity, Create Topic; an open topic replaces the chat's messages and takes replies | `Gateway` `Topics`, `Topic`, `TopicHistory`; `GatewayRequest::Topics`, `TopicHistory`, `CreateTopic`, `Post` |
-| Voice channel | `voice`, `voice:compact` | Title, topic, "5 in voice / 50 total", Copy invite link (a `ts3server://` link to the channel; the phone's Invite button does the same), the members button, Smaller stage / Larger stage, Chat only; the people as large avatars (talking ring and bars, muted, crown, streaming); the streams as cards (LIVE, viewers, kind, bitrate, sound, Watch Stream); the call bar: mute and deafen (red while on), share (its menu opens above it), the voice settings and Leave; the channel's chat. The smaller stage (`ui.voice_compact`, and always in windows under 800 px tall, where its button is disabled) is one row of small avatars, scrolling sideways, and the streams as rows (Watch, Show), so the chat gets about 200 to 240 px more | `Presence`, `Talking`, `StreamsChanged`, viewer counts from `StreamsChanged`, else the `Gateway` stream directory |
+| Voice channel | `voice`, `voice:compact` | Title, topic, "5 in voice / 50 total", Copy invite link (a `ts3server://` link to the channel; the phone's Invite button does the same), the members button, Smaller stage / Larger stage, Chat only; the people as large avatars (talking ring and bars, muted, crown, streaming); the streams as cards (the streamer's avatar on a painted scene in their colour, or the picture while watched, and our own from the Stream Studio its preview: `studio:live,server,voice`; LIVE, viewers, kind, bitrate, sound, Watch Stream); the call bar: mute and deafen (red while on), share (its menu opens above it), the voice settings and Leave; the channel's chat. The smaller stage (`ui.voice_compact`, and always in windows under 800 px tall, where its button is disabled) is one row of small avatars, scrolling sideways, and the streams as rows (Watch, Show), so the chat gets about 200 to 240 px more | `Presence`, `Talking`, `StreamsChanged`, viewer counts from `StreamsChanged`, else the `Gateway` stream directory |
 | Watching a stream | `watch`, `popout` | The channel's header with "5 in voice" and Leave; the player with the streamer, title, viewers, LIVE, the picture's height (the simulcast picker when a Voelin streamer offers layers), volume, elapsed time, what arrives (codec, size, frame rate, bitrate), back to the chat, pop out, full screen; a note that the stream belongs to the channel; the channel's chat and a Stream Info tab. Popped out (and in full screen) it fills the window | `WatchState`, `WatchLayers`, decoded frames and their stats (`src/video.rs`), `StreamsChanged` (viewer counts; the `Gateway` stream directory where the server gives none) |
 
 The pins and topics share the place of the members panel: opening one
 closes the other, and the members button brings the panel back. On the
 phone the chat is the Chat tab and the members of our channel are on the
-Activity tab. The Chat tab counts the server's unread chats; private chats
+Activity tab, with the streams (the streamer's avatar on their colour, Watch,
+Show and Leave). The Chat tab counts the server's unread chats; private chats
 count on the Home tab, where the direct messages are.
 
 ## Home, friends, messages and the settings pages
@@ -511,7 +517,9 @@ Environment variables (see `src/dev.rs`):
   `profiles`, `devices`,
   `notifications`, `integrations`, `advanced` (above). With sample data, `watch` plays the local test pattern in the
   sample stream's place. `studio[:window|live|record|source|audio|camera|scene|settings]`
-  opens the Stream Studio (above) in that state; with its window open a
+  opens the Stream Studio (above) in that state (`studio:live` also with a
+  screen opened after it: `studio:live,server,voice` shows our stream's card
+  with the studio's picture); with its window open a
   screenshot also saves the window alone (`<name>-window.png`) and draws it
   over the main window.
 - `VOELIN_WINDOW_SIZE=390x844`: window size (phone layout below the breakpoint).

@@ -316,6 +316,11 @@ export struct StreamItem {
     channel: string,
     // The streamer's client id (their avatar in the members).
     streamer-id: int,
+    // The streamer's avatar, as the members show it: their picture, or
+    // their initials on their colour (also the card's picture's colour).
+    initials: string,
+    tint: color,
+    avatar: image,
     // How many watch it (the gateway's directory; 0 unknown).
     viewers: int,
     audio: bool,
@@ -326,6 +331,8 @@ export struct StreamItem {
     watching: bool,
     // Our own stream.
     own: bool,
+    // Ours from the Stream Studio: its preview is the card's picture.
+    studio: bool,
 }
 
 // A viewer of our stream. state: "requested", "connecting" or "connected".

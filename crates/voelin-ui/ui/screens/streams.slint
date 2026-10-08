@@ -5,7 +5,7 @@ import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge, StreamItem, MemberItem } from "../bridge.slint";
 import { Nav } from "../nav.slint";
-import { Icon, Button, ButtonKind, IconButton, Avatar, Status, LiveBadge, Chip, Select, SectionHeader, SpeakingBars, Slider, Spinner, TextField, TabItem, ListView, ScrollView } from "../components/index.slint";
+import { Icon, Button, ButtonKind, IconButton, Avatar, Status, LiveBadge, Chip, Select, SectionHeader, SpeakingBars, Slider, Spinner, TextField, TabItem, Art, ListView, ScrollView } from "../components/index.slint";
 import { MemberRow, GroupHeader } from "members.slint";
 import { PageHeader, MessageList, Composer } from "chat.slint";
 
@@ -23,20 +23,34 @@ component StreamCard inherits Rectangle {
         spacing: Theme.space-3;
         HorizontalLayout {
             spacing: Theme.space-3;
-            // A picture-less preview: the live mark on a gradient.
+            // No picture before watching (the protocol has none): the
+            // streamer's avatar on a painted scene in their colour, LIVE
+            // under it.
             Rectangle {
                 width: 64px;
                 height: 40px;
                 border-radius: Theme.radius-sm;
+                clip: true;
                 background: @linear-gradient(135deg, #2b1f6e 0%, #0f2a66 100%);
-                Icon {
-                    source: Icons.monitor-up;
-                    size: Theme.icon-md;
-                    tint: #ffffffc0;
+                Art {
+                    source: Icons.art-scenes[mod(stream.streamer-id, 3)];
+                    cover-width: parent.width;
+                    cover-height: parent.height;
+                    align-y: 0.3;
+                }
+                Rectangle {
+                    background: stream.tint.with-alpha(0.3);
+                }
+                Avatar {
+                    y: 3px;
+                    size: 28px;
+                    initials: stream.initials;
+                    tint: stream.tint;
+                    image: stream.avatar;
+                    label: stream.streamer;
                 }
                 if stream.id != "": LiveBadge {
-                    x: 3px;
-                    y: 3px;
+                    y: parent.height - self.height - 1px;
                     height: 14px;
                 }
             }
