@@ -40,7 +40,20 @@ impl App {
 			image_cache_mb: cache_mb as f32,
 		});
 		bridge.set_image_cache_usage(images::usage_text().into());
-		self.studio_theme();
+		self.theme_windows();
+	}
+
+	/// The windows of their own (the studio's, the stream's) follow the main
+	/// window's theme.
+	pub(crate) fn theme_windows(&self) {
+		let Some(ui) = self.ui.upgrade() else { return };
+		let theme = ui.global::<Theme>();
+		if let Some(window) = &self.studio.window {
+			copy_theme(&theme, &window.global::<Theme>());
+		}
+		if let Some(window) = &self.popout.window {
+			copy_theme(&theme, &window.global::<Theme>());
+		}
 	}
 
 	/// The settings page changed the form: store the keys (they apply
@@ -85,4 +98,11 @@ impl App {
 			warn!(%e, "could not store the stage size");
 		}
 	}
+}
+
+/// Each window has its own Theme global.
+fn copy_theme(from: &Theme, to: &Theme) {
+	to.set_mode(from.get_mode());
+	to.set_font_scale(from.get_font_scale());
+	to.set_system_dark(from.get_system_dark());
 }

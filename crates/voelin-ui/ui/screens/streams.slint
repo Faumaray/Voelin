@@ -85,11 +85,12 @@ component StreamCard inherits Rectangle {
                 accessible-label: @tr("Watch {}", stream.name);
                 clicked => { Bridge.watch-stream(stream.id); }
             }
+            // Also back from a window of its own.
             if stream.watching && !Bridge.viewer-open: Button {
                 horizontal-stretch: 1;
                 small: true;
-                icon: Icons.monitor;
-                text: @tr("Show");
+                icon: Bridge.viewer-popped ? Icons.minimize-2 : Icons.monitor;
+                text: Bridge.viewer-popped ? @tr("Bring back") : @tr("Show");
                 clicked => { Bridge.show-viewer(); }
             }
             if stream.watching: Button {
@@ -233,15 +234,15 @@ component StreamQuality inherits HorizontalLayout {
 }
 
 // The player: the picture with the controls over its bottom. `compact`
-// (full screen, the phone) also has the streamer, the title and LIVE over
-// its top, and Leave; otherwise the header shows them.
+// (full screen, the phone, a window of its own) also has the streamer, the
+// title and LIVE over its top, and Leave; otherwise the header shows them.
 //
 // The controls hide 2.5 s after the pointer last moved over the picture,
 // once it has been there (in full screen it is), and come back when it
 // moves; with the pointer elsewhere, as in a screenshot, they stay. A
 // status and the end of the stream keep them. A touch screen has no
 // pointer to move: a tap on the picture shows or hides them.
-component StreamPlayer inherits Rectangle {
+export component StreamPlayer inherits Rectangle {
     in property <bool> compact;
     property <bool> touch: !Bridge.desktop;
     property <bool> pinned: Bridge.viewer-status != "" || Bridge.viewer-ended;
@@ -446,7 +447,7 @@ component StreamPlayer inherits Rectangle {
                 vertical-alignment: center;
                 overflow: elide;
             }
-            if !Bridge.viewer-fullscreen && !Nav.narrow: IconButton {
+            if !Bridge.viewer-fullscreen && !Nav.narrow && !Bridge.viewer-popped: IconButton {
                 icon: Icons.minimize-2;
                 label: @tr("Back to the chat (keeps watching)");
                 tooltip: root.up ? self.label : "";
@@ -457,7 +458,7 @@ component StreamPlayer inherits Rectangle {
             // Theatre mode: the window without the shell. Checked, it has
             // the accent's colours, as elsewhere (white would not show on
             // the light theme's).
-            if !Bridge.viewer-fullscreen && !Nav.narrow: IconButton {
+            if !Bridge.viewer-fullscreen && !Nav.narrow && !Bridge.viewer-popped: IconButton {
                 icon: Icons.rectangle-horizontal;
                 label: Nav.theatre ? @tr("Exit theatre mode") : @tr("Theatre mode");
                 tooltip: root.up ? self.label : "";
@@ -466,16 +467,26 @@ component StreamPlayer inherits Rectangle {
                 y: (parent.height - self.height) / 2;
                 clicked => { Nav.theatre = !Nav.theatre; }
             }
-            // Until the viewer has a window of its own, popping out is
-            // theatre mode.
-            if !Nav.narrow: IconButton {
-                icon: Icons.external-link;
-                label: Nav.theatre ? @tr("Back to the window") : @tr("Pop out");
+            // In a window of its own: over the other windows or not
+            // (picture in picture).
+            if Bridge.viewer-popped: IconButton {
+                icon: Icons.pin;
+                label: Bridge.viewer-on-top ? @tr("Stop keeping on top") : @tr("Keep on top");
                 tooltip: root.up ? self.label : "";
-                checked: Nav.theatre;
-                tint: Nav.theatre ? Theme.accent-text : #ffffff;
+                checked: Bridge.viewer-on-top;
+                tint: Bridge.viewer-on-top ? Theme.accent-text : #ffffff;
                 y: (parent.height - self.height) / 2;
-                clicked => { Nav.theatre = !Nav.theatre; }
+                clicked => { Bridge.viewer-on-top = !Bridge.viewer-on-top; }
+            }
+            // Into a window of its own and back (a phone has one window).
+            if Bridge.desktop && !Nav.narrow: IconButton {
+                icon: Icons.external-link;
+                label: Bridge.viewer-popped ? @tr("Back into the main window") : @tr("Pop out");
+                tooltip: root.up ? self.label : "";
+                checked: Bridge.viewer-popped;
+                tint: Bridge.viewer-popped ? Theme.accent-text : #ffffff;
+                y: (parent.height - self.height) / 2;
+                clicked => { Bridge.pop-out-viewer(!Bridge.viewer-popped); }
             }
             IconButton {
                 icon: Bridge.viewer-fullscreen ? Icons.minimize-2 : Icons.maximize;

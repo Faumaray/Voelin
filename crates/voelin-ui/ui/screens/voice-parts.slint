@@ -110,16 +110,18 @@ export component Participant inherits VerticalLayout {
 }
 
 // A stream in the channel: LIVE, the title, who streams it, and Watch (or
-// Show, while we watch it). A large card with the picture while we watch
-// it (else the streamer on a painted scene), the viewers, the kind, the
-// bitrate and the sound; compact, a row with the streamer's avatar that
-// says where it is.
+// Show, while we watch it; Bring back, while it plays in a window of its
+// own). A large card with the picture while we watch it here (else the
+// streamer on a painted scene), the viewers, the kind, the bitrate and the
+// sound; compact, a row with the streamer's avatar that says where it is.
 export component StreamCard inherits Rectangle {
     in property <StreamItem> stream;
     in property <bool> compact;
+    // We watch it in a window of its own: the picture is there.
+    property <bool> popped: stream.watching && Bridge.viewer-popped;
     // The picture: the stream while we watch it (the viewer hidden behind
     // the chat), or our own from the studio while it is live.
-    property <bool> watched: stream.watching && Bridge.viewer-has-frame;
+    property <bool> watched: stream.watching && Bridge.viewer-has-frame && !root.popped;
     property <bool> previewed: stream.studio && StudioBridge.status.live && StudioBridge.has-preview;
     height: compact ? 76px : 236px;
     border-radius: Theme.radius-lg;
@@ -199,9 +201,18 @@ export component StreamCard inherits Rectangle {
                 large: true;
                 y: (parent.height - self.height) / 2;
             }
-            if stream.viewers > 0: Chip {
+            // Popped out, that window counts the viewers, and the card
+            // has room for one chip beside LIVE.
+            if stream.viewers > 0 && !root.popped: Chip {
                 text: @tr("{} watching", stream.viewers);
                 icon: Icons.eye;
+                tint: #ffffff;
+                fill: #060a18a0;
+                y: (parent.height - self.height) / 2;
+            }
+            if root.popped: Chip {
+                text: @tr("Playing in its own window");
+                icon: Icons.external-link;
                 tint: #ffffff;
                 fill: #060a18a0;
                 y: (parent.height - self.height) / 2;
@@ -251,6 +262,7 @@ export component StreamCard inherits Rectangle {
             Text {
                 text: !root.compact ? (stream.kind != "" ? stream.streamer + "  •  " + stream.kind : stream.streamer)
                     : stream.id == "" ? (stream.channel == "" ? @tr("Looking it up…") : @tr("In {}; looking it up…", stream.channel))
+                    : root.popped ? @tr("Playing in its own window")
                     : stream.own ? @tr("Your stream")
                     : stream.channel != "" ? @tr("{} · in {}", stream.streamer, stream.channel)
                     : stream.viewers > 0 ? @tr("{} · {} watching", stream.streamer, stream.viewers)
@@ -288,10 +300,12 @@ export component StreamCard inherits Rectangle {
                 kind: root.compact ? ButtonKind.primary : ButtonKind.secondary;
                 small: root.compact;
                 checked: !root.compact;
-                icon: stream.watching ? Icons.monitor : root.compact ? Icons.eye : Icons.external-link;
-                text: stream.watching ? (root.compact ? @tr("Show") : @tr("Show Stream")) : root.compact ? @tr("Watch") : @tr("Watch Stream");
+                icon: root.popped ? Icons.minimize-2 : stream.watching ? Icons.monitor : root.compact ? Icons.eye : Icons.external-link;
+                text: root.popped ? @tr("Bring back") : stream.watching ? (root.compact ? @tr("Show") : @tr("Show Stream")) : root.compact ? @tr("Watch") : @tr("Watch Stream");
                 clicked => {
-                    if stream.watching {
+                    if root.popped {
+                        Bridge.pop-out-viewer(false);
+                    } else if stream.watching {
                         Bridge.show-viewer();
                     } else {
                         Bridge.watch-stream(stream.id);

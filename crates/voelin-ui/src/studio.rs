@@ -50,7 +50,7 @@ use voelin_store::MessageSource;
 use crate::app::{
 	App, ChatLine, Nav, Page, StudioAudio, StudioBridge, StudioForm, StudioLayer, StudioNav,
 	StudioPick, StudioScene, StudioSettingsForm, StudioSource, StudioSourceForm, StudioStatus,
-	StudioViewer, StudioWindow, Theme, later, with_app,
+	StudioViewer, StudioWindow, later, with_app,
 };
 use crate::settings::parse_positive;
 use crate::video::CaptureRequest;
@@ -170,7 +170,7 @@ pub(crate) struct StudioState {
 	/// The main window's globals have the models.
 	attached: bool,
 	/// The studio in a window of its own.
-	window: Option<StudioWindow>,
+	pub(crate) window: Option<StudioWindow>,
 	run: Option<Running>,
 	starting: bool,
 	/// Why it does not run or cannot stream.
@@ -2115,20 +2115,11 @@ impl App {
 				slint::CloseRequestResponse::HideWindow
 			});
 			self.studio.window = Some(window);
-			self.studio_theme();
-			// The main window closes the studio's with it.
-			if let Some(ui) = self.ui.upgrade() {
-				ui.window().on_close_requested(|| {
-					with_app(|app| {
-						if let Some(window) = app.studio.window.take() {
-							let _ = window.hide();
-						}
-					});
-					slint::CloseRequestResponse::HideWindow
-				});
-				if ui.global::<Nav>().get_page() == Page::Studio {
-					ui.global::<Nav>().set_page(Page::Server);
-				}
+			self.theme_windows();
+			if let Some(ui) = self.ui.upgrade()
+				&& ui.global::<Nav>().get_page() == Page::Studio
+			{
+				ui.global::<Nav>().set_page(Page::Server);
 			}
 		}
 		// The next picture goes to both windows with the flag.
@@ -2149,15 +2140,6 @@ impl App {
 				ui.global::<Nav>().invoke_show(Page::Studio);
 			}
 		});
-	}
-
-	/// The studio window follows the main window's theme.
-	pub(crate) fn studio_theme(&self) {
-		let (Some(ui), Some(window)) = (self.ui.upgrade(), &self.studio.window) else { return };
-		let (from, to) = (ui.global::<Theme>(), window.global::<Theme>());
-		to.set_mode(from.get_mode());
-		to.set_font_scale(from.get_font_scale());
-		to.set_system_dark(from.get_system_dark());
 	}
 
 	/// A picture of the studio window (screenshots, dev.rs).

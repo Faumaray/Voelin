@@ -39,8 +39,7 @@
 //!   opened: the server dialog filled in from it, or in voice on its
 //!   server a move into its channel), `watch` (the first stream; with
 //!   sample data the local test pattern in its place), `theatre` (after
-//!   `watch`: in theatre mode), `popout` (`watch` popped out; for now the
-//!   same as `watch,theatre`),
+//!   `watch`: in theatre mode), `popout` (`watch` in a window of its own),
 //!   `tab:<home|servers|chat|activity|you>` (phone layout); `friends[:<uid>]`,
 //!   `messages[:<uid>]` (a private chat), `inbox` (offline messages),
 //!   `library`, `events`, `event-form`, `search[:<text>]`,
@@ -55,8 +54,8 @@
 //!   `studio:live,server,voice` shows our stream's card with the studio's
 //!   picture), `studio:record`, or a dialog: `studio:source`,
 //!   `studio:audio`, `studio:camera`, `studio:scene`, `studio:settings`.
-//!   A screenshot also saves the studio's window (`<name>-window.png`) and
-//!   draws it over the main window.
+//!   A screenshot also saves the studio's window, or the stream's
+//!   (`<name>-window.png`), and draws it over the main window.
 //! - `VOELIN_AUTOWATCH=1`: watch the first stream that shows up.
 //! - `VOELIN_AUTOSHARE=test-pattern`: share the test pattern (accepting
 //!   everyone) once connected to a TeamSpeak 6 server.
@@ -333,15 +332,17 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 			}
 			// As a link from the platform comes.
 			"link" => crate::inbox::request(crate::inbox::Request::OpenLink(arg.to_owned())),
-			// Until the viewer has a window of its own, `popout` is theatre
-			// mode too.
 			"watch" | "popout" => {
 				with_app(|app| {
-					if switches.demo_ui { app.demo_watch() } else { app.watch_first_stream() }
+					if switches.demo_ui {
+						app.demo_watch();
+					} else {
+						app.watch_first_stream();
+					}
+					if what == "popout" {
+						app.viewer_pop_out();
+					}
 				});
-				if what == "popout" {
-					nav.set_theatre(true);
-				}
 			}
 			"theatre" => nav.set_theatre(true),
 			// Home, friends, messages, events, the bell, the search.
@@ -436,7 +437,8 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 						eprintln!("screenshot failed: {e}");
 					}
 					let _ = ui.hide();
-					// Also when the studio's own window is open.
+					// Also when the studio's or the stream's own window is
+					// open.
 					let _ = slint::quit_event_loop();
 				}
 			},
@@ -468,10 +470,11 @@ fn open_unread(app: &mut App, back: usize) {
 
 fn save_screenshot(ui: &MainWindow, path: &std::path::Path) -> Result<()> {
 	let mut image = ui.window().take_snapshot()?;
-	if let Some(studio) = with_app(|app| app.studio_snapshot()).flatten() {
+	let window = with_app(|app| app.studio_snapshot().or_else(|| app.viewer_snapshot())).flatten();
+	if let Some(window) = window {
 		let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-		save_png(&studio, &path.with_file_name(format!("{stem}-window.png")))?;
-		paste(&mut image, &studio);
+		save_png(&window, &path.with_file_name(format!("{stem}-window.png")))?;
+		paste(&mut image, &window);
 	}
 	save_png(&image, path)
 }

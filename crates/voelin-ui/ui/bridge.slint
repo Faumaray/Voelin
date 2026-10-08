@@ -999,8 +999,13 @@ export global Bridge {
     // Whether capture and encoding are built in.
     in property <bool> can-share: true;
 
-    // The stream shown in the viewer.
+    // The stream shown in the viewer. Open: the player is in this window
+    // (the main window's is not while the stream plays in its own).
     in property <bool> viewer-open;
+    // The stream plays in a window of its own (desktop, src/popout.rs),
+    // which can stay over the other windows.
+    in property <bool> viewer-popped;
+    in-out property <bool> viewer-on-top;
     in property <image> viewer-frame;
     in property <bool> viewer-has-frame;
     in property <string> viewer-title;
@@ -1136,6 +1141,9 @@ export global Bridge {
     callback leave-stream();
     callback set-stream-volume(float);
     callback toggle-fullscreen();
+    // The player into a window of its own (true) or back into the main
+    // window.
+    callback pop-out-viewer(bool);
     // Show or hide the pointer over the window: the player hides it with
     // its controls in full screen.
     callback show-cursor(bool);

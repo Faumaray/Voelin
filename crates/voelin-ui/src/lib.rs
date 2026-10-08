@@ -18,6 +18,7 @@ mod members;
 mod messages;
 #[cfg(not(target_os = "android"))]
 mod myts;
+mod popout;
 mod previews;
 mod servers;
 mod settings;

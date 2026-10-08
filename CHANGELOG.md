@@ -78,6 +78,9 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
 - A theatre mode for streams: the stream viewer's new button fills the
   window with the stream and its chat, without the servers, the channels
   and the members. Escape leaves it, and full screen too.
+- Streams pop out into a window of their own on the desktop, optionally
+  kept on top of other windows, while the main window goes on; closing it
+  brings the stream back.
 
 ### Changed
 

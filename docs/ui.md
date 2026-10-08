@@ -21,6 +21,7 @@ crates/voelin-ui/
     nav.slint            Nav global: page, settings section, phone tab, dialogs, panel size
     studio-bridge.slint  the Stream Studio's structs and globals (StudioBridge, StudioNav)
     studio-window.slint  StudioWindow: the studio in a window of its own
+    viewer-window.slint  ViewerWindow: the stream we watch in a window of its own
     components/          the design system (catalogue below); index.slint exports all
     shells/              desktop.slint (rail, top bar, Sidebar), mobile.slint (bottom
                          navigation), common.slint (Panel, VoiceCard, UserCard, ...)
@@ -39,9 +40,9 @@ crates/voelin-ui/
     app.rs               setup, App state, event dispatch
     servers.rs chat.rs members.rs streams.rs settings_page.rs appearance.rs
     home.rs social.rs messages.rs events.rs settings_pages.rs previews.rs
-    studio.rs            the logic of each area (social.rs: contacts, the bell and the
+    studio.rs popout.rs  the logic of each area (social.rs: contacts, the bell and the
                          search; previews.rs: pictures in chat; studio.rs: the Stream
-                         Studio's controller)
+                         Studio's controller; popout.rs: the stream's own window)
     vm/                  pure view models (engine state → Slint structs), unit-tested
     bind/                callbacks of each area, wired once
     images.rs            the image cache (LRU, bounded by `ui.image_cache_mb`)
@@ -174,7 +175,7 @@ comes from the engine's events; what a gateway adds is hidden without it.
 | Pinned messages | `pins` | In the members panel's place: cards with author, time, text, files and reactions; the pin unpins, a click jumps to the message | `Gateway` `Pins`, `Pinned`, `Unpinned`; `GatewayRequest::Pins`, `Unpin` |
 | Topics | `topics`, `topic:<id>` | In the members panel's place: search, cards with the message count, creator and last activity, Create Topic; an open topic replaces the chat's messages and takes replies | `Gateway` `Topics`, `Topic`, `TopicHistory`; `GatewayRequest::Topics`, `TopicHistory`, `CreateTopic`, `Post` |
 | Voice channel | `voice`, `voice:compact` | Title, topic, "5 in voice / 50 total", Copy invite link (a `ts3server://` link to the channel; the phone's Invite button does the same), the members button, Smaller stage / Larger stage, Chat only; the people as large avatars (talking ring and bars, muted, crown, streaming); the streams as cards (the streamer's avatar on a painted scene in their colour, or the picture while watched, and our own from the Stream Studio its preview: `studio:live,server,voice`; LIVE, viewers, kind, bitrate, sound, Watch Stream); the call bar: mute and deafen (red while on), share (its menu opens above it), the voice settings and Leave; the channel's chat. The smaller stage (`ui.voice_compact`, and always in windows under 800 px tall, where its button is disabled) is one row of small avatars, scrolling sideways, and the streams as rows (Watch, Show), so the chat gets about 200 to 240 px more | `Presence`, `Talking`, `StreamsChanged`, viewer counts from `StreamsChanged`, else the `Gateway` stream directory |
-| Watching a stream | `watch`, `watch,theatre`, `popout` | A header (on our channel's background) with the streamer's avatar, the title, the streamer and viewers, LIVE, the picture's height (the simulcast picker when a Voelin streamer offers layers), the members button and Leave; the player, with nothing over the picture but its controls: volume, elapsed time, what arrives (codec, size, frame rate, bitrate), back to the chat, theatre mode, pop out (for now theatre mode too), full screen. The controls hide 2.5 s after the pointer last moved over the picture and come back when it moves (in full screen the cursor hides with them; on a touch screen a tap on the picture shows or hides them); while waiting for the picture and after the stream ended they stay, and so do they before the pointer was ever over the picture, as in screenshots. Then a note that the stream belongs to the channel; the channel's chat and a Stream Info tab. In theatre mode (`Nav.theatre`) it fills the window without the shell or the members button, the chat still under the picture; it ends with the viewer, and a narrow window keeps the phone layout. Escape leaves full screen, then theatre mode. In full screen (and on the phone outside the voice screen) the player is alone, with the streamer, title, viewers, LIVE and the quality over the picture's top, hiding with the controls | `WatchState`, `WatchLayers`, decoded frames and their stats (`src/video.rs`), `StreamsChanged` (viewer counts; the `Gateway` stream directory where the server gives none) |
+| Watching a stream | `watch`, `watch,theatre`, `popout` | A header (on our channel's background) with the streamer's avatar, the title, the streamer and viewers, LIVE, the picture's height (the simulcast picker when a Voelin streamer offers layers), the members button and Leave; the player, with nothing over the picture but its controls: volume, elapsed time, what arrives (codec, size, frame rate, bitrate), back to the chat, theatre mode, pop out (desktop), full screen. The controls hide 2.5 s after the pointer last moved over the picture and come back when it moves (in full screen the cursor hides with them; on a touch screen a tap on the picture shows or hides them); while waiting for the picture and after the stream ended they stay, and so do they before the pointer was ever over the picture, as in screenshots. Then a note that the stream belongs to the channel; the channel's chat and a Stream Info tab. In theatre mode (`Nav.theatre`) it fills the window without the shell or the members button, the chat still under the picture; it ends with the viewer, and a narrow window keeps the phone layout. Escape leaves full screen, then theatre mode. In full screen (and on the phone outside the voice screen) the player is alone, with the streamer, title, viewers, LIVE and the quality over the picture's top, hiding with the controls. Popped out (`ViewerWindow`, `src/popout.rs`), the player alone is in a window of its own titled with the stream, while the main window goes on (`Bridge.viewer-popped`; the main window's `viewer-open` is false meanwhile): its controls keep it on top of the other windows (`always-on-top`, picture in picture; the next pop-out remembers it for the run) and bring it back; full screen and Escape are that window's, and it stays when another stream is watched. The stream's card on the voice page says "Playing in its own window", with Bring back (the streams panel's card has Bring back too). Closing the window brings the stream back too, on its server's page; Leave closes it, and so does closing the main window. The pictures go only to the window that shows the player | `WatchState`, `WatchLayers`, decoded frames and their stats (`src/video.rs`), `StreamsChanged` (viewer counts; the `Gateway` stream directory where the server gives none) |
 
 The pins and topics share the place of the members panel: opening one
 closes the other, and the members button brings the panel back. On the
@@ -509,7 +510,7 @@ Environment variables (see `src/dev.rs`):
   current chat read up to five messages before its end: the New line,
   scrolled up to; `unread:end` ten messages before, at the end of the list,
   under the bar that counts them), `watch`, `theatre` (after `watch`:
-  theatre mode), `popout` (for now the same as `watch,theatre`)
+  theatre mode), `popout` (`watch` in a window of its own)
   (the server page, above), `tab:<home|servers|chat|activity|you>` (phone
   layout); `friends[:<uid>]`, `messages[:<uid>]`, `inbox`, `offline`,
   `library`, `events`, `event-form`, `search[:<text>]`, `notifications`,
@@ -520,9 +521,9 @@ Environment variables (see `src/dev.rs`):
   sample stream's place. `studio[:window|live|record|source|audio|camera|scene|settings]`
   opens the Stream Studio (above) in that state (`studio:live` also with a
   screen opened after it: `studio:live,server,voice` shows our stream's card
-  with the studio's picture); with its window open a
-  screenshot also saves the window alone (`<name>-window.png`) and draws it
-  over the main window.
+  with the studio's picture); with its window open, or the stream's
+  (`popout`), a screenshot also saves the window alone (`<name>-window.png`)
+  and draws it over the main window.
 - `VOELIN_WINDOW_SIZE=390x844`: window size (phone layout below the breakpoint).
 - `VOELIN_SCREENSHOT=<png>`, `VOELIN_SCREENSHOT_DELAY=<s>`: save the window and exit.
 - `VOELIN_DEMO_STREAM=1`, `VOELIN_AUTOCONNECT`, `VOELIN_AUTOWATCH`,
@@ -729,7 +730,10 @@ renderer; the phone layouts are desktop renders, not Android device tests.
   layers, which only a Voelin streamer does (`a=x-voelin-layers`, see
   [media.md](media.md)); for the official client's streams the player
   shows the decoded picture's height.
-- Popping the stream out fills the main window (no second window yet).
+- The stream's own window is desktop only (Android has one window). It shows
+  no toasts and has no chat; status messages go to the main window. Keeping
+  it on top is a hint to the desktop: Wayland lets no app do it (winit
+  ignores it there; the compositor's window menu may offer it).
 - A jump to a pinned message scrolls to where an average row would be
   (rows differ in height), and only to messages already loaded. So does
   the unread bar's Jump, and the bar shows while that estimate of the New

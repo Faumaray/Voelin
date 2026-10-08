@@ -571,8 +571,9 @@ impl App {
 		let connected = view.state.voice == VoiceState::Connected;
 		let members = if connected { vm::tree::members(&input) } else { Vec::new() };
 		vm::list::sync(&self.models.members, &members);
-		// The people in our channel first while their view is shown.
-		let watching = self.watch.as_ref().is_some_and(|w| w.shown);
+		// The people in our channel first while their view is shown (not
+		// while the stream plays in a window of its own).
+		let watching = self.watch.as_ref().is_some_and(|w| w.shown) && self.popout.window.is_none();
 		let voice_first = connected && (self.voice_view || watching);
 		let everyone = vm::tree::server_members(&input, voice_first);
 		let filter = self.member_filter.trim().to_lowercase();

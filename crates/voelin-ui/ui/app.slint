@@ -43,6 +43,8 @@ export { Nav, Page, MobileTab, SettingsSection } from "nav.slint";
 // The Stream Studio: its data, and its own window (src/studio.rs).
 export { StudioBridge, StudioNav, StudioScene, StudioSource, StudioAudio, StudioLayer, StudioViewer, StudioPick, StudioStatus, StudioForm, StudioSourceForm, StudioSettingsForm } from "studio-bridge.slint";
 export { StudioWindow } from "studio-window.slint";
+// The stream we watch in a window of its own (src/popout.rs).
+export { ViewerWindow } from "viewer-window.slint";
 
 export component MainWindow inherits Window {
     title: Bridge.app-name;
@@ -79,7 +81,8 @@ export component MainWindow inherits Window {
     // The viewer takes the whole window in full screen and in theatre mode
     // (a narrow window keeps the phone layout).
     property <bool> chrome: !(Bridge.viewer-open && (Bridge.viewer-fullscreen || (Nav.theatre && !Nav.narrow)));
-    // Theatre mode ends with the viewer.
+    // Theatre mode ends with the viewer here, which is also when it moves
+    // into a window of its own (Rust sets viewer-open false meanwhile).
     property <bool> viewer-open: Bridge.viewer-open;
     changed viewer-open => {
         if !viewer-open {

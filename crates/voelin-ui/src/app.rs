@@ -542,25 +542,31 @@ impl Models {
 			gateway_perms: Rc::default(),
 			all_settings: Rc::default(),
 		};
-		bridge.set_servers(ModelRc::from(models.servers.clone()));
-		bridge.set_tree(ModelRc::from(models.tree.clone()));
-		bridge.set_members(ModelRc::from(models.members.clone()));
-		bridge.set_server_members(ModelRc::from(models.server_members.clone()));
-		bridge.set_tabs(ModelRc::from(models.tabs.clone()));
-		bridge.set_streams(ModelRc::from(models.streams.clone()));
-		bridge.set_share_viewers(ModelRc::from(models.viewers.clone()));
-		bridge.set_pins(ModelRc::from(models.pins.clone()));
-		bridge.set_topics(ModelRc::from(models.topics.clone()));
-		bridge.set_topic_messages(ModelRc::from(models.topic_messages.clone()));
-		bridge.set_viewer_qualities(ModelRc::from(models.qualities.clone()));
-		bridge.set_messages(ModelRc::from(models.no_chat.clone()));
-		bridge.set_layers(ModelRc::from(models.layers.clone()));
-		bridge.set_audio_sources(ModelRc::from(models.audio_sources.clone()));
-		bridge.set_identities(ModelRc::from(models.identities.clone()));
-		bridge.set_gateway_config(ModelRc::from(models.gateway_config.clone()));
-		bridge.set_gateway_perms(ModelRc::from(models.gateway_perms.clone()));
-		bridge.set_all_settings(ModelRc::from(models.all_settings.clone()));
+		models.attach(bridge);
 		models
+	}
+
+	/// Show the models in `bridge`: the main window's, and the viewer's own
+	/// window's (its player reads the stream's qualities).
+	pub(crate) fn attach(&self, bridge: &Bridge) {
+		bridge.set_servers(ModelRc::from(self.servers.clone()));
+		bridge.set_tree(ModelRc::from(self.tree.clone()));
+		bridge.set_members(ModelRc::from(self.members.clone()));
+		bridge.set_server_members(ModelRc::from(self.server_members.clone()));
+		bridge.set_tabs(ModelRc::from(self.tabs.clone()));
+		bridge.set_streams(ModelRc::from(self.streams.clone()));
+		bridge.set_share_viewers(ModelRc::from(self.viewers.clone()));
+		bridge.set_pins(ModelRc::from(self.pins.clone()));
+		bridge.set_topics(ModelRc::from(self.topics.clone()));
+		bridge.set_topic_messages(ModelRc::from(self.topic_messages.clone()));
+		bridge.set_viewer_qualities(ModelRc::from(self.qualities.clone()));
+		bridge.set_messages(ModelRc::from(self.no_chat.clone()));
+		bridge.set_layers(ModelRc::from(self.layers.clone()));
+		bridge.set_audio_sources(ModelRc::from(self.audio_sources.clone()));
+		bridge.set_identities(ModelRc::from(self.identities.clone()));
+		bridge.set_gateway_config(ModelRc::from(self.gateway_config.clone()));
+		bridge.set_gateway_perms(ModelRc::from(self.gateway_perms.clone()));
+		bridge.set_all_settings(ModelRc::from(self.all_settings.clone()));
 	}
 }
 
@@ -649,6 +655,8 @@ pub(crate) struct App {
 	pub pages: crate::settings_pages::Pages,
 	/// The Stream Studio (studio.rs).
 	pub studio: crate::studio::StudioState,
+	/// The stream's own window (popout.rs).
+	pub popout: crate::popout::Popout,
 }
 
 thread_local! {
@@ -879,9 +887,16 @@ pub fn run(options: RunOptions) -> Result<()> {
 		social: Default::default(),
 		pages: Default::default(),
 		studio: Default::default(),
+		popout: Default::default(),
 	};
 	APP.with(|a| *a.borrow_mut() = Some(app));
 	crate::bind::wire(&ui);
+	// The studio's and the stream's windows close with the main window,
+	// so the app ends.
+	ui.window().on_close_requested(|| {
+		with_app(App::close_windows);
+		slint::CloseRequestResponse::HideWindow
+	});
 	with_app(|app| {
 		app.apply_appearance();
 		app.load_own_uids();
