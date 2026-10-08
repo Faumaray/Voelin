@@ -57,11 +57,17 @@ export global Nav {
     in-out property <length> narrow-breakpoint: 800px;
     // Wide enough for a third column (home, direct messages).
     in-out property <bool> wide: true;
+    // Too short for the voice channel view's larger stage (under 800 px):
+    // it shows the smaller one.
+    in-out property <bool> short: false;
     in-out property <bool> right-panel-open: true;
     in-out property <length> right-panel-width: 280px;
     // The voice channel we are in (people, streams, its chat) instead of
     // the plain chat.
     in-out property <bool> voice-view: false;
+    // Its stage as a strip of people and stream rows, for a taller chat
+    // (the setting `ui.voice_compact`; short windows show it anyway).
+    in-out property <bool> voice-compact: false;
     // Drawers in place of the members panel (gateway features).
     in-out property <bool> pins-open;
     in-out property <bool> topics-open;
@@ -323,6 +329,12 @@ export global Nav {
     public function show-voice(on: bool) {
         voice-view = on;
         Bridge.show-voice-view(on);
+    }
+
+    // The voice channel view's smaller or larger stage, stored.
+    public function toggle-voice-compact() {
+        voice-compact = !voice-compact;
+        Bridge.voice-compact-changed(voice-compact);
     }
 
     public function start-topic(key: int) {

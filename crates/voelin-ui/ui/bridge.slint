@@ -1141,6 +1141,8 @@ export global Bridge {
     callback appearance-changed(AppearanceForm);
     // The members panel was dragged to another width (pixels).
     callback panel-resized(float);
+    // The voice channel view's stage was made smaller (true) or larger.
+    callback voice-compact-changed(bool);
     // The voice channel view was opened or closed.
     callback show-voice-view(bool);
     // The members panel's search field.

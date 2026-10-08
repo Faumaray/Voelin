@@ -53,6 +53,9 @@ pub(super) fn wire(ui: &MainWindow) {
 	bridge.on_panel_resized(|width| {
 		with_app(|app| app.panel_resized(width));
 	});
+	bridge.on_voice_compact_changed(|compact| {
+		with_app(|app| app.voice_compact_changed(compact));
+	});
 	bridge.on_appearance_changed(|form| {
 		with_app(|app| app.appearance_changed(&form));
 	});

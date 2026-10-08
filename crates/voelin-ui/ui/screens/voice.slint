@@ -1,16 +1,49 @@
 // The voice channel we are in: who is there (and who talks), the streams
-// in it, and the channel's chat below.
+// in it, the call's controls, and the channel's chat below.
 
 import { Theme } from "../theme.slint";
 import { Icons } from "../icons.slint";
 import { Bridge } from "../bridge.slint";
-import { Nav, SettingsSection } from "../nav.slint";
-import { Icon, IconButton, Button, ButtonKind, BannerPicture } from "../components/index.slint";
+import { Nav } from "../nav.slint";
+import { Icon, IconButton, Button, ButtonKind, BannerPicture, ScrollView } from "../components/index.slint";
+import { VoiceButtons } from "../shells/common.slint";
 import { MessageList, Composer } from "chat.slint";
 import { Participant, StreamCard } from "voice-parts.slint";
 
-// The voice channel view (desktop): header, people, streams, chat.
+// Under the stage: mute, deafen, share, the voice settings and Leave.
+component CallBar inherits HorizontalLayout {
+    alignment: center;
+    padding-left: Theme.space-6;
+    padding-right: Theme.space-6;
+    padding-bottom: Theme.space-3;
+    spacing: Theme.space-3;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: @tr("Call");
+    VoiceButtons {
+        size: 44px;
+        round: true;
+        filled: true;
+        gear: true;
+        spacing: Theme.space-3;
+    }
+    Button {
+        kind: ButtonKind.danger;
+        icon: Icons.phone-off;
+        text: @tr("Leave");
+        y: (parent.height - self.height) / 2;
+        clicked => {
+            Nav.show-voice(false);
+            Bridge.disconnect-voice();
+        }
+    }
+}
+
+// The voice channel view (desktop): header, people, streams, the call bar,
+// chat. The smaller stage (`Nav.voice-compact`, and in short windows) is a
+// strip of people and stream rows.
 export component VoiceView inherits VerticalLayout {
+    // The smaller stage: chosen, or the window too short for the larger.
+    property <bool> compact: Nav.voice-compact || Nav.short;
     // Banner shares the header; it does not push people and streams down.
     Rectangle {
         clip: true;
@@ -57,26 +90,18 @@ export component VoiceView inherits VerticalLayout {
                         clicked => { Nav.toggle-members(); }
                     }
                     IconButton {
+                        icon: root.compact ? Icons.chevron-down : Icons.chevron-up;
+                        label: root.compact ? @tr("Larger stage") : @tr("Smaller stage");
+                        tooltip: Nav.short ? @tr("The window is too short for the larger stage") : self.label;
+                        enabled: !Nav.short;
+                        y: (parent.height - self.height) / 2;
+                        clicked => { Nav.toggle-voice-compact(); }
+                    }
+                    IconButton {
                         icon: Icons.message-square;
                         label: @tr("Chat only");
                         y: (parent.height - self.height) / 2;
                         clicked => { Nav.show-voice(false); }
-                    }
-                    Button {
-                        icon: Icons.settings;
-                        text: @tr("Voice Settings");
-                        y: (parent.height - self.height) / 2;
-                        clicked => { Nav.open-settings(SettingsSection.voice); }
-                    }
-                    Button {
-                        kind: ButtonKind.danger;
-                        icon: Icons.phone-off;
-                        text: @tr("Leave");
-                        y: (parent.height - self.height) / 2;
-                        clicked => {
-                            Nav.show-voice(false);
-                            Bridge.disconnect-voice();
-                        }
                     }
                 }
                 if Bridge.own-channel-topic != "": Text {
@@ -106,7 +131,7 @@ export component VoiceView inherits VerticalLayout {
         }
     }
     // The people, centred, wrapping into more rows when there are many.
-    FlexboxLayout {
+    if !root.compact: FlexboxLayout {
         padding-left: Theme.space-6;
         padding-right: Theme.space-6;
         padding-top: Theme.space-3;
@@ -120,6 +145,23 @@ export component VoiceView inherits VerticalLayout {
             member: member;
         }
     }
+    // Smaller: one row of people, scrolling sideways when there are many.
+    if root.compact: ScrollView {
+        height: 112px;
+        HorizontalLayout {
+            padding-left: Theme.space-6;
+            padding-right: Theme.space-6;
+            padding-top: Theme.space-2;
+            spacing: Theme.space-3;
+            alignment: center;
+            accessible-role: AccessibleRole.list;
+            accessible-label: @tr("In voice");
+            for member in Bridge.members: Participant {
+                member: member;
+                compact: true;
+            }
+        }
+    }
     if Bridge.streams.length > 0: HorizontalLayout {
         padding-left: Theme.space-6;
         padding-right: Theme.space-6;
@@ -128,8 +170,10 @@ export component VoiceView inherits VerticalLayout {
         for stream in Bridge.streams: StreamCard {
             horizontal-stretch: 1;
             stream: stream;
+            compact: root.compact;
         }
     }
+    CallBar { }
     MessageList {
         vertical-stretch: 1;
         model: Bridge.messages;

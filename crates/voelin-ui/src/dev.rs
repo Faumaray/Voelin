@@ -18,7 +18,8 @@
 //!   `bookmark:edit` the current one, Advanced open),
 //!   `emoji` (the picker), `client` (the volume dialog of the first other
 //!   client once connected), `panel` / `no-panel` (the members panel),
-//!   `voice` (the voice channel view; on the phone its own screen),
+//!   `voice` (the voice channel view; on the phone its own screen;
+//!   `voice:compact` with the smaller stage, not stored),
 //!   `members` (the phone's members page), `notification` (a tapped voice
 //!   notification), `shared:<text>` (text shared to the app on Android),
 //!   `pins`, `topics` (the drawers),
@@ -268,7 +269,13 @@ pub(crate) fn start(ui: &MainWindow, switches: &Switches) -> Running {
 			"panel" => nav.set_right_panel_open(true),
 			"no-panel" => nav.set_right_panel_open(false),
 			"tab" => nav.set_mobile_tab(mobile_tab(arg)),
-			"voice" => nav.invoke_show_voice(true),
+			"voice" => {
+				nav.invoke_show_voice(true);
+				// The smaller stage, for this run only.
+				if arg == "compact" {
+					nav.set_voice_compact(true);
+				}
+			}
 			"pins" => nav.invoke_show_pins(true),
 			// The phone's members page.
 			"members" => nav.set_members_open(true),

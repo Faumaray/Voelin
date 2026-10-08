@@ -70,6 +70,11 @@ User-visible changes of the apps and the `tsgw` gateway. The format follows
 - Every gateway a server publishes is tried in turn (TLS first, 20 seconds
   each) before waiting to try again, so a TLS proxy that fails falls back to
   the plain gateway published next to it.
+- A call bar on the desktop's voice channel page: mute, deafen, share, the
+  voice settings and Leave, under the people and streams (Voice Settings
+  and Leave left the header). A smaller stage, one row of people and the
+  streams as rows, leaves about 200 px more for the chat; it is remembered,
+  and windows under 800 px tall always have it.
 
 ### Changed
 

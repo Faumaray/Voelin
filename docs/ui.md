@@ -143,9 +143,10 @@ there are at most ten, kept when a server is added),
 `TopBar` (the search, starting over the main panel, opens the search like
 Ctrl+K; the bell at the right), `MobileShell` (top bar, page, bottom
 navigation), `VoiceCard`, `VoiceButtons` (mute, deafen, share; `gear` adds
-the voice settings), `UserCard` (its avatar and name open Settings → My
-Account), `HoldToTalk`. Pages bring their own title; About is in the
-settings (and on the phone's You page).
+the voice settings; `round` and `filled` for the voice view's call bar),
+`UserCard` (its avatar and name open Settings → My Account), `HoldToTalk`.
+Pages bring their own title; About is in the settings (and on the phone's
+You page).
 
 Voice parts (ui/screens/voice-parts.slint), for the desktop's voice view and
 the phone's voice screen: `Participant` (`member`, `size`: the avatar's) and
@@ -167,7 +168,7 @@ comes from the engine's events; what a gateway adds is hidden without it.
 | Channel password | `channel-password`, `channel-password:wrong` | Joining a channel (a double-click in the tree, joining a friend) moves there with voice, or connects into it (by its id) without; when the server puts us elsewhere on connecting, as it does for a wrong password, it is joined again, which says why. A locked channel first asks for its password in `ChannelPasswordDialog`, unless one was given since voice connected; a refused one asks again under "Wrong password". A full channel or another refusal is a toast | `Presence` (`has_password`), `JoinFailed`; `Command::MoveToChannel`, `ConnectVoice` (`channel_password`) |
 | Pinned messages | `pins` | In the members panel's place: cards with author, time, text, files and reactions; the pin unpins, a click jumps to the message | `Gateway` `Pins`, `Pinned`, `Unpinned`; `GatewayRequest::Pins`, `Unpin` |
 | Topics | `topics`, `topic:<id>` | In the members panel's place: search, cards with the message count, creator and last activity, Create Topic; an open topic replaces the chat's messages and takes replies | `Gateway` `Topics`, `Topic`, `TopicHistory`; `GatewayRequest::Topics`, `TopicHistory`, `CreateTopic`, `Post` |
-| Voice channel | `voice` | Title, topic, "5 in voice / 50 total", Copy invite link (a `ts3server://` link to the channel; the phone's Invite button does the same), the members button, Chat only, Voice Settings, Leave; the people as large avatars (talking ring and bars, muted, crown, streaming); the streams as cards (LIVE, viewers, kind, bitrate, sound, Watch Stream); the channel's chat | `Presence`, `Talking`, `StreamsChanged`, viewer counts from `StreamsChanged`, else the `Gateway` stream directory |
+| Voice channel | `voice`, `voice:compact` | Title, topic, "5 in voice / 50 total", Copy invite link (a `ts3server://` link to the channel; the phone's Invite button does the same), the members button, Smaller stage / Larger stage, Chat only; the people as large avatars (talking ring and bars, muted, crown, streaming); the streams as cards (LIVE, viewers, kind, bitrate, sound, Watch Stream); the call bar: mute and deafen (red while on), share (its menu opens above it), the voice settings and Leave; the channel's chat. The smaller stage (`ui.voice_compact`, and always in windows under 800 px tall, where its button is disabled) is one row of small avatars, scrolling sideways, and the streams as rows (Watch, Show), so the chat gets about 200 to 240 px more | `Presence`, `Talking`, `StreamsChanged`, viewer counts from `StreamsChanged`, else the `Gateway` stream directory |
 | Watching a stream | `watch`, `popout` | The channel's header with "5 in voice" and Leave; the player with the streamer, title, viewers, LIVE, the picture's height (the simulcast picker when a Voelin streamer offers layers), volume, elapsed time, what arrives (codec, size, frame rate, bitrate), back to the chat, pop out, full screen; a note that the stream belongs to the channel; the channel's chat and a Stream Info tab. Popped out (and in full screen) it fills the window | `WatchState`, `WatchLayers`, decoded frames and their stats (`src/video.rs`), `StreamsChanged` (viewer counts; the `Gateway` stream directory where the server gives none) |
 
 The pins and topics share the place of the members panel: opening one
@@ -415,6 +416,7 @@ live when they change (settings page, `--set`, another window):
 | `ui.narrow_breakpoint` | pixels | 800 | below this width the phone layout |
 | `ui.image_cache_mb` | megabytes | 256 | decoded images kept in memory (0: none) |
 | `ui.members_width` | pixels | 280 | width of the members panel (dragging its edge sets it) |
+| `ui.voice_compact` | bool | false | the voice channel view's smaller stage (its Smaller stage / Larger stage button sets it; windows under 800 px tall always have it) |
 | `ui.image_preview_kb` | kilobytes | 8192 | pictures linked in chat (files and `[img]`) up to this size show as pictures (0: never) |
 | `notify.mentions`, `notify.private_messages`, `notify.pokes`, `notify.event_reminders`, `notify.friends_online` | off / app / desktop | desktop (friends: app) | what the bell and the desktop say about each kind |
 | `video.camera`, `video.background`, `video.resolution`, `video.mirror` | device id; none / blur; auto or WxH; bool | first camera, none, auto, true | the camera of the preview and the default of camera sources |
@@ -491,7 +493,7 @@ Environment variables (see `src/dev.rs`):
   scrolled up), and a stream, without a server (nothing is stored).
 - `VOELIN_OPEN=<what>[,<what>...]`: `home`, `server` (`server:chat`: the server chat), `settings[:voice|keybinds|streaming|privacy|appearance|profiles]` (`identities` is the same as `profiles`),
   `about`, `share[:live]`, `bookmark[:edit]`, `emoji`, `client`, `panel`, `no-panel`,
-  `voice`, `pins`, `topics`, `topic:<id>`, `member`, `poke`,
+  `voice` (`voice:compact`: the smaller stage, not stored), `pins`, `topics`, `topic:<id>`, `member`, `poke`,
   `channel-password[:wrong]`, `actions` (the last message's actions, as if
   hovered: a screenshot cannot hover), `first-run` (Home's banner as before
   the first server, over the sample data), `link-confirm[:<url>]` (the question

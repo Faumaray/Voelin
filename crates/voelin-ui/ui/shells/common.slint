@@ -123,11 +123,14 @@ export component VoiceCard inherits Rectangle {
     }
 }
 
-// Mute, deafen, share, and with `gear` the voice settings.
+// Mute, deafen, share, and with `gear` the voice settings. `round` and
+// `filled` are the voice view's call bar.
 export component VoiceButtons inherits HorizontalLayout {
     in property <length> size: 34px;
     // The rail has the settings; the user card leaves them out.
     in property <bool> gear: false;
+    in property <bool> round;
+    in property <bool> filled;
     spacing: Theme.space-1;
     IconButton {
         icon: Bridge.input-muted ? Icons.mic-off : Icons.mic;
@@ -135,6 +138,8 @@ export component VoiceButtons inherits HorizontalLayout {
         checked: Bridge.input-muted;
         danger: true;
         size: root.size;
+        round: root.round;
+        filled: root.filled;
         enabled: Bridge.voice-connected;
         clicked => { Bridge.set-input-muted(!Bridge.input-muted); }
     }
@@ -144,6 +149,8 @@ export component VoiceButtons inherits HorizontalLayout {
         checked: Bridge.output-muted;
         danger: true;
         size: root.size;
+        round: root.round;
+        filled: root.filled;
         enabled: Bridge.voice-connected;
         clicked => { Bridge.set-output-muted(!Bridge.output-muted); }
     }
@@ -154,14 +161,18 @@ export component VoiceButtons inherits HorizontalLayout {
             label: Bridge.share-state == "live" ? @tr("Sharing") : StudioBridge.status.live ? @tr("Live in the Stream Studio") : @tr("Share or go live");
             checked: Bridge.share-state == "live" || StudioBridge.status.live;
             size: root.size;
+            round: root.round;
+            filled: root.filled;
             clicked => { share-menu.open(0, - root.size - share-menu.menu-height - 4px); }
         }
         share-menu := ShareMenu { }
     }
     if root.gear: IconButton {
         icon: Icons.settings;
-        label: @tr("Settings");
+        label: @tr("Voice Settings");
         size: root.size;
+        round: root.round;
+        filled: root.filled;
         clicked => { Nav.open-settings(SettingsSection.voice); }
     }
 }

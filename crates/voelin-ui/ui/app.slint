@@ -62,9 +62,11 @@ export component MainWindow inherits Window {
         Nav.wide = self.width > 1180px;
     }
     changed breakpoint => { Nav.narrow = self.width < Nav.narrow-breakpoint; }
+    changed height => { Nav.short = self.height < 800px; }
     init => {
         Nav.narrow = self.width < Nav.narrow-breakpoint;
         Nav.wide = self.width > 1180px;
+        Nav.short = self.height < 800px;
         Theme.system-dark = Palette.color-scheme != ColorScheme.light;
     }
     // Android: the space under the on-screen keyboard (the window is not

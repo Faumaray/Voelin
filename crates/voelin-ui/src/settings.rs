@@ -100,9 +100,25 @@ pub static UI_MEMBERS_WIDTH: Key<u32> = Key::new(
 	|| 280,
 );
 
+/// `ui.voice_compact`: the voice channel view's smaller stage (a strip of
+/// people and stream rows, more room for the chat). Its toggle stores it.
+pub static UI_VOICE_COMPACT: Key<bool> = Key::new(
+	"ui.voice_compact",
+	Kind::Bool,
+	"The voice channel view's smaller stage, leaving more room for the chat.",
+	|| false,
+);
+
 /// The UI's keys besides [`UI`] and [`CLIENT_PLAYBACK`], for registering.
-pub fn appearance_keys() -> [&'static dyn voelin_core::settings::Setting; 5] {
-	[&UI_THEME, &UI_FONT_SCALE, &UI_NARROW_BREAKPOINT, &UI_IMAGE_CACHE_MB, &UI_MEMBERS_WIDTH]
+pub fn appearance_keys() -> [&'static dyn voelin_core::settings::Setting; 6] {
+	[
+		&UI_THEME,
+		&UI_FONT_SCALE,
+		&UI_NARROW_BREAKPOINT,
+		&UI_IMAGE_CACHE_MB,
+		&UI_MEMBERS_WIDTH,
+		&UI_VOICE_COMPACT,
+	]
 }
 
 /// What a kind of notification does: nothing, the bell, or the bell and a
@@ -531,6 +547,18 @@ mod tests {
 		assert_eq!(serde_json::to_value(NotifyLevel::App).unwrap(), "app");
 		assert_eq!(NotifyLevel::from_index(NotifyLevel::Off.index()), NotifyLevel::Off);
 		assert_eq!(NotifyLevel::from_index(7), NotifyLevel::Desktop);
+	}
+
+	#[test]
+	fn voice_compact_key() {
+		let settings = voelin_core::settings::Settings::in_memory();
+		for key in appearance_keys() {
+			settings.register(key);
+		}
+		assert_eq!(settings.get_json("ui.voice_compact"), Some(false.into()), "the full stage");
+		assert!(settings.apply_overrides(["ui.voice_compact=true"]).is_empty());
+		assert!(settings.get(&UI_VOICE_COMPACT));
+		assert!(settings.set_json("ui.voice_compact", "small".into()).is_err());
 	}
 
 	#[test]
